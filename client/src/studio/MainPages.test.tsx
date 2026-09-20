@@ -34,6 +34,7 @@ const {
   downloadStudioTaskResult,
   retryStudioTask,
   renameStudioGenerationTask,
+  removeStudioGenerationTask,
   loadMoreGenerationTasks,
   loadMoreOralTasks,
   loadStudioTaskDetail,
@@ -78,6 +79,7 @@ const {
   downloadStudioTaskResult: vi.fn(),
   retryStudioTask: vi.fn(),
   renameStudioGenerationTask: vi.fn(),
+  removeStudioGenerationTask: vi.fn(),
   loadMoreGenerationTasks: vi.fn(),
   loadMoreOralTasks: vi.fn(),
   loadStudioTaskDetail: vi.fn(),
@@ -115,6 +117,7 @@ vi.mock("./live", () => ({
   downloadStudioTaskResult,
   retryStudioTask,
   renameStudioGenerationTask,
+  removeStudioGenerationTask,
   loadMoreGenerationTasks,
   loadMoreOralTasks,
   loadStudioTaskDetail,
@@ -1879,6 +1882,7 @@ describe("V1.4 任务中心列表", () => {
   beforeEach(() => {
     useStudio.mockReset();
     cancelStudioTask.mockReset();
+    removeStudioGenerationTask.mockReset();
     loadMoreGenerationTasks.mockReset();
     loadMoreOralTasks.mockReset();
     vi.useFakeTimers({ now: clock, toFake: ["Date"] });
@@ -1938,6 +1942,117 @@ describe("V1.4 任务中心列表", () => {
     );
     expect(value.updateData).toHaveBeenCalled();
     expect(value.notify).toHaveBeenCalledWith("视频名称已更新。");
+  });
+
+  it("普通视频批次支持从任务列表删除，且需二次确认", async () => {
+    const generationTask: StudioTask = {
+      ...doneTask,
+      id: "generation-remove",
+      backendId: "generation-remove",
+      backendKind: "generation_batch",
+      title: "待移除的成片",
+      type: "视频生成",
+    };
+    const value = tasksPage({ data: data([generationTask]) });
+    useStudio.mockReturnValue(value);
+    removeStudioGenerationTask.mockResolvedValue(undefined);
+    render(<TasksPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    // 二次确认之前不得触达后端：这是账号级移除，但仍是用户不可自助撤销的操作。
+    expect(removeStudioGenerationTask).not.toHaveBeenCalled();
+    expect(
+      await screen.findByText(/确定从任务列表移除「待移除的成片」吗/),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "确认移除" }));
+    await waitFor(() =>
+      expect(removeStudioGenerationTask).toHaveBeenCalledWith(generationTask),
+    );
+    expect(value.updateData).toHaveBeenCalled();
+    expect(value.notify).toHaveBeenCalledWith("任务已从列表移除。");
+  });
+
+  it("确认弹窗说明不会取消任务也不退费，避免误解为撤单", async () => {
+    const generationTask: StudioTask = {
+      ...doneTask,
+      id: "generation-copy",
+      backendId: "generation-copy",
+      backendKind: "generation_batch",
+      title: "文案校验用成片",
+      type: "视频生成",
+    };
+    useStudio.mockReturnValue(tasksPage({ data: data([generationTask]) }));
+    render(<TasksPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    const dialog = await screen.findByText(/仅从本账号列表移除/);
+    expect(dialog.textContent).toMatch(/不会取消/);
+    expect(dialog.textContent).toMatch(/不影响已产生的费用/);
+  });
+
+  it("口播任务不提供删除入口：后端移除接口只覆盖普通批次", () => {
+    const oralTask: StudioTask = {
+      ...doneTask,
+      id: "oral-1",
+      backendId: "oral-1",
+      backendKind: "oral_task",
+      backendStatus: "SUCCEEDED",
+      title: "张工口播成片",
+      type: "数字人口播",
+    };
+    useStudio.mockReturnValue(tasksPage({ data: data([oralTask]) }));
+    render(<TasksPage />);
+
+    expect(screen.queryByRole("button", { name: "删除" })).toBeNull();
+  });
+
+  it("审核模式删除只本地移除，不调用后端", async () => {
+    const generationTask: StudioTask = {
+      ...doneTask,
+      id: "generation-review",
+      backendId: "generation-review",
+      backendKind: "generation_batch",
+      title: "审核模式成片",
+      type: "视频生成",
+    };
+    const value = tasksPage({
+      data: data([generationTask]),
+      review: true,
+    });
+    useStudio.mockReturnValue(value);
+    render(<TasksPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认移除" }));
+
+    await waitFor(() => expect(value.updateData).toHaveBeenCalled());
+    expect(removeStudioGenerationTask).not.toHaveBeenCalled();
+  });
+
+  it("删除失败时保留任务并提示后端原因", async () => {
+    const generationTask: StudioTask = {
+      ...doneTask,
+      id: "generation-fail",
+      backendId: "generation-fail",
+      backendKind: "generation_batch",
+      title: "删除会失败的成片",
+      type: "视频生成",
+    };
+    const value = tasksPage({ data: data([generationTask]) });
+    useStudio.mockReturnValue(value);
+    removeStudioGenerationTask.mockRejectedValue(
+      new Error("任务不存在或无权限。"),
+    );
+    render(<TasksPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认移除" }));
+
+    await waitFor(() =>
+      expect(value.notify).toHaveBeenCalledWith("任务不存在或无权限。"),
+    );
+    expect(value.updateData).not.toHaveBeenCalled();
   });
 
   it("普通批次和口播任务使用独立历史游标且按 id 去重追加", async () => {

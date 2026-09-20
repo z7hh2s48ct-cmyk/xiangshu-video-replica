@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -20,7 +21,14 @@ ANALYSIS_KIND = "analysis"
 SHOT_CARD_KIND = "shot_card"
 SCHEMA_VERSION = "b3.analysis.v1"
 APILIO_DEFAULT_BASE_URL = "https://api.apilio.ai"
+# 图像语义检查（人物识别源图、首帧复核）仍用这个模型：它们在 2026-09-20 的
+# 故障里表现为 URLError/TimeoutError（网络层），没有证据说明模型名有问题，
+# 所以不跟着视频拆解一起换。
 APILIO_GEMINI_MODEL = "gemini-3.1-pro-preview"
+# 视频拆解单独一个默认值：2026-09-20 线上拆解 100% 失败在上游 HTTP 400，
+# preview 模型疑似已下线，改用正式版。上游再次调整时，设置页的「视频分析
+# 模型」可直接覆盖这里，不必等下一次发版。
+APILIO_ANALYSIS_MODEL = "gemini-3.8-flash"
 
 # 结构化运动枚举：拆解结果必须对“人物是否在动、机位是否在动”显式表态，
 # 下游（H3 Prompt 编译）据此确定性渲染运动指令，避免“边走边说”被
@@ -240,6 +248,34 @@ class ApilioChatTransport(Protocol):
     ) -> tuple[bytes, Mapping[str, str]]: ...
 
 
+# The refusal body is the only place that says *why* the provider said no, but
+# providers routinely echo the request back — signed video URL included.  Strip
+# anything URL-shaped and cap the length before the reason reaches a log line or
+# the ``error_message_redacted`` column.
+_URL_PATTERN = re.compile(r"https?://\S+")
+UPSTREAM_REASON_LIMIT = 300
+
+
+def redacted_upstream_reason(raw: bytes | str) -> str:
+    text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        payload = None
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict) and isinstance(error.get("message"), str):
+            text = error["message"]
+        elif isinstance(error, str):
+            text = error
+        elif isinstance(payload.get("message"), str):
+            text = payload["message"]
+    text = " ".join(_URL_PATTERN.sub("[已脱敏地址]", text).split())
+    if len(text) > UPSTREAM_REASON_LIMIT:
+        text = text[:UPSTREAM_REASON_LIMIT] + "…"
+    return text
+
+
 class UrllibApilioChatTransport:
     # Measured on a real 15s reference video: 71–91s per call for the full
     # shot-card prompt. 90s cut real traffic in half; 240s leaves headroom for
@@ -255,9 +291,20 @@ class UrllibApilioChatTransport:
             with urlopen(request, timeout=self.timeout_seconds) as response:  # noqa: S310
                 return response.read(), dict(response.headers.items())
         except HTTPError as exc:
-            logger.warning("Apilio video analysis request failed with HTTP status %s", exc.code)
+            try:
+                reason = redacted_upstream_reason(exc.read())
+            except (OSError, ValueError, AttributeError):
+                # Reading the refusal body is best-effort diagnostics; it must
+                # never replace the failure it was meant to explain.
+                reason = ""
+            logger.warning(
+                "Apilio video analysis request failed with HTTP status %s: %s",
+                exc.code,
+                reason or "(上游未返回可读原因)",
+            )
             raise AnalysisProviderFailed(
-                f"Apilio returned HTTP {exc.code}",
+                f"视频拆解服务拒绝了请求（HTTP {exc.code}）"
+                + (f"：{reason}" if reason else "，且未说明原因。"),
                 http_status=exc.code,
                 failure_phase=HTTP_FAILURE_PHASE,
                 retryable=exc.code == 429 or exc.code >= 500,
@@ -284,7 +331,7 @@ class ApilioGemini:
         *,
         api_key: str,
         base_url: str = APILIO_DEFAULT_BASE_URL,
-        model: str = APILIO_GEMINI_MODEL,
+        model: str = APILIO_ANALYSIS_MODEL,
         transport: ApilioChatTransport | None = None,
     ) -> None:
         self.api_key = api_key
@@ -294,8 +341,9 @@ class ApilioGemini:
 
     def analyze(self, *, video_uri: str, duration_seconds: float) -> ProviderResponse:
         if not is_https_video_url(video_uri):
+            logger.warning("Video analysis refused: the reference video URL is not HTTPS")
             raise AnalysisProviderFailed(
-                "Gemini analysis requires an HTTPS signed video URL",
+                "参考视频没有可用的 HTTPS 签名地址，无法送去拆解；请重新上传参考视频后再试。",
                 failure_phase=REQUEST_FAILURE_PHASE,
             )
         payload = {
@@ -327,8 +375,10 @@ class ApilioGemini:
         from app.h3_prompts import RULES
 
         if not is_https_video_url(video_uri):
+            logger.warning("Video analysis refused: the reference video URL is not HTTPS")
             raise AnalysisProviderFailed(
-                "Analysis requires HTTPS video", failure_phase=REQUEST_FAILURE_PHASE
+                "参考视频没有可用的 HTTPS 签名地址，无法送去拆解；请重新上传参考视频后再试。",
+                failure_phase=REQUEST_FAILURE_PHASE,
             )
         instruction = (RULES / "analysis.txt").read_text(encoding="utf-8")
         # 目标生成时长不得进入拆解提示词：拆解只描述源视频事实，成片时长由生成
@@ -384,9 +434,15 @@ class ApilioGemini:
             response = json.loads(raw_body.decode("utf-8"))
             content = response["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise AnalysisProviderFailed("Apilio returned an invalid Gemini response") from exc
+            logger.warning(
+                "Apilio Gemini response is not a readable completion: %s", type(exc).__name__
+            )
+            raise AnalysisProviderFailed(
+                "视频拆解服务返回的数据结构无法识别；请重试或更换参考视频。"
+            ) from exc
         if not isinstance(content, str) or not content.strip():
-            raise AnalysisProviderFailed("Apilio Gemini response is missing analysis content")
+            logger.warning("Apilio Gemini completion carried no analysis content")
+            raise AnalysisProviderFailed("视频拆解服务返回了空结果；请重试或更换参考视频。")
         return content, {
             "provider": "apilio_gemini",
             "model": self.model,

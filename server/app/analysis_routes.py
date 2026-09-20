@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.analysis import (
     ANALYSIS_KIND,
+    APILIO_ANALYSIS_MODEL,
     APILIO_DEFAULT_BASE_URL,
     NETWORK_FAILURE_PHASE,
     SHOT_CARD_KIND,
@@ -118,6 +119,11 @@ def get_video_analysis_provider(conn: Database) -> VideoAnalysisProvider:
         # Keeping the origin fixed prevents an imported legacy base_url from
         # receiving the configured bearer token.
         base_url=APILIO_DEFAULT_BASE_URL,
+        # The model name, unlike the endpoint, decides nothing about *who*
+        # receives the token, so it is safe to configure.  It needs to be:
+        # upstream retires preview models without notice and every analysis
+        # then fails with HTTP 400 until a new build ships.
+        model=(config.get("analysis_model") or "").strip() or APILIO_ANALYSIS_MODEL,
     )
 
 
@@ -858,6 +864,10 @@ def perform_analysis_task(
                 if not metadata.width or not metadata.height or not metadata.fps:
                     raise VideoProbeFailed("missing video stream metadata")
             except (VideoProbeFailed, VideoProbeUnavailable) as exc:
+                logger.warning(
+                    "Reference video metadata probe failed before analysis: %s",
+                    type(exc).__name__,
+                )
                 raise AnalysisProviderFailed("视频元数据无法读取，请重新上传后拆解。") from exc
             duration = metadata.duration_seconds
             divisor = gcd(metadata.width, metadata.height)
@@ -1128,7 +1138,12 @@ def analysis_provider_error(failure: AnalysisProviderFailed) -> HTTPException:
     else:
         status_code = 502
         code = "ANALYSIS_PROVIDER_FAILED"
-        message = "视频拆解服务返回了无法解析的结果，请重试或更换参考视频。"
+        # Five unrelated call sites reach this branch — a refused HTTPS URL, an
+        # unreadable completion, an empty completion, a schema-invalid analysis
+        # and an unprobeable upload.  Each writes its own secret-free Chinese
+        # reason; collapsing them into one sentence hid the real cause from the
+        # UI, from ``error_message_redacted`` and from support alike.
+        message = str(failure).strip() or "视频拆解失败，请稍后重新拆解。"
     return HTTPException(
         status_code=status_code,
         detail={

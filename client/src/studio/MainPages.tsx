@@ -20,6 +20,7 @@ import {
   loadMoreOralTasks,
   loadStudioTaskDetail,
   loadTaskPreview,
+  removeStudioGenerationTask,
   renameStudioGenerationTask,
   retryStudioTask,
   saveTaskPreview,
@@ -40,6 +41,7 @@ import {
   Icon,
   Media,
   Panel,
+  StudioDialog,
   Tabs,
 } from "./ui";
 import {
@@ -1039,6 +1041,8 @@ export function TasksPage() {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [renameSavingId, setRenameSavingId] = useState<string | null>(null);
+  const [pendingRemove, setPendingRemove] = useState<StudioTask | null>(null);
+  const [removingId, setRemovingId] = useState<string | null>(null);
   const [loadingHistory, setLoadingHistory] = useState<
     "generation" | "oral" | null
   >(null);
@@ -1161,6 +1165,28 @@ export function TasksPage() {
       );
     } finally {
       setCancellingId(null);
+    }
+  };
+  const removeTask = async (task: StudioTask) => {
+    if (removingId) return;
+    setRemovingId(task.id);
+    try {
+      // 审核示例没有真实批次可隐藏，只做本地移除，保持与人物库删除一致。
+      if (!review) await removeStudioGenerationTask(task);
+      updateData((current) => ({
+        ...current,
+        tasks: current.tasks.filter((item) => item.id !== task.id),
+      }));
+      setPendingRemove(null);
+      notify("任务已从列表移除。");
+    } catch (cause) {
+      notify(
+        cause instanceof Error && cause.message.trim()
+          ? cause.message.trim()
+          : "移除失败，请重试。",
+      );
+    } finally {
+      setRemovingId(null);
     }
   };
   const saveTaskName = async (task: StudioTask) => {
@@ -1321,6 +1347,17 @@ export function TasksPage() {
                         {task.status === "completed" ? "查看结果" : "查看详情"}
                       </Button>
                     )}
+                    {/* 只有普通批次有账号级隐藏接口；口播任务没有，不给入口。 */}
+                    {task.backendKind === "generation_batch" &&
+                      renamingId !== task.id && (
+                        <Button
+                          variant="quiet"
+                          disabled={removingId === task.id}
+                          onClick={() => setPendingRemove(task)}
+                        >
+                          删除
+                        </Button>
+                      )}
                   </div>
                 </td>
               </tr>
@@ -1385,6 +1422,31 @@ export function TasksPage() {
           普通批次与口播任务分别分页；状态待确认的任务请先核对，不要直接重复提交。
         </Hint>
       )}
+      {pendingRemove ? (
+        <StudioDialog
+          title="从任务列表移除"
+          onClose={() => setPendingRemove(null)}
+        >
+          <div className="studio-confirm-panel">
+            <p>
+              确定从任务列表移除「{pendingRemove.title}」吗？
+              仅从本账号列表移除，不会取消正在进行的任务，也不影响已产生的费用与生成结果。
+            </p>
+            <div className="studio-confirm-actions">
+              <Button variant="quiet" onClick={() => setPendingRemove(null)}>
+                取消
+              </Button>
+              <Button
+                variant="primary"
+                disabled={removingId === pendingRemove.id}
+                onClick={() => void removeTask(pendingRemove)}
+              >
+                {removingId === pendingRemove.id ? "移除中…" : "确认移除"}
+              </Button>
+            </div>
+          </div>
+        </StudioDialog>
+      ) : null}
     </section>
   );
 }

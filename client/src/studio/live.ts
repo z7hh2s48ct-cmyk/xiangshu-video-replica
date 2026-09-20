@@ -14,6 +14,7 @@ import {
   createScriptVersion,
   createVideoUploadIntent,
   defaultBatchProvider,
+  deleteGenerationBatch,
   deletePublishAccount,
   deleteStudioDraft,
   downloadMaterialAsset,
@@ -896,6 +897,18 @@ export async function renameStudioGenerationTask(
       name,
     ),
   );
+}
+
+/** 任务中心「删除」：仅把批次从本账号列表隐藏（服务端写
+ * ``customer_batch_visibility``），不取消进行中的任务、不删生成结果、不影响
+ * 已产生的计费记录。口播任务没有对应的隐藏接口，调用方不应为其提供入口。 */
+export async function removeStudioGenerationTask(
+  task: StudioTask,
+): Promise<void> {
+  if (task.backendKind !== "generation_batch") {
+    throw new Error("当前任务类型不支持从列表移除。");
+  }
+  await deleteGenerationBatch(task.backendId || task.batchId || task.id);
 }
 
 async function loadTasks(_currentUser: CurrentUser) {

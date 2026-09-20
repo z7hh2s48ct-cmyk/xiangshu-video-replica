@@ -26,6 +26,7 @@ from app.material_thumbs import (
     THUMBNAIL_SUFFIX,
     THUMBNAIL_URL_EXPIRES_IN,
     ensure_thumbnail_object,
+    thumbnail_key_for,
 )
 from app.media import (
     MAX_UPLOAD_BYTES,
@@ -340,9 +341,16 @@ def validate_signed_asset_grant(
                 status_code=403,
                 detail={"code": "SIGNED_ASSET_GRANT_FORBIDDEN"},
             ) from exc
-        if not hmac.compare_digest(
-            current_key.encode("utf-8"), expected_object_key.encode("utf-8")
-        ):
+        # 素材缩略图由原对象键确定性派生（``<key>.thumb.jpg``），授权侧签发的
+        # 就是派生键。这里只比对原键会让每个缩略图请求必然 403，并连带挡死
+        # ``get_signed_object`` 里「历史素材首次读取时现场补齐」那段逻辑。
+        # 仍然是精确比对：只认本资产的原键与本资产的派生键，两者都不匹配就拒。
+        requested = expected_object_key.encode("utf-8")
+        matches_original = hmac.compare_digest(current_key.encode("utf-8"), requested)
+        matches_thumbnail = hmac.compare_digest(
+            thumbnail_key_for(current_key).encode("utf-8"), requested
+        )
+        if not (matches_original or matches_thumbnail):
             raise HTTPException(
                 status_code=403,
                 detail={"code": "SIGNED_ASSET_GRANT_FORBIDDEN"},
