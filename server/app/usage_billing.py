@@ -170,6 +170,7 @@ def accept_platform_operation(
     service: str,
     source_id: str,
     collection_batch_id: str | None = None,
+    api_metadata: dict[str, str] | None = None,
 ) -> str:
     """Capture shared background expenditure without assigning it to a customer."""
     snapshot = retail_snapshot(conn, service, 1)
@@ -177,8 +178,8 @@ def accept_platform_operation(
     operation_id = str(uuid4())
     conn.execute(
         "INSERT INTO billing_operations(id,service,module,source_id,unit,budget_units,"
-        "pricing_snapshot_json,collection_batch_id) "
-        "VALUES (%s,%s,%s,%s,%s,1,%s,%s)",
+        "pricing_snapshot_json,collection_batch_id,api_metadata) "
+        "VALUES (%s,%s,%s,%s,%s,1,%s,%s,%s)",
         (
             operation_id,
             service,
@@ -187,6 +188,7 @@ def accept_platform_operation(
             SERVICES[service].unit,
             json.dumps(snapshot),
             collection_batch_id,
+            json.dumps(api_metadata) if api_metadata else None,
         ),
     )
     return operation_id
@@ -412,11 +414,21 @@ def record_attempt(
 
 
 def begin_source_attempt(
-    conn: BusinessConnection, source_id: str, *, service: str | None = None
+    conn: BusinessConnection,
+    source_id: str,
+    *,
+    service: str | None = None,
+    api_metadata: dict[str, str] | None = None,
 ) -> str | None:
     operation = find_operation(conn, source_id)
     if operation is None:
         return None
+    if api_metadata:
+        # viral_data 的 API 类型挂在所属 operation 上，供管理端按类型拆解成本。
+        conn.execute(
+            "UPDATE billing_operations SET api_metadata=%s WHERE id=%s",
+            (json.dumps(api_metadata), operation),
+        )
     return begin_attempt(conn, operation_id=operation, attempt_key=str(uuid4()), service=service)
 
 

@@ -54,13 +54,10 @@ SERVER_DIR = Path(__file__).resolve().parent.parent
 MIGRATIONS_DIR = SERVER_DIR / "migrations"
 REPO_ROOT = SERVER_DIR.parent
 
-<<<<<<< HEAD
-# 当前链尾。与 test_postgres_migrations.HEAD_REVISION 同源（main→090 + 20260912T1400）。
-HEAD_REVISION = "20260919T1000_browser_account_probe"
-=======
 # 当前链尾。与 test_postgres_migrations.HEAD_REVISION 同源。
-HEAD_REVISION = "20260919T1000_oral_soft_delete"
->>>>>>> origin/feat/asset-download-and-oral-delete-20260919
+# 20260920T0000_merge_parallel_heads 合并了 browser_account_probe + oral_soft_delete，
+# 其后 20260920T0100_add_api_metadata_to_billing_ops 补 api_metadata 列。
+HEAD_REVISION = "20260920T0100_add_api_metadata_to_billing_ops"
 
 # 最后一个已发布（受支持）起点。其后的 056…090 与本迁移尚未随任何受支持版本发布，
 # 故冻结范围止于此——把未发布 revision 也纳入哈希会让每次新增迁移都必须改常量，
@@ -104,15 +101,11 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # 例如 triggers 用 information_schema.triggers 的**行数**（BEFORE UPDATE 与
 # BEFORE DELETE 各算一行），故 18 行对应 10 个 distinct trigger，不是 10 行。
 HEAD_SCHEMA_COUNTS = {
-<<<<<<< HEAD
     "check_constraints": 310,
-=======
-    "check_constraints": 309,
->>>>>>> origin/feat/asset-download-and-oral-delete-20260919
-    "columns": 1163,
+    "columns": 1168,
     "foreign_keys": 184,
     "identity_columns": 0,
-    "jsonb_columns": 3,
+    "jsonb_columns": 4,
     "partial_indexes": 35,
     "primary_keys": 98,
     "sequences": 4,
@@ -264,21 +257,11 @@ HEAD_TABLE_NAMES = (
 # video_asset/cover_asset）、check_constraints +7（records 5 条 + accounts status/source）、
 # jsonb_columns +3（tags/options/stats）、partial_indexes +2（account_active/sync）、
 # timestamptz_columns +6；unique_constraints 不变。同样以 --print-schema 重算。
-<<<<<<< HEAD
-# PUBLISH-LOGIN-ROBUSTNESS-20260919 给 publish_browser_accounts 追加 24h 健康探测调度列
-# （next_probe_at/probe_lease_owner/probe_lease_expires_at/probe_attempt_count）：columns +4、
-# timestamptz_columns +2、check_constraints +1（probe_attempt_count>=0）、partial_indexes +1
-# （WHERE status='connected'）；tables/primary_keys/foreign_keys/unique_constraints 不变。
-# 空库→新 head 于本地 postgres:16 fixture 用 migration_manifest.py --print-schema 重算。
-HEAD_SCHEMA_DIGEST = "e99dd554b8fcce317ea5e92dcd55b7e3815d6d803769a4aeab3bea6fb10504c1"
-=======
-# ASSET-DOWNLOAD-ORAL-DELETE-20260919 给 oral_avatars / oral_voices 各追加软删两列
-# （deleted_at / deleted_by_user_id，2 列 × 2 表 = columns +4）；无新表、无新索引/约束，
-# 故 tables / primary_keys / partial_indexes / check_constraints 等均不变。链尾移至
-# 20260919T1000_oral_soft_delete，以 scripts/ci/migration_manifest.py --print-schema
-# 于本地 postgres:16 fixture 重算。
-HEAD_SCHEMA_DIGEST = "c277acf9c2c4c44c1cdc1e57e66b4240374975610bc8a9c3327d79f86a924079"
->>>>>>> origin/feat/asset-download-and-oral-delete-20260919
+# 合并链尾 20260920T0000_merge_parallel_heads 同时包含：
+# - browser_account_probe: columns +4, timestamptz +2, check_constraints +1, partial_indexes +1
+# - oral_soft_delete: columns +4 (deleted_at / deleted_by_user_id × 2 表)
+# digest 需以 scripts/ci/migration_manifest.py --print-schema 于 postgres:16 重算。
+HEAD_SCHEMA_DIGEST = "85faf5f34ef7930aa4aca782a9cc2885dd7d2f4d3382c2898f9c31df987700d6"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (
@@ -517,9 +500,13 @@ def test_migration_chain_has_single_head_with_registered_merge() -> None:
     ]
     assert branch_points == [
         (
+            "20260920T0000_merge_parallel_heads",
+            ("20260919T1000_browser_account_probe", "20260919T1000_oral_soft_delete"),
+        ),
+        (
             "20260914T0000_local_joint_merge",
             ("20260913T1600_shared_viral_media", "20260913T1825_h3_account_pool"),
-        )
+        ),
     ], f"unregistered migration merge: {branch_points}"
 
     roots = [rev.revision for rev in revisions if rev.down_revision is None]

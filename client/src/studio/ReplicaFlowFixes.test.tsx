@@ -502,7 +502,7 @@ describe("复刻页 C 类：素材签名与提示词渲染", () => {
     };
     mockAnalysisSuccess();
     useStudio.mockReturnValue(value);
-    const view = render(<ReplicaPage />);
+    const _view = render(<ReplicaPage />);
 
     await screen.findByRole("button", { name: /拆解/ });
     fireEvent.click(analysisButton());

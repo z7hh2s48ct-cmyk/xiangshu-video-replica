@@ -1,0 +1,589 @@
+{
+  "schemaVersion": 1,
+  "summaryFactsSchemaVersion": 1,
+  "summary": {
+    "evidenceMode": "session-rich",
+    "evidenceBoundary": {
+      "manifest": {
+        "schemaVersion": 2,
+        "sourceFingerprint": "6cd36b07b6ba7397",
+        "adapterVersion": "qoder-task-loop-source-v2",
+        "platform": "qoder",
+        "selection": {
+          "strategy": "stratified",
+          "eligibleCount": 97,
+          "analyzedCount": 40,
+          "confidence": "Medium"
+        }
+      },
+      "episodeCoverage": {
+        "episodeCount": 140,
+        "editedEpisodeCount": 137,
+        "closedEpisodeCount": 0,
+        "recoveredEpisodeCount": 0
+      },
+      "deliveryEvidenceLevels": [],
+      "sourceGaps": []
+    },
+    "semanticFacets": {
+      "schemaVersion": 1,
+      "status": "supplementary",
+      "entries": [
+        {
+          "id": "session-insight:source-coverage",
+          "kind": "redacted-summary",
+          "episodeRef": null,
+          "status": "candidate",
+          "labels": [
+            "source-coverage",
+            "Medium"
+          ],
+          "summary": "Analyzed 40 of 97 sessions; 3/6 enabled source roots exist. Treat conclusions as sampled and increase the limit or time scope before making broad claims.",
+          "evidenceRefs": [],
+          "modelVersion": "session-insights-v1"
+        },
+        {
+          "id": "session-insight:validation-behavior",
+          "kind": "redacted-summary",
+          "episodeRef": null,
+          "status": "candidate",
+          "labels": [
+            "validation-behavior",
+            "Low"
+          ],
+          "summary": "Validation was mentioned by the user, but no matching command execution was observed: pytest (4). Treat this as a validation execution gap until a matching tool command is found in bounded evidence.",
+          "evidenceRefs": [
+            {
+              "kind": "global-project-jsonl",
+              "id": "session-insight-2-1",
+              "type": "user",
+              "line": 133
+            },
+            {
+              "kind": "global-project-jsonl",
+              "id": "session-insight-2-2",
+              "type": "user",
+              "line": 252
+            },
+            {
+              "kind": "execution-transcript",
+              "id": "session-insight-2-3",
+              "type": "user",
+              "line": 2
+            }
+          ],
+          "modelVersion": "session-insights-v1"
+        },
+        {
+          "id": "session-insight:post-edit-validation",
+          "kind": "rework-correction",
+          "episodeRef": null,
+          "status": "candidate",
+          "labels": [
+            "post-edit-validation",
+            "Medium"
+          ],
+          "summary": "Observed 138 edit event(s), but no later validation command in the analyzed sample. Route this lead to Harness session-evidence review to inspect the affected Task Episodes and later relevant validation before any finding.",
+          "evidenceRefs": [
+            {
+              "kind": "execution-transcript",
+              "id": "session-insight-3-1",
+              "type": "assistant",
+              "line": 407
+            }
+          ],
+          "modelVersion": "session-insights-v1"
+        },
+        {
+          "id": "session-insight:execution-friction",
+          "kind": "friction-taxonomy",
+          "episodeRef": null,
+          "status": "candidate",
+          "labels": [
+            "execution-friction",
+            "Low"
+          ],
+          "summary": "No strong execution friction signal in the analyzed sample. Keep friction claims narrow unless additional failed commands, rejected actions, or warnings are inspected.",
+          "evidenceRefs": [],
+          "modelVersion": "session-insights-v1"
+        },
+        {
+          "id": "session-insight:tool-mix",
+          "kind": "redacted-summary",
+          "episodeRef": null,
+          "status": "candidate",
+          "labels": [
+            "tool-mix",
+            "Medium"
+          ],
+          "summary": "Most observed tool: Bash (2821). Use this as workflow evidence, then inspect bounded sessions before claiming user intent.",
+          "evidenceRefs": [
+            {
+              "kind": "execution-transcript",
+              "id": "session-insight-5-1",
+              "type": "assistant",
+              "line": 7
+            }
+          ],
+          "modelVersion": "session-insights-v1"
+        },
+        {
+          "id": "session-insight:session-complexity",
+          "kind": "redacted-summary",
+          "episodeRef": null,
+          "status": "candidate",
+          "labels": [
+            "session-complexity",
+            "Medium"
+          ],
+          "summary": "Observed 11 active long session(s); longest active estimate: 15h 21m. Review task family, outcome, and friction before deciding whether this duration reflects a problem or any decomposition, tool, delegation, or model change is needed.",
+          "evidenceRefs": [
+            {
+              "kind": "execution-transcript",
+              "id": "session-insight-6-1",
+              "type": "session_meta",
+              "line": 1
+            }
+          ],
+          "modelVersion": "session-insights-v1"
+        },
+        {
+          "id": "session-insight:session-usage-efficiency",
+          "kind": "redacted-summary",
+          "episodeRef": null,
+          "status": "candidate",
+          "labels": [
+            "session-usage-efficiency",
+            "Medium"
+          ],
+          "summary": "本次分析覆盖 97 个会话，其中 28 个达到活跃长会话阈值，最长约 1620 分钟；另有 2 个长跨度主要来自暂停或恢复。 这些活动证据只描述投入；当前 token 或 credit 证据不足，不能据此推断模型偏好、质量或节省。",
+          "evidenceRefs": [
+            {
+              "kind": "execution-transcript",
+              "id": "session-insight-7-1",
+              "type": "session_meta",
+              "line": 1
+            }
+          ],
+          "modelVersion": "session-insights-v1"
+        }
+      ]
+    },
+    "learningCapture": {
+      "schemaVersion": 1,
+      "state": "N/A",
+      "summary": "暂不适用——需要两个可比的观察窗口和一次改进对比。",
+      "interventions": []
+    },
+    "aiAgentPractice": {
+      "inspectedSurfaces": [],
+      "coverageRows": [
+        {
+          "surface": "Rules",
+          "scopes": [
+            "Project",
+            "Plugin"
+          ],
+          "count": 123,
+          "paths": [
+            "AGENTS.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/rules/react-native/accessibility.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/rules/common/agents.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/rules/common/code-review.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/rules/angular/coding-style.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/rules/arkts/coding-style.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/rules/common/coding-style.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/rules/cpp/coding-style.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/rules/csharp/coding-style.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/rules/dart/coding-style.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/rules/fsharp/coding-style.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/rules/golang/coding-style.md"
+          ]
+        },
+        {
+          "surface": "Skills",
+          "scopes": [
+            "Global",
+            "Plugin"
+          ],
+          "count": 97,
+          "paths": [
+            "~/.agents/skills/agent-reach/SKILL.md",
+            "~/.agents/skills/article-visual-planner/SKILL.md",
+            "~/.agents/skills/brandkit/SKILL.md",
+            "~/.agents/skills/content-performance-learner/SKILL.md",
+            "~/.agents/skills/content-pipeline-orchestrator/SKILL.md",
+            "~/.agents/skills/design-taste-frontend/SKILL.md",
+            "~/.agents/skills/design-taste-frontend-v1/SKILL.md",
+            "~/.agents/skills/editorial-quality-gate/SKILL.md",
+            "~/.agents/skills/evidence-pack-builder/SKILL.md",
+            "~/.agents/skills/full-output-enforcement/SKILL.md",
+            "~/.agents/skills/gpt-taste/SKILL.md",
+            "~/.agents/skills/gstack/SKILL.md"
+          ]
+        },
+        {
+          "surface": "Hooks",
+          "scopes": [
+            "Plugin"
+          ],
+          "count": 8,
+          "paths": [
+            "~/.qoder/plugins/cache/qoderapp-bundler/qoder-context/1.0.51.fa026ec3/hooks/hooks.json",
+            "~/.qoder/plugins/cache/qoder-bundler/security-scan/.qoder-plugin/qoder-hooks.json"
+          ]
+        },
+        {
+          "surface": "Commands",
+          "scopes": [
+            "Plugin"
+          ],
+          "count": 90,
+          "paths": [
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/commands/aside.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/commands/auto-update.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/commands/build-fix.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/commands/checkpoint.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/commands/code-review.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/commands/cost-report.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/commands/cpp-build.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/commands/cpp-review.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/commands/cpp-test.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/commands/epic-claim.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/commands/epic-decompose.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/commands/epic-publish.md"
+          ]
+        },
+        {
+          "surface": "Custom Agents",
+          "scopes": [
+            "Plugin"
+          ],
+          "count": 76,
+          "paths": [
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/agents/a11y-architect.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/agents/agent-evaluator.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/vercel/0.44.0/agents/ai-architect.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/agents/architect.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/agents/build-error-resolver.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/agents/chief-of-staff.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/agents/code-architect.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/agents/code-explorer.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/agents/code-reviewer.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/pr-review-toolkit/1.0.0/agents/code-reviewer.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/agents/code-simplifier.md",
+            "~/.qoder/plugins/cache/qoder-marketplace/pr-review-toolkit/1.0.0/agents/code-simplifier.md"
+          ]
+        },
+        {
+          "surface": "MCP",
+          "scopes": [
+            "Plugin"
+          ],
+          "count": 5,
+          "paths": [
+            "~/.qoder/plugins/cache/qoder-marketplace/chrome-devtools-mcp/1.9.0/.mcp.json",
+            "~/.qoder/plugins/cache/qoder-bundler/computer-use/.mcp.json",
+            "~/.qoder/plugins/cache/qoder-marketplace/playwright/1.0.0/mcp.json",
+            "~/.qoder/plugins/cache/qoderapp-bundler/qoder-context/1.0.51.fa026ec3/mcp.json",
+            "~/.qoder/plugins/cache/qoder-marketplace/vercel/0.44.0/.mcp.json"
+          ]
+        },
+        {
+          "surface": "Workflows",
+          "scopes": [
+            "Project"
+          ],
+          "count": 2,
+          "paths": [
+            ".github/workflows/ci.yml",
+            ".github/workflows/desktop-build.yml"
+          ]
+        },
+        {
+          "surface": "Plugins",
+          "scopes": [
+            "Plugin"
+          ],
+          "count": 17,
+          "paths": [
+            "~/.qoder/plugins/cache/qoder-marketplace/agent-browser/0.31.1/.qoder-plugin/plugin.json",
+            "~/.qoder/plugins/cache/qoder-marketplace/andrej-karpathy-skills/1.0.0/.qoder-plugin/plugin.json",
+            "~/.qoder/plugins/cache/qoder-bundler/better-harness/.qoder-plugin/plugin.json",
+            "~/.qoder/plugins/cache/qoder-marketplace/chrome-devtools-mcp/1.9.0/.qoder-plugin/plugin.json",
+            "~/.qoder/plugins/cache/qoder-bundler/computer-use/.qoder-plugin/plugin.json",
+            "~/.qoder/plugins/cache/qoder-marketplace/design-review/0.1.0/.qoder-plugin/plugin.json",
+            "~/.qoder/plugins/cache/qoder-marketplace/ecc/2.0.0/.qoder-plugin/plugin.json",
+            "~/.qoder/plugins/cache/qoder-marketplace/frontend-design/1.0.0/.qoder-plugin/plugin.json",
+            "~/.qoder/plugins/cache/qoder-marketplace/gstack/1.58.5/.qoder-plugin/plugin.json",
+            "~/.qoder/plugins/cache/qoder-marketplace/impeccable/4.3.1/.qoder-plugin/plugin.json",
+            "~/.qoder/plugins/cache/qoder-marketplace/playwright/1.0.0/.qoder-plugin/plugin.json",
+            "~/.qoder/plugins/cache/qoder-marketplace/pr-review-toolkit/1.0.0/.qoder-plugin/plugin.json"
+          ]
+        },
+        {
+          "surface": "Memories",
+          "scopes": [
+            "Project",
+            "Global"
+          ],
+          "count": 98
+        }
+      ],
+      "repositorySourceRows": [],
+      "memoryDetails": {
+        "contentPolicy": "metadata-only",
+        "scanState": "scanned-present",
+        "scopeCounts": [
+          {
+            "scope": "Project",
+            "count": 97
+          },
+          {
+            "scope": "Global",
+            "count": 1
+          }
+        ],
+        "integrity": {
+          "status": "reviewed",
+          "titleCount": 98,
+          "reviewedTitleCount": 98,
+          "truncated": false,
+          "exactCollisionGroups": 4,
+          "similarityCandidates": 2
+        }
+      }
+    },
+    "usageActivity": {
+      "schemaVersion": 2,
+      "dateBasis": "UTC",
+      "measurementBasis": "session-starts-active-estimate-model-active-session-days-skill-invocations-and-loads",
+      "truncated": false,
+      "dates": [
+        "2026-08-21",
+        "2026-08-22",
+        "2026-08-23",
+        "2026-08-24",
+        "2026-08-25",
+        "2026-08-26",
+        "2026-08-27",
+        "2026-08-28",
+        "2026-08-29",
+        "2026-08-30",
+        "2026-08-31",
+        "2026-09-01",
+        "2026-09-02",
+        "2026-09-03",
+        "2026-09-04",
+        "2026-09-05",
+        "2026-09-06",
+        "2026-09-07",
+        "2026-09-08",
+        "2026-09-09",
+        "2026-09-10",
+        "2026-09-11",
+        "2026-09-12",
+        "2026-09-13",
+        "2026-09-14",
+        "2026-09-15",
+        "2026-09-16",
+        "2026-09-17",
+        "2026-09-18",
+        "2026-09-19",
+        "2026-09-20"
+      ],
+      "sessions": {
+        "total": 97,
+        "starts": [
+          6,
+          2,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          8,
+          7,
+          16,
+          29,
+          2,
+          3,
+          0,
+          0,
+          0,
+          0,
+          15,
+          0,
+          7,
+          2
+        ],
+        "activeMinutes": [
+          506.2,
+          7.5,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          87.5,
+          1909.4,
+          3512.9,
+          2456.2,
+          14.7,
+          40.4,
+          0,
+          0,
+          0,
+          0,
+          795.6,
+          0,
+          138,
+          15.6
+        ]
+      },
+      "models": [],
+      "skills": [
+        {
+          "name": "agent-reach",
+          "total": 2,
+          "daily": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            2,
+            0,
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    "usageEfficiency": {
+      "schemaVersion": 2,
+      "selection": {
+        "strategy": "all-eligible",
+        "eligibleSessionCount": 97,
+        "analyzedSessionCount": 97,
+        "complete": true
+      },
+      "roles": {
+        "userThreadCandidateCount": 64,
+        "childAgentCandidateCount": 33
+      },
+      "longSessions": {
+        "activeCount": 28,
+        "wallOnlyCount": 2,
+        "longestActiveMinutes": 1619.6,
+        "activeRatio": 0.2887,
+        "estimate": {
+          "method": "capped-event-gap",
+          "activeThresholdMinutes": 45,
+          "gapCapMinutes": 5,
+          "idleGapMinutes": 30
+        },
+        "samples": [
+          {
+            "alias": "S1",
+            "role": "child-agent-candidate",
+            "activeMinutes": 1619.6,
+            "failureCount": 0
+          },
+          {
+            "alias": "S2",
+            "role": "user-thread-candidate",
+            "activeMinutes": 1619.6,
+            "failureCount": 0
+          },
+          {
+            "alias": "S3",
+            "role": "user-thread-candidate",
+            "activeMinutes": 921.3,
+            "failureCount": 0
+          },
+          {
+            "alias": "S4",
+            "role": "child-agent-candidate",
+            "activeMinutes": 921.3,
+            "failureCount": 0
+          }
+        ]
+      },
+      "accounting": {
+        "mode": "effort-proxy",
+        "responseCount": 0,
+        "modelAttributedResponseCount": 0,
+        "unattributedResponseCount": 0,
+        "usageFieldObservedCount": 0,
+        "nonZeroUsageCount": 0,
+        "exactCreditsAvailable": false,
+        "pricingVersion": null
+      },
+      "modelUsage": [],
+      "outcomeReview": {
+        "status": "required",
+        "reviewedCandidateCount": 0,
+        "reviewedActiveLongCount": 0,
+        "comparableModelOutcomeEvidence": false,
+        "recommendation": "controlled-a-b-required"
+      },
+      "reviewLead": {
+        "id": "session-usage-outcome-review-gap",
+        "title": "28 个长会话候选仍待结果复核",
+        "reason": "97 个已分析会话中有 28 个（28.9%）超过估算活跃时长阈值，最长估算为 1619.6 分钟，其中 0 个已有结果复核；另有 2 个长跨度可能来自空闲或恢复。这只是调查线索，尚未确认存在效率、任务拆分、工具链或模型问题。",
+        "expectedOutcome": "每个展示候选都完成任务族、结果和摩擦分类，让报告能够判断是否真的需要改进。",
+        "aiFixPrompt": "/better-harness 复核这些会话\n\n28 个长会话候选仍待结果复核\n\n## 先核对的会话\n\n- S1：子 Agent 候选，估算活跃约 1619.6 分钟，失败事件 0 次\n- S2：用户会话候选，估算活跃约 1619.6 分钟，失败事件 0 次\n- S3：用户会话候选，估算活跃约 921.3 分钟，失败事件 0 次\n- S4：子 Agent 候选，估算活跃约 921.3 分钟，失败事件 0 次\n- 当前展示 28 个未复核活跃长会话中的 4 个；其余 24 个继续通过同一个有界 review packet 复核。\n\n## 先做什么\n\n在操作系统临时目录创建 <run>，从项目根运行：\n\n```bash\nnode scripts/session-analysis.mjs insights --platform qoder --workspace . --selection all-eligible --limit 1000 --format json --output <run>/insights.json\nnode scripts/session-analysis/usage-review-packet.mjs --source <run>/insights.json --workspace . --limit 8 --output <run>/.review-packet.json\n```\n\n私有 review packet 会在本地解析候选；只为 S1, S2, S3, S4 写入 taskFamily、outcome、friction、confidence 和 evidenceReason。先完成复核，不改业务代码，也不创建 Memory、Skill 或 Hook。\n\n## 我们看到了什么\n\n97 个已分析会话中有 28 个（28.9%）超过估算活跃时长阈值，最长估算为 1619.6 分钟，其中 0 个已有结果复核；另有 2 个长跨度可能来自空闲或恢复。这只是调查线索，尚未确认存在效率、任务拆分、工具链或模型问题。\n\n## 为什么值得复核\n\n未复核前无法区分复杂任务、工具链摩擦、暂停恢复噪音或正常的长任务。\n\n## 预期结果\n\n每个展示候选都完成任务族、结果和摩擦分类，让报告能够判断是否真的需要改进。\n\n## 范围\n\n只生成隐私安全的会话效率复核和 reader report，不改业务代码，不把墙钟跨度当作活跃成本。持久报告只保留匿名别名；私有 review packet 不得复制进报告。这是 4/28 的有界视图（4/N）；只对展示样本下结论，其余候选保持未复核。\n\n## 怎样算完成\n\n<run>/.review.json 对 S1, S2, S3, S4 各有一条有效复核；语义复核生成 <run>/insights.reviewed.json；<run>/report.md 以 reviewed source 校验通过。复核未确认问题时，不创建优化项。\n\n## 验证\n\n- 运行 `node scripts/session-analysis/usage-semantic-review.mjs --source <run>/insights.json --packet <run>/.review-packet.json --review <run>/.review.json --output <run>/insights.reviewed.json`\n- 运行 `node scripts/session-analysis/validate-usage-report.mjs --source <run>/insights.reviewed.json --report <run>/report.md`，必须返回 `ok: true`\n- 确认 reviewed source 的 `outcomeReview.reviewedActiveLongCount` 等于已复核的展示别名数；通过后删除两个私有临时 review 文件",
+        "sampleCoverage": {
+          "shown": 4,
+          "total": 28,
+          "complete": false
+        }
+      }
+    }
+  },
+  "dimensions": [],
+  "findings": []
+}

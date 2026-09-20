@@ -6,7 +6,7 @@ import json
 import logging
 import math
 import sqlite3
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -440,9 +440,11 @@ def read_saved_prompts(
 
 # ========== 新增：H3 提示词预览编译 API（前端实时使用） ==========
 
+
 class CompileH3PreviewRequest(BaseModel):
     """前端用于实时预览 H3 提示词编译结果"""
-    shots: list[dict]  # ShotCard JSON
+
+    shots: list[dict[str, Any]]  # ShotCard JSON
     original_script: str
     analysis_version_id: str
 
@@ -451,7 +453,10 @@ class CompileH3PreviewResult(BaseModel):
     h3_prompt_text: str
 
 
-@router.post("/projects/{project_id}/prompts/compile-h3-preview", response_model=CompileH3PreviewResult)
+@router.post(
+    "/projects/{project_id}/prompts/compile-h3-preview",
+    response_model=CompileH3PreviewResult,
+)
 def compile_h3_preview(
     project_id: str,
     request: CompileH3PreviewRequest,
@@ -461,54 +466,51 @@ def compile_h3_preview(
     """
     轻量级 H3 提示词编译，用于前端实时预览。
     不写入数据库，只返回编译后的文本。
-    
+
     参数:
     - project_id: 项目 ID
     - request.shots: 分镜卡数据
     - request.original_script: 原始脚本
     - request.analysis_version_id: 分析版本 ID
-    
+
     返回:
     - h3_prompt_text: 编译后的完整 H3 提示词
     """
     try:
-        from app.generation import compile_prompt_text, shot_timeline_duration
-        
+        from app.generation import compile_prompt_text
+
         # 解析 shots 数据
         shot_payload = {
             "shots": request.shots,
             "duration_seconds": None,  # 将由 compile_prompt_text 自动计算
         }
-        
+
         script_payload = {
             "full_text": request.original_script,
             "shot_mappings": [],
         }
-        
+
         # 手动计算时间线长度
         source_duration_seconds = 0.0
         for shot in request.shots:
             end_time = float(shot.get("end_time", 0))
             if end_time > source_duration_seconds:
                 source_duration_seconds = end_time
-        
+
         # 调用核心编译函数
         prompt_text = compile_prompt_text(
             script_payload=dict(script_payload),
             shot_payload=dict(shot_payload),
             source_duration_seconds=source_duration_seconds,
             duration_seconds=15,  # 默认 15 秒
-            resolution="768P",     # 默认分辨率
+            resolution="768P",  # 默认分辨率
         )
-        
+
         return CompileH3PreviewResult(h3_prompt_text=prompt_text)
-        
+
     except Exception as e:
         logging.error(f"Failed to compile H3 preview: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"编译 H3 提示词失败：{str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"编译 H3 提示词失败：{str(e)}")
 
 
 @router.post(

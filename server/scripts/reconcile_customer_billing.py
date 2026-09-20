@@ -162,6 +162,17 @@ PG_ONLY_COLUMNS: dict[str, frozenset[str]] = {
     # （该迁移非 postgresql 方言 return，SQLite lane 不加此列）。
     # T07 导入时留空，随后由 `python -m scripts.backfill_content_objects` 回填。
     "assets": frozenset({"content_object_id"}),
+    # 20260919T1000_oral_soft_delete: 口播分身/声音克隆的软删列仅存在于 PG
+    # （SQLite 内部泳道在 065 后退役，无历史软删事实）。
+    "oral_avatars": frozenset({"deleted_at", "deleted_by_user_id"}),
+    "oral_voices": frozenset({"deleted_at", "deleted_by_user_id"}),
+    # 20260919T1000_browser_account_probe: 健康探针调度列仅存在于 PG。
+    "publish_browser_accounts": frozenset(
+        {"next_probe_at", "probe_lease_owner", "probe_lease_expires_at", "probe_attempt_count"}
+    ),
+    # 20260920T0100_add_api_metadata_to_billing_ops: viral_data 的 API 类型
+    # 元数据仅存在于 PG（SQLite lane 无计费运行时）。
+    "billing_operations": frozenset({"api_metadata"}),
 }
 DEFAULT_DIGEST_BATCH_SIZE = 1000
 _DIGEST_MODULUS = 1 << 256

@@ -510,6 +510,8 @@ class ViralSourceClient:
         transport: ViralHttpTransport,
         path: str,
         payload: Mapping[str, Any],
+        *,
+        billing_units: int = 1,
     ) -> dict[str, Any]:
         url = f"{self._base_url}{path}"
         body = json.dumps(dict(payload), ensure_ascii=False).encode("utf-8")
@@ -523,12 +525,12 @@ class ViralSourceClient:
         # Map path to API type for billing metadata
         api_type_mapping = {
             DOUYIN_GENERAL_SEARCH_PATH: "douyin_search",
-            WECHAT_SEARCH_VIDEOS_PATH: "wechat_search_page", 
+            WECHAT_SEARCH_VIDEOS_PATH: "wechat_search_page",
             WECHAT_VIDEO_DETAIL_PATH: "wechat_video_detail",
         }
         api_type = api_type_mapping.get(path)
-        
-        with (set_api_type(api_type) if api_type else nullcontext()):
+
+        with set_api_type(api_type) if api_type else nullcontext():
             with meter_call("viral_data", units=billing_units):
                 content = transport.request("POST", url, headers=headers, body=body)
         try:

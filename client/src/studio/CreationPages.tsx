@@ -1386,18 +1386,6 @@ export function ReplicaPage() {
   latestDraftRef.current = state.draft;
   patchDraftRef.current = patchDraft;
 
-  // ========== 新增：H3 提示词双写模式管理 ==========
-  const [h3PromptDraft, setH3PromptDraft] = useState<string>("");
-  const [h3PromptVersionId, setH3PromptVersionId] = useState<string | null>(
-    null,
-  );
-  const [h3PromptLastEditedAt, setH3PromptLastEditedAt] = useState<
-    number | null
-  >(null);
-  const [isH3Editing, setIsH3Editing] = useState(false);
-  const h3SaveOperationRef = useRef(0);
-  const compileDebounceRef = useRef<NodeJS.Timeout | null>(null);
-
   // hasShots 前置计算以避免前向引用问题（用于满足 biome 的完整性检查）
   const displayShots =
     shots.length > 0
@@ -1406,132 +1394,6 @@ export function ReplicaPage() {
         ? REVIEW_SAMPLE_SHOTS
         : [];
   const hasShots = stage === "ready" && displayShots.length > 0;
-
-  // 编译 H3 提示词的辅助函数（调用后端轻量级 API）
-  const compileH3PromptFromShots = useCallback(
-    async (shots: ShotCard[], originalScript: string) => {
-      if (!latestDraftRef.current.projectId || !analysisVersionId) return "";
-
-      try {
-        const response = await fetch(
-          `/api/projects/${latestDraftRef.current.projectId}/prompts/compile-h3-preview`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              shots: shots.map((shot) => ({
-                shot_id: shot.shot_id,
-                start_time: shot.start_time,
-                end_time: shot.end_time,
-                shot_type: shot.shot_type,
-                composition: shot.composition,
-                camera_motion: shot.camera_motion,
-                subject: shot.subject,
-                action: shot.action,
-                scene: shot.scene,
-                spoken_text: shot.spoken_text,
-                transition: shot.transition,
-                motion: shot.motion,
-              })),
-              original_script: originalScript,
-              analysis_version_id: analysisVersionId,
-            }),
-          },
-        );
-
-        if (!response.ok) {
-          const errorText = await response.text();
-          throw new Error(
-            `编译 H3 提示词失败 (${response.status}): ${errorText}`,
-          );
-        }
-
-        const result = await response.json();
-        return result.h3_prompt_text || "";
-      } catch (error) {
-        console.error("编译 H3 提示词失败:", error);
-        notify("编译 H3 提示词失败，请稍后重试。");
-        return "";
-      }
-    },
-    [analysisVersionId, notify],
-  );
-
-  // 当分镜表变化时自动编译 H3 提示词（防抖 300ms）
-  useEffect(() => {
-    // 如果不在 ready 阶段、没有分镜数据、或用户正在编辑 H3，则不自动覆盖
-    if (stage !== "ready" || shots.length === 0 || isH3Editing) return;
-
-    if (compileDebounceRef.current) {
-      clearTimeout(compileDebounceRef.current);
-    }
-
-    compileDebounceRef.current = setTimeout(async () => {
-      const compiled = await compileH3PromptFromShots(shots, originalScript);
-      if (compiled && !isH3Editing) {
-        setH3PromptDraft(compiled);
-        setH3PromptLastEditedAt(Date.now());
-      }
-    }, 300);
-
-    return () => {
-      if (compileDebounceRef.current) {
-        clearTimeout(compileDebounceRef.current);
-      }
-    };
-  }, [shots, originalScript, isH3Editing, compileH3PromptFromShots, stage]);
-
-  const handleH3DraftChange = (text: string) => {
-    setH3PromptDraft(text);
-    setH3PromptLastEditedAt(Date.now());
-    setFinalSnapshot(null); // 标记终稿已失效
-  };
-
-  const saveH3Draft = async () => {
-    if (!latestDraftRef.current.projectId) return;
-
-    const operation = ++h3SaveOperationRef.current;
-    try {
-      // 保存到数据库
-      const saved = await saveGenerationPrompt(
-        latestDraftRef.current.projectId,
-        {
-          name:
-            h3PromptDraftName.current ||
-            `H3 提示词 ${new Date().toLocaleDateString("zh-CN")}`,
-          prompt_text: h3PromptDraft,
-        },
-      );
-
-      // 验证操作是否仍然有效
-      if (operation !== h3SaveOperationRef.current) return;
-
-      setH3PromptVersionId(saved.id);
-      notify("H3 提示词已保存为最终版本。");
-      setIsH3Editing(false);
-    } catch (_error) {
-      notify("保存 H3 提示词失败，请稍后重试。");
-    }
-  };
-
-  const discardH3Draft = () => {
-    // 恢复到最后一次保存的版本或自动编译的版本
-    if (h3PromptVersionId) {
-      // TODO: 从数据库读取最新版本
-      // 这里先简单处理：切换到只读模式
-      setIsH3Editing(false);
-    } else {
-      // 没有保存过，重新编译
-      compileH3PromptFromShots(shots, originalScript).then((compiled) => {
-        if (compiled) {
-          setH3PromptDraft(compiled);
-          setIsH3Editing(false);
-        }
-      });
-    }
-  };
-
-  const h3PromptDraftName = useRef("");
 
   useEffect(
     () => () => {
@@ -2077,10 +1939,7 @@ export function ReplicaPage() {
     setShotsDirty(true);
     setShotSaveError("");
     setFinalSnapshot(null);
-    // 如果用户没有直接在 H3 编辑器中修改，自动触发重新编译
-    if (!isH3Editing) {
-      handleH3DraftChange(""); // 清空当前 H3 草稿以触发重新编译
-    }
+    // TODO: H3 草稿功能的 UI 组件
   };
 
   const saveShotEdits = async () => {

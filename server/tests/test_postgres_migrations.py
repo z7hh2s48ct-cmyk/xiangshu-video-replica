@@ -32,18 +32,12 @@ from sqlalchemy.engine import make_url
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 # PR#103(df7020c) 引入 pg_test_kit.require_pg_or_explicit_skip 模块级 autouse fixture，
 # 取代旧的 SKIP_REASON 常量（已无引用，随 main 基线删除）。
-<<<<<<< HEAD
-# HEAD_REVISION 取本分支链尾：PUBLISH-LOGIN-ROBUSTNESS-20260919 追加
-# 20260919T1000_browser_account_probe 在 20260918T1200_publish_account_avatar 之后。
+# HEAD_REVISION 取链尾：20260920T0000_merge_parallel_heads 合并了
+# browser_account_probe 与 oral_soft_delete 两个平行分支，
+# 其后 20260920T0100_add_api_metadata_to_billing_ops 为 billing_operations
+# 补 viral_data 的 API 类型元数据列。
 # 迁移后 alembic 版本头即该值，9 处 assert version == HEAD_REVISION 依赖此值。
-HEAD_REVISION = "20260919T1000_browser_account_probe"
-=======
-# HEAD_REVISION 取本分支链尾：ASSET-DOWNLOAD-ORAL-DELETE-20260919 追加
-# 20260919T1000_oral_soft_delete（oral_avatars / oral_voices 软删两列）在
-# 20260918T1200_publish_account_avatar 之后。
-# 迁移后 alembic 版本头即该值，9 处 assert version == HEAD_REVISION 依赖此值。
-HEAD_REVISION = "20260919T1000_oral_soft_delete"
->>>>>>> origin/feat/asset-download-and-oral-delete-20260919
+HEAD_REVISION = "20260920T0100_add_api_metadata_to_billing_ops"
 
 
 def test_viral_script_cache_migration_preserves_results_without_task_foreign_keys(

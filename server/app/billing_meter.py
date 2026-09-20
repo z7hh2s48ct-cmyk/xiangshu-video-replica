@@ -6,7 +6,6 @@ Extends with API metadata tracking for TikTok Hub calls:
 - wechat_video_detail
 """
 
-import json
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -41,7 +40,7 @@ def collection_billing_context(batch_id: str) -> Iterator[None]:
 @contextmanager
 def set_api_type(api_type: str) -> Iterator[None]:
     """Temporarily set the API type for the current execution context.
-    
+
     Used to tag billing operations with the specific TikTok Hub API being called.
     Example:
         with set_api_type("douyin_search"):
@@ -68,25 +67,26 @@ def meter_call(service: str, *, units: float | int = 1) -> Iterator[None]:
     source = None if service == "viral_data" and _collection.get() else _source.get()
     attempt = None
     platform_operation = None
-    api_metadata = {"api_type": _api_type.get(None)} if _api_type.get() else None
-    
+    api_type = _api_type.get()
+    api_metadata = {"api_type": api_type} if api_type else None
+
     if source:
         with pg_transaction() as raw:
             attempt = begin_source_attempt(
-                BusinessConnection.postgres(raw), 
-                source, 
+                BusinessConnection.postgres(raw),
+                source,
                 service=service,
-                api_metadata=api_metadata if api_metadata else None
+                api_metadata=api_metadata if api_metadata else None,
             )
     elif service == "viral_data" and os.environ.get("VIDEO_REPLICA_DATABASE_URL"):
         with pg_transaction() as raw:
             conn = BusinessConnection.postgres(raw)
             platform_operation = accept_platform_operation(
-                conn, 
-                service=service, 
-                source_id=str(uuid4()), 
+                conn,
+                service=service,
+                source_id=str(uuid4()),
                 collection_batch_id=_collection.get(),
-                api_metadata=api_metadata if api_metadata else None
+                api_metadata=api_metadata if api_metadata else None,
             )
             attempt = begin_attempt(conn, operation_id=platform_operation, attempt_key="request")
     usage = None

@@ -325,7 +325,7 @@ for provider in PROVIDER_PRIORITY_ORDER:
 **修改前**:
 ```python
 # server/app/viral_tikhub.py
-client = ViralSourceClient(api_key="hardcoded-or-env")
+client = ViralSourceClient(api_key=os.environ.get("TIKHUB_API_KEY"))
 videos = client.douyin_search(keyword="别墅")
 ```
 
