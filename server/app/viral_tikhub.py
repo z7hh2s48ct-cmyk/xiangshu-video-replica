@@ -23,6 +23,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, cast
 from urllib.error import HTTPError, URLError
@@ -517,10 +518,19 @@ class ViralSourceClient:
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
-        from app.billing_meter import meter_call
+        from app.billing_meter import meter_call, set_api_type
 
-        with meter_call("viral_data"):
-            content = transport.request("POST", url, headers=headers, body=body)
+        # Map path to API type for billing metadata
+        api_type_mapping = {
+            DOUYIN_GENERAL_SEARCH_PATH: "douyin_search",
+            WECHAT_SEARCH_VIDEOS_PATH: "wechat_search_page", 
+            WECHAT_VIDEO_DETAIL_PATH: "wechat_video_detail",
+        }
+        api_type = api_type_mapping.get(path)
+        
+        with (set_api_type(api_type) if api_type else nullcontext()):
+            with meter_call("viral_data", units=billing_units):
+                content = transport.request("POST", url, headers=headers, body=body)
         try:
             envelope = json.loads(content)
         except json.JSONDecodeError as exc:
