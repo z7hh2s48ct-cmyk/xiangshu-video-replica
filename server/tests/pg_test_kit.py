@@ -154,6 +154,11 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
         # tests (test_admin_h3_extended_modes.py), migrated to alembic head
         # with admin_u/auditor_u operator seeds.
         "cw063_h3_extended_modes_test",
+        # CUSTOMER-CENTER-V2 迁移链合并验证（merge revision + cw056 重测基线）。
+        "customer_center_v2_merge_test",
+        # CUSTOMER-CENTER-V2 子账号 CRUD API 套件（test_sub_account_crud.py）：
+        # 独立迁移到 head 的 scratch 库，TRUNCATE 隔离。
+        "cw062_sub_account_crud_test",
         # CW-070 WeChat Pay V3 Native settlement: dedicated database for the
         # PG-only wechat_native recharge_order settlement matrix
         # (test_wechat_native_callback_pg.py) — confirm_recharge_payment under

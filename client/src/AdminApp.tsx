@@ -11,7 +11,9 @@ import { CustomersManagementPage } from "./admin/CustomersManagementPage";
 import { FundsPage } from "./admin/FundsPage";
 import { GenerationRecordsPage } from "./admin/GenerationRecordsPage";
 import { OverviewPage } from "./admin/OverviewPage";
+import { SubAccountsPage } from "./admin/SubAccountsPage";
 import { SystemSettingsPage } from "./admin/SystemSettingsPage";
+import { AdminErrorBoundary } from "./admin/ui/AdminErrorBoundary";
 import { shanghaiDate } from "./admin/ui/vocabulary";
 import { ViralVideosPage } from "./admin/ViralVideosPage";
 import "./admin/admin-login.css";
@@ -65,6 +67,7 @@ export type AdminTab =
   | "analytics"
   | "funds"
   | "customersMgmt"
+  | "subAccounts"
   | "generationRecords"
   | "viralVideos"
   | "auditCenter"
@@ -92,6 +95,11 @@ const tabGroups: Array<{
         id: "customersMgmt",
         label: "客户管理",
         helper: "客户账户与积分管理",
+      },
+      {
+        id: "subAccounts",
+        label: "子账号管理",
+        helper: "为母账号创建和管理子账号",
       },
       {
         id: "generationRecords",
@@ -123,6 +131,7 @@ const tabPageTitles: Record<AdminTab, string> = {
   analytics: "经营分析",
   funds: "资金流水",
   customersMgmt: "客户管理",
+  subAccounts: "子账号管理",
   generationRecords: "用户生成记录",
   viralVideos: "爆款视频库",
   auditCenter: "审计中心",
@@ -135,6 +144,7 @@ const navigationIcons: Record<AdminTab, string> = {
   analytics: chartIcon,
   funds: walletIcon,
   customersMgmt: usersIcon,
+  subAccounts: usersIcon,
   generationRecords: clapperboardIcon,
   viralVideos: clapperboardIcon,
   auditCenter: shieldIcon,
@@ -777,6 +787,15 @@ export function AdminApp() {
               operatorId={actor.user_id}
               readOnly={readOnly}
             />
+          ) : null}
+          {activeTab === "subAccounts" ? (
+            <AdminErrorBoundary>
+              <SubAccountsPage
+                embedded={false}
+                operatorId={actor.user_id}
+                readOnly={readOnly}
+              />
+            </AdminErrorBoundary>
           ) : null}
           {activeTab === "generationRecords" ? (
             <GenerationRecordsPage

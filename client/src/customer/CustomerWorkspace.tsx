@@ -7,7 +7,6 @@ import {
 } from "react";
 import {
   attachCustomerSessionToken,
-  type CustomerActivationCodeReset,
   CustomerApiError,
   type CustomerDeviceListResponse,
   type CustomerProfile,
@@ -15,7 +14,6 @@ import {
   customerDismissDevicePairing,
   customerGetProfile,
   customerListDevices,
-  customerResetActivationCode,
   customerUnbindDevice,
   customerUpdateProfile,
 } from "../api";
@@ -301,21 +299,7 @@ export function CustomerWorkspace({
     }
   }
 
-  async function handleResetActivationCode(): Promise<CustomerActivationCodeReset> {
-    const token = await store.loadSessionToken();
-    if (token === null) {
-      onSessionExpired();
-      throw new Error("登录已失效，请重新进入工作台。");
-    }
-    try {
-      return await customerResetActivationCode({ kind: "session", token });
-    } catch (cause) {
-      if (cause instanceof CustomerApiError && cause.status === 401) {
-        onSessionExpired();
-      }
-      throw cause;
-    }
-  }
+  // handleResetActivationCode 已删除（激活码方案废弃，2026-09-19）
 
   /** 登出先清本账号的本地创作残留与页间缓存：进程不重启就换账号时，
    * 模块级缓存和 localStorage 都会原样串进下一个人的工作区。
@@ -341,7 +325,6 @@ export function CustomerWorkspace({
             onRefreshProfile: () => loadProfile(),
             onLogout: handleLogout,
             onRefreshDevices: loadDevices,
-            onResetActivationCode: handleResetActivationCode,
             onUnbind: (deviceId) => void handleUnbind(deviceId),
             onUpdateProfile: handleUpdateProfile,
             profile,

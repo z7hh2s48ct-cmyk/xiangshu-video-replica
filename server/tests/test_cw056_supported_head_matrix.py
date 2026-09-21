@@ -55,9 +55,10 @@ MIGRATIONS_DIR = SERVER_DIR / "migrations"
 REPO_ROOT = SERVER_DIR.parent
 
 # 当前链尾。与 test_postgres_migrations.HEAD_REVISION 同源。
-# 20260920T0000_merge_parallel_heads 合并了 browser_account_probe + oral_soft_delete，
-# 其后 20260920T0100_add_api_metadata_to_billing_ops 补 api_metadata 列。
-HEAD_REVISION = "20260920T0100_add_api_metadata_to_billing_ops"
+# 20260921T0000_merge_wallet_actor_and_billing_metadata 把 CUSTOMER-CENTER-V2-20260919
+# （sub_accounts → wallet_actor）与 main（oral_soft_delete → merge_parallel_heads →
+# add_api_metadata_to_billing_ops）两条并行链线性化为单头。
+HEAD_REVISION = "20260921T0000_merge_wallet_actor_and_billing_metadata"
 
 # 最后一个已发布（受支持）起点。其后的 056…090 与本迁移尚未随任何受支持版本发布，
 # 故冻结范围止于此——把未发布 revision 也纳入哈希会让每次新增迁移都必须改常量，
@@ -101,12 +102,12 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # 例如 triggers 用 information_schema.triggers 的**行数**（BEFORE UPDATE 与
 # BEFORE DELETE 各算一行），故 18 行对应 10 个 distinct trigger，不是 10 行。
 HEAD_SCHEMA_COUNTS = {
-    "check_constraints": 310,
-    "columns": 1168,
-    "foreign_keys": 184,
+    "check_constraints": 313,
+    "columns": 1172,
+    "foreign_keys": 187,
     "identity_columns": 0,
     "jsonb_columns": 4,
-    "partial_indexes": 35,
+    "partial_indexes": 37,
     "primary_keys": 98,
     "sequences": 4,
     "tables": 98,
@@ -257,11 +258,14 @@ HEAD_TABLE_NAMES = (
 # video_asset/cover_asset）、check_constraints +7（records 5 条 + accounts status/source）、
 # jsonb_columns +3（tags/options/stats）、partial_indexes +2（account_active/sync）、
 # timestamptz_columns +6；unique_constraints 不变。同样以 --print-schema 重算。
-# 合并链尾 20260920T0000_merge_parallel_heads 同时包含：
-# - browser_account_probe: columns +4, timestamptz +2, check_constraints +1, partial_indexes +1
-# - oral_soft_delete: columns +4 (deleted_at / deleted_by_user_id × 2 表)
-# digest 需以 scripts/ci/migration_manifest.py --print-schema 于 postgres:16 重算。
-HEAD_SCHEMA_DIGEST = "85faf5f34ef7930aa4aca782a9cc2885dd7d2f4d3382c2898f9c31df987700d6"
+# 合并链尾 20260921T0000_merge_wallet_actor_and_billing_metadata 同时包含：
+# - SUB-ACCOUNTS-20260919（sub_accounts + wallet_actor）：users.parent_user_id/account_type、
+#   wallet_transactions.actor_user_id——columns +3、check_constraints +3、foreign_keys +2、
+#   partial_indexes +2，无新表
+# - main 侧 browser_account_probe + oral_soft_delete + merge_parallel_heads +
+#   add_api_metadata_to_billing_ops（billing_operations.viral_data 补 api_metadata 列）
+# digest/counts 以 scripts/ci/migration_manifest.py --print-schema 于 postgres:16 重算。
+HEAD_SCHEMA_DIGEST = "ffcb63b8486dbda9c717b3066635d4081187d37585117fc66b90715e9665d402"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (
@@ -499,6 +503,13 @@ def test_migration_chain_has_single_head_with_registered_merge() -> None:
         if isinstance(rev.down_revision, tuple)
     ]
     assert branch_points == [
+        (
+            "20260921T0000_merge_wallet_actor_and_billing_metadata",
+            (
+                "20260919T1500_device_parent_cascade",
+                "20260920T0100_add_api_metadata_to_billing_ops",
+            ),
+        ),
         (
             "20260920T0000_merge_parallel_heads",
             ("20260919T1000_browser_account_probe", "20260919T1000_oral_soft_delete"),

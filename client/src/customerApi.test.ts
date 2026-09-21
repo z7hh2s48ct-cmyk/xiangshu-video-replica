@@ -15,7 +15,6 @@ import {
   customerLogin,
   customerLogout,
   customerPasswordLogin,
-  customerResetActivationCode,
   customerSwitch,
   customerUnbindDevice,
   customerUpdateProfile,
@@ -502,41 +501,22 @@ describe("customer API adapter requests", () => {
     );
   });
 
-  it("dismisses a pairing with DELETE and rotates the activation code with POST", async () => {
+  // 激活码重置测试已删除（激活码方案废弃，2026-09-19），仅保留配对 dismiss。
+  it("dismisses a pairing with DELETE", async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(jsonResponse(204, undefined))
-      .mockResolvedValueOnce(
-        jsonResponse(200, {
-          activation_code: "XS04-AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD",
-          masked_code: "XS04-AAAA***-*******-*******-***DDDD",
-        }),
-      );
+      .mockResolvedValueOnce(jsonResponse(204, undefined));
     vi.stubGlobal("fetch", fetchMock);
 
     await customerDismissDevicePairing(
       { kind: "device", token: deviceTokenText },
       "pairing-1",
     );
-    const reset = await customerResetActivationCode({
-      kind: "session",
-      token: sessionTokenText,
-    });
 
-    expect(reset.masked_code).toContain("***");
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
       `${BASE}/api/customer/device-pairings/pairing-1`,
     );
     expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe("DELETE");
-    expect(fetchMock.mock.calls[1]?.[0]).toBe(
-      `${BASE}/api/customer/activation-code/reset`,
-    );
-    expect((fetchMock.mock.calls[1][1] as RequestInit).method).toBe("POST");
-    expect(
-      ((fetchMock.mock.calls[1][1] as RequestInit).headers as Headers).get(
-        "Authorization",
-      ),
-    ).toBe("Bearer session-token");
   });
 
   it("updates the customer display name and closes an unpaid order", async () => {

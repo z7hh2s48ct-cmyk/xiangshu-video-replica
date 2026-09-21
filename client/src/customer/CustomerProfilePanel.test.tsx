@@ -19,9 +19,10 @@ const profile: CustomerProfile = {
   username: "customer-1",
   display_name: "李丽",
   joined_at: "2026-08-01T00:00:00Z",
-  activation_code_masked: "XS04-ABCD••••WXYZ",
-  activation_status: "ACTIVE",
-  activated_at: "2026-08-02T00:00:00Z",
+  // 激活码字段已废弃（2026-09-19），保留为 null 以兼容类型定义
+  activation_code_masked: null,
+  activation_status: null,
+  activated_at: null,
   device_slots_used: 1,
   device_slots_total: 2,
 };
@@ -78,7 +79,7 @@ describe("CustomerProfilePanel", () => {
     onRefreshProfile: vi.fn().mockResolvedValue(undefined),
     onRecharge: vi.fn(),
     onRefreshDevices: vi.fn().mockResolvedValue(undefined),
-    onResetActivationCode: vi.fn(),
+    // onResetActivationCode 已删除（激活码方案废弃，2026-09-19）
     onSessionExpired: vi.fn(),
     onLogout: vi.fn().mockResolvedValue(undefined),
     onUnbind: vi.fn(),
@@ -89,11 +90,11 @@ describe("CustomerProfilePanel", () => {
     walletRefreshKey: 0,
   };
 
-  it("groups account, activation and device details in the personal centre", () => {
+  it("groups account and device details in the personal centre", () => {
     render(<CustomerProfilePanel {...defaultProps} />);
 
     expect(screen.getByRole("heading", { name: "李丽" })).toBeInTheDocument();
-    expect(screen.getByText("XS04-ABCD••••WXYZ")).toBeInTheDocument();
+    // 激活码展示已删除（激活码方案废弃，2026-09-19），不再断言掩码文本。
     expect(screen.getByText("1 台")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "设备管理" }));
@@ -130,26 +131,7 @@ describe("CustomerProfilePanel", () => {
     );
   });
 
-  it("shows the replacement activation code once after a confirmed reset", async () => {
-    vi.spyOn(window, "confirm").mockReturnValue(true);
-    const onResetActivationCode = vi.fn().mockResolvedValue({
-      activation_code: "XS04-NEWCODE-NEWCODE-NEWCODE-NEWCODE",
-      masked_code: "XS04-NEWC***-*******-*******-***CODE",
-    });
-    render(
-      <CustomerProfilePanel
-        {...defaultProps}
-        onResetActivationCode={onResetActivationCode}
-      />,
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "重置激活码" }));
-
-    expect(
-      await screen.findByText("XS04-NEWCODE-NEWCODE-NEWCODE-NEWCODE"),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/新激活码仅显示这一次/)).toBeInTheDocument();
-  });
+  // 测试用例 "shows the replacement activation code once after a confirmed reset" 已删除（激活码方案废弃，2026-09-19）
 
   it("shows heartbeat and lease health in the device tab and renews on demand", async () => {
     const onManualHeartbeat = vi.fn();

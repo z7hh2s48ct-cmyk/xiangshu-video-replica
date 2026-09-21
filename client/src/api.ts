@@ -5532,6 +5532,9 @@ const CUSTOMER_ACCOUNT_ERROR_MESSAGES: Readonly<Record<string, string>> = {
     "当前视频尚未就绪，无法交给云端分析。请联系管理员配置云端素材存储，再重新上传视频。",
   SINGLE_PERSON_SOURCE_REQUIRED:
     "当前参考画面未通过单人检查。请选择只有一位清晰人物的画面，再生成首帧。",
+  // ACTIVATION_UNAVAILABLE / PAIRING_UNAVAILABLE 保留：它们属于仍在使用的
+  // 激活/配对登录流程（ActivationPage / DevicePairingPage / useCustomerSession），
+  // 不在本次「个人中心 UI 残留」清理范围内。
   ACTIVATION_UNAVAILABLE: "该激活码当前无法使用，请确认激活码仍在有效期内。",
   PAIRING_UNAVAILABLE: "该激活码当前无法用于设备配对，请联系服务人员处理。",
   SESSION_CONFLICT: "另一台设备当前正在使用此账号，请稍后重新打开应用。",
@@ -6434,6 +6437,10 @@ async function customerJson<T>(
   return { response, body: (await response.json()) as T };
 }
 
+/**
+ * @deprecated 激活码方案已废弃（2026-09-19），改用注册登录 + user_id 绑定。
+ * 本类型保留仅为兼容旧代码（useCustomerSession.ts 等），将在后续 PR 中删除。
+ */
 export type CustomerActivateInput = {
   activationCode: string;
   deviceFingerprint: string;
@@ -6506,8 +6513,13 @@ export async function clearCustomerBrowserCredentials(
   });
 }
 
-/** Redeem an activation code: user + wallet + first device + first charge +
- * first session in one transaction (POST /api/customer/activate). */
+/**
+ * Redeem an activation code: user + wallet + first device + first charge +
+ * first session in one transaction (POST /api/customer/activate).
+ *
+ * @deprecated 激活码方案已废弃（2026-09-19），改用注册登录 + user_id 绑定。
+ * 本函数保留仅为兼容旧代码（useCustomerSession.ts:495），将在后续 PR 中删除。
+ */
 export async function customerActivate(
   input: CustomerActivateInput,
 ): Promise<CustomerActivationResponse> {
@@ -6647,6 +6659,10 @@ export async function customerUnbindDevice(
   );
 }
 
+/**
+ * @deprecated 激活码方案已废弃（2026-09-19），改用注册登录 + user_id 绑定。
+ * 本类型保留仅为兼容旧代码（DevicePairingPage.tsx / CustomerPairingFlow.tsx），将在后续 PR 中删除。
+ */
 export type CustomerEnrollInput = {
   activationCode: string;
   deviceFingerprint: string;
@@ -6665,10 +6681,15 @@ export type CustomerEnrollResult =
       credential: CustomerEnrollConsumedResponse;
     };
 
-/** Start (or finish) the second-device pairing
+/**
+ * Start (or finish) the second-device pairing
  * (POST /api/customer/devices/enroll): 202 while waiting for the first
  * device's approval, 201 with the one-time device credential once an approved
- * pairing is consumed. */
+ * pairing is consumed.
+ *
+ * @deprecated 激活码方案已废弃（2026-09-19），改用注册登录 + user_id 绑定。
+ * 本函数保留仅为兼容旧代码（DevicePairingPage.tsx:44 / CustomerPairingFlow.tsx:135），将在后续 PR 中删除。
+ */
 export async function customerEnrollDevice(
   input: CustomerEnrollInput,
 ): Promise<CustomerEnrollResult> {
@@ -6725,20 +6746,7 @@ export async function customerDismissDevicePairing(
   );
 }
 
-export type CustomerActivationCodeReset =
-  components["schemas"]["ActivationCodeResetResponse"];
-
-/** Rotate the active account code. The replacement plaintext is returned
- * once and must never be persisted by the desktop. */
-export async function customerResetActivationCode(
-  credential: CustomerSessionCredential,
-): Promise<CustomerActivationCodeReset> {
-  const { body } = await customerJson<CustomerActivationCodeReset>(
-    "/api/customer/activation-code/reset",
-    { method: "POST", credential },
-  );
-  return body;
-}
+// CustomerActivationCodeReset / customerResetActivationCode 已删除（激活码方案废弃，2026-09-19）
 
 /** The customer's wallet balance + billing (GET /api/customer/wallet). */
 export async function customerGetWallet(

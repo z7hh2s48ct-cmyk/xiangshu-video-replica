@@ -32,12 +32,12 @@ from sqlalchemy.engine import make_url
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 # PR#103(df7020c) 引入 pg_test_kit.require_pg_or_explicit_skip 模块级 autouse fixture，
 # 取代旧的 SKIP_REASON 常量（已无引用，随 main 基线删除）。
-# HEAD_REVISION 取链尾：20260920T0000_merge_parallel_heads 合并了
-# browser_account_probe 与 oral_soft_delete 两个平行分支，
-# 其后 20260920T0100_add_api_metadata_to_billing_ops 为 billing_operations
-# 补 viral_data 的 API 类型元数据列。
+# HEAD_REVISION 取链尾：20260921T0000_merge_wallet_actor_and_billing_metadata 把
+# CUSTOMER-CENTER-V2-20260919（sub_accounts → wallet_actor）与 main
+# （oral_soft_delete → merge_parallel_heads → add_api_metadata_to_billing_ops）
+# 两条并行链线性化，保持 alembic 单头。
 # 迁移后 alembic 版本头即该值，9 处 assert version == HEAD_REVISION 依赖此值。
-HEAD_REVISION = "20260920T0100_add_api_metadata_to_billing_ops"
+HEAD_REVISION = "20260921T0000_merge_wallet_actor_and_billing_metadata"
 
 
 def test_viral_script_cache_migration_preserves_results_without_task_foreign_keys(

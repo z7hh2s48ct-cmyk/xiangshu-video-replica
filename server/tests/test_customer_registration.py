@@ -56,7 +56,7 @@ CW076_DB_NAME = "cw076_registration_test"
 CW076_MIGRATION_DB_NAME = "cw076_migration_test"
 
 REGISTER_PATH = "/api/customer/register"
-HEAD_REVISION = "20260920T0100_add_api_metadata_to_billing_ops"
+HEAD_REVISION = "20260921T0000_merge_wallet_actor_and_billing_metadata"
 PRIOR_REVISION = "20260912T1353_customer_discounts"
 
 # A policy-valid password (>= MIN_PASSWORD_LENGTH, not blank). Never a secret.

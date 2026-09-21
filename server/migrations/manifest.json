@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20260920T0100_add_api_metadata_to_billing_ops"
+      "20260921T0000_merge_wallet_actor_and_billing_metadata"
     ],
     "parents": {
       "001_core": null,
@@ -114,13 +114,20 @@
       "20260918T1200_publish_account_avatar": "20260917T1000_publish_records",
       "20260919T1000_browser_account_probe": "20260918T1200_publish_account_avatar",
       "20260919T1000_oral_soft_delete": "20260918T1200_publish_account_avatar",
+      "20260919T1200_sub_accounts": "20260919T1000_browser_account_probe",
+      "20260919T1300_wallet_actor": "20260919T1200_sub_accounts",
+      "20260919T1500_device_parent_cascade": "20260919T1300_wallet_actor",
       "20260920T0000_merge_parallel_heads": [
         "20260919T1000_browser_account_probe",
         "20260919T1000_oral_soft_delete"
       ],
-      "20260920T0100_add_api_metadata_to_billing_ops": "20260920T0000_merge_parallel_heads"
+      "20260920T0100_add_api_metadata_to_billing_ops": "20260920T0000_merge_parallel_heads",
+      "20260921T0000_merge_wallet_actor_and_billing_metadata": [
+        "20260919T1500_device_parent_cascade",
+        "20260920T0100_add_api_metadata_to_billing_ops"
+      ]
     },
-    "revision_count": 105
+    "revision_count": 109
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -547,6 +554,18 @@
       "file": "versions/20260919T1000_oral_soft_delete.py",
       "sha256": "52d26412eedbd704371fda842dadb57d84df614b984945e52e2f9eb739d16602"
     },
+    "20260919T1200_sub_accounts": {
+      "file": "versions/20260919T1200_sub_accounts.py",
+      "sha256": "64ebd1d2c001fc7545a12c1a2c660f97fada849b9f37934deba2fca51f0a88fb"
+    },
+    "20260919T1300_wallet_actor": {
+      "file": "versions/20260919T1300_wallet_actor.py",
+      "sha256": "87823884431813b9948ceed88714e72e7d4bfcd9c548084db7986b6fd98b6cec"
+    },
+    "20260919T1500_device_parent_cascade": {
+      "file": "versions/20260919T1500_device_parent_cascade.py",
+      "sha256": "960869b5a33c5c50762d9574c52f6bd56bd9e843844fb4061a6597a49a5afe06"
+    },
     "20260920T0000_merge_parallel_heads": {
       "file": "versions/20260920T0000_merge_parallel_heads.py",
       "sha256": "f3f050f8b57cb5657c80df5307a6f16f81209491cb1bc3a8113f8e440eac4a79"
@@ -554,6 +573,10 @@
     "20260920T0100_add_api_metadata_to_billing_ops": {
       "file": "versions/20260920T0100_add_api_metadata_to_billing_ops.py",
       "sha256": "c4c3baf18801bb21dece43e1d6ee525ef3cdca3b88d4dc9816510e37619b2460"
+    },
+    "20260921T0000_merge_wallet_actor_and_billing_metadata": {
+      "file": "versions/20260921T0000_merge_wallet_actor_and_billing_metadata.py",
+      "sha256": "02804ed76b9bb5c8451906581c5b2ed91f300adea831dffec839d8e1a85eabfa"
     }
   },
   "task": "MIGRATION-GUARD-20260912"

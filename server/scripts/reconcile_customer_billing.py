@@ -145,10 +145,15 @@ PG_ONLY_COLUMNS: dict[str, frozenset[str]] = {
     # （T07 的 SQLite 源 schema 冻结于 042 前基线）。
     # 20260912T1400_customer_registration_credentials: 自助注册凭证列仅存在于 PG
     # （SQLite 内部泳道从不自注册客户，088 在该 lane 为 guarded no-op）。
-    "users": frozenset({"max_devices", "password_hash", "registration_source"}),
+    # 20260919T1200_sub_accounts: 母子账号层级列仅存在于 PG（客户版 V3 新体系，
+    # T07 的 SQLite 源 schema 冻结于其前基线）。
+    "users": frozenset(
+        {"max_devices", "password_hash", "registration_source", "account_type", "parent_user_id"}
+    ),
     # 20260912T1353_customer_discounts: wallet_transactions.discount_rate 仅存在于 PG
     # （本迁移非 postgresql 方言 return，SQLite lane 不建此列）。
     # 20260912T2200: legacy records have no API key attribution; import as NULL.
+    # 20260919T1300_wallet_actor: 子账号消费的实际操作人列仅存在于 PG。
     "wallet_transactions": frozenset(
         {
             "discount_rate",
@@ -156,8 +161,11 @@ PG_ONLY_COLUMNS: dict[str, frozenset[str]] = {
             "auth_source",
             "pricing_snapshot_json",
             "billing_operation_id",
+            "actor_user_id",
         }
     ),
+    # 20260919T1500_device_parent_cascade: 设备的母账号归属列仅存在于 PG。
+    "customer_devices": frozenset({"parent_user_id"}),
     # 20260916T1400_content_objects: 内容寻址登记表的外键列仅存在于 PG
     # （该迁移非 postgresql 方言 return，SQLite lane 不加此列）。
     # T07 导入时留空，随后由 `python -m scripts.backfill_content_objects` 回填。

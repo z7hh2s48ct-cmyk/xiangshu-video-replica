@@ -218,7 +218,6 @@ function fakeCustomerAccount(
     onRefreshProfile: vi.fn().mockResolvedValue(undefined),
     onLogout: vi.fn().mockResolvedValue(undefined),
     onRefreshDevices: vi.fn().mockResolvedValue(undefined),
-    onResetActivationCode: vi.fn(),
     onUnbind: vi.fn(),
     onUpdateProfile: vi.fn(),
     profile: null,

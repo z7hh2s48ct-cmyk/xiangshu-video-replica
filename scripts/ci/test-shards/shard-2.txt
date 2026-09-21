@@ -10,7 +10,6 @@ server/tests/test_customer_recharge.py
 server/tests/test_customer_security.py
 server/tests/test_cw026_converged_auth.py
 server/tests/test_cw030_worker_pg_matrix.py
-server/tests/test_cw033_pitr_drill_validation.py
 server/tests/test_cw041_internal_identity_exit.py
 server/tests/test_cw056_supported_head_matrix.py
 server/tests/test_cw059_rbac_pg_matrix.py
@@ -25,6 +24,7 @@ server/tests/test_publish_accounts.py
 server/tests/test_publish_delivery.py
 server/tests/test_security_contracts.py
 server/tests/test_storage_cross_instance.py
-server/tests/test_viral_link_canonical.py
-server/tests/test_wechat_native_provider.py
+server/tests/test_usage_billing.py
+server/tests/test_wechat_native_callback_pg.py
 server/tests/test_worker_crash_recovery.py
+server/tests/test_zpay.py

@@ -165,6 +165,24 @@ def create_account(
         entity_type="publish_account",
         entity_id="new",
     )
+
+    # T2.6: 验证当前用户必须是 MASTER 类型（子账号不能创建发布账号）
+    user_row = conn.execute(
+        "SELECT account_type FROM users WHERE id = %s",
+        (actor.id,),
+    ).fetchone()
+    if user_row is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    account_type = user_row["account_type"]
+    if account_type != "MASTER":
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "PUBLISH_ACCOUNT_MASTER_ONLY",
+                "message": "发布账号必须由母账号创建，子账号无权操作。",
+            },
+        )
+
     platform = request.platform.strip()
     if platform not in PLATFORMS:
         raise _bad_request("PUBLISH_PLATFORM_UNSUPPORTED", "不支持的发布平台。")

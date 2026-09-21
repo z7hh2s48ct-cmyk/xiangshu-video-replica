@@ -1,6 +1,5 @@
 import type {
   CurrentUser,
-  CustomerActivationCodeReset,
   CustomerDeviceListResponse,
   CustomerProfile,
 } from "./api";
@@ -34,7 +33,7 @@ export type WorkspaceShellProps = {
     onRefreshProfile: () => Promise<void>;
     onLogout: () => Promise<CustomerLogoutOutcome>;
     onRefreshDevices: () => Promise<void>;
-    onResetActivationCode: () => Promise<CustomerActivationCodeReset>;
+    // onResetActivationCode 已删除（激活码方案废弃，2026-09-19）
     onUnbind: (deviceId: string) => void;
     onUpdateProfile: (displayName: string) => Promise<CustomerProfile>;
     profile: CustomerProfile | null;

@@ -203,6 +203,9 @@
   max-width: 100%;
   vertical-align: middle;
 }
+.customer-id-copy__value code {
+  overflow-wrap: anywhere;
+}
 .customer-id-copy .customer-id-copy__value {
   min-width: 0;
   padding: 0;
@@ -212,9 +215,6 @@
   font: inherit;
   text-align: left;
   user-select: text;
-}
-.customer-id-copy__value code {
-  overflow-wrap: anywhere;
 }
 .customer-id-copy .customer-id-copy__icon {
   display: grid;

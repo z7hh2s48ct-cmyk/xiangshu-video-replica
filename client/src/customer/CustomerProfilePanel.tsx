@@ -1,10 +1,6 @@
 import { useEffect, useState } from "react";
 
-import type {
-  CustomerActivationCodeReset,
-  CustomerDeviceListResponse,
-  CustomerProfile,
-} from "../api";
+import type { CustomerDeviceListResponse, CustomerProfile } from "../api";
 import { CustomerWalletPanel } from "./CustomerWalletPanel";
 import { DeviceManagementPage } from "./DeviceManagementPage";
 import { HeartbeatStatus } from "./HeartbeatStatus";
@@ -30,7 +26,6 @@ export function CustomerProfilePanel({
   onRefreshProfile,
   onRecharge,
   onRefreshDevices,
-  onResetActivationCode,
   onSessionExpired,
   onUnbind,
   onUpdateProfile,
@@ -52,7 +47,6 @@ export function CustomerProfilePanel({
   onRefreshProfile: () => Promise<void>;
   onRecharge: (amountYuan?: number) => void;
   onRefreshDevices: () => Promise<void>;
-  onResetActivationCode: () => Promise<CustomerActivationCodeReset>;
   onSessionExpired: () => void;
   onUnbind: (deviceId: string) => void;
   onUpdateProfile: (displayName: string) => Promise<CustomerProfile>;
@@ -67,10 +61,9 @@ export function CustomerProfilePanel({
   const [profileError, setProfileError] = useState("");
   const [profileNotice, setProfileNotice] = useState("");
   const [isSavingProfile, setIsSavingProfile] = useState(false);
-  const [isResettingCode, setIsResettingCode] = useState(false);
   const [isRetryingProfile, setIsRetryingProfile] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
-  const [replacementCode, setReplacementCode] = useState("");
+  // isResettingCode / replacementCode 已删除（激活码方案废弃）
   const [deferredPairingIds, setDeferredPairingIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -105,34 +98,7 @@ export function CustomerProfilePanel({
     }
   }
 
-  async function resetActivationCode() {
-    if (
-      isResettingCode ||
-      !window.confirm(
-        "确认重置激活码？旧激活码会立即失效，新激活码只显示一次；当前已绑定设备不会下线。",
-      )
-    ) {
-      return;
-    }
-    setIsResettingCode(true);
-    setProfileError("");
-    setProfileNotice("");
-    try {
-      const result = await onResetActivationCode();
-      setReplacementCode(result.activation_code);
-      if (profile) {
-        onProfileUpdated({
-          ...profile,
-          activation_code_masked: result.masked_code,
-        });
-      }
-      setProfileNotice("激活码已重置，请立即复制并妥善保存。");
-    } catch (cause) {
-      setProfileError(errorMessage(cause, "重置激活码失败，请稍后重试。"));
-    } finally {
-      setIsResettingCode(false);
-    }
-  }
+  // resetActivationCode 已删除（激活码方案废弃，2026-09-19）
 
   async function retryProfile() {
     if (isRetryingProfile) {
@@ -169,16 +135,6 @@ export function CustomerProfilePanel({
     setDeferredPairingIds((current) => new Set(current).add(pairingId));
     setProfileNotice("已暂不处理，可稍后在设备管理中继续确认。");
     setTab("overview");
-  }
-
-  async function copyText(value: string, successMessage: string) {
-    try {
-      await navigator.clipboard.writeText(value);
-      setProfileError("");
-      setProfileNotice(successMessage);
-    } catch {
-      setProfileError("复制失败，请手动选择并复制。");
-    }
   }
 
   return (
@@ -299,11 +255,7 @@ export function CustomerProfilePanel({
           <div className="customer-profile__metrics">
             <article>
               <span>账号状态</span>
-              <strong>
-                {profile && !profile.activation_code_masked
-                  ? "正常"
-                  : activationStatus(profile?.activation_status)}
-              </strong>
+              <strong>正常</strong>
               <small>已登录，可正常使用</small>
             </article>
             <article>
@@ -318,73 +270,8 @@ export function CustomerProfilePanel({
             </article>
           </div>
 
-          {profile?.activation_code_masked && (
-            <article className="customer-profile__license">
-              <div>
-                <span>当前激活凭证</span>
-                <strong>
-                  {profile?.activation_code_masked ?? "正在读取激活信息…"}
-                </strong>
-                <small>
-                  {profile?.activated_at
-                    ? `${formatDate(profile.activated_at)} 激活`
-                    : "完整激活码不会在个人中心再次显示"}
-                </small>
-              </div>
-              <div className="customer-profile__license-actions">
-                <button
-                  className="secondary-button"
-                  disabled={!profile?.activation_code_masked}
-                  onClick={() =>
-                    void copyText(
-                      profile?.activation_code_masked ?? "",
-                      "授权编号已复制。",
-                    )
-                  }
-                  type="button"
-                >
-                  复制授权编号
-                </button>
-                <button
-                  className="secondary-button"
-                  disabled={
-                    isResettingCode || profile?.activation_status !== "ACTIVE"
-                  }
-                  onClick={() => void resetActivationCode()}
-                  type="button"
-                >
-                  {isResettingCode ? "正在重置" : "重置激活码"}
-                </button>
-                <button
-                  onClick={() => {
-                    setTab("devices");
-                    void onRefreshDevices();
-                  }}
-                  type="button"
-                >
-                  管理关联设备
-                </button>
-              </div>
-            </article>
-          )}
-
-          {replacementCode ? (
-            <section className="customer-profile__replacement" role="status">
-              <div>
-                <strong>新激活码仅显示这一次</strong>
-                <code>{replacementCode}</code>
-                <small>请立即复制保存；关闭本页后将只显示脱敏编号。</small>
-              </div>
-              <button
-                onClick={() =>
-                  void copyText(replacementCode, "新激活码已复制。")
-                }
-                type="button"
-              >
-                复制新激活码
-              </button>
-            </section>
-          ) : null}
+          {/* 激活码方案已废弃（2026-09-19），改用注册登录 + user_id 绑定。
+              原「当前激活凭证」卡片与「新激活码显示区」已删除。 */}
 
           {overviewPairings.length > 0 ? (
             <section className="customer-profile__pending">
@@ -469,16 +356,7 @@ export function CustomerProfilePanel({
   );
 }
 
-function activationStatus(status: string | null | undefined): string {
-  return (
-    {
-      ACTIVE: "正常",
-      SUSPENDED: "已暂停",
-      REVOKED: "已撤销",
-      EXPIRED: "已过期",
-    }[status ?? ""] ?? "读取中"
-  );
-}
+// activationStatus 已删除（激活码方案废弃，2026-09-19）
 
 function formatDate(value: string): string {
   return new Date(value).toLocaleDateString("zh-CN");

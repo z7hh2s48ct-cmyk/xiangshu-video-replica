@@ -117,7 +117,6 @@ export function LiveWorkspacePanel({
           onPairDevice={customerAccount.onPairDevice}
           onRecharge={(amountYuan) => openRecharge(amountYuan)}
           onRefreshDevices={customerAccount.onRefreshDevices}
-          onResetActivationCode={customerAccount.onResetActivationCode}
           onSessionExpired={customerAccount.onSessionExpired}
           onUnbind={customerAccount.onUnbind}
           onUpdateProfile={customerAccount.onUpdateProfile}

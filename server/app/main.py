@@ -74,6 +74,7 @@ from app.simple_character_routes import router as character_simple_router
 from app.source_frame_routes import router as source_frame_router
 from app.studio_draft_routes import router as studio_draft_router
 from app.studio_routes import router as studio_router
+from app.sub_account_routes import router as sub_account_router
 from app.viral_import_routes import router as viral_import_router
 from app.viral_routes import router as viral_router
 from app.wallet_routes import router as wallet_router
@@ -405,6 +406,7 @@ app.include_router(character_reference_router)
 app.include_router(source_frame_router)
 app.include_router(first_frame_router)
 app.include_router(character_simple_router)
+app.include_router(sub_account_router)
 
 
 @app.get("/health", response_model=HealthResponse)
