@@ -9,6 +9,7 @@ import {
 } from "../api";
 import {
   type CustomerCredentialStore,
+  type CustomerStoredIdentity,
   customerCredentialStore,
   useCustomerSession,
 } from "./useCustomerSession";
@@ -72,16 +73,24 @@ it("a live browser reload renews the lease without consuming a new login attempt
  * contract (the desktop build swaps in the Tauri DPAPI adapter, tests and
  * the browser lane use an isolated non-persistent store; dev doc §14: the
  * desktop and browser credential adapters must stay separate). */
-function memoryStore(initial?: { deviceToken?: string | null }) {
+function memoryStore(initial?: {
+  deviceToken?: string | null;
+  identity?: CustomerStoredIdentity | null;
+}) {
   let deviceToken: string | null = initial?.deviceToken ?? null;
   let sessionToken: string | null = null;
+  let identity: CustomerStoredIdentity | null = initial?.identity ?? null;
   const calls: string[] = [];
   const store: CustomerCredentialStore & {
     calls: string[];
-    snapshot: () => { deviceToken: string | null; sessionToken: string | null };
+    snapshot: () => {
+      deviceToken: string | null;
+      sessionToken: string | null;
+      identity: CustomerStoredIdentity | null;
+    };
   } = {
     calls,
-    snapshot: () => ({ deviceToken, sessionToken }),
+    snapshot: () => ({ deviceToken, sessionToken, identity }),
     async loadDeviceCredentialToken() {
       calls.push("load-device");
       return deviceToken;
@@ -90,10 +99,12 @@ function memoryStore(initial?: { deviceToken?: string | null }) {
       calls.push("load-session");
       return sessionToken;
     },
-    async saveActivation(nextDeviceToken, nextSessionToken) {
+    async saveActivation(nextDeviceToken, nextSessionToken, nextIdentity) {
       calls.push("save-activation");
       deviceToken = nextDeviceToken;
       sessionToken = nextSessionToken;
+      // CW-062：仅在携带身份时更新缓存（设备凭据恢复路径不传身份）。
+      if (nextIdentity) identity = nextIdentity;
     },
     async saveSessionToken(nextSessionToken) {
       calls.push("save-session");
@@ -120,6 +131,9 @@ function memoryStore(initial?: { deviceToken?: string | null }) {
     },
     async saveRememberedLogin() {},
     async clearRememberedLogin() {},
+    async loadIdentity() {
+      return identity;
+    },
   };
   return store;
 }
@@ -391,6 +405,7 @@ describe("useCustomerSession", () => {
     expect(store.snapshot()).toEqual({
       deviceToken: "device-token-1",
       sessionToken: "session-token-1",
+      identity: null,
     });
     const request = fetchMock.mock.calls[0];
     const body = JSON.parse(String(request[1]?.body));
@@ -435,6 +450,7 @@ describe("useCustomerSession", () => {
     expect(store.snapshot()).toEqual({
       deviceToken: "device-token-1",
       sessionToken: null,
+      identity: null,
     });
   });
 
@@ -740,6 +756,7 @@ describe("useCustomerSession", () => {
     expect(store.snapshot()).toEqual({
       deviceToken: "device-token-1",
       sessionToken: null,
+      identity: null,
     });
   });
 
@@ -767,6 +784,7 @@ describe("useCustomerSession", () => {
     expect(store.snapshot()).toEqual({
       deviceToken: "device-token-1",
       sessionToken: null,
+      identity: null,
     });
   });
 
@@ -792,6 +810,7 @@ describe("useCustomerSession", () => {
     expect(store.snapshot()).toEqual({
       deviceToken: null,
       sessionToken: null,
+      identity: null,
     });
     // DoD: DEVICE_REVOKED clears device/session credentials (the snapshot above)
     // but must NOT treat the stable machine identity as a credential. The hook
@@ -829,6 +848,7 @@ describe("useCustomerSession", () => {
     expect(store.snapshot()).toEqual({
       deviceToken: "device-token-1",
       sessionToken: null,
+      identity: null,
     });
   });
 
@@ -862,6 +882,7 @@ describe("useCustomerSession", () => {
     expect(store.snapshot()).toEqual({
       deviceToken: "device-token-1",
       sessionToken: null,
+      identity: null,
     });
   });
 
@@ -902,6 +923,7 @@ describe("useCustomerSession", () => {
     expect(store.snapshot()).toEqual({
       deviceToken: "device-token-1",
       sessionToken: null,
+      identity: null,
     });
   });
 
@@ -1074,6 +1096,10 @@ describe("useCustomerSession", () => {
     expect(result.current.user).toEqual({
       userId: "user-1",
       username: "user-1",
+      // 激活码铸造的是机构母账号（子账号仅限管理端创建）。
+      accountType: "MASTER",
+      parentUserId: null,
+      parentDisplayName: null,
     });
 
     await act(async () => {
@@ -1098,7 +1124,14 @@ describe("useCustomerSession", () => {
     );
 
     await waitFor(() => expect(result.current.screen).toBe("workspace"));
-    expect(result.current.user).toEqual({ userId: "user-1", username: null });
+    expect(result.current.user).toEqual({
+      userId: "user-1",
+      username: null,
+      // 旧凭据库没有身份缓存：未知身份如实呈现为 null（徽章不显示）。
+      accountType: null,
+      parentUserId: null,
+      parentDisplayName: null,
+    });
   });
 
   it("renews the lease with a heartbeat while the workspace is live", async () => {

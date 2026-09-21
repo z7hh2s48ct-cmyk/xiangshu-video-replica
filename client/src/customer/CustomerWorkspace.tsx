@@ -24,6 +24,7 @@ import type {
   CustomerCredentialStore,
   CustomerLogoutOutcome,
   CustomerSessionRuntime,
+  CustomerStoredIdentity,
   CustomerWorkspaceUser,
 } from "./useCustomerSession";
 
@@ -57,6 +58,18 @@ export function CustomerWorkspace({
   const [profileLoadError, setProfileLoadError] = useState("");
   const [deviceError, setDeviceError] = useState("");
   const [deviceLoadError, setDeviceLoadError] = useState("");
+  // CW-062：个人中心身份徽章/子账号入口的身份来源。会话用户自带首次登录
+  // 时的身份；重启恢复阶段 user 可能未知（null），此时从凭据库补读缓存。
+  const [storedIdentity, setStoredIdentity] =
+    useState<CustomerStoredIdentity | null>(() =>
+      user.accountType
+        ? {
+            accountType: user.accountType,
+            parentUserId: user.parentUserId,
+            parentDisplayName: user.parentDisplayName,
+          }
+        : null,
+    );
   const [workspaceCredential, setWorkspaceCredential] = useState<{
     store: CustomerCredentialStore;
     user: CustomerWorkspaceUser;
@@ -176,6 +189,26 @@ export function CustomerWorkspace({
       );
     }
   }, [store, onSessionExpired]);
+
+  // CW-062：首次登录时 user 已带身份，徽章零闪烁；身份未知（设备凭据恢复）
+  // 时再读一次本地缓存（不发光网络请求，旧金库无声返回 null）。
+  const loadIdentity = useCallback(() => store.loadIdentity(), [store]);
+  useEffect(() => {
+    if (user.accountType || storedIdentity) {
+      return;
+    }
+    let active = true;
+    void loadIdentity()
+      .then((identity) => {
+        if (active && identity) {
+          setStoredIdentity(identity);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [loadIdentity, user.accountType, storedIdentity]);
 
   // Device management is not part of the personal center; load only on an explicit legacy action.
 
@@ -331,6 +364,8 @@ export function CustomerWorkspace({
             profileLoadError,
             store,
             onSessionExpired,
+            identity: storedIdentity,
+            loadIdentity,
             sessionRuntime,
             onManualHeartbeat,
             onPairDevice,

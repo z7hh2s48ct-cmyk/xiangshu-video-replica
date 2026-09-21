@@ -47,6 +47,10 @@ class WalletTransactionResponse(BaseModel):
     billing_operation_id: str | None = None
     service: str | None = None
     service_name: str | None = None
+    # T2.10: who caused the entry — a sub-account id when the consumption rode
+    # the master's wallet; NULL on historical rows without actor evidence.
+    actor_user_id: str | None = None
+    actor_name: str | None = None
 
 
 class WalletTransactionPage(BaseModel):

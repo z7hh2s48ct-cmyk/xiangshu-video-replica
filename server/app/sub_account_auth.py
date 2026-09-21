@@ -2,10 +2,10 @@
 
 Provides two essential guards for sub-account scoped operations:
 
-1. ensure_sub_account_access(): Validates the caller IS a sub-account with correct attributes.
-   - Asserts account_type == 'SUB'
-   - Asserts is_active == true
-   - Returns CurrentUser extended with parent_user_id field
+1. ensure_sub_account_access(): Validates the caller IS a live sub-account.
+   - Reads users.account_type / parent_user_id / is_active on the request connection
+   - Asserts account_type in ('SUB', 'SUB_ADMIN'), is_active and a bound parent
+   - Returns SubAccountCurrentUser with account_type + parent_user_id
 
 2. prevent_cross_parent_access(): Validates caller only accesses resources under same parent.
    - For master accounts: no restriction (can access own resources)
@@ -16,8 +16,8 @@ Usage patterns:
 ```python
 # In routes that require sub-account caller
 @router.post("/sub-accounts/{id}/actions")
-async def do_something(
-    current_user: Annotated[CurrentUser, Security(ensure_sub_account_access)]
+def do_something(
+    current_user: Annotated[SubAccountCurrentUser, Depends(ensure_sub_account_access)]
 ):
     # Now we know: account_type='SUB', is_active=true
     parent_id = current_user.parent_user_id  # Available
@@ -30,7 +30,7 @@ async def list_devices(
     current_user: CurrentUser,
     parent_user_id: str = Query(...),
 ):
-    prevent_cross_parent_access(current_user, parent_user_id=parent_user_id)
+    prevent_cross_parent_access(current_user, target_parent_user_id=parent_user_id)
     ...
 ```
 
@@ -42,11 +42,12 @@ Database assumptions:
 
 from __future__ import annotations
 
-from typing import Annotated
+from dataclasses import dataclass
 
-from fastapi import HTTPException, Security
+import psycopg
+from fastapi import HTTPException
 
-from app.auth import CurrentUser
+from app.auth import AuthenticatedUser, CurrentUser, Database
 from app.db_portable import BusinessConnection
 
 # ---------------------------------------------------------------------------
@@ -54,49 +55,65 @@ from app.db_portable import BusinessConnection
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
 class SubAccountCurrentUser(CurrentUser):
-    """Extended CurrentUser with parent_user_id for sub-accounts.
+    """A caller proven to be an active sub-account (T2.8).
 
-    This is a marker class — in practice we just enrich CurrentUser dict
-    with parent_user_id when the user is a sub-account.
+    ``account_type`` carries the exact sub kind ('SUB' / 'SUB_ADMIN') and
+    ``parent_user_id`` the master account this caller belongs to — the only
+    fields a sub-account-scoped route may branch on.
     """
 
+    account_type: str
     parent_user_id: str  # The master account ID this sub-account belongs to
 
 
 def ensure_sub_account_access(
-    current_user: Annotated[CurrentUser, Security(lambda: None)],
+    conn: Database,
+    current_user: AuthenticatedUser,
 ) -> SubAccountCurrentUser:
-    """Validate caller is an active sub-account.
+    """Validate caller is an active sub-account (T2.8).
+
+    Reads the caller's account row on the request connection and answers 403
+    for anything that is not a live SUB/SUB_ADMIN with a bound parent. A
+    route wrapping this dependency then wires ``prevent_cross_parent_access``
+    before touching any resource (T2.9).
 
     Raises HTTPException 403 if:
-    - Caller is not a sub-account (account_type != 'SUB')
+    - Caller is not a sub-account (account_type not in SUB/SUB_ADMIN)
     - Caller is deactivated (is_active == false)
+    - Caller has no bound parent_user_id
 
     Returns:
-        SubAccountCurrentUser with parent_user_id field populated
+        SubAccountCurrentUser with account_type + parent_user_id populated
 
     Usage:
         @router.post("/endpoints")
-        async def endpoint(
-            current_user: Annotated[CurrentUser, Security(ensure_sub_account_access)]
+        def endpoint(
+            current_user: Annotated[SubAccountCurrentUser, Depends(ensure_sub_account_access)]
         ):
-            # Now current_user is guaranteed to be SUB + active
+            # Now current_user is guaranteed SUB + active + parent bound
             parent_id = current_user.parent_user_id
     """
-    assert hasattr(current_user, "user_id")
-    assert hasattr(current_user, "role")
-
-    # Note: In real implementation, we'd query the database to get account_type
-    # and parent_user_id. For now, assume it's already embedded in CurrentUser
-    # by the authentication layer (or we add a helper function below).
-
-    # Placeholder: replace with actual DB lookup in production
-    # This would be implemented as a dependency function that queries users table
-
-    raise NotImplementedError(
-        "ensure_sub_account_access requires DB lookup implementation. "
-        "See: server/app/sub_account_auth.py for full implementation."
+    row = conn.execute(
+        "SELECT account_type, parent_user_id, is_active FROM users WHERE id = %s",
+        (current_user.id,),
+    ).fetchone()
+    if row is None or str(row[0]) not in {"SUB", "SUB_ADMIN"} or not row[2] or row[1] is None:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "SUB_ACCOUNT_REQUIRED",
+                "message": "该操作仅限有效子账号执行。",
+            },
+        )
+    return SubAccountCurrentUser(
+        id=current_user.id,
+        username=current_user.username,
+        display_name=current_user.display_name,
+        role=current_user.role,
+        account_type=str(row[0]),
+        parent_user_id=str(row[1]),
     )
 
 
@@ -110,6 +127,7 @@ def prevent_cross_parent_access(
     *,
     target_parent_user_id: str | None = None,
     resource_owner_id: str | None = None,
+    conn: BusinessConnection | psycopg.Connection | None = None,
 ) -> None:
     """Prevent sub-accounts from accessing resources outside their parent org.
 
@@ -148,7 +166,7 @@ def prevent_cross_parent_access(
             )
     """
     # Check if caller is a sub-account
-    caller_is_sub = getattr(current_user, "account_type", None) == "SUB"
+    caller_is_sub = getattr(current_user, "account_type", None) in {"SUB", "SUB_ADMIN"}
 
     if not caller_is_sub:
         # Masters can access their own resources without restriction
@@ -170,17 +188,24 @@ def prevent_cross_parent_access(
         # Explicit parent ID provided
         target_parent = target_parent_user_id
     elif resource_owner_id is not None:
-        # Look up parent from DB (caller must pass database connection)
-        # This would be implemented as:
-        # row = conn.execute(
-        #     "SELECT parent_user_id FROM users WHERE id = %s",
-        #     (resource_owner_id,)
-        # ).fetchone()
-        # target_parent = row["parent_user_id"]
-        raise NotImplementedError(
-            "prevent_cross_parent_access with resource_owner_id requires DB connection. "
-            "Pass target_parent_user_id explicitly or implement DB lookup."
-        )
+        # Resolve the resource owner's organisation on the caller's connection:
+        # a master-owned row belongs to that master's own org, a sub-owned row
+        # to its parent org.
+        if conn is None:
+            raise ValueError("resource_owner_id lookup requires a connection")
+        row = conn.execute(
+            "SELECT parent_user_id FROM users WHERE id = %s",
+            (resource_owner_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "RESOURCE_OWNER_NOT_FOUND",
+                    "message": "目标资源归属账号不存在。",
+                },
+            )
+        target_parent = str(row[0]) if row[0] is not None else str(resource_owner_id)
     else:
         raise ValueError("Must provide either target_parent_user_id or resource_owner_id")
 
@@ -196,6 +221,49 @@ def prevent_cross_parent_access(
                 ),
             },
         )
+
+
+# ---------------------------------------------------------------------------
+# Shared password-lane admission (login + session fence)
+# ---------------------------------------------------------------------------
+
+
+# Account origins that authenticate with a username + password of their own.
+_PASSWORD_SOURCES = frozenset({"self_register", "activation_code"})
+
+
+def password_login_account_ok(
+    conn: psycopg.Connection,
+    *,
+    registration_source: str | None,
+    account_type: str | None,
+    parent_user_id: str | None,
+) -> bool:
+    """The shared admission rule for password-authenticated accounts.
+
+    Used by both ``POST /api/customer/password-login`` and the session fence
+    (``verify_session_context``) so login and every fenced write agree on who
+    may hold a password session:
+
+    - ``self_register`` / ``activation_code`` masters authenticate on their
+      own credentials (the pre-sub-account lanes);
+    - a sub-account is admitted only with an admin-issued password
+      (``registration_source='admin_create'``, written by the sub-account
+      creation/reset endpoints), a bound parent and an *active* master —
+      deactivating the master freezes every session riding under it.
+    """
+    if registration_source in _PASSWORD_SOURCES:
+        return True
+    if (
+        registration_source == "admin_create"
+        and account_type in {"SUB", "SUB_ADMIN"}
+        and parent_user_id is not None
+    ):
+        parent = conn.execute(
+            "SELECT is_active FROM users WHERE id = %s", (parent_user_id,)
+        ).fetchone()
+        return parent is not None and bool(parent[0])
+    return False
 
 
 # ---------------------------------------------------------------------------

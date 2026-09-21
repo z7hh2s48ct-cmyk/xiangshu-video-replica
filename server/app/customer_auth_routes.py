@@ -44,6 +44,7 @@ from app.api_errors import http_error as _http
 from app.bootstrap import customer_public_origin, is_customer_production
 from app.db_pg import get_pg_pool, pg_transaction
 from app.password_hashing import PasswordPolicyError, hash_password, verify_password
+from app.sub_account_auth import password_login_account_ok
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +182,13 @@ class CustomerPasswordLoginResponse(CustomerRegistrationResponse):
     session_token: str
     session_epoch: int
     session_lease_expires_at: str
+    # CW-062 sub-account identity: a master answers 'MASTER' with no parent; a
+    # sub-account carries its master's id and display name so the desktop
+    # header can badge the session without a second round-trip. The defaults
+    # keep pre-sub-account sealed idempotency envelopes replayable.
+    account_type: str = "MASTER"
+    parent_user_id: str | None = None
+    parent_display_name: str | None = None
 
 
 def _registration_budget(request: Request) -> None:
@@ -258,7 +266,14 @@ def _password_device(
     *,
     user_id: str,
     body: CustomerPasswordLoginRequest,
+    parent_user_id: str | None = None,
 ) -> tuple[str, str]:
+    """Resolve or mint this account's password-lane device row.
+
+    A sub-account's device is bound to its master org (``parent_user_id``,
+    the 20260919T1500 cascade column) so device history survives the sub
+    account; masters keep the historical NULL.
+    """
     from app.customer_device_service import (
         fingerprint_digests_for,
         highest_device_domain_key,
@@ -278,9 +293,13 @@ def _password_device(
     token_digest = keyed_digest(key, device_token)
     if row is not None:
         device_id = str(row[0])
+        # Re-login on a known device: refresh the credential and (re)assert
+        # the org binding so a device created before the cascade migration
+        # joins its sub-account's master org (a no-op for masters: NULL).
         conn.execute(
-            "UPDATE customer_devices SET token_digest = %s, token_key_version = %s WHERE id = %s",
-            (token_digest, version, device_id),
+            "UPDATE customer_devices SET token_digest = %s, token_key_version = %s, "
+            "parent_user_id = %s WHERE id = %s",
+            (token_digest, version, parent_user_id, device_id),
         )
     else:
         device_id = str(uuid.uuid4())
@@ -292,12 +311,14 @@ def _password_device(
         slot = next(n for n in range(1, len(used) + 2) if n not in used)
         conn.execute(
             "INSERT INTO customer_devices "
-            "(id, user_id, activation_code_id, slot_no, display_name, platform, "
-            "fingerprint_hmac, fingerprint_key_version, token_digest, token_key_version, "
-            "fingerprint_canonical) VALUES (%s, %s, NULL, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "(id, user_id, activation_code_id, parent_user_id, slot_no, display_name, "
+            "platform, fingerprint_hmac, fingerprint_key_version, token_digest, "
+            "token_key_version, fingerprint_canonical) "
+            "VALUES (%s, %s, NULL, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 device_id,
                 user_id,
+                parent_user_id,
                 slot,
                 "账号登录设备",
                 body.device_platform,
@@ -367,14 +388,29 @@ def password_login(
         }
     )
     replay_candidate = False
+    account_usable = False
     with pg_transaction() as conn:
         row = conn.execute(
             "SELECT id, username, display_name, password_hash, is_active, role, "
-            "registration_source "
+            "registration_source, account_type, parent_user_id "
             "FROM users WHERE username = %s",
             (username,),
         ).fetchone()
         if row is not None:
+            # Admission covers the sub-account lane: an admin-created SUB with
+            # a bound, still-active master may hold a password session. The
+            # master liveness read rides the lookup transaction and is
+            # re-checked under the FOR UPDATE below before a session is minted.
+            account_usable = (
+                bool(row[4])
+                and row[5] == "customer"
+                and password_login_account_ok(
+                    conn,
+                    registration_source=row[6],
+                    account_type=row[7],
+                    parent_user_id=str(row[8]) if row[8] is not None else None,
+                )
+            )
             for key_digest in key_digests:
                 envelope = load_envelope(
                     conn, operation=operation, scope=str(row[0]), key_digest=key_digest
@@ -386,13 +422,7 @@ def password_login(
         _login_budget(request, username)
     encoded = str(row[3]) if row is not None and row[3] else _DUMMY_PASSWORD_HASH
     password_matches = verify_password(body.password, encoded)
-    if (
-        row is None
-        or not password_matches
-        or not row[4]
-        or row[5] != "customer"
-        or row[6] not in {"self_register", "activation_code"}
-    ):
+    if row is None or not account_usable or not password_matches:
         with pg_transaction() as conn:
             record_auth_failure(
                 conn,
@@ -406,7 +436,8 @@ def password_login(
     with pg_transaction() as conn:
         # Serializes first-device creation and rechecks account revocation/password changes.
         current = conn.execute(
-            "SELECT password_hash, is_active, role, registration_source FROM users "
+            "SELECT password_hash, is_active, role, registration_source, "
+            "account_type, parent_user_id FROM users "
             "WHERE id = %s FOR UPDATE",
             (user_id,),
         ).fetchone()
@@ -415,7 +446,12 @@ def password_login(
             or current[0] != encoded
             or not current[1]
             or current[2] != "customer"
-            or current[3] not in {"self_register", "activation_code"}
+            or not password_login_account_ok(
+                conn,
+                registration_source=current[3],
+                account_type=current[4],
+                parent_user_id=str(current[5]) if current[5] is not None else None,
+            )
         ):
             raise _http(401, "INVALID_CREDENTIALS", "用户名或密码错误，或账号暂不可用。")
         now_row = conn.execute("SELECT clock_timestamp()").fetchone()
@@ -458,7 +494,17 @@ def password_login(
             response.headers["X-Idempotent-Replay"] = "true"
             return restored
 
-        device_id, device_token = _password_device(conn, user_id=user_id, body=body)
+        assert current is not None  # the guard above rejects a missing row
+        parent_user_id = str(current[5]) if current[5] is not None else None
+        parent_display_name: str | None = None
+        if parent_user_id is not None:
+            parent_row = conn.execute(
+                "SELECT display_name FROM users WHERE id = %s", (parent_user_id,)
+            ).fetchone()
+            parent_display_name = str(parent_row[0]) if parent_row is not None else None
+        device_id, device_token = _password_device(
+            conn, user_id=user_id, body=body, parent_user_id=parent_user_id
+        )
         result = login_session(
             conn,
             user_id=user_id,
@@ -479,6 +525,9 @@ def password_login(
             session_token=result.session_token or "",
             session_epoch=result.session_epoch,
             session_lease_expires_at=result.lease_until,
+            account_type=str(current[4]),
+            parent_user_id=parent_user_id,
+            parent_display_name=parent_display_name,
         )
         envelope_id = insert_envelope(
             conn,

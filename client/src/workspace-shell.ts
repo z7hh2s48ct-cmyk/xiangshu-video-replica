@@ -7,6 +7,7 @@ import type {
   CustomerCredentialStore,
   CustomerLogoutOutcome,
   CustomerSessionRuntime,
+  CustomerStoredIdentity,
 } from "./customer/useCustomerSession";
 
 /**
@@ -40,6 +41,11 @@ export type WorkspaceShellProps = {
     profileLoadError: string;
     store: CustomerCredentialStore;
     onSessionExpired: () => void;
+    /** CW-062：会话身份（母账号 / 子账号 + 所属母账号），供个人中心身份
+     * 徽章与子账号管理入口判定；设备凭据恢复时可能为 null（身份未知）。 */
+    identity?: CustomerStoredIdentity | null;
+    /** CW-062：再次读取本地缓存身份（挂载时同步读，不触发网络）。 */
+    loadIdentity?: () => Promise<CustomerStoredIdentity | null>;
     /** Live heartbeat/lease health from the customer session hook; absent
      * on the internal lane. Rendered in the profile centre's device tab. */
     sessionRuntime?: CustomerSessionRuntime | null;

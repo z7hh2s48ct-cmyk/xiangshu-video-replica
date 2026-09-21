@@ -19,6 +19,20 @@ from app.billing_catalog import (
 from app.db_portable import BusinessConnection
 
 
+def resolve_wallet_owner(conn: BusinessConnection, user_id: str) -> str:
+    """The wallet that pays for this operator's work (T2.10).
+
+    A sub-account owns no wallet: its consumption settles on the master
+    account's wallet while ``billing_operations.user_id`` keeps naming the
+    *actor* that submitted the work. Masters, and rows with no parent —
+    including a vanished row — resolve to themselves.
+    """
+    row = conn.execute("SELECT parent_user_id FROM users WHERE id = %s", (user_id,)).fetchone()
+    if row is not None and row[0] is not None:
+        return str(row[0])
+    return user_id
+
+
 def accept_operation(
     conn: BusinessConnection,
     *,
@@ -32,7 +46,12 @@ def accept_operation(
     pricing_snapshot: dict[str, Any] | None = None,
     collection_batch_id: str | None = None,
 ) -> str:
-    """Called in the task-creation transaction, before any paid upstream submission."""
+    """Called in the task-creation transaction, before any paid upstream submission.
+
+    ``user_id`` is the *actor* (the account that submitted the work). The
+    wallet, its lots and the ledger's wallet side belong to the master when
+    the actor is a sub-account (T2.10); the operation row keeps the actor.
+    """
     # A user-scoped lock also serializes free requests without a wallet row.
     conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("billing:user:" + user_id,))
     old = conn.execute(
@@ -69,15 +88,18 @@ def accept_operation(
         )
     credits = int(str(snapshot["credits"]))
     funding: list[dict[str, Any]] = []
+    wallet_owner_id = user_id
     if credits:
+        wallet_owner_id = resolve_wallet_owner(conn, user_id)
         wallet = conn.execute(
-            "SELECT available_credits FROM wallets WHERE user_id=%s FOR UPDATE", (user_id,)
+            "SELECT available_credits FROM wallets WHERE user_id=%s FOR UPDATE",
+            (wallet_owner_id,),
         ).fetchone()
         updated = conn.execute(
             "UPDATE wallets SET available_credits=available_credits-%s, "
             "reserved_credits=reserved_credits+%s, "
             "updated_at=now() WHERE user_id=%s AND available_credits >= %s",
-            (credits, credits, user_id, credits),
+            (credits, credits, wallet_owner_id, credits),
         )
         if updated.rowcount != 1:
             raise HTTPException(
@@ -91,7 +113,7 @@ def accept_operation(
         lots = conn.execute(
             "SELECT id,credits,remaining_credits,amount_fen FROM billing_credit_lots "
             "WHERE user_id=%s AND remaining_credits>0 ORDER BY created_at,id FOR UPDATE",
-            (user_id,),
+            (wallet_owner_id,),
         ).fetchall()
         untracked = (
             max(0, int(wallet[0]) - sum(int(lot["remaining_credits"]) for lot in lots))
@@ -160,7 +182,17 @@ def accept_operation(
         ),
     )
     if credits:
-        _ledger(conn, operation_id, user_id, billing_round, "RESERVE", -credits, credits, snapshot)
+        _ledger(
+            conn,
+            operation_id,
+            wallet_owner_id,
+            billing_round,
+            "RESERVE",
+            -credits,
+            credits,
+            snapshot,
+            actor_user_id=user_id,
+        )
     return operation_id
 
 
@@ -203,15 +235,20 @@ def _ledger(
     available: int,
     reserved: int,
     snapshot: dict[str, Any],
+    *,
+    actor_user_id: str,
 ) -> None:
+    """Append one wallet entry: ``user_id`` is the wallet owner, the actor is
+    the operator that caused it (T2.10 — a sub-account's entry sits on the
+    master's wallet with ``actor_user_id`` naming the sub)."""
     conn.execute(
         "INSERT INTO wallet_transactions(id,user_id,type,available_delta,reserved_delta,"
         "billing_operation_id,"
         "billing_round,idempotency_key,pricing_snapshot_json,api_key_id,auth_source,task_id,"
-        "oral_task_id) "
+        "oral_task_id,actor_user_id) "
         "SELECT %s,%s,%s,%s,%s,id,%s,%s,%s,api_key_id,auth_source, "
         "CASE WHEN service IN ('video_768p','video_2k') THEN source_id END, "
-        "CASE WHEN service='oral' THEN source_id END FROM billing_operations WHERE id=%s",
+        "CASE WHEN service='oral' THEN source_id END,%s FROM billing_operations WHERE id=%s",
         (
             str(uuid4()),
             user_id,
@@ -221,6 +258,7 @@ def _ledger(
             billing_round,
             f"usage:{kind}:{operation_id}",
             json.dumps(snapshot),
+            actor_user_id,
             operation_id,
         ),
     )
@@ -262,10 +300,10 @@ def finish_operation(
     reserved = int(operation["reserved_credits"])
     refund = reserved - charged
     if reserved:
-        # Always lock the wallet before funding lots, matching acceptance lock order.
-        conn.execute(
-            "SELECT user_id FROM wallets WHERE user_id=%s FOR UPDATE", (operation["user_id"],)
-        )
+        # Always lock the wallet before funding lots, matching acceptance lock
+        # order. The payer is the master's wallet when the actor is a sub.
+        wallet_owner_id = resolve_wallet_owner(conn, str(operation["user_id"]))
+        conn.execute("SELECT user_id FROM wallets WHERE user_id=%s FOR UPDATE", (wallet_owner_id,))
     revenue: Decimal | None = Decimal(0)
     remaining = charged
     for part in json.loads(str(operation["funding_json"])):
@@ -287,7 +325,7 @@ def finish_operation(
             "UPDATE wallets SET available_credits=available_credits+%s,"
             "reserved_credits=reserved_credits-%s,"
             "updated_at=now() WHERE user_id=%s AND reserved_credits>=%s",
-            (refund, reserved, operation["user_id"], reserved),
+            (refund, reserved, wallet_owner_id, reserved),
         )
         if updated.rowcount != 1:
             raise RuntimeError("钱包预留积分不一致")
@@ -295,23 +333,25 @@ def finish_operation(
             _ledger(
                 conn,
                 operation_id,
-                str(operation["user_id"]),
+                wallet_owner_id,
                 int(operation["billing_round"]),
                 "SETTLE",
                 0,
                 -charged,
                 snapshot,
+                actor_user_id=str(operation["user_id"]),
             )
         if refund:
             _ledger(
                 conn,
                 operation_id,
-                str(operation["user_id"]),
+                wallet_owner_id,
                 int(operation["billing_round"]),
                 "RELEASE",
                 refund,
                 -refund,
                 snapshot,
+                actor_user_id=str(operation["user_id"]),
             )
     nominal = (
         Decimal(charged) * 100 / Decimal(str(snapshot["points_per_yuan"]))

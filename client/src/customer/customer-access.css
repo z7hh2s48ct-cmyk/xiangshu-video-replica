@@ -785,6 +785,35 @@ button.danger-button:not(:disabled):hover {
   color: #f4efe7;
   font-size: var(--font-title);
 }
+/* CW-062 身份徽章：母账号金色、子账号青色，与显示名同行。 */
+.customer-profile__name-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.customer-profile__badge {
+  border: 1px solid #4a4a4f;
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: var(--font-caption);
+  font-weight: 500;
+}
+.customer-profile__badge.is-master {
+  border-color: #806226;
+  color: #f1d39b;
+  background: #221b0f;
+}
+.customer-profile__badge.is-sub {
+  border-color: #35606b;
+  color: #9fd3de;
+  background: #101f23;
+}
+.customer-profile__parent-line {
+  margin: 6px 0 0;
+  color: #d9c9a5;
+  font-size: var(--font-label);
+}
 .customer-profile__hero p:last-child {
   margin: 0;
   color: #aaa297;

@@ -436,6 +436,43 @@ def test_cw062_admin_only_access(dsn: str, conn: psycopg.Connection):
     assert "auditor" in response.text.lower()
 
 
+def test_cw062_delete_refuses_while_a_session_history_pins(dsn: str, conn: psycopg.Connection):
+    """A session history (the append-only 029 event log) pins the account.
+
+    The DELETE must answer the stable 409 instead of trying to rewrite the
+    audit (the event log refuses UPDATE/DELETE outright); the operator then
+    deactivates through PATCH instead.
+    """
+    users = seed_users(conn)
+
+    # One LOGIN event referencing the sub is enough for the FK to refuse the
+    # user-row delete. FK/triggers are suspended for the seed shape only.
+    conn.execute("SET session_replication_role = replica")
+    conn.execute(
+        """
+        INSERT INTO customer_session_events
+            (id, event, user_id, activation_code_id, device_id, session_id, session_epoch)
+        VALUES (%s, 'LOGIN', %s, 'code_history', 'device_history', 'session_history', 1)
+        """,
+        (f"event_{uuid.uuid4().hex[:8]}", users.sub_account_id),
+    )
+    conn.execute("SET session_replication_role = DEFAULT")
+
+    client = api_client(dsn)
+
+    response = client.delete(f"/api/admin/sub-accounts/{users.sub_account_id}")
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "SUB_ACCOUNT_HAS_HISTORY"
+
+    # The row survives untouched; deactivation is the operator's next move.
+    row = conn.execute(
+        "SELECT id, is_active FROM users WHERE id = %s", (users.sub_account_id,)
+    ).fetchone()
+    assert row is not None
+    assert row["is_active"] == 1
+
+
 # -----------------------------------------------------------------------------
 # Test metadata
 # -----------------------------------------------------------------------------

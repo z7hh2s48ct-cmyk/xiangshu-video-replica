@@ -25,6 +25,10 @@ const profile: CustomerProfile = {
   activated_at: null,
   device_slots_used: 1,
   device_slots_total: 2,
+  // CW-062：母账号身份（无 parent）。
+  account_type: "MASTER",
+  parent_user_id: null,
+  parent_display_name: null,
 };
 
 const devices: CustomerDeviceListResponse = {
@@ -59,6 +63,8 @@ const store: CustomerCredentialStore = {
   clearAllCredentials: vi.fn().mockResolvedValue(undefined),
   deviceInstanceId: vi.fn().mockResolvedValue("test-instance-id"),
   devicePlatform: () => "windows",
+  // CW-062：身份缓存不参与这些用例的断言，给出满足接口的最小桩。
+  loadIdentity: async () => null,
   // 「记住密码」在这些用例里不参与断言，给出满足接口的最小桩。
   loadRememberedLogin: async () => null,
   saveRememberedLogin: async () => {},
@@ -101,6 +107,78 @@ describe("CustomerProfilePanel", () => {
     expect(defaultProps.onRefreshDevices).toHaveBeenCalled();
     expect(screen.getByText("工作电脑 •••• AB12")).toBeInTheDocument();
     expect(screen.getByText(/还没有绑定设备/)).toBeInTheDocument();
+  });
+
+  // CW-062：母账号身份在个人中心可见，并且是子账号管理入口的开关。
+  it("shows the master badge and the sub-account tab for a master identity", () => {
+    render(
+      <CustomerProfilePanel
+        {...defaultProps}
+        identity={{
+          accountType: "MASTER",
+          parentUserId: null,
+          parentDisplayName: null,
+        }}
+      />,
+    );
+
+    expect(screen.getByText("母账号")).toBeInTheDocument();
+    // 标题的 accessible name 不含徽章文本（h2 外挂）。
+    expect(screen.getByRole("heading", { name: "李丽" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "子账号管理" }),
+    ).toBeInTheDocument();
+  });
+
+  // CW-062：子账号能看到所属母账号，但没有组织管理权（页签不出现）。
+  it("marks a sub-account and hides the management tab", async () => {
+    const subProfile: CustomerProfile = {
+      ...profile,
+      account_type: "SUB",
+      parent_user_id: "parent-1",
+      parent_display_name: "总部机构",
+    };
+    render(
+      <CustomerProfilePanel
+        {...defaultProps}
+        profile={subProfile}
+        identity={{
+          accountType: "SUB",
+          parentUserId: "parent-1",
+          parentDisplayName: "总部机构",
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("子账号")).toBeInTheDocument();
+    expect(screen.getByText(/所属母账号：总部机构/)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "子账号管理" }),
+    ).not.toBeInTheDocument();
+  });
+
+  // CW-062：身份未知（重装/旧金库）时徽章隐藏，但个人中心其余内容不受影响。
+  it("degrades to no badge when the identity is unknown", async () => {
+    const identityLoader = vi.fn().mockResolvedValue(null);
+    render(
+      <CustomerProfilePanel
+        {...defaultProps}
+        identity={null}
+        identityLoader={identityLoader}
+        profile={null}
+        profileLoadError="账号资料加载失败，请稍后重试。"
+      />,
+    );
+
+    await waitFor(() => expect(identityLoader).toHaveBeenCalled());
+    expect(screen.queryByText("母账号")).not.toBeInTheDocument();
+    expect(screen.queryByText("子账号")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "子账号管理" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "客户账号" }),
+    ).toBeInTheDocument();
   });
 
   it("edits the display name while keeping the account number read-only", async () => {

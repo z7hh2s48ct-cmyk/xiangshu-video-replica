@@ -13,6 +13,10 @@ const profile: CustomerProfile = {
   activated_at: "2026-08-02T00:00:00Z",
   device_slots_used: 1,
   device_slots_total: 2,
+  // CW-062：母账号身份（无 parent）。
+  account_type: "MASTER",
+  parent_user_id: null,
+  parent_display_name: null,
 };
 
 // CW-012：customerToCurrentUser 从旧入口 RootApp.tsx 迁出到客户域独立叶子模块。
@@ -23,6 +27,9 @@ describe("customerToCurrentUser（CW-012 迁出 RootApp 旧入口）", () => {
     const user: CustomerWorkspaceUser = {
       userId: "user-1",
       username: "fallback-name",
+      accountType: "MASTER",
+      parentUserId: null,
+      parentDisplayName: null,
     };
     expect(customerToCurrentUser(user, profile)).toEqual({
       id: "user-1",
@@ -33,7 +40,13 @@ describe("customerToCurrentUser（CW-012 迁出 RootApp 旧入口）", () => {
   });
 
   it("profile 缺省时 username 与 display_name 均回退到 user.username", () => {
-    const user: CustomerWorkspaceUser = { userId: "user-2", username: "alice" };
+    const user: CustomerWorkspaceUser = {
+      userId: "user-2",
+      username: "alice",
+      accountType: "MASTER",
+      parentUserId: null,
+      parentDisplayName: null,
+    };
     expect(customerToCurrentUser(user)).toEqual({
       id: "user-2",
       username: "alice",
@@ -43,7 +56,13 @@ describe("customerToCurrentUser（CW-012 迁出 RootApp 旧入口）", () => {
   });
 
   it("user.username 为 null 且无 profile 时回退到默认 customer/客户", () => {
-    const user: CustomerWorkspaceUser = { userId: "user-3", username: null };
+    const user: CustomerWorkspaceUser = {
+      userId: "user-3",
+      username: null,
+      accountType: null,
+      parentUserId: null,
+      parentDisplayName: null,
+    };
     expect(customerToCurrentUser(user, null)).toEqual({
       id: "user-3",
       username: "customer",

@@ -6,17 +6,21 @@ import { DeviceManagementPage } from "./DeviceManagementPage";
 import { HeartbeatStatus } from "./HeartbeatStatus";
 import { LeaseCountdown } from "./LeaseCountdown";
 import { PairingApprovalCard } from "./PairingApprovalCard";
+import { SubAccountManagementPage } from "./SubAccountManagementPage";
 import type {
   CustomerCredentialStore,
   CustomerLogoutOutcome,
   CustomerSessionRuntime,
+  CustomerStoredIdentity,
 } from "./useCustomerSession";
 
-type ProfileTab = "overview" | "devices" | "billing";
+type ProfileTab = "overview" | "devices" | "billing" | "sub-accounts";
 
 export function CustomerProfilePanel({
   devices,
   deviceError,
+  identity = null,
+  identityLoader,
   onApprovePairing,
   onDismissPairing,
   onManualHeartbeat,
@@ -37,6 +41,10 @@ export function CustomerProfilePanel({
 }: {
   devices: CustomerDeviceListResponse | null;
   deviceError: string;
+  /** CW-062：会话身份（首次登录响应/凭据库缓存），null 时徽章隐藏。 */
+  identity?: CustomerStoredIdentity | null;
+  /** CW-062：再读一次本地缓存身份（挂载时 user 尚未携带身份的恢复路径）。 */
+  identityLoader?: () => Promise<CustomerStoredIdentity | null>;
   onApprovePairing: (pairingId: string) => void;
   onDismissPairing: (pairingId: string) => void;
   onManualHeartbeat?: () => void;
@@ -56,7 +64,6 @@ export function CustomerProfilePanel({
   store: CustomerCredentialStore;
   walletRefreshKey: number;
 }) {
-  const [tab, setTab] = useState<ProfileTab>("overview");
   const [displayName, setDisplayName] = useState(profile?.display_name ?? "");
   const [profileError, setProfileError] = useState("");
   const [profileNotice, setProfileNotice] = useState("");
@@ -72,6 +79,56 @@ export function CustomerProfilePanel({
     (pairing) => !deferredPairingIds.has(pairing.pairing_request_id),
   );
   const isOnline = useLeaseActive(sessionRuntime?.leaseExpiresAt ?? null);
+
+  // CW-062：身份来自会话缓存（首登响应写入）；profile 是权威副本，加载后
+  // 以它为准（重启恢复的先头帧可能还是未知身份）。
+  const [loadedIdentity, setLoadedIdentity] =
+    useState<CustomerStoredIdentity | null>(identity);
+  useEffect(() => {
+    if (identity) {
+      setLoadedIdentity(identity);
+      return;
+    }
+    if (!identityLoader) {
+      return;
+    }
+    let active = true;
+    void identityLoader()
+      .then((next) => {
+        if (active && next) {
+          setLoadedIdentity(next);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [identity, identityLoader]);
+  useEffect(() => {
+    const accountType = profile?.account_type;
+    if (!accountType) {
+      return;
+    }
+    setLoadedIdentity((current) => ({
+      accountType: parseAccountType(accountType),
+      parentUserId: profile.parent_user_id ?? current?.parentUserId ?? null,
+      parentDisplayName:
+        profile.parent_display_name ?? current?.parentDisplayName ?? null,
+    }));
+  }, [
+    profile?.account_type,
+    profile?.parent_user_id,
+    profile?.parent_display_name,
+  ]);
+  const isMaster = loadedIdentity?.accountType === "MASTER";
+
+  const [tab, setTab] = useState<ProfileTab>("overview");
+  // 子账号页签只对母账号出现；身份后到时（恢复路径）若已站在该页签，退回概览。
+  useEffect(() => {
+    if (tab === "sub-accounts" && !isMaster) {
+      setTab("overview");
+    }
+  }, [tab, isMaster]);
 
   useEffect(() => {
     setDisplayName(profile?.display_name ?? "");
@@ -142,7 +199,19 @@ export function CustomerProfilePanel({
       <header className="customer-profile__hero">
         <div>
           <p className="eyebrow">个人中心</p>
-          <h2>{profile?.display_name ?? "客户账号"}</h2>
+          {/* 徽章放在 h2 外：标题的 accessible name 必须是纯显示名。 */}
+          <div className="customer-profile__name-line">
+            <h2>{profile?.display_name ?? "客户账号"}</h2>
+            {identityBadge(loadedIdentity) ? (
+              <span
+                className={`customer-profile__badge ${
+                  isMaster ? "is-master" : "is-sub"
+                }`}
+              >
+                {identityBadge(loadedIdentity)}
+              </span>
+            ) : null}
+          </div>
           <p>
             {profile?.username ??
               (profileLoadError ? "账号资料读取失败" : "正在读取账号信息")}
@@ -150,6 +219,11 @@ export function CustomerProfilePanel({
               ? ` · ${formatDate(profile.joined_at)} 加入`
               : ""}
           </p>
+          {loadedIdentity && !isMaster && loadedIdentity.parentDisplayName ? (
+            <p className="customer-profile__parent-line">
+              所属母账号：{loadedIdentity.parentDisplayName}
+            </p>
+          ) : null}
         </div>
         <div className="customer-profile__hero-actions">
           <button
@@ -167,12 +241,19 @@ export function CustomerProfilePanel({
       </header>
 
       <nav aria-label="个人中心功能" className="customer-profile__tabs">
-        {(
-          [
-            ["overview", "账号概览"],
-            ["devices", "设备管理"],
-            ["billing", "余额与记录"],
-          ] as const
+        {(isMaster
+          ? ([
+              ["overview", "账号概览"],
+              ["devices", "设备管理"],
+              ["billing", "余额与记录"],
+              // CW-062：子账号管理只对母账号出现（子账号无组织管理权）。
+              ["sub-accounts", "子账号管理"],
+            ] as const)
+          : ([
+              ["overview", "账号概览"],
+              ["devices", "设备管理"],
+              ["billing", "余额与记录"],
+            ] as const)
         ).map(([value, label]) => (
           <button
             aria-current={tab === value ? "page" : undefined}
@@ -352,11 +433,29 @@ export function CustomerProfilePanel({
           store={store}
         />
       ) : null}
+
+      {tab === "sub-accounts" && isMaster ? (
+        <SubAccountManagementPage
+          onSessionExpired={onSessionExpired}
+          store={store}
+        />
+      ) : null}
     </section>
   );
 }
 
 // activationStatus 已删除（激活码方案废弃，2026-09-19）
+
+function identityBadge(identity: CustomerStoredIdentity | null): string {
+  if (!identity) {
+    return "";
+  }
+  return identity.accountType === "MASTER" ? "母账号" : "子账号";
+}
+
+function parseAccountType(value: string): "MASTER" | "SUB" | "SUB_ADMIN" {
+  return value === "SUB" || value === "SUB_ADMIN" ? value : "MASTER";
+}
 
 function formatDate(value: string): string {
   return new Date(value).toLocaleDateString("zh-CN");

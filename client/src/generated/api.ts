@@ -158,6 +158,36 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/projects/{project_id}/prompts/compile-h3-preview": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Compile H3 Preview
+     * @description 轻量级 H3 提示词编译，用于前端实时预览。
+     *     不写入数据库，只返回编译后的文本。
+     *
+     *     参数:
+     *     - project_id: 项目 ID
+     *     - request.shots: 分镜卡数据
+     *     - request.original_script: 原始脚本
+     *     - request.analysis_version_id: 分析版本 ID
+     *
+     *     返回:
+     *     - h3_prompt_text: 编译后的完整 H3 提示词
+     */
+    post: operations["compile_h3_preview_api_projects__project_id__prompts_compile_h3_preview_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/projects/{project_id}/saved-prompts/{saved_prompt_id}/apply": {
     parameters: {
       query?: never;
@@ -1200,6 +1230,40 @@ export interface paths {
     /** Confirm Voice */
     post: operations["confirm_voice_api_oral_voices__voice_id__confirm_post"];
     delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/oral/avatars/{avatar_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    /** Delete Avatar */
+    delete: operations["delete_avatar_api_oral_avatars__avatar_id__delete"];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/oral/voices/{voice_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    /** Delete Voice */
+    delete: operations["delete_voice_api_oral_voices__voice_id__delete"];
     options?: never;
     head?: never;
     patch?: never;
@@ -2368,6 +2432,31 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/admin/viral/batches/{batch_id}/api-usage": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Collection Batch Api Usage
+     * @description Get detailed API usage breakdown for a specific collection batch.
+     *
+     *     This endpoint allows the admin backend to display:
+     *     - How many times each TikTok Hub API was called
+     *     - Cost attribution per API type
+     *     - Success/failure rates
+     */
+    get: operations["get_collection_batch_api_usage_api_admin_viral_batches__batch_id__api_usage_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/control/settings/h3-accounts": {
     parameters: {
       query?: never;
@@ -3111,6 +3200,85 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/customer/sub-accounts": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Sub Accounts
+     * @description List the sub-accounts of the caller's own organisation.
+     */
+    get: operations["list_sub_accounts_api_customer_sub_accounts_get"];
+    put?: never;
+    /**
+     * Create Sub Account
+     * @description Create one sub-account under the caller's own master account.
+     */
+    post: operations["create_sub_account_api_customer_sub_accounts_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/sub-accounts/{sub_account_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    /**
+     * Delete Sub Account
+     * @description Delete a sub-account, degrading to deactivation when history pins it.
+     *
+     *     The session/device footprint is purged inside a savepoint, then the row
+     *     itself. A ``ForeignKeyViolation`` there means business history (ledger,
+     *     tasks — FKs without CASCADE) refuses to be orphaned: the savepoint rolls
+     *     back and the account is deactivated + its session revoked instead, so the
+     *     response carries ``deleted: false`` rather than failing the request.
+     */
+    delete: operations["delete_sub_account_api_customer_sub_accounts__sub_account_id__delete"];
+    options?: never;
+    head?: never;
+    /**
+     * Update Sub Account
+     * @description Update display_name / is_active; deactivation revokes the live session.
+     */
+    patch: operations["update_sub_account_api_customer_sub_accounts__sub_account_id__patch"];
+    trace?: never;
+  };
+  "/api/customer/sub-accounts/{sub_account_id}/password": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Set Sub Account Password
+     * @description Set or rotate a sub-account's login password.
+     *
+     *     Writing ``registration_source='admin_create'`` alongside the hash is what
+     *     admits the account on the shared password-session rule. The rotation also
+     *     revokes the live session: the old session must not outlive the old
+     *     credential. Plaintext never touches the database or the audit trail.
+     */
+    post: operations["set_sub_account_password_api_customer_sub_accounts__sub_account_id__password_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/customer/api-keys": {
     parameters: {
       query?: never;
@@ -3758,6 +3926,28 @@ export interface paths {
     get: operations["list_wallet_transactions_api_wallet_transactions_get"];
     put?: never;
     post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/reports/export": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Export Statistics
+     * @description 导出计费统计报表（CSV，gzip 压缩）。
+     *
+     *     只读查询走 REPEATABLE READ 快照，导出行集与账务时点一致。
+     */
+    post: operations["export_statistics_api_control_reports_export_post"];
     delete?: never;
     options?: never;
     head?: never;
@@ -5335,6 +5525,84 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/admin/sub-accounts": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Sub Accounts
+     * @description List all sub-accounts under a master account.
+     */
+    get: operations["list_sub_accounts_api_admin_sub_accounts_get"];
+    put?: never;
+    /**
+     * Create Sub Account
+     * @description Create a sub-account under a master account.
+     */
+    post: operations["create_sub_account_api_admin_sub_accounts_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/admin/sub-accounts/{sub_account_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    /**
+     * Delete Sub Account
+     * @description Delete a sub-account, purging its session/device footprint first.
+     *
+     *     The session/device rows go before the user row in the same transaction
+     *     (their ``user_id`` FKs carry no CASCADE). Business history (ledger,
+     *     tasks) is deliberately never deleted: when such rows pin the account the
+     *     DELETE answers 409 and the operator deactivates instead.
+     */
+    delete: operations["delete_sub_account_api_admin_sub_accounts__sub_account_id__delete"];
+    options?: never;
+    head?: never;
+    /**
+     * Update Sub Account
+     * @description Update sub-account details (display_name, status).
+     */
+    patch: operations["update_sub_account_api_admin_sub_accounts__sub_account_id__patch"];
+    trace?: never;
+  };
+  "/api/admin/sub-accounts/{sub_account_id}/password": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Reset Sub Account Password
+     * @description Set or rotate a sub-account's login password.
+     *
+     *     Writing ``registration_source='admin_create'`` alongside the hash is what
+     *     admits the account on the shared password-session rule (login and session
+     *     fence). Re-running rotates the password in place; an unknown sub row is
+     *     answered 404. The plaintext never touches the database or the audit trail.
+     */
+    post: operations["reset_sub_account_password_api_admin_sub_accounts__sub_account_id__password_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/health": {
     parameters: {
       query?: never;
@@ -5664,6 +5932,26 @@ export interface components {
       consent_id: string;
       /** Idempotency Key */
       idempotency_key: string;
+    };
+    /**
+     * BatchApiUsageDetail
+     * @description Individual API call usage within a collection batch.
+     */
+    BatchApiUsageDetail: {
+      /** Api Type */
+      api_type: string;
+      /** Unit Cost */
+      unit_cost: number;
+      /** Total Units */
+      total_units: number;
+      /** Total Cost Fen */
+      total_cost_fen: number;
+      /** Confirmed Count */
+      confirmed_count: number;
+      /** Pending Count */
+      pending_count: number;
+      /** Failed Count */
+      failed_count: number;
     };
     /** BatchCreateRequest */
     BatchCreateRequest: {
@@ -6411,6 +6699,54 @@ export interface components {
         [key: string]: string;
       };
     };
+    /**
+     * CollectionBatchApiUsage
+     * @description API usage statistics for one collection batch.
+     */
+    CollectionBatchApiUsage: {
+      /** Batch Id */
+      batch_id: string;
+      /** Platform */
+      platform: string;
+      /** Created At */
+      created_at: string;
+      /** Keywords Json */
+      keywords_json: {
+        [key: string]: unknown;
+      };
+      /** Pricing Snapshot Json */
+      pricing_snapshot_json: {
+        [key: string]: unknown;
+      };
+      douyin_search?: components["schemas"]["BatchApiUsageDetail"] | null;
+      wechat_search_pages?: components["schemas"]["BatchApiUsageDetail"] | null;
+      wechat_video_details?:
+        | components["schemas"]["BatchApiUsageDetail"]
+        | null;
+      /** Total Cost Fen */
+      total_cost_fen: number;
+      /** Profit Fen */
+      profit_fen?: number | null;
+    };
+    /**
+     * CompileH3PreviewRequest
+     * @description 前端用于实时预览 H3 提示词编译结果
+     */
+    CompileH3PreviewRequest: {
+      /** Shots */
+      shots: {
+        [key: string]: unknown;
+      }[];
+      /** Original Script */
+      original_script: string;
+      /** Analysis Version Id */
+      analysis_version_id: string;
+    };
+    /** CompileH3PreviewResult */
+    CompileH3PreviewResult: {
+      /** H3 Prompt Text */
+      h3_prompt_text: string;
+    };
     /** CompleteIdentityUploadRequest */
     CompleteIdentityUploadRequest: {
       /** Asset Id */
@@ -6878,6 +7214,15 @@ export interface components {
       session_epoch: number;
       /** Session Lease Expires At */
       session_lease_expires_at: string;
+      /**
+       * Account Type
+       * @default MASTER
+       */
+      account_type: string;
+      /** Parent User Id */
+      parent_user_id?: string | null;
+      /** Parent Display Name */
+      parent_display_name?: string | null;
     };
     /** CustomerPaymentCodeResponse */
     CustomerPaymentCodeResponse: {
@@ -6927,6 +7272,15 @@ export interface components {
       device_slots_used: number;
       /** Device Slots Total */
       device_slots_total: number | null;
+      /**
+       * Account Type
+       * @default MASTER
+       */
+      account_type: string;
+      /** Parent User Id */
+      parent_user_id?: string | null;
+      /** Parent Display Name */
+      parent_display_name?: string | null;
     };
     /** CustomerRegistrationRequest */
     CustomerRegistrationRequest: {
@@ -7236,6 +7590,53 @@ export interface components {
       actor: components["schemas"]["AdminActorInfo"];
       /** Auth Method */
       auth_method: string;
+    };
+    /**
+     * ExportRequest
+     * @description 报表导出参数。
+     */
+    ExportRequest: {
+      /**
+       * Format
+       * @description 输出格式（当前仅支持 csv）
+       * @default csv
+       */
+      format: string;
+      /**
+       * Start Date
+       * Format: date
+       * @description 起始日期（含）
+       */
+      start_date: string;
+      /**
+       * End Date
+       * Format: date
+       * @description 结束日期（含）
+       */
+      end_date: string;
+      /**
+       * Service Types
+       * @description 按服务过滤
+       * @default [
+       *       "all"
+       *     ]
+       */
+      service_types: string[];
+      /**
+       * User Ids
+       * @description 按用户过滤（None=全部）
+       */
+      user_ids?: string[] | null;
+      /**
+       * Min Revenue Fen
+       * @description 最小费用过滤
+       */
+      min_revenue_fen?: number | null;
+      /**
+       * Max Revenue Fen
+       * @description 最大费用过滤
+       */
+      max_revenue_fen?: number | null;
     };
     /** ExtractSourceFramesRequest */
     ExtractSourceFramesRequest: {
@@ -7694,6 +8095,8 @@ export interface components {
     };
     /** IndependentVideoRequest */
     IndependentVideoRequest: {
+      /** Display Name */
+      display_name?: string | null;
       /**
        * Mode
        * @enum {string}
@@ -8879,6 +9282,15 @@ export interface components {
       /** Replace Device Id */
       replace_device_id: string;
     };
+    /** ResetSubAccountPasswordRequest */
+    ResetSubAccountPasswordRequest: {
+      /** Password */
+      password: string;
+      /** Reason */
+      reason: string;
+      /** Request Id */
+      request_id?: string | null;
+    };
     /** RuntimeSettingsRequest */
     RuntimeSettingsRequest: {
       /** Max Generation Count Per Batch */
@@ -9198,6 +9610,11 @@ export interface components {
       reason: string;
       /** Session Epoch */
       session_epoch: number;
+    };
+    /** SetSubAccountPasswordRequest */
+    SetSubAccountPasswordRequest: {
+      /** Password */
+      password: string;
     };
     /** SettingsDiagnosticReport */
     SettingsDiagnosticReport: {
@@ -10436,6 +10853,10 @@ export interface components {
       service?: string | null;
       /** Service Name */
       service_name?: string | null;
+      /** Actor User Id */
+      actor_user_id?: string | null;
+      /** Actor Name */
+      actor_name?: string | null;
     };
     /** WeChatSettingsUpdate */
     WeChatSettingsUpdate: {
@@ -10472,6 +10893,48 @@ export interface components {
       key?: string | null;
       /** Enabled Channels */
       enabled_channels: ("alipay" | "wxpay")[];
+    };
+    /** CreateSubAccountRequest */
+    app__customer_sub_account_routes__CreateSubAccountRequest: {
+      /** Username */
+      username: string;
+      /** Display Name */
+      display_name: string;
+      /** Password */
+      password?: string | null;
+    };
+    /** UpdateSubAccountRequest */
+    app__customer_sub_account_routes__UpdateSubAccountRequest: {
+      /** Display Name */
+      display_name?: string | null;
+      /** Is Active */
+      is_active?: boolean | null;
+    };
+    /** CreateSubAccountRequest */
+    app__sub_account_routes__CreateSubAccountRequest: {
+      /** Username */
+      username: string;
+      /** Display Name */
+      display_name: string;
+      /** Parent User Id */
+      parent_user_id: string;
+      /** Initial Password */
+      initial_password?: string | null;
+      /** Reason */
+      reason: string;
+      /** Request Id */
+      request_id?: string | null;
+    };
+    /** UpdateSubAccountRequest */
+    app__sub_account_routes__UpdateSubAccountRequest: {
+      /** Display Name */
+      display_name?: string | null;
+      /** Is Active */
+      is_active?: boolean | null;
+      /** Reason */
+      reason: string;
+      /** Request Id */
+      request_id?: string | null;
     };
   };
   responses: never;
@@ -10824,6 +11287,44 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["VersionResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  compile_h3_preview_api_projects__project_id__prompts_compile_h3_preview_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
+      };
+      path: {
+        project_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["CompileH3PreviewRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CompileH3PreviewResult"];
         };
       };
       /** @description Validation Error */
@@ -13294,6 +13795,72 @@ export interface operations {
       };
     };
   };
+  delete_avatar_api_oral_avatars__avatar_id__delete: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        avatar_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  delete_voice_api_oral_voices__voice_id__delete: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        voice_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   list_oral_generation_tasks_api_oral_tasks_get: {
     parameters: {
       query?: {
@@ -15594,6 +16161,37 @@ export interface operations {
       };
     };
   };
+  get_collection_batch_api_usage_api_admin_viral_batches__batch_id__api_usage_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        batch_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CollectionBatchApiUsage"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   get_h3_accounts_api_control_settings_h3_accounts_get: {
     parameters: {
       query?: never;
@@ -16940,6 +17538,170 @@ export interface operations {
       };
     };
   };
+  list_sub_accounts_api_customer_sub_accounts_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+    };
+  };
+  create_sub_account_api_customer_sub_accounts_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["app__customer_sub_account_routes__CreateSubAccountRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  delete_sub_account_api_customer_sub_accounts__sub_account_id__delete: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        sub_account_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  update_sub_account_api_customer_sub_accounts__sub_account_id__patch: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        sub_account_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["app__customer_sub_account_routes__UpdateSubAccountRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  set_sub_account_password_api_customer_sub_accounts__sub_account_id__password_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        sub_account_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["SetSubAccountPasswordRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   list_customer_api_keys_api_customer_api_keys_get: {
     parameters: {
       query?: never;
@@ -18124,6 +18886,39 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["WalletTransactionPage"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  export_statistics_api_control_reports_export_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ExportRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": unknown;
         };
       };
       /** @description Validation Error */
@@ -21675,6 +22470,182 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["SimpleCharacterResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_sub_accounts_api_admin_sub_accounts_get: {
+    parameters: {
+      query: {
+        /** @description Master account ID */
+        parent_user_id: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  create_sub_account_api_admin_sub_accounts_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["app__sub_account_routes__CreateSubAccountRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  delete_sub_account_api_admin_sub_accounts__sub_account_id__delete: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        sub_account_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  update_sub_account_api_admin_sub_accounts__sub_account_id__patch: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        sub_account_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["app__sub_account_routes__UpdateSubAccountRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  reset_sub_account_password_api_admin_sub_accounts__sub_account_id__password_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        sub_account_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ResetSubAccountPasswordRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
         };
       };
       /** @description Validation Error */

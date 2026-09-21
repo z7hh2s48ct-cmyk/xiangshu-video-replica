@@ -55,6 +55,7 @@ from app.payment_provider import (
 from app.permissions import require_not_auditor
 from app.security_rate_limit import _server_now, client_ip_from_request
 from app.settings import SettingsRepository, effective_customer_billing_settings
+from app.usage_billing import resolve_wallet_owner
 from app.wallet_routes import WalletResponse, WalletTransactionPage, WalletTransactionResponse
 from app.zpay import generate_merchant_order_no
 from app.zpay_payments import read_recharge_order, serialize_recharge_order
@@ -132,6 +133,12 @@ class CustomerProfileResponse(BaseModel):
     activated_at: str | None
     device_slots_used: int
     device_slots_total: int | None
+    # CW-062 sub-account identity: mirrors the password-login response so a
+    # restored session (heartbeat + profile) can badge the workspace without
+    # a second round-trip. A master answers 'MASTER' with no parent.
+    account_type: str = "MASTER"
+    parent_user_id: str | None = None
+    parent_display_name: str | None = None
 
 
 class UpdateCustomerProfileRequest(BaseModel):
@@ -370,6 +377,20 @@ def create_recharge_order(
 # ============================================================================
 
 
+def _require_master_for_recharge(conn: BusinessConnection, *, user_id: str) -> None:
+    """Refuse top-ups requested from a sub-account seat (T2.10).
+
+    The wallet belongs to the master; letting a sub create a recharge order
+    would collect payment against an account with no wallet to credit.
+    """
+    row = conn.execute("SELECT parent_user_id FROM users WHERE id = %s", (user_id,)).fetchone()
+    if row is not None and row[0] is not None:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "MASTER_ACCOUNT_REQUIRED", "message": "该操作仅限母账号执行。"},
+        )
+
+
 @router.post(
     "/customer/recharge-orders",
     response_model=RechargeOrderResponse,
@@ -418,6 +439,9 @@ def create_customer_recharge_order(
         merchant_order_no = generate_merchant_order_no()
         try:
             with db.write() as (conn, user):
+                # Sub-accounts never recharge: the organisation's credits are
+                # topped up by the master (T2.10).
+                _require_master_for_recharge(conn, user_id=user.id)
                 # Serialize new orders against legacy wallet conversion; no network call here.
                 conn.execute(
                     "SELECT user_id FROM wallets WHERE user_id = %s FOR UPDATE", (user.id,)
@@ -804,7 +828,13 @@ def _customer_profile(conn: psycopg.Connection, *, user_id: str) -> CustomerProf
                    FROM customer_devices device
                    WHERE device.user_id = u.id AND device.status = 'BOUND'
                ) AS device_slots_used,
-               u.max_devices
+               u.max_devices,
+               u.account_type, u.parent_user_id,
+               (
+                   SELECT parent.display_name
+                   FROM users parent
+                   WHERE parent.id = u.parent_user_id
+               ) AS parent_display_name
         FROM users u
         LEFT JOIN LATERAL (
             SELECT masked_code, status, activated_at
@@ -835,6 +865,9 @@ def _customer_profile(conn: psycopg.Connection, *, user_id: str) -> CustomerProf
         activated_at=str(row[5]) if row[5] is not None else None,
         device_slots_used=int(row[6]),
         device_slots_total=None,
+        account_type=str(row[8]) if row[8] is not None else "MASTER",
+        parent_user_id=str(row[9]) if row[9] is not None else None,
+        parent_display_name=str(row[10]) if row[10] is not None else None,
     )
 
 
@@ -928,9 +961,13 @@ def read_customer_wallet(request: Request) -> WalletResponse:
     ``xsk_live_`` key. Mirrors the internal /api/wallet read (BILL-01: credits
     live in the same customer wallet the activation grant funded)."""
     with customer_read_transaction(request) as (conn, user_id):
+        # A sub-account session reads the organisation's wallet: the credits
+        # belong to the master (T2.10), so the balance and billing settings
+        # resolve to the wallet owner.
+        wallet_owner_id = resolve_wallet_owner(BusinessConnection.postgres(conn), user_id)
         row = conn.execute(
             "SELECT available_credits, reserved_credits FROM wallets WHERE user_id = %s",
-            (user_id,),
+            (wallet_owner_id,),
         ).fetchone()
         if row is None:
             raise HTTPException(
@@ -939,9 +976,9 @@ def read_customer_wallet(request: Request) -> WalletResponse:
             )
         billing = SettingsRepository(
             BusinessConnection.postgres(conn)
-        ).read_customer_billing_settings(user_id=user_id)
+        ).read_customer_billing_settings(user_id=wallet_owner_id)
         try:
-            billing = effective_customer_billing_settings(billing, user_id=user_id)
+            billing = effective_customer_billing_settings(billing, user_id=wallet_owner_id)
         except ValueError as exc:
             raise HTTPException(
                 status_code=503,
@@ -996,8 +1033,12 @@ def list_customer_wallet_transactions(
     if started_at and ended_at and ended_at <= started_at:
         raise HTTPException(422, detail="结束时间必须晚于开始时间。")
     with customer_read_transaction(request) as (conn, user_id):
+        # Same wallet-owner resolution as the balance read: every ledger row of
+        # the organisation sits on the master's wallet (T2.10), including a
+        # sub-account's consumption (attributed through actor_user_id).
+        wallet_owner_id = resolve_wallet_owner(BusinessConnection.postgres(conn), user_id)
         clauses = ["wt.user_id = %s"]
-        params: list[object] = [user_id]
+        params: list[object] = [wallet_owner_id]
         if token_group_id:
             clauses.append("k.token_group_id = %s")
             params.append(token_group_id)
@@ -1029,7 +1070,7 @@ def list_customer_wallet_transactions(
             " FROM wallet_transactions wt LEFT JOIN customer_api_keys k ON k.id = "
             "wt.api_key_id AND k.user_id = wt.user_id "
             "LEFT JOIN billing_operations op ON op.id=wt.billing_operation_id "
-            "AND op.user_id=wt.user_id "
+            "AND (op.user_id=wt.user_id OR op.user_id=wt.actor_user_id) "
             "LEFT JOIN recharge_orders credit_order ON credit_order.id = wt.recharge_order_id "
             "AND credit_order.user_id = wt.user_id "
             "LEFT JOIN admin_adjustments credit_adjustment ON "
@@ -1053,7 +1094,9 @@ def list_customer_wallet_transactions(
                    CASE WHEN wt.type = 'CHARGE' THEN
                      COALESCE(credit_adjustment.source_document_type, credit_order.provider)
                    END, wt.billing_operation_id,
-                   (SELECT o.service FROM billing_operations o WHERE o.id=wt.billing_operation_id)
+                   (SELECT o.service FROM billing_operations o WHERE o.id=wt.billing_operation_id),
+                   wt.actor_user_id,
+                   (SELECT u.display_name FROM users u WHERE u.id=wt.actor_user_id)
             """
             + from_sql
             + """
@@ -1087,6 +1130,8 @@ def list_customer_wallet_transactions(
                     billing_operation_id=row[18],
                     service=row[19],
                     service_name=SERVICES[row[19]].name if row[19] in SERVICES else None,
+                    actor_user_id=str(row[20]) if row[20] is not None else None,
+                    actor_name=row[21],
                 )
                 for row in rows
             ],
@@ -1227,13 +1272,17 @@ def read_customer_center_summary(
         raise HTTPException(401, detail={"code": "SESSION_REQUIRED", "message": "请先登录账号。"})
     response.headers["Cache-Control"] = "no-store"
     with fenced_pg_transaction(snapshot) as (conn, ctx):
+        # A sub-account session reads the organisation's summary: balance,
+        # reservation, consumed total and tokens all belong to the master's
+        # wallet (T2.10). The response keeps naming the caller.
+        wallet_owner_id = resolve_wallet_owner(BusinessConnection.postgres(conn), ctx.user_id)
         row = conn.execute(
             "SELECT available_credits, reserved_credits, "
             "(SELECT COALESCE(SUM(-reserved_delta), 0) FROM wallet_transactions "
             "WHERE user_id = %s AND type = 'SETTLE'), "
             "(SELECT COUNT(*) FROM customer_api_keys WHERE user_id = %s AND revoked_at IS NULL) "
             "FROM wallets WHERE user_id = %s",
-            (ctx.user_id, ctx.user_id, ctx.user_id),
+            (wallet_owner_id, wallet_owner_id, wallet_owner_id),
         ).fetchone()
         if row is None:
             raise HTTPException(

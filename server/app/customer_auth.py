@@ -46,6 +46,7 @@ from datetime import UTC, datetime
 import psycopg
 
 from app.customer_device_service import _token_digests
+from app.sub_account_auth import password_login_account_ok
 
 # Stable fencing error codes (dev doc §13.2).
 SESSION_REPLACED = "SESSION_REPLACED"
@@ -169,8 +170,13 @@ def verify_session_context(
     # looks alive. Plain snapshot reads: no second lock is needed, the row
     # lock above already serializes the outcome against the writers.
     if activation_code_id is None:
+        # Password-lane accounts (self-registered masters and admin-created
+        # sub-accounts) share one admission rule with the login route: a
+        # deactivated master fences every session riding under it, so a
+        # sub-account session dies with its master without a second sweep.
         account = conn.execute(
-            "SELECT is_active, role, password_hash, registration_source FROM users WHERE id = %s",
+            "SELECT is_active, role, password_hash, registration_source, "
+            "account_type, parent_user_id FROM users WHERE id = %s",
             (user_id,),
         ).fetchone()
         if (
@@ -178,7 +184,12 @@ def verify_session_context(
             or not account[0]
             or account[1] != "customer"
             or not account[2]
-            or account[3] not in {"self_register", "activation_code"}
+            or not password_login_account_ok(
+                conn,
+                registration_source=account[3],
+                account_type=account[4],
+                parent_user_id=str(account[5]) if account[5] is not None else None,
+            )
         ):
             raise _replaced("The customer account is unavailable.")
     else:

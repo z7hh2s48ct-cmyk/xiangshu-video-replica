@@ -44,6 +44,18 @@ pub struct RememberedLogin {
     pub password: String,
 }
 
+/// CW-062：随设备凭据缓存的账号身份（母账号 / 子账号 + 所属母账号）。
+///
+/// 只是一份展示用副本（非凭据）：重启恢复会话时，个人中心要用它在首帧
+/// 渲染身份徽章，而不必等 profile 请求回来。字段随 TS 侧 `loadIdentity()`
+/// 的 snake_case 契约序列化。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StoredCustomerIdentity {
+    pub account_type: String,
+    pub parent_user_id: Option<String>,
+    pub parent_display_name: Option<String>,
+}
+
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct CustomerCredentials {
     pub device_token: String,
@@ -51,6 +63,9 @@ pub struct CustomerCredentials {
     /// 老金库记录里没有这个字段，升级后必须还能读出来，故 `default`。
     #[serde(default)]
     pub remembered_login: Option<RememberedLogin>,
+    /// 同上：老金库记录里没有身份字段，升级后必须还能读出来。
+    #[serde(default)]
+    pub identity: Option<StoredCustomerIdentity>,
 }
 
 #[derive(Debug)]
@@ -223,19 +238,35 @@ pub fn customer_save_credentials(
     app: AppHandle,
     device_token: String,
     session_token: String,
+    identity: Option<StoredCustomerIdentity>,
 ) -> Result<(), String> {
     vault_for(&app)
-        .and_then(|vault| {
-            // 这个命令整体覆盖记录，而会话续期每次都会调它；不把已记住的登录
-            // 读出来带过去，用户勾的「记住密码」会在下一次心跳续期时被冲掉。
-            let remembered = vault.load()?.and_then(|stored| stored.remembered_login);
-            vault.save(&CustomerCredentials {
-                device_token,
-                session_token: Some(session_token),
-                remembered_login: remembered,
-            })
-        })
+        .and_then(|vault| save_credentials_into(&vault, device_token, session_token, identity))
         .map_err(|e| e.0)
+}
+
+/// `customer_save_credentials` 的核心（脱离 AppHandle，供单元测试直接驱动）。
+///
+/// 两条保留规则都在这里：命令整体覆盖记录，而「记住密码」与 CW-062 身份
+/// 都是随登录写入、不能在下一次心跳续期时被冲掉的东西；调用方（TS 侧）在
+/// 续期时只带令牌，读旧记录回填是唯一的保命机制。
+fn save_credentials_into(
+    vault: &CustomerCredentialVault,
+    device_token: String,
+    session_token: String,
+    identity: Option<StoredCustomerIdentity>,
+) -> Result<(), VaultError> {
+    let stored = vault.load()?;
+    let remembered = stored
+        .as_ref()
+        .and_then(|record| record.remembered_login.clone());
+    let preserved_identity = stored.and_then(|record| record.identity);
+    vault.save(&CustomerCredentials {
+        device_token,
+        session_token: Some(session_token),
+        remembered_login: remembered,
+        identity: identity.or(preserved_identity),
+    })
 }
 
 #[tauri::command]
@@ -250,6 +281,7 @@ pub fn customer_save_remembered_login(
                 device_token: String::new(),
                 session_token: None,
                 remembered_login: None,
+                identity: None,
             });
             credentials.remembered_login = Some(RememberedLogin { username, password });
             vault.save(&credentials)
@@ -871,6 +903,49 @@ mod tests {
     // 续会话不能把它冲掉、退出登录要保留、设备吊销要一并清除。
     const REMEMBERED_SECRET_TEXT: &str = "remembered-secret-1";
 
+    // CW-062：身份同理——续期不带身份必须保留，换机/设备吊销一并清除。
+    const IDENTITY_ACCOUNT_TYPE_TEXT: &str = "SUB";
+    const IDENTITY_PARENT_ID_TEXT: &str = "parent-1";
+    const IDENTITY_PARENT_NAME_TEXT: &str = "总部机构";
+
+    fn sub_identity() -> StoredCustomerIdentity {
+        StoredCustomerIdentity {
+            account_type: IDENTITY_ACCOUNT_TYPE_TEXT.to_string(),
+            parent_user_id: Some(IDENTITY_PARENT_ID_TEXT.to_string()),
+            parent_display_name: Some(IDENTITY_PARENT_NAME_TEXT.to_string()),
+        }
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn identity_survives_a_renewal_and_is_dropped_on_device_rotation() {
+        let vault = temp_vault();
+        save_credentials_into(
+            &vault,
+            DEVICE_TOKEN_TEXT.to_string(),
+            "session-1".to_string(),
+            Some(sub_identity()),
+        )
+        .expect("initial save");
+
+        // 续期：TS 侧不带 identity（None）——命令必须保留已存身份，
+        // 否则每次心跳都会把个人中心的徽章数据冲掉。
+        save_credentials_into(
+            &vault,
+            DEVICE_TOKEN_TEXT.to_string(),
+            "session-2".to_string(),
+            None,
+        )
+        .expect("renew");
+        let stored = vault.load().expect("load").expect("some");
+        assert_eq!(stored.session_token.as_deref(), Some("session-2"));
+        assert_eq!(stored.identity, Some(sub_identity()));
+
+        // 设备吊销/换机：身份是旧登录的残留，必须一并清掉。
+        vault.clear_all().expect("clear all");
+        assert_eq!(vault.load().expect("load"), None);
+    }
+
     #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn remembered_login_survives_a_session_token_renewal() {
@@ -883,6 +958,7 @@ mod tests {
                     username: "alice".to_string(),
                     password: REMEMBERED_SECRET_TEXT.to_string(),
                 }),
+                identity: None,
             })
             .expect("initial save");
 
@@ -915,6 +991,7 @@ mod tests {
                     username: "alice".to_string(),
                     password: REMEMBERED_SECRET_TEXT.to_string(),
                 }),
+                identity: None,
             })
             .expect("initial save");
 
@@ -945,6 +1022,7 @@ mod tests {
                     username: "alice".to_string(),
                     password: REMEMBERED_SECRET_TEXT.to_string(),
                 }),
+                identity: None,
             })
             .expect("initial save");
 
@@ -962,6 +1040,8 @@ mod tests {
             serde_json::from_slice(legacy).expect("legacy record parses");
         assert_eq!(parsed.device_token, DEVICE_TOKEN_TEXT);
         assert!(parsed.remembered_login.is_none());
+        // CW-062：老金库同样没有身份字段，升级后必须先降级为「身份未知」。
+        assert!(parsed.identity.is_none());
     }
 
     #[test]
@@ -991,6 +1071,7 @@ mod tests {
                 device_token: DEVICE_TOKEN_TEXT.into(),
                 session_token: Some("session-token-1".into()),
                 remembered_login: None,
+                identity: None,
             })
             .expect("save");
 
@@ -1010,6 +1091,7 @@ mod tests {
                 device_token: DEVICE_TOKEN_TEXT.into(),
                 session_token: Some("session-token-1".into()),
                 remembered_login: None,
+                identity: None,
             })
             .expect("save");
 
@@ -1035,6 +1117,7 @@ mod tests {
                 device_token: DEVICE_TOKEN_TEXT.into(),
                 session_token: Some("session-token-1".into()),
                 remembered_login: None,
+                identity: None,
             })
             .expect("save");
 
@@ -1054,6 +1137,7 @@ mod tests {
                 device_token: DEVICE_TOKEN_TEXT.into(),
                 session_token: Some("session-token-1".into()),
                 remembered_login: None,
+                identity: None,
             })
             .expect("save");
 
@@ -1084,6 +1168,7 @@ mod tests {
                 device_token: DEVICE_TOKEN_TEXT.into(),
                 session_token: Some("session-token-1".into()),
                 remembered_login: None,
+                identity: None,
             })
             .expect("save");
 
@@ -1104,6 +1189,7 @@ mod tests {
                 device_token: DEVICE_TOKEN_TEXT.into(),
                 session_token: Some("session-token-1".into()),
                 remembered_login: None,
+                identity: None,
             })
             .expect("save");
         assert!(
@@ -1121,6 +1207,7 @@ mod tests {
                 device_token: DEVICE_TOKEN_TEXT.into(),
                 session_token: Some("session-token-1".into()),
                 remembered_login: None,
+                identity: None,
             })
             .expect("save");
 
@@ -1140,6 +1227,7 @@ mod tests {
                 device_token: DEVICE_TOKEN_TEXT.into(),
                 session_token: Some("session-token-1".into()),
                 remembered_login: None,
+                identity: None,
             })
             .expect("save");
 
@@ -1158,6 +1246,7 @@ mod tests {
             device_token: DEVICE_TOKEN_TEXT.into(),
             session_token: Some("session-token-1".into()),
             remembered_login: None,
+            identity: None,
         });
         assert!(
             result.is_err(),
@@ -1201,6 +1290,7 @@ mod tests {
                 device_token: DEVICE_TOKEN_TEXT.into(),
                 session_token: Some("session-token-1".into()),
                 remembered_login: None,
+                identity: None,
             })
             .expect("save");
         let identity = vault.device_instance_id().expect("identity");
@@ -1233,6 +1323,7 @@ mod tests {
                 device_token: DEVICE_TOKEN_TEXT.into(),
                 session_token: Some("session-token-1".into()),
                 remembered_login: None,
+                identity: None,
             })
             .expect("save");
         let envelope = vault.dir.join(CREDENTIALS_FILE);
@@ -1245,6 +1336,7 @@ mod tests {
                     device_token: DEVICE_TOKEN_TEXT.into(),
                     session_token: None,
                     remembered_login: None,
+                    identity: None,
                 })
                 .expect("re-save");
             vault.load().expect("reload").expect("device credential")

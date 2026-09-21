@@ -4,6 +4,12 @@
 
 This document describes the sub-account management system implemented in CW-062, enabling master accounts to create and manage subordinate accounts for distributed video replication operations while maintaining centralized billing and resource ownership.
 
+The desktop follow-up (2026-09-21) extends it end-to-end: sub-account passwords
+and login admission, the customer self-service lane
+(`/api/customer/sub-accounts`), master-wallet resolution on the consumption
+path, and the Tauri/React client surfaces (identity badge, management page,
+cached display identity).
+
 ## Architecture
 
 ### Data Model
@@ -54,17 +60,27 @@ When a MASTER account is deleted:
 - Publish accounts retained for record-keeping
 - Only immediate hierarchy (sub-accounts) fully cascades
 
+**Session-history pin (029 append-only log)**: `customer_session_events` accepts
+only `INSERT` — the append-only trigger refuses `UPDATE`/`DELETE` outright — and
+its `user_id` FK carries no CASCADE. An account that ever held a session keeps
+its audit trail: any user-row DELETE that would orphan those events (a
+sub-account directly, or a master cascading into its sub-rows) fails the FK and
+rolls back; the lanes turn that into a graceful answer (degraded deactivation /
+409) instead of a 500.
+
 ---
 
 ## API Endpoints
 
 ### Base URL
 
-```
-/api/admin/sub-accounts
-```
+- **Admin lane**: `/api/admin/sub-accounts` — the operations console, behind
+  the CW-026/027 guards (admin session + write CSRF).
+- **Customer self-service lane**: `/api/customer/sub-accounts` — a master
+  manages its own organisation from the desktop client; a sub-account session
+  is answered 403 (see the dedicated section below).
 
-All endpoints require admin role authentication.
+All admin endpoints require admin role authentication.
 
 ### 1. Create Sub-Account
 
@@ -76,6 +92,7 @@ All endpoints require admin role authentication.
   "username": "employee_001",
   "display_name": "张三 (员工)",
   "parent_user_id": "master_uuid_here",
+  "initial_password": "optional-secret-1",
   "reason": "用于视频批量生产",
   "request_id": "uuid-v4"
 }
@@ -84,6 +101,11 @@ All endpoints require admin role authentication.
 **Validation**:
 - `username`: Unique across all users (checked via `SELECT 1 FROM users WHERE username = %s`)
 - `parent_user_id`: Must exist AND have `account_type='MASTER'` AND `role='customer'`
+- `initial_password` (optional): hashed at the boundary (400 `WEAK_PASSWORD` on
+  a policy violation); when present the row is written with
+  `registration_source='admin_create'` — the origin the shared password-session
+  rule admits. Without it the account exists but cannot hold a session until a
+  password is set through the reset endpoint.
 - `reason`: Non-blank string (for audit log)
 
 **Success Response (200)**:
@@ -95,6 +117,7 @@ All endpoints require admin role authentication.
   "account_type": "SUB",
   "parent_user_id": "master_uuid_here",
   "is_active": true,
+  "has_password": true,
   "created_at": "2026-09-19T12:34:56.789Z"
 }
 ```
@@ -169,7 +192,38 @@ All endpoints require admin role authentication.
 
 ---
 
-### 4. Delete Sub-Account
+### 4. Reset Sub-Account Password
+
+**POST** `/api/admin/sub-accounts/{sub_account_id}/password`
+
+**Request Body**:
+```json
+{
+  "password": "new-secret-9",
+  "reason": "员工换人",
+  "request_id": "uuid-v4"
+}
+```
+
+Setting or rotating the password writes `registration_source='admin_create'`
+alongside the hash and revokes the sub-account's live session in the same
+transaction — an old session must not outlive the old password. Plaintext never
+touches the database or the audit trail.
+
+**Response (200)**:
+```json
+{ "id": "sub_xyz123", "has_password": true }
+```
+
+**Errors**:
+| Code | HTTP Status | Description |
+|------|-------------|-------------|
+| `SUB_ACCOUNT_NOT_FOUND` | 404 | ID doesn't exist or isn't a SUB type |
+| `WEAK_PASSWORD` | 400 | Password violates the shared registration policy |
+
+---
+
+### 5. Delete Sub-Account
 
 **DELETE** `/api/admin/sub-accounts/{sub_account_id}`
 
@@ -181,16 +235,99 @@ All endpoints require admin role authentication.
 }
 ```
 
-**Cascade Effects**:
-- All devices with `parent_user_id = sub_account_id` → `parent_user_id` becomes NULL
-- No changes to `user_id` references in `publish_accounts`
+**Footprint & history semantics**:
+- The session-state/device footprint (`customer_session_state`,
+  `customer_devices`) is purged first — those `user_id` FKs carry no CASCADE
+- Business history (ledger, tasks) and the append-only session-event log (029)
+  are deliberately never deleted: when such rows pin the account the DELETE
+  answers 409 and the operator deactivates instead
 - Audit log entry created (action: `'sub_account.delete'`)
 
 **Errors**:
 | Code | HTTP Status | Description |
 |------|-------------|-------------|
 | `SUB_ACCOUNT_NOT_FOUND` | 404 | ID doesn't exist |
-| `ADMIN_REQUIRED` | 403 | Caller not an admin |
+| `SUB_ACCOUNT_HAS_HISTORY` | 409 | Ledger/task/session history pins the row — deactivate instead |
+
+---
+
+## Customer Self-Service Lane (Desktop Follow-Up)
+
+`/api/customer/sub-accounts` lets a **master** customer run the same lifecycle
+from the desktop client without the admin lane:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/customer/sub-accounts` | List the caller's own sub-accounts |
+| `POST` | `/api/customer/sub-accounts` | Create a sub-account (optional initial `password`) |
+| `PATCH` | `/api/customer/sub-accounts/{id}` | Update `display_name` / `is_active` |
+| `POST` | `/api/customer/sub-accounts/{id}/password` | Set/rotate the sub's password |
+| `DELETE` | `/api/customer/sub-accounts/{id}` | Delete, or degrade to deactivation |
+
+**Safety rails**:
+
+- Every endpoint rides the customer session fence: no session → 401
+  `SESSION_REQUIRED`; a *sub-account* session → 403 `MASTER_ACCOUNT_REQUIRED`.
+  Sub-accounts never manage sub-accounts.
+- Rows are scoped by `parent_user_id = caller`. A foreign or unknown id is the
+  single 404 `SUB_ACCOUNT_NOT_FOUND` — no IDOR oracle distinguishing the two.
+- Deactivation (`is_active=false`) and password rotation revoke the sub's live
+  session in the same transaction (SES-03 propagation).
+- Deactivating the *master* freezes every session riding under it: the shared
+  session fence re-checks the parent's `is_active` on every request.
+
+**Create contract** (`POST`): `{username, display_name, password?}` → `201`
+with the sub payload (`id, username, display_name, account_type,
+parent_user_id, is_active, has_password, created_at, updated_at`). With a
+password the sub can log in immediately (the row is written with
+`registration_source='admin_create'`); without one the account exists but
+cannot hold a session until the master sets a password.
+
+**Delete contract** (`DELETE`) prefers a real delete — the session-state/device
+footprint is purged in a savepoint, then the row. When history pins the account
+(business rows, or the append-only session-event log), the savepoint rolls back
+and the account is deactivated + its session revoked instead:
+
+```json
+{ "id": "sub-9f1c...", "deleted": false, "is_active": false }
+```
+
+`deleted: true` means the row is gone; `deleted: false` means it survives,
+deactivated, until the master deletes it again for a clean account.
+
+**Stable error codes**:
+
+| Code | HTTP Status | Description |
+|------|-------------|-------------|
+| `SESSION_REQUIRED` | 401 | No customer session token |
+| `MASTER_ACCOUNT_REQUIRED` | 403 | Caller is not a MASTER (e.g. a sub session) |
+| `SUB_ACCOUNT_NOT_FOUND` | 404 | Foreign or unknown id (single answer) |
+| `USERNAME_TAKEN` | 409 | Username already taken |
+| `WEAK_PASSWORD` | 400 | Password violates the registration policy |
+| `INVALID_DISPLAY_NAME` | 400 | Blank or over 64 characters |
+| `EMPTY_UPDATE` | 400 | PATCH with neither field set |
+
+Audit rows land in `audit_logs` under `customer.sub_account.*` with public
+metadata only.
+
+---
+
+## Sub-Account Login & Session Admission
+
+Sub-accounts authenticate with a username + password of their own through the
+regular customer lane:
+
+- Login (`POST /api/customer/login`, and the legacy password-login alias) and
+  the session fence share one admission rule —
+  `sub_account_auth.password_login_account_ok`: a sub is admitted only with
+  `registration_source='admin_create'`, `account_type IN ('SUB','SUB_ADMIN')`,
+  a bound parent, and an **active** master. Masters keep the `self_register` /
+  `activation_code` origins.
+- The login answer and `GET /api/customer/profile` carry the identity:
+  `account_type`, `parent_user_id`, `parent_display_name` — the desktop renders
+  the badge from them without an extra admin call.
+- Deactivating the master or the sub, or rotating the password, ends the
+  session on the next request (fence re-check), not only at lease expiry.
 
 ---
 
@@ -338,6 +475,30 @@ WHERE actor_user_id IS NULL
 
 **Result after backfill**: `actor_user_id = NULL` only for historical transactions where the actual operator was later deleted (retained for audit integrity).
 
+### Wallet Resolution (Desktop Follow-Up)
+
+One organisation holds one wallet (the master's). `usage_billing.resolve_wallet_owner`
+maps any session user to its wallet owner: a sub resolves to its master; a
+master to itself. Consumers:
+
+- Customer wallet reads (`GET /api/customer/wallet`, `/center-summary`,
+  `/wallet/transactions`) answer the master's balance for a sub session.
+- The consumption chain (accept/finish operations) charges the master's wallet
+  while `actor_user_id` keeps the sub's id — spend attribution stays per-person
+  on a single organisation balance.
+- A sub owns no `wallets` row; top-ups and adjustments always target the master.
+
+---
+
+## Desktop Client Integration (Desktop Follow-Up)
+
+| Layer | Piece | Behavior |
+|-------|-------|----------|
+| Session | `useCustomerSession` / types | Login + profile responses persist `account_type`, `parent_user_id`, `parent_display_name` into the session state |
+| Personal center | `CustomerProfilePanel` | Identity badge (master: "母账号"; sub: "子账号 · 所属母账号") and the sub-account management tab only for masters; unknown identity degrades to no badge |
+| Management page | `SubAccountManagementPage` | List / create (optional initial password) / rename / deactivate (with confirmation) / reset password / delete; a `deleted:false` answer surfaces as "已停用（存在历史数据）" instead of a silent no-op |
+| Credential cache | Tauri `customer_credentials.rs` | A display-only `StoredCustomerIdentity` copy rides the device credential: a restored session renders the badge on the first frame; renewal keeps it (TS sends `identity: null`), device rotation / logout / clear-all drops it |
+
 ---
 
 ## Database Migration Guide
@@ -421,8 +582,19 @@ alembic downgrade 20260919T1200_publish_account_avatar
 
 ### Unit Tests
 
-- `test_sub_account_schema.py`: PG-only schema constraints (6 tests)
-- `test_sub_account_crud.py`: API endpoint integration (9 tests)
+- `test_sub_account_schema.py`: PG-only schema constraints
+- `test_sub_account_crud.py`: admin-lane API integration, including the 409
+  refusal when a session history pins the row (029 append-only events)
+- `test_customer_sub_account_self_service.py`: customer-lane lifecycle with
+  real password sessions — create/login/identity fields, list/rename, single-404
+  scope, fence refusal, delete degrade, revocation on deactivate/rotation,
+  master deactivation freezing sub sessions, master-wallet reads
+- `test_customer_center.py`: profile/session identity contract
+- Vitest: `SubAccountManagementPage.test.tsx` (list/create/initial password/
+  deactivate confirm/expired session/delete degrade), `CustomerProfilePanel.test.tsx`
+  (master badge vs sub badge vs unknown identity)
+- Tauri: `customer_credentials.rs` unit tests (identity survives a session
+  renewal, dropped on device rotation / clear-all)
 
 ### E2E Tests (Pending)
 
@@ -450,7 +622,11 @@ alembic downgrade 20260919T1200_publish_account_avatar
 - [ ] Migrate hardcoded error codes to centralized catalog
 - [ ] Add OpenAPI response schemas for all endpoints
 - [ ] Implement rate limiting for sub-account mutation APIs
-- [ ] Add soft-delete flag instead of hard CASCADE DELETE
+- [x] Soft-delete path: DELETE now degrades to deactivation whenever history
+      (ledger/tasks/append-only session events) pins the row — customer lane
+      answers `deleted: false`, admin lane 409 `SUB_ACCOUNT_HAS_HISTORY`
+- [ ] Cascading master deletion still assumes no sub holds session history —
+      revisit before any bulk org purge ships
 
 ---
 

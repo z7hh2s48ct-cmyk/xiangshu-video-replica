@@ -22,6 +22,9 @@ const sessionTokenText = "workspace-session-token-1";
 const user: CustomerWorkspaceUser = {
   userId: "user-1",
   username: "customer-1",
+  accountType: "MASTER",
+  parentUserId: null,
+  parentDisplayName: null,
 };
 
 const mockDevices: CustomerDeviceListResponse = {
@@ -64,6 +67,10 @@ const mockProfile: CustomerProfile = {
   activated_at: "2026-08-02T00:00:00Z",
   device_slots_used: 1,
   device_slots_total: 2,
+  // CW-062：母账号身份（无 parent）。
+  account_type: "MASTER",
+  parent_user_id: null,
+  parent_display_name: null,
 };
 
 function jsonResponse(payload: unknown, status = 200) {
@@ -100,6 +107,8 @@ function fakeStore(): CustomerCredentialStore {
     clearAllCredentials: vi.fn().mockResolvedValue(undefined),
     deviceInstanceId: vi.fn().mockResolvedValue("test-instance-id"),
     devicePlatform: () => "windows",
+    // CW-062：身份缓存不参与这些用例的断言，给出满足接口的最小桩。
+    loadIdentity: async () => null,
     // 「记住密码」在这些用例里不参与断言，给出满足接口的最小桩。
     loadRememberedLogin: async () => null,
     saveRememberedLogin: async () => {},

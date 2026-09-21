@@ -1,0 +1,97 @@
+/* CW-062 桌面端自助子账号管理：沿用 customer-access.css 的色彩令牌
+   （--line / --panel / --font-*），卡片式列表避免把表格塞进个人中心。 */
+.sub-accounts-page {
+  display: grid;
+  gap: 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 24px;
+  background: var(--panel);
+}
+.sub-accounts-page__header h3 {
+  margin: 6px 0 8px;
+  color: #f4efe7;
+}
+.sub-accounts-page__header p {
+  margin: 0;
+  color: #aaa297;
+}
+.sub-accounts-page__create {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  align-items: end;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 18px;
+  background: #141419;
+}
+.sub-accounts-page__create label {
+  display: grid;
+  gap: 8px;
+  color: #aaa297;
+  font-size: var(--font-label);
+}
+.sub-accounts-page__create input {
+  width: 100%;
+}
+.sub-accounts-list {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.sub-account-card {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) auto auto;
+  align-items: center;
+  gap: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px 18px;
+  background: #141419;
+}
+.sub-account-card__identity {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.sub-account-card__identity strong {
+  color: #f0e9df;
+  overflow-wrap: anywhere;
+}
+.sub-account-card__identity small {
+  color: #aaa297;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+.sub-account-card__identity input {
+  width: 100%;
+}
+.sub-account-card__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.sub-account-badge {
+  border: 1px solid #4a4a4f;
+  border-radius: 999px;
+  padding: 3px 10px;
+  color: #aaa297;
+  font-size: var(--font-caption);
+}
+.sub-account-badge.is-active {
+  border-color: #3f6b52;
+  color: #91deb4;
+}
+.sub-account-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.sub-account-card__actions button.is-danger:hover {
+  color: #f2a3a3;
+  background: #3a1d1d;
+}

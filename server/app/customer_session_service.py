@@ -577,6 +577,26 @@ def switch_session(
 REASON_CODE_SUSPENDED = "code_suspended"
 REASON_CODE_REVOKED = "code_revoked"
 
+# The reasons recorded when a master reevaluates one of its sub-accounts
+# (customer self-service lane): deactivation and credential rotation both
+# terminate the sub's live session in the same transaction.
+REASON_SUB_ACCOUNT_DEACTIVATED = "sub_account_deactivated"
+REASON_SUB_ACCOUNT_PASSWORD_RESET = "sub_account_password_reset"
+
+# The session/device rows that must be purged before a customer row can be
+# physically deleted: their ``user_id`` FKs carry no CASCADE. Order matters —
+# the session state references the device, so it goes first. The session-event
+# log is deliberately absent: ``customer_session_events`` is append-only (029 —
+# the database refuses UPDATE/DELETE outright), so a session history is kept
+# and pins the account the same way business history does — the DELETE
+# degrades (customer lane) or answers the has-history conflict (admin lane)
+# instead of rewriting the audit. Business history (ledger, tasks) is absent
+# for the same reason.
+SUB_ACCOUNT_FOOTPRINT_TABLES = (
+    "customer_session_state",
+    "customer_devices",
+)
+
 
 def revoke_session(
     conn: psycopg.Connection,

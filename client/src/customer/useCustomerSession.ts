@@ -36,7 +36,12 @@ import {
 export interface CustomerCredentialStore {
   loadDeviceCredentialToken(): Promise<string | null>;
   loadSessionToken(): Promise<string | null>;
-  saveActivation(deviceToken: string, sessionToken: string): Promise<void>;
+  /** 第三参可选：只有携带身份时才更新缓存（设备凭据恢复路径不传）。 */
+  saveActivation(
+    deviceToken: string,
+    sessionToken: string,
+    identity?: CustomerStoredIdentity,
+  ): Promise<void>;
   saveSessionToken(sessionToken: string): Promise<void>;
   clearSessionToken(): Promise<void>;
   clearAllCredentials(): Promise<void>;
@@ -47,9 +52,20 @@ export interface CustomerCredentialStore {
   loadRememberedLogin(): Promise<RememberedLogin | null>;
   saveRememberedLogin(login: RememberedLogin): Promise<void>;
   clearRememberedLogin(): Promise<void>;
+  /** CW-062：随设备凭据缓存的账号身份。密码登录时写入，重启恢复会话时读出；
+   * 桌面端持久化到系统凭据库，浏览器端仅内存（刷新后由 profile 端点补齐）。 */
+  loadIdentity(): Promise<CustomerStoredIdentity | null>;
 }
 
 export type RememberedLogin = { username: string; password: string };
+
+/** CW-062 子账号身份（与设备凭据同住）：母账号为 `MASTER` 且无 parent；
+ * 子账号席位携带母账号 id 与显示名，工作台据此渲染身份徽章。 */
+export type CustomerStoredIdentity = {
+  accountType: "MASTER" | "SUB" | "SUB_ADMIN";
+  parentUserId: string | null;
+  parentDisplayName: string | null;
+};
 
 export type CustomerSessionConflict = {
   deviceNameMasked: string;
@@ -85,16 +101,44 @@ export type CustomerActivationFormInput = {
 
 /** The workspace identity for the customer lane. Activation returns the
  * username; a restart-restore login response carries only the user id (no
- * customer /me endpoint exists yet), so the username degrades to null. */
+ * customer /me endpoint exists yet), so the username degrades to null.
+ *
+ * CW-062: `accountType`/`parentUserId`/`parentDisplayName` carry the
+ * sub-account identity; `accountType` is null when a restored session could
+ * not recover it (pre-upgrade credential vaults) — the badge stays hidden
+ * until the next password login refreshes it. */
 export type CustomerWorkspaceUser = {
   userId: string;
   username: string | null;
+  accountType: "MASTER" | "SUB" | "SUB_ADMIN" | null;
+  parentUserId: string | null;
+  parentDisplayName: string | null;
 };
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
 
 function newIdempotencyKey(): string {
   return crypto.randomUUID();
+}
+
+/** The server closes the account type to MASTER/SUB/SUB_ADMIN; anything else
+ * (an old server, a replayed envelope) degrades to the master default. */
+function parseAccountType(
+  value: string | null | undefined,
+): "MASTER" | "SUB" | "SUB_ADMIN" {
+  return value === "SUB" || value === "SUB_ADMIN" ? value : "MASTER";
+}
+
+/** The cached identity never blocks a session: a vault read failure degrades
+ * to "unknown" and the badge simply stays hidden. */
+async function loadStoredIdentity(
+  store: CustomerCredentialStore,
+): Promise<CustomerStoredIdentity | null> {
+  try {
+    return await store.loadIdentity();
+  } catch {
+    return null;
+  }
 }
 
 /** A vault (credential-store) failure surfaced as a determinate customer
@@ -275,7 +319,13 @@ export function useCustomerSession(
           sessionTokenRef.current = previousSessionToken;
           sessionGenerationRef.current += 1;
           setSessionToken(previousSessionToken);
-          setUser({ userId: profile.user_id, username: profile.username });
+          setUser({
+            userId: profile.user_id,
+            username: profile.username,
+            accountType: parseAccountType(profile.account_type),
+            parentUserId: profile.parent_user_id ?? null,
+            parentDisplayName: profile.parent_display_name ?? null,
+          });
           noteLease(lease.lease_expires_at);
           return;
         } catch (cause) {
@@ -308,7 +358,17 @@ export function useCustomerSession(
       sessionTokenRef.current = result.session.session_token;
       sessionGenerationRef.current += 1;
       setSessionToken(result.session.session_token);
-      setUser({ userId: result.session.user_id, username: null });
+      // CW-062：设备凭据恢复不带身份（响应里只有 user_id）；从凭据库缓存读回
+      // 子账号身份。旧金库没有缓存时身份未知（null），徽章暂不可见，直到
+      // 下一次密码登录刷新。
+      const storedIdentity = await loadStoredIdentity(store);
+      setUser({
+        userId: result.session.user_id,
+        username: null,
+        accountType: storedIdentity?.accountType ?? null,
+        parentUserId: storedIdentity?.parentUserId ?? null,
+        parentDisplayName: storedIdentity?.parentDisplayName ?? null,
+      });
       noteLease(result.session.session_lease_expires_at);
       return result;
     },
@@ -519,7 +579,14 @@ export function useCustomerSession(
         sessionTokenRef.current = response.session_token;
         sessionGenerationRef.current += 1;
         setSessionToken(response.session_token);
-        setUser({ userId: response.user_id, username: response.username });
+        // 激活码只能铸造机构母账号（子账号仅限管理端创建），身份直给。
+        setUser({
+          userId: response.user_id,
+          username: response.username,
+          accountType: "MASTER",
+          parentUserId: null,
+          parentDisplayName: null,
+        });
         noteLease(response.session_lease_expires_at);
         dispatch({ type: "activation-succeeded" });
       } catch (cause) {
@@ -579,16 +646,30 @@ export function useCustomerSession(
           body,
           passwordAttemptRef.current.key,
         );
+        // CW-062：登录响应携带子账号身份，随设备凭据一并落库，重启恢复会话
+        // （设备凭据路径）不再需要第二次往返。
+        const identity: CustomerStoredIdentity = {
+          accountType: parseAccountType(response.account_type),
+          parentUserId: response.parent_user_id ?? null,
+          parentDisplayName: response.parent_display_name ?? null,
+        };
         await store.saveActivation(
           response.device_token,
           response.session_token,
+          identity,
         );
         passwordAttemptRef.current = null;
         registeredUsernameRef.current = null;
         sessionTokenRef.current = response.session_token;
         sessionGenerationRef.current += 1;
         setSessionToken(response.session_token);
-        setUser({ userId: response.user_id, username: response.username });
+        setUser({
+          userId: response.user_id,
+          username: response.username,
+          accountType: identity.accountType,
+          parentUserId: identity.parentUserId,
+          parentDisplayName: identity.parentDisplayName,
+        });
         setError(null);
         setConflict(null);
         noteLease(response.session_lease_expires_at);
@@ -700,7 +781,15 @@ export function useCustomerSession(
       sessionTokenRef.current = result.session.session_token;
       sessionGenerationRef.current += 1;
       setSessionToken(result.session.session_token);
-      setUser({ userId: result.session.user_id, username: null });
+      // 显式切换设备仍是同一账号：身份从凭据库缓存延续（无缓存则未知）。
+      const storedIdentity = await loadStoredIdentity(store);
+      setUser({
+        userId: result.session.user_id,
+        username: null,
+        accountType: storedIdentity?.accountType ?? null,
+        parentUserId: storedIdentity?.parentUserId ?? null,
+        parentDisplayName: storedIdentity?.parentDisplayName ?? null,
+      });
       setConflict(null);
       noteLease(result.session.session_lease_expires_at);
       dispatch({ type: "login-succeeded" });
@@ -877,10 +966,18 @@ export function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
+type StoredCustomerIdentity = {
+  account_type: string;
+  parent_user_id: string | null;
+  parent_display_name: string | null;
+};
+
 type StoredCustomerCredentials = {
   device_token: string;
   session_token: string | null;
   remembered_login?: { username: string; password: string } | null;
+  /** CW-062：老金库记录里没有这个字段，升级后必须还能读出来，故可选。 */
+  identity?: StoredCustomerIdentity | null;
 };
 
 function tauriCustomerCredentialStore(): CustomerCredentialStore {
@@ -901,11 +998,31 @@ function tauriCustomerCredentialStore(): CustomerCredentialStore {
       const sessionToken = stored?.session_token?.trim();
       return sessionToken || null;
     },
-    async saveActivation(deviceToken, sessionToken) {
+    async saveActivation(deviceToken, sessionToken, identity) {
       await invoke("customer_save_credentials", {
         deviceToken,
         sessionToken,
+        // CW-062：无身份信息（设备凭据恢复）时传 null，Rust 侧保留已存身份。
+        identity: identity
+          ? {
+              account_type: identity.accountType,
+              parent_user_id: identity.parentUserId,
+              parent_display_name: identity.parentDisplayName,
+            }
+          : null,
       });
+    },
+    async loadIdentity() {
+      const stored = await invoke<StoredCustomerCredentials | null>(
+        "customer_load_credentials",
+      );
+      const identity = stored?.identity;
+      if (!identity) return null;
+      return {
+        accountType: parseAccountType(identity.account_type),
+        parentUserId: identity.parent_user_id ?? null,
+        parentDisplayName: identity.parent_display_name ?? null,
+      };
     },
     async saveSessionToken(sessionToken) {
       const stored = await invoke<StoredCustomerCredentials | null>(
@@ -957,6 +1074,9 @@ function browserCookieCredentialStore(): CustomerCredentialStore {
   // them from the same-origin endpoint, which never exposes its HttpOnly cookies.
   let deviceToken: string | null = null;
   let sessionToken: string | null = null;
+  // CW-062：浏览器端没有系统凭据库，身份缓存只在内存里活到刷新为止；
+  // 刷新后由 profile 端点（account_type/parent_*）补齐。绝不落 Web Storage。
+  let identity: CustomerStoredIdentity | null = null;
   const instanceId = newIdempotencyKey();
   let initialized = false;
   let pending: Promise<void> | null = null;
@@ -991,11 +1111,12 @@ function browserCookieCredentialStore(): CustomerCredentialStore {
       await load();
       return sessionToken;
     },
-    async saveActivation(nextDeviceToken, nextSessionToken) {
+    async saveActivation(nextDeviceToken, nextSessionToken, nextIdentity) {
       revision += 1;
       initialized = true;
       deviceToken = nextDeviceToken;
       sessionToken = nextSessionToken.trim() || null;
+      if (nextIdentity) identity = nextIdentity;
     },
     async saveSessionToken(nextSessionToken) {
       revision += 1;
@@ -1024,12 +1145,16 @@ function browserCookieCredentialStore(): CustomerCredentialStore {
       revision += 1;
       deviceToken = null;
       sessionToken = null;
+      identity = null;
     },
     async deviceInstanceId() {
       return instanceId;
     },
     devicePlatform() {
       return "browser";
+    },
+    async loadIdentity() {
+      return identity;
     },
     // 浏览器没有系统凭据库。这里刻意不降级到 localStorage/sessionStorage——
     // 那等于把账号口令明文留在磁盘上，是 §10.2 明令禁止的。读恒为空，写是

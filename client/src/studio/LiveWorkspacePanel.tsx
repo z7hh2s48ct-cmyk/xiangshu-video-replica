@@ -108,6 +108,8 @@ export function LiveWorkspacePanel({
         <CustomerProfilePanel
           deviceError={customerAccount.deviceError}
           devices={customerAccount.devices}
+          identity={customerAccount.identity}
+          identityLoader={customerAccount.loadIdentity}
           onApprovePairing={customerAccount.onApprovePairing}
           onDismissPairing={customerAccount.onDismissPairing}
           onManualHeartbeat={customerAccount.onManualHeartbeat}

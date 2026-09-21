@@ -45,6 +45,7 @@ from app.customer_auth_routes import router as customer_auth_router
 from app.customer_device_routes import router as customer_device_router
 from app.customer_pricing_routes import router as customer_pricing_router
 from app.customer_session_routes import router as customer_session_router
+from app.customer_sub_account_routes import router as customer_sub_account_router
 from app.db_pg import DATABASE_URL_ENV, SQLITE_URL_SCHEMES, close_pg_pool
 from app.export_controller import router as export_router
 from app.first_frame_routes import router as first_frame_router
@@ -387,6 +388,7 @@ app.include_router(customer_auth_router)
 app.include_router(customer_activation_router)
 app.include_router(customer_device_router)
 app.include_router(customer_session_router)
+app.include_router(customer_sub_account_router)
 app.include_router(api_key_router)
 app.include_router(admin_activation_router)
 app.include_router(admin_device_router)

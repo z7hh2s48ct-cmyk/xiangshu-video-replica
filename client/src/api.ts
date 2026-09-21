@@ -6830,6 +6830,80 @@ export async function customerUpdateProfile(
   return body;
 }
 
+/** CW-062 客户自助子账号（/api/customer/sub-accounts）：后端返回 dict，
+ * 契约里是 unknown，故在此手写响应形状（与 admin lane 的先例一致）。 */
+export type CustomerSubAccount = {
+  id: string;
+  username: string;
+  display_name: string;
+  account_type: "SUB" | "SUB_ADMIN";
+  parent_user_id: string;
+  is_active: boolean;
+  has_password: boolean;
+  created_at: string;
+  updated_at: string | null;
+};
+
+export async function customerListSubAccounts(
+  credential: CustomerSessionCredential,
+): Promise<CustomerSubAccount[]> {
+  const { body } = await customerJson<{
+    sub_accounts: CustomerSubAccount[];
+    total_count: number;
+  }>("/api/customer/sub-accounts", { credential });
+  return body.sub_accounts;
+}
+
+export async function customerCreateSubAccount(
+  credential: CustomerSessionCredential,
+  input: { username: string; display_name: string; password?: string },
+): Promise<CustomerSubAccount> {
+  const { body } = await customerJson<CustomerSubAccount>(
+    "/api/customer/sub-accounts",
+    { method: "POST", credential, body: input },
+  );
+  return body;
+}
+
+export async function customerUpdateSubAccount(
+  credential: CustomerSessionCredential,
+  subAccountId: string,
+  input: { display_name?: string; is_active?: boolean },
+): Promise<CustomerSubAccount> {
+  const { body } = await customerJson<CustomerSubAccount>(
+    `/api/customer/sub-accounts/${encodeURIComponent(subAccountId)}`,
+    { method: "PATCH", credential, body: input },
+  );
+  return body;
+}
+
+export async function customerSetSubAccountPassword(
+  credential: CustomerSessionCredential,
+  subAccountId: string,
+  password: string,
+): Promise<{ id: string; has_password: boolean }> {
+  const { body } = await customerJson<{ id: string; has_password: boolean }>(
+    `/api/customer/sub-accounts/${encodeURIComponent(subAccountId)}/password`,
+    { method: "POST", credential, body: { password } },
+  );
+  return body;
+}
+
+export async function customerDeleteSubAccount(
+  credential: CustomerSessionCredential,
+  subAccountId: string,
+): Promise<{ id: string; deleted: boolean; is_active: boolean }> {
+  const { body } = await customerJson<{
+    id: string;
+    deleted: boolean;
+    is_active: boolean;
+  }>(`/api/customer/sub-accounts/${encodeURIComponent(subAccountId)}`, {
+    method: "DELETE",
+    credential,
+  });
+  return body;
+}
+
 /** The customer's wallet transaction ledger (GET /api/customer/wallet/transactions). */
 export async function customerListWalletTransactions(
   credential: CustomerSessionCredential,

@@ -245,6 +245,8 @@ describe("V1.4 workspace integration", () => {
     clearAllCredentials: vi.fn().mockResolvedValue(undefined),
     deviceInstanceId: vi.fn().mockResolvedValue("device-1"),
     devicePlatform: () => "windows",
+    // CW-062：身份缓存不参与这些用例的断言，给出满足接口的最小桩。
+    loadIdentity: async () => null,
     // 「记住密码」在这些用例里不参与断言，给出满足接口的最小桩。
     loadRememberedLogin: async () => null,
     saveRememberedLogin: async () => {},
@@ -272,6 +274,10 @@ describe("V1.4 workspace integration", () => {
       activated_at: "2026-09-01T08:00:00Z",
       device_slots_used: 1,
       device_slots_total: 2,
+      // CW-062：母账号身份（无 parent）。
+      account_type: "MASTER",
+      parent_user_id: null,
+      parent_display_name: null,
     },
     profileLoadError: "",
     store,
