@@ -2899,28 +2899,88 @@ describe("发布账号官方扫码", () => {
     await screen.findByRole("button", { name: "取消扫码" });
     expect(nativeAccounts.startLocalPublishLogin).toHaveBeenCalledOnce();
   });
-  it("额外验证时才提供官方窗口入口", async () => {
+  it("需要进一步验证时自动打开官方窗口，无需手动点击", async () => {
+    vi.useFakeTimers();
     nativeAccounts.startLocalPublishLogin.mockResolvedValue("verify-login");
+    nativeAccounts.focusLocalPublishLogin.mockResolvedValue(undefined);
     nativeAccounts.checkLocalPublishLogin.mockResolvedValue({
       phase: "action_required",
       image: null,
       account: null,
     });
     const { value } = open();
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "抖音" })).toBeEnabled(),
-    );
+    await act(async () => {});
     fireEvent.click(screen.getByRole("button", { name: "抖音" }));
-    fireEvent.click(
-      await screen.findByRole(
-        "button",
-        { name: "打开官方窗口" },
-        { timeout: 2500 },
-      ),
-    );
-    expect(nativeAccounts.focusLocalPublishLogin).toHaveBeenCalledWith(
-      value.user.id,
-      "verify-login",
-    );
+    await act(async () => {});
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    // 源码取码失败（action_required）即自动降级为可见官方窗口，只触发一次。
+    expect(
+      nativeAccounts.focusLocalPublishLogin,
+    ).toHaveBeenCalledExactlyOnceWith(value.user.id, "verify-login");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_000);
+    });
+    expect(nativeAccounts.focusLocalPublishLogin).toHaveBeenCalledOnce();
+  });
+  it("隐藏窗口持续取不到二维码时自动降级打开官方窗口", async () => {
+    vi.useFakeTimers();
+    nativeAccounts.startLocalPublishLogin.mockResolvedValue("slow-login");
+    nativeAccounts.focusLocalPublishLogin.mockResolvedValue(undefined);
+    nativeAccounts.checkLocalPublishLogin.mockResolvedValue({
+      phase: "loading",
+      image: null,
+      account: null,
+    });
+    const { value } = open();
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "抖音" }));
+    await act(async () => {});
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+    expect(nativeAccounts.focusLocalPublishLogin).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+    expect(
+      nativeAccounts.focusLocalPublishLogin,
+    ).toHaveBeenCalledExactlyOnceWith(value.user.id, "slow-login");
+  });
+  it("二维码就绪时不自动打开官方窗口，验证阶段仍可手动唤起", async () => {
+    vi.useFakeTimers();
+    nativeAccounts.startLocalPublishLogin.mockResolvedValue("ready-login");
+    nativeAccounts.focusLocalPublishLogin.mockResolvedValue(undefined);
+    nativeAccounts.checkLocalPublishLogin.mockResolvedValue({
+      phase: "qr_ready",
+      image: "data:image/png;base64,cXI=",
+      account: null,
+    });
+    const { value } = open();
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "抖音" }));
+    await act(async () => {});
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(35_000);
+    });
+    // 源码取码成功（qr_ready）时绝不自动弹官方窗口。
+    expect(nativeAccounts.focusLocalPublishLogin).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "打开官方窗口" })).toBeNull();
+    // 进入验证阶段后自动降级触发；手动按钮保留，便于窗口被最小化后重新唤起。
+    nativeAccounts.checkLocalPublishLogin.mockResolvedValue({
+      phase: "action_required",
+      image: null,
+      account: null,
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    expect(
+      nativeAccounts.focusLocalPublishLogin,
+    ).toHaveBeenCalledExactlyOnceWith(value.user.id, "ready-login");
+    fireEvent.click(screen.getByRole("button", { name: "打开官方窗口" }));
+    await act(async () => {});
+    expect(nativeAccounts.focusLocalPublishLogin).toHaveBeenCalledTimes(2);
   });
 });

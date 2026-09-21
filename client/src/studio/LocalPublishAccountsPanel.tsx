@@ -47,6 +47,8 @@ const cloudKey = (account: { platform: string; platform_user_id: string }) =>
   `${account.platform}:${account.platform_user_id}`;
 const SYNC_FAILED_MESSAGE =
   "本机已连接，但同步到服务端失败，自动发布暂不可用；请点击「同步到服务端」重试。";
+// 源码取码（隐藏窗口）的预算：超时仍拿不到二维码才降级为可见官方窗口。
+const AUTO_OFFICIAL_WINDOW_MS = 30_000;
 
 export function LocalPublishAccountsPanel({
   notify,
@@ -80,6 +82,8 @@ export function LocalPublishAccountsPanel({
   const syncToCloudRef = useRef<
     (account: LocalPublishAccount, storageState?: unknown) => Promise<void>
   >(async () => {});
+  // Same reason: auto-degrade calls focus() from inside the poll loop.
+  const focusRef = useRef<() => Promise<void>>(async () => {});
   const generation = useRef(0);
   const pending = useRef(false);
   const native = canUseLocalPublishAccounts();
@@ -190,6 +194,9 @@ export function LocalPublishAccountsPanel({
     let active = true;
     let failures = 0;
     let timer: ReturnType<typeof setTimeout>;
+    // 自动降级只触发一次；手动「打开官方窗口」按钮不受此标记限制。
+    let autoOpened = false;
+    const startedAt = Date.now();
     setPollPaused(false);
     const poll = async () => {
       try {
@@ -212,8 +219,22 @@ export function LocalPublishAccountsPanel({
           );
           if (canUseLocalPublishAccounts())
             void syncToCloudRef.current(account, status.storage_state ?? null);
-        } else if (status.phase !== "expired" && status.phase !== "closed") {
-          timer = setTimeout(() => void poll(), 1500);
+        } else {
+          // 源码取码失败才降级：需要额外验证，或预算内始终拿不到二维码。
+          // confirming 说明用户已在扫码，不弹可见窗口打断。
+          if (
+            canUseLocalPublishAccounts() &&
+            !autoOpened &&
+            (status.phase === "action_required" ||
+              (status.phase === "loading" &&
+                Date.now() - startedAt >= AUTO_OFFICIAL_WINDOW_MS))
+          ) {
+            autoOpened = true;
+            void focusRef.current();
+          }
+          if (status.phase !== "expired" && status.phase !== "closed") {
+            timer = setTimeout(() => void poll(), 1500);
+          }
         }
       } catch (cause) {
         if (!active || currentLogin.current !== loginId) return;
@@ -314,12 +335,16 @@ export function LocalPublishAccountsPanel({
     try {
       await focusLocalPublishLogin(ownerId, id);
       if (current !== generation.current || currentLogin.current !== id) return;
-      setRetryPoll((value) => value + 1);
+      // Only a paused poll needs resuming. When the window is shown automatically
+      // (or manually) while detection is still active, restarting the poll loop
+      // would double the cadence, so leave the running timer untouched.
+      if (pollPaused) setRetryPoll((value) => value + 1);
     } catch (cause) {
       if (current === generation.current && currentLogin.current === id)
         setError(errorMessage(cause));
     }
   }
+  focusRef.current = focus;
   async function remove() {
     if (!removing || pending.current) return;
     pending.current = true;

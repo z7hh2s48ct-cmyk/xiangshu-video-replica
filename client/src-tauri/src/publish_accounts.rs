@@ -556,6 +556,46 @@ pub fn close_all_windows(app: &AppHandle) {
     }
 }
 
+/// Close the official window of a session that reached a terminal state without
+/// a saved account (expiry, duplicate scan, mismatched identity). Fresh logins
+/// also get their WebView2 profile cleared so a half-scanned platform session
+/// never leaks into the next QR pull; re-verifications keep the stored profile.
+fn discard_login_session(
+    app: &AppHandle,
+    dir: &Path,
+    logins: &mut HashMap<String, Login>,
+    login_id: &str,
+) -> Result<(), String> {
+    let Some(login) = logins.get(login_id) else {
+        return Ok(());
+    };
+    let fresh = login.existing.is_none();
+    let platform = login.platform.clone();
+    let opened = app.get_webview_window(&format!("publish-{login_id}"));
+    let window = match opened {
+        Some(window) => {
+            window
+                .navigate("about:blank".parse().map_err(|_| "页面地址错误")?)
+                .map_err(|e| e.to_string())?;
+            window
+        }
+        None if fresh => official_window(app, dir, login_id, &platform, OfficialWindowMode::Clear)?,
+        None => {
+            logins.remove(login_id);
+            return Ok(());
+        }
+    };
+    if fresh {
+        if let Err(error) = clear_profile(&window) {
+            let _ = window.close();
+            return Err(error);
+        }
+    }
+    window.close().map_err(|e| e.to_string())?;
+    logins.remove(login_id);
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn list_local_publish_accounts(
     app: AppHandle,
@@ -627,12 +667,15 @@ pub async fn check_local_publish_login(
     main_only(&window)?;
     let dir = root(&app, &owner)?;
     let (platform, elapsed) = {
-        let logins = state.logins.lock().map_err(|_| "扫码会话忙，请重试")?;
+        let mut logins = state.logins.lock().map_err(|_| "扫码会话忙，请重试")?;
         let login = logins
             .get(&login_id)
             .filter(|v| v.owner == owner)
             .ok_or("扫码会话不存在")?;
         if login.started.elapsed() > Duration::from_secs(300) {
+            // Terminal: close the hidden window and drop the session so the next
+            // login is not blocked by a QR pull nobody polls anymore.
+            discard_login_session(&app, &dir, &mut logins, &login_id)?;
             return Ok(LoginStatus::phase("expired"));
         }
         (login.platform.clone(), login.started.elapsed())
@@ -691,19 +734,21 @@ pub async fn check_local_publish_login(
         return Err("平台返回的账号信息不完整".into());
     }
     let mut logins = state.logins.lock().map_err(|_| "扫码会话忙，请重试")?;
-    let login = logins
-        .get(&login_id)
-        .filter(|v| v.owner == owner)
-        .ok_or("扫码会话已取消")?;
-    if let Some(previous) = &login.existing {
-        if previous.platform_user_id != identity.platform_user_id {
-            official
-                .navigate("about:blank".parse().map_err(|_| "页面地址错误")?)
-                .map_err(|e| e.to_string())?;
-            clear_profile(&official)?;
-            official.close().map_err(|e| e.to_string())?;
-            fs::remove_file(account_path(&dir, &login_id)?).map_err(|e| e.to_string())?;
-            logins.remove(&login_id);
+    // Copy the field the terminal path needs; `discard_login_session` takes &mut.
+    let existing_uid = {
+        let login = logins
+            .get(&login_id)
+            .filter(|v| v.owner == owner)
+            .ok_or("扫码会话已取消")?;
+        login.existing.as_ref().map(|a| a.platform_user_id.clone())
+    };
+    if let Some(previous_uid) = existing_uid {
+        if previous_uid != identity.platform_user_id {
+            let account_file = account_path(&dir, &login_id)?;
+            discard_login_session(&app, &dir, &mut logins, &login_id)?;
+            if account_file.exists() {
+                fs::remove_file(&account_file).map_err(|e| e.to_string())?;
+            }
             return Err("扫码账号与原账号不同，已清除该登录状态；请取消并重新添加账号".into());
         }
     }
@@ -713,6 +758,9 @@ pub async fn check_local_publish_login(
             && a.platform_user_id == identity.platform_user_id
             && a.id != login_id
     }) {
+        // Terminal: the scanned account already exists, so this session must not
+        // keep its window or half-used profile around.
+        discard_login_session(&app, &dir, &mut logins, &login_id)?;
         return Err("该平台账号已连接，请使用已有账号重新验证".into());
     }
     let account = LocalAccount {
@@ -871,40 +919,21 @@ pub async fn cancel_local_publish_login(
     main_only(&window)?;
     let dir = root(&app, &owner)?;
     let mut logins = state.logins.lock().map_err(|_| "扫码会话忙，请重试")?;
-    if let Some(login) = logins.get(&login_id).filter(|v| v.owner == owner) {
-        let opened = app.get_webview_window(&format!("publish-{}", login.id));
-        if login.existing.is_none() {
-            let official = match opened {
-                Some(official) => {
-                    official
-                        .navigate("about:blank".parse().map_err(|_| "页面地址错误")?)
-                        .map_err(|e| e.to_string())?;
-                    official
-                }
-                None => official_window(
-                    &app,
-                    &dir,
-                    &login.id,
-                    &login.platform,
-                    OfficialWindowMode::Clear,
-                )?,
-            };
-            if let Err(error) = clear_profile(&official) {
-                let _ = official.close();
-                return Err(error);
-            }
-            official.close().map_err(|e| e.to_string())?;
-            // A failed close after metadata persistence can leave a pending login.
-            // Cancel must remove that partial record only after clearing succeeds.
+    let fresh = logins
+        .get(&login_id)
+        .filter(|v| v.owner == owner)
+        .map(|login| login.existing.is_none());
+    if let Some(fresh) = fresh {
+        // A failed close after metadata persistence can leave a pending login.
+        // Cancel must remove that partial record only after clearing succeeds.
+        discard_login_session(&app, &dir, &mut logins, &login_id)?;
+        if fresh {
             let _lock = state.disk.lock().map_err(|_| "账号存储忙，请重试")?;
-            let metadata = account_path(&dir, &login.id)?;
+            let metadata = account_path(&dir, &login_id)?;
             if metadata.exists() {
                 fs::remove_file(metadata).map_err(|e| e.to_string())?;
             }
-        } else if let Some(official) = opened {
-            official.close().map_err(|e| e.to_string())?;
         }
-        logins.remove(&login_id);
     }
     Ok(())
 }
