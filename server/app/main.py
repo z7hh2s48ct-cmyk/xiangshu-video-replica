@@ -67,6 +67,7 @@ from app.publish_browser_routes import router as publish_browser_router
 from app.publish_record_routes import router as publish_record_router
 from app.publish_routes import router as publish_router
 from app.rbac_routes import router as rbac_router
+from app.recharge_package_routes import router as recharge_package_router
 from app.recharge_routes import router as recharge_router
 from app.script_from_audio_routes import router as script_from_audio_router
 from app.settings import SettingsUnavailableError
@@ -393,6 +394,7 @@ app.include_router(api_key_router)
 app.include_router(admin_activation_router)
 app.include_router(admin_device_router)
 app.include_router(recharge_router)
+app.include_router(recharge_package_router)
 app.include_router(wallet_router)
 app.include_router(export_router)  # Admin report export functionality
 app.include_router(settings_router)

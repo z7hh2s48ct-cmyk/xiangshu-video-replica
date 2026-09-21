@@ -3,11 +3,13 @@ import { Pagination } from "../admin/ui/Pagination";
 import {
   type CreatedRechargeOrder,
   CustomerApiError,
+  type CustomerRechargePackage,
   customerCloseRechargeOrder,
   customerCreateRechargeOrder,
   customerGetRechargeOrder,
   customerGetWallet,
   customerListRechargeOrders,
+  customerListRechargePackages,
   customerListWalletTransactions,
   type GenerationPriceQuote,
   getGenerationPriceQuote,
@@ -17,10 +19,17 @@ import {
   type WalletTransaction,
   type WalletTransactionPage,
 } from "../api";
+import {
+  discountSourceLabel,
+  formatDiscountZhe,
+  matchingPackagesForAmount,
+  packageBelowMinimum,
+  packageBenefitLabel,
+  packageBonusCredits,
+} from "../rechargePackageDisplay";
 import type { CustomerCredentialStore } from "./useCustomerSession";
 import "./customer-wallet.css";
 
-const RECHARGE_PRESETS_YUAN = [50, 100, 200, 500, 1000] as const;
 const ORDER_POLL_INTERVAL_MS = 2_000;
 const MAX_ORDER_POLL_ATTEMPTS = 30;
 const HISTORY_PAGE_SIZE = 20;
@@ -36,9 +45,11 @@ export function CustomerWalletPanel({
 }: {
   store: CustomerCredentialStore;
   onSessionExpired: () => void;
-  onRechargeRequested?: (amountYuan: number) => void;
+  onRechargeRequested?: (amountYuan: number, packageId?: string) => void;
 }) {
   const [wallet, setWallet] = useState<WalletSnapshot | null>(null);
+  const [packages, setPackages] = useState<CustomerRechargePackage[]>([]);
+  const [packageError, setPackageError] = useState("");
   const [transactionPage, setTransactionPage] =
     useState<WalletTransactionPage | null>(null);
   const [orders, setOrders] = useState<RechargeOrder[]>([]);
@@ -93,17 +104,28 @@ export function CustomerWalletPanel({
       if (credential === null || requestId !== summaryRequestIdRef.current) {
         return;
       }
-      const [nextWallet, recentOrderPage] = await Promise.all([
+      const [nextWallet, recentOrderPage, packageOutcome] = await Promise.all([
         customerGetWallet(credential),
         customerListRechargeOrders(credential, {
           limit: HISTORY_PAGE_SIZE,
           offset: 0,
         }),
+        // 套餐加载失败不拖垮钱包：自定义金额仍可用。
+        customerListRechargePackages(credential).then(
+          (items) => ({ ok: true as const, items }),
+          () => ({ ok: false as const, items: [] }),
+        ),
       ]);
       if (requestId !== summaryRequestIdRef.current) {
         return;
       }
       setWallet(nextWallet);
+      if (packageOutcome.ok) {
+        setPackages(packageOutcome.items);
+        setPackageError("");
+      } else {
+        setPackageError("充值套餐暂不可用，可使用自定义金额充值。");
+      }
       setSummaryError("");
       setOrders(
         recentOrderPage.items.filter((order) => order.status !== "CLOSED"),
@@ -335,7 +357,49 @@ export function CustomerWalletPanel({
     }
   }, [loadOrderHistory, loadSummary]);
 
-  async function startRecharge(amountYuan: number) {
+  async function createRechargeOrder(input: {
+    amountFen: number;
+    packageId?: string;
+  }) {
+    const credential = await loadSession();
+    if (credential === null) {
+      return;
+    }
+    setIsCreating(true);
+    setError("");
+    setNotice("");
+    try {
+      const created = await customerCreateRechargeOrder(
+        credential,
+        input.amountFen,
+        { idempotencyKey: crypto.randomUUID(), packageId: input.packageId },
+      );
+      setPendingOrderNo(created.order_no);
+      setNotice("支付页已打开，本页会自动确认到账。");
+      submitPaymentForm(created);
+      refreshOrderViews();
+    } catch (cause) {
+      setError(errorMessage(cause, "创建充值订单失败。"));
+    } finally {
+      setIsCreating(false);
+    }
+  }
+
+  async function startPackageRecharge(pkg: CustomerRechargePackage) {
+    if (isCreating) {
+      return;
+    }
+    if (onRechargeRequested) {
+      onRechargeRequested(pkg.amount_fen / 100, pkg.id);
+      return;
+    }
+    await createRechargeOrder({
+      amountFen: pkg.amount_fen,
+      packageId: pkg.id,
+    });
+  }
+
+  async function startCustomRecharge(amountYuan: number) {
     if (!wallet || isCreating) {
       return;
     }
@@ -354,31 +418,12 @@ export function CustomerWalletPanel({
       onRechargeRequested(amountYuan);
       return;
     }
-    const credential = await loadSession();
-    if (credential === null) {
-      return;
-    }
-    setIsCreating(true);
-    setError("");
-    setNotice("");
-    try {
-      const created = await customerCreateRechargeOrder(credential, amountFen, {
-        idempotencyKey: crypto.randomUUID(),
-      });
-      setPendingOrderNo(created.order_no);
-      setNotice("支付页已打开，本页会自动确认到账。");
-      submitPaymentForm(created);
-      refreshOrderViews();
-    } catch (cause) {
-      setError(errorMessage(cause, "创建充值订单失败。"));
-    } finally {
-      setIsCreating(false);
-    }
+    await createRechargeOrder({ amountFen });
   }
 
   function submitCustomAmount(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    void startRecharge(Number(customAmount));
+    void startCustomRecharge(Number(customAmount));
   }
 
   async function closePendingOrder(orderNo: string) {
@@ -443,6 +488,17 @@ export function CustomerWalletPanel({
   }
 
   const transactions = transactionPage?.items ?? [];
+  // 报价里的套餐折扣（取更优后）：钱包页展示用户当前实际享有的优惠。
+  const discountQuote = priceQuotes.find(
+    (quote) => formatDiscountZhe(quote.discount_rate) !== null,
+  );
+  const discountZhe = discountQuote
+    ? formatDiscountZhe(discountQuote.discount_rate)
+    : null;
+  const discountSource = discountSourceLabel(discountQuote?.discount_source);
+  const discountNote = discountZhe
+    ? `已享${discountZhe}${discountSource ? `（${discountSource}）` : ""}`
+    : null;
 
   return (
     <section className="wallet-page" aria-label="余额与充值">
@@ -473,6 +529,7 @@ export function CustomerWalletPanel({
               ? `充值换算：1元 = ${wallet.points_per_yuan} 积分`
               : "充值积分价格待配置"}
           </small>
+          {discountNote ? <small>{discountNote}</small> : null}
           <small>按提交档位计费，生成失败全额退回</small>
         </article>
       </div>
@@ -487,24 +544,40 @@ export function CustomerWalletPanel({
             </p>
           </div>
         </div>
-        <div className="recharge-presets">
-          {RECHARGE_PRESETS_YUAN.map((amount) => (
-            <button
-              aria-label={`充值${amount}元`}
-              disabled={isCreating}
-              key={amount}
-              onClick={() => void startRecharge(amount)}
-              type="button"
-            >
-              <strong>{amount} 元</strong>
-              <span>
-                {wallet.points_per_yuan
-                  ? `${Math.floor(amount * wallet.points_per_yuan)} 积分`
-                  : "到账积分以订单为准"}
-              </span>
-            </button>
-          ))}
-        </div>
+        {packages.length ? (
+          <div className="recharge-presets recharge-presets--packages">
+            {packages.map((pkg) => {
+              const benefit = packageBenefitLabel(pkg);
+              const bonus = packageBonusCredits(wallet, pkg);
+              // 低于生效起充额的档位后端必 422：客户端先行置灰并说明原因。
+              const belowMinimum = packageBelowMinimum(pkg, wallet);
+              return (
+                <button
+                  aria-label={`购买套餐${pkg.name}`}
+                  disabled={isCreating || belowMinimum}
+                  key={pkg.id}
+                  onClick={() => void startPackageRecharge(pkg)}
+                  type="button"
+                >
+                  <strong>{pkg.name}</strong>
+                  <span>
+                    {formatFen(pkg.amount_fen)} → {pkg.credits} 积分
+                  </span>
+                  {bonus !== null ? <span>含赠送 {bonus} 积分</span> : null}
+                  {benefit ? <span>{benefit}</span> : null}
+                  {belowMinimum ? (
+                    <span>
+                      低于起充金额 {formatFen(wallet.min_recharge_fen)}
+                      ，暂不可购
+                    </span>
+                  ) : null}
+                </button>
+              );
+            })}
+          </div>
+        ) : packageError ? (
+          <p role="status">{packageError}</p>
+        ) : null}
         <form
           className="custom-recharge-form"
           noValidate
@@ -525,6 +598,13 @@ export function CustomerWalletPanel({
             {isCreating ? "正在创建订单" : "确认充值"}
           </button>
         </form>
+        {matchingPackagesForAmount(packages, Number(customAmount) * 100)
+          .length ? (
+          <p role="status">
+            该金额有对应套餐（含赠送/折扣）；选择上方套餐可享受套餐到账与权益，
+            自定义金额按基础汇率到账。
+          </p>
+        ) : null}
         {error || pollingError ? (
           <p className="settings-error" role="alert">
             {error || pollingError}

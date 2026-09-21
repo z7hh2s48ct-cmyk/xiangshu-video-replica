@@ -5018,6 +5018,75 @@ button.activation-generator__submit {
   }
 }
 
+/* 充值套餐管理（系统设置 → 支付与价格）：档位表格 + 两列表单，
+   接口勾选与操作按钮整行铺开，避免与金额/积分输入挤压。 */
+.admin-shell--control .admin-recharge-packages .table-action-button {
+  width: auto;
+  min-height: 34px;
+  padding: 6px 12px;
+  border: 1px solid #514733;
+  border-radius: 8px;
+  background: transparent;
+  color: #ddc797;
+  font-size: var(--font-label);
+}
+.admin-shell--control
+  .admin-recharge-packages
+  .table-action-button:hover:enabled,
+.admin-shell--control
+  .admin-recharge-packages
+  .table-action-button:focus-visible {
+  border-color: var(--accent-strong);
+  color: #f0bc5e;
+}
+.admin-shell--control .admin-recharge-packages__form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  padding: 20px;
+  border: 1px solid #38352c;
+  border-radius: 10px;
+  background: #171814;
+}
+.admin-shell--control .admin-recharge-packages__form h3,
+.admin-shell--control .admin-recharge-packages__form fieldset,
+.admin-shell--control .admin-recharge-packages__form .admin-actions {
+  grid-column: 1 / -1;
+}
+.admin-shell--control .admin-recharge-packages__form h3 {
+  margin: 0;
+  font-size: var(--font-body);
+}
+.admin-shell--control .admin-recharge-packages__form label {
+  display: grid;
+  gap: 8px;
+  color: #c7c1b5;
+  font-weight: 400;
+  min-width: 0;
+}
+.admin-shell--control .admin-recharge-packages__form fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  margin: 0;
+  border: 1px solid #38352c;
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+.admin-shell--control .admin-recharge-packages__form fieldset label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.admin-shell--control .admin-recharge-packages__form input[type="checkbox"] {
+  width: auto;
+}
+@media (max-width: 900px) {
+  .admin-shell--control .admin-recharge-packages__form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .admin-services .h3-accounts {
   grid-column: 1 / -1;
 }

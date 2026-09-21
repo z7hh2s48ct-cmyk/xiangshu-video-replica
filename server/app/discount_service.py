@@ -31,7 +31,11 @@ import psycopg
 
 @dataclass(frozen=True)
 class DiscountRecord:
-    """``customer_discounts`` 一行——客户消耗侧折扣配置视图（只读）."""
+    """``customer_discounts`` 一行——客户消耗侧折扣配置视图（只读）.
+
+    ``source_recharge_order_id`` 非空表示该折扣由充值套餐授予（充值时自动写入）；
+    ``None`` 表示管理员手工折扣——套餐「最近覆盖」逻辑不触碰手工折扣。
+    """
 
     id: str
     user_id: str
@@ -41,6 +45,7 @@ class DiscountRecord:
     valid_until: datetime | None
     applicable_interfaces: tuple[str, ...]
     is_active: bool
+    source_recharge_order_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +120,7 @@ def _row_to_record(row: tuple[Any, ...]) -> DiscountRecord:
         valid_until=row[5],
         applicable_interfaces=_parse_interfaces(row[6]),
         is_active=bool(row[7]),
+        source_recharge_order_id=(str(row[8]) if len(row) > 8 and row[8] is not None else None),
     )
 
 
@@ -135,7 +141,7 @@ def get_active_discounts(
     now = at_time or datetime.now(UTC)
     rows = conn.execute(
         "SELECT id, user_id, discount_rate, priority, valid_from, valid_until, "
-        "applicable_interfaces, is_active "
+        "applicable_interfaces, is_active, source_recharge_order_id "
         "FROM customer_discounts "
         "WHERE user_id = %s AND is_active AND valid_from <= %s "
         "AND (valid_until IS NULL OR valid_until > %s) "

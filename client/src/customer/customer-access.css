@@ -682,6 +682,41 @@ button.danger-button:not(:disabled):hover {
 .recharge-dialog__presets button span {
   font-size: var(--font-caption);
 }
+.recharge-dialog__packages {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+}
+.recharge-package-card {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  border: 1px solid #4a3b24;
+  border-radius: 11px;
+  padding: 16px 12px;
+  color: #efbd5f;
+  text-align: left;
+  background: #1a1610;
+}
+.recharge-package-card:hover:enabled,
+.recharge-package-card:focus-visible {
+  border-color: var(--accent-strong);
+}
+.recharge-package-card span {
+  color: #aaa297;
+  font-size: var(--font-caption);
+}
+/* 低于生效起充额的档位：置灰并禁止点击（后端下单会 422 拒绝）。 */
+.recharge-package-card:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+/* 从钱包跳转时高亮来自「建议套餐」的档位，避免用户误选其它档位。 */
+.recharge-package-card--suggested {
+  border-color: var(--accent-strong);
+  background: rgba(224, 168, 63, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(224, 168, 63, 0.4);
+}
 .recharge-dialog__chooser form {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

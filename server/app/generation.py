@@ -17,6 +17,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from math import floor, isfinite
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
@@ -825,6 +826,9 @@ class GenerationPriceQuote(BaseModel):
     unit_credits: float
     estimated_credits: int
     credit_price_version: int
+    # 客户套餐折扣（取更优合并后）；无折扣时为 None（价格保持平台口径）。
+    discount_rate: Decimal | None = None
+    discount_source: str | None = None
 
 
 class TaskSummary(BaseModel):
@@ -7727,13 +7731,14 @@ def generation_price_quote(
     resolution: Literal["768P", "2K"],
     duration_seconds: int,
     quantity: int,
+    user_id: str | None = None,
 ) -> GenerationPriceQuote:
     from decimal import ROUND_CEILING, Decimal
 
-    from app.billing_catalog import retail_snapshot
+    from app.billing_catalog import retail_snapshot, snapshot_discount_rate
 
     subject = "video_2k" if resolution == "2K" else "video_768p"
-    snapshot = retail_snapshot(conn, subject, duration_seconds)
+    snapshot = retail_snapshot(conn, subject, duration_seconds, user_id=user_id)
     estimated_seconds = duration_seconds * quantity
     estimated_credits = int(str(snapshot["credits"])) * quantity
     if estimated_credits > 2147483647:
@@ -7760,6 +7765,8 @@ def generation_price_quote(
         unit_credits=unit_credits,
         estimated_credits=estimated_credits,
         credit_price_version=price_version,
+        discount_rate=snapshot_discount_rate(snapshot),
+        discount_source=cast(str | None, snapshot["discount_source"]),
     )
 
 

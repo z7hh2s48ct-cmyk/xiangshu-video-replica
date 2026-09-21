@@ -47,12 +47,17 @@ export function LiveWorkspacePanel({
   const [suggestedAmountYuan, setSuggestedAmountYuan] = useState<
     number | undefined
   >(undefined);
+  // 钱包页的套餐卡片：带上套餐 id，弹窗高亮同一档位（下单时仍走套餐语义）。
+  const [suggestedPackageId, setSuggestedPackageId] = useState<
+    string | undefined
+  >(undefined);
   const [walletRefreshKey, setWalletRefreshKey] = useState(0);
   const canWrite = currentUser.role !== "auditor";
   const customerSession = customerAccount ?? customerWallet;
 
-  function openRecharge(amountYuan?: number) {
+  function openRecharge(amountYuan?: number, packageId?: string) {
     setSuggestedAmountYuan(amountYuan);
+    setSuggestedPackageId(packageId);
     setIsRechargeOpen(true);
   }
 
@@ -98,7 +103,9 @@ export function LiveWorkspacePanel({
             key={walletRefreshKey}
             store={customerSession.store}
             onSessionExpired={customerSession.onSessionExpired}
-            onRechargeRequested={(amountYuan) => openRecharge(amountYuan)}
+            onRechargeRequested={(amountYuan, packageId) =>
+              openRecharge(amountYuan, packageId)
+            }
           />
         ) : (
           <WalletPanel currentUserId={currentUser.id} />
@@ -117,7 +124,9 @@ export function LiveWorkspacePanel({
           onRefreshProfile={customerAccount.onRefreshProfile}
           onLogout={customerAccount.onLogout}
           onPairDevice={customerAccount.onPairDevice}
-          onRecharge={(amountYuan) => openRecharge(amountYuan)}
+          onRecharge={(amountYuan, packageId) =>
+            openRecharge(amountYuan, packageId)
+          }
           onRefreshDevices={customerAccount.onRefreshDevices}
           onSessionExpired={customerAccount.onSessionExpired}
           onUnbind={customerAccount.onUnbind}
@@ -142,12 +151,14 @@ export function LiveWorkspacePanel({
           onClose={() => {
             setIsRechargeOpen(false);
             setSuggestedAmountYuan(undefined);
+            setSuggestedPackageId(undefined);
           }}
           onOrderCreated={finishRecharge}
           onPaid={finishRecharge}
           onSessionExpired={customerSession.onSessionExpired}
           store={customerSession.store}
           suggestedAmountYuan={suggestedAmountYuan}
+          suggestedPackageId={suggestedPackageId}
         />
       ) : null}
     </section>

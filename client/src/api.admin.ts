@@ -15,6 +15,7 @@
 import {
   type CustomerCreditConfig,
   type CustomerPricing,
+  type CustomerRechargePackage,
   clearAdminCsrfToken,
   getAdminCsrfToken,
   notifyAdminSessionExpired,
@@ -43,6 +44,63 @@ export function updateCustomerPricing(
     { config, expected_version: expectedVersion },
     reason,
     "保存积分价格失败",
+    idempotencyKey,
+    "PUT",
+  );
+}
+
+/** 充值套餐的写入草稿（管理端新建/更新共用；客户侧类型同名复用）。 */
+export type RechargePackageDraft = {
+  name: string;
+  amount_fen: number;
+  credits: number;
+  /** 折扣率 4 位小数字符串（如 "0.9000"）；null = 无折扣档位。 */
+  discount_rate: string | null;
+  discount_interfaces: string[];
+  sort_order: number;
+  is_active: boolean;
+};
+
+/** 管理端套餐列表（含停用行；GET /api/control/settings/recharge-packages）。 */
+export async function listRechargePackages(): Promise<
+  CustomerRechargePackage[]
+> {
+  const body = await adminRead<{ items: CustomerRechargePackage[] }>(
+    "/api/control/settings/recharge-packages",
+    "读取充值套餐失败",
+  );
+  return body.items;
+}
+
+/** 新建套餐（POST；写契约 + 幂等快照 + 审计）。 */
+export function createRechargePackage(
+  draft: RechargePackageDraft,
+  reason: string,
+  idempotencyKey?: string,
+): Promise<CustomerRechargePackage> {
+  return adminWrite<CustomerRechargePackage>(
+    "/api/control/settings/recharge-packages",
+    { ...draft },
+    reason,
+    "新建充值套餐失败",
+    idempotencyKey,
+    "POST",
+  );
+}
+
+/** 更新套餐（PUT；乐观锁 expected_version 不符 → 409）。 */
+export function updateRechargePackage(
+  packageId: string,
+  draft: RechargePackageDraft,
+  expectedVersion: number,
+  reason: string,
+  idempotencyKey?: string,
+): Promise<CustomerRechargePackage> {
+  return adminWrite<CustomerRechargePackage>(
+    `/api/control/settings/recharge-packages/${encodeURIComponent(packageId)}`,
+    { ...draft, expected_version: expectedVersion },
+    reason,
+    "更新充值套餐失败",
     idempotencyKey,
     "PUT",
   );

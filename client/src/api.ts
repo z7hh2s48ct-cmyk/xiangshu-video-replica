@@ -210,6 +210,10 @@ export type GenerationPriceQuote = {
   unit_credits?: number;
   estimated_credits?: number;
   credit_price_version?: number;
+  /** 客户套餐折扣率 4 位小数字符串（如 "0.9000"）；None/缺省 = 无折扣。 */
+  discount_rate?: string | null;
+  /** 折扣来源 token（"recharge_package" / "manual"）；仅当 discount_rate 非空时有意义。 */
+  discount_source?: string | null;
 };
 export type SavedPromptInput = {
   generation_context?: PromptGenerationContext;
@@ -7034,19 +7038,56 @@ export async function customerListRechargeOrders(
   return body;
 }
 
+/** 客户可见的充值套餐档位（GET /api/customer/recharge-packages，仅启用行）。 */
+export type CustomerRechargePackage = {
+  id: string;
+  name: string;
+  amount_fen: number;
+  credits: number;
+  /** 折扣率 4 位小数字符串（如 "0.9000"）；null = 无权益档位。 */
+  discount_rate: string | null;
+  discount_interfaces: string[];
+  sort_order: number;
+  is_active: boolean;
+  version: number;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+/** 管理员配置的充值套餐（客户只读）。 */
+export async function customerListRechargePackages(
+  credential: CustomerSessionCredential,
+): Promise<CustomerRechargePackage[]> {
+  const { body } = await customerJson<{ items?: CustomerRechargePackage[] }>(
+    "/api/customer/recharge-packages",
+    { credential },
+  );
+  // 契约异常（缺 items）时按空列表处理：充值页不能因档位列表而整页崩。
+  return Array.isArray(body?.items) ? body.items : [];
+}
+
 /** Create a customer recharge order
- * (POST /api/customer/recharge-orders → 201 PENDING + ZPay payment form). */
+ * (POST /api/customer/recharge-orders → 201 PENDING + ZPay payment form).
+ *
+ * 传 `packageId` 时为套餐下单：amount_fen 必须等于套餐金额，到账积分与权益
+ * 以套餐为准并冻结进订单快照。不传时是自定义金额（基础汇率、无权益）。 */
 export async function customerCreateRechargeOrder(
   credential: CustomerSessionCredential,
   amountFen: number,
-  options: { idempotencyKey: string; requestId?: string },
+  options: { idempotencyKey: string; packageId?: string; requestId?: string },
 ): Promise<CreatedRechargeOrder> {
+  const payload: { amount_fen: number; package_id?: string } = {
+    amount_fen: amountFen,
+  };
+  if (options.packageId !== undefined) {
+    payload.package_id = options.packageId;
+  }
   const { body } = await customerJson<CreatedRechargeOrder>(
     "/api/customer/recharge-orders",
     {
       method: "POST",
       credential,
-      body: { amount_fen: amountFen },
+      body: payload,
       idempotencyKey: options.idempotencyKey,
       requestId: options.requestId,
     },

@@ -53,7 +53,7 @@ export function CustomerProfilePanel({
   onPairDevice?: () => void;
   onProfileUpdated: (profile: CustomerProfile) => void;
   onRefreshProfile: () => Promise<void>;
-  onRecharge: (amountYuan?: number) => void;
+  onRecharge: (amountYuan?: number, packageId?: string) => void;
   onRefreshDevices: () => Promise<void>;
   onSessionExpired: () => void;
   onUnbind: (deviceId: string) => void;
@@ -428,7 +428,9 @@ export function CustomerProfilePanel({
       {tab === "billing" ? (
         <CustomerWalletPanel
           key={walletRefreshKey}
-          onRechargeRequested={(amount) => onRecharge(amount)}
+          onRechargeRequested={(amount, packageId) =>
+            onRecharge(amount, packageId)
+          }
           onSessionExpired={onSessionExpired}
           store={store}
         />

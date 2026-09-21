@@ -1554,3 +1554,7 @@ PROD-DEPLOY 补充：既有维护任务缺少 scripts 模块的问题已通过�
 ## LINK-FORMAT-20260917 · 抖音/小红书链接入口全格式支持
 
 服务端链接规范化：裸域名分享文本提取、短链 302 还原（SSRF 防护、3 跳上限、失败降级原链直传）、任意入口形态提取内容 ID 重写网关已知稳定形态（抖音 `/jingxuan?modal_id=`、小红书 `/explore/{id}` 保留 xsec_token）、网关 ID 校验放宽 15–22 位；计费与路由口径不变。用户明确不做真实付费探针，29 项离线表驱动测试先红后绿，既有链接测试全部保持通过。Owner Claude 当前会话；基线 `origin/main@0ce6ed28`，分支 `feat/link-format-canonical-20260917`，独立 worktree `.worktrees/LINK-FORMAT-20260917`。本地最终门禁一次通过：静态门 + 四分片 2609 passed / 1 既有 skipped；PR 与 CI 结果见[独立证据](evidence/LINK-FORMAT-20260917.md)。未合并部署。
+
+## RECHARGE-PACKAGES-20260922 · 管理员可配置充值套餐与消费折扣权益
+
+充值档位不再写死，管理员可配置套餐（金额/赠送积分/折扣接口与折扣率/启停排序），支持充值赠送、视频生成折扣与无优惠三种形态；客户按套餐下单冻结快照，结算按快照授予折扣并接入报价/计费/流水；低于生效起充的套餐下单返回 422，授予走用户级 advisory lock，账目按生效折扣归因。Owner Qoder session 代 honor.pei；基线 `origin/main@8e9e69be`，分支 `feat/recharge-packages-20260922`，独立 worktree `.worktrees/RECHARGE-PACKAGES-20260922`。测试先行（先红后绿），评审 H-1/M-1/M-2/L-1/L-2/L-3 逐条修复；两轮本地门禁全绿（静态门 vitest 1770、四分片 2922 passed / 1 既有 skip、客户 E2E 修复后全套 6 passed），AUTOMATED_VERIFIED。详见[独立证据](evidence/RECHARGE-PACKAGES-20260922.md)。不核销其他任务状态；未合并部署。

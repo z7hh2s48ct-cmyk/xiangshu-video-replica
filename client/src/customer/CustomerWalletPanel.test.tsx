@@ -20,6 +20,36 @@ const wallet = {
   recharge_step_fen: 1000,
 };
 
+// 管理端配置的档位：200 元 → 21000 积分（含赠送 1000），无折扣权益。
+const basicPackage = {
+  id: "pkg-200",
+  name: "标准档",
+  amount_fen: 20000,
+  credits: 21000,
+  discount_rate: null,
+  discount_interfaces: [],
+  sort_order: 0,
+  is_active: true,
+  version: 1,
+  created_at: "2026-09-22 10:00:00",
+  updated_at: "2026-09-22 10:00:00",
+};
+
+// 带权益档位：100 元 → 11000 积分（含赠送 1000）＋视频生成 9 折。
+const discountPackage = {
+  id: "pkg-100",
+  name: "畅享档",
+  amount_fen: 10000,
+  credits: 11000,
+  discount_rate: "0.9000",
+  discount_interfaces: ["video_generation"],
+  sort_order: 1,
+  is_active: true,
+  version: 1,
+  created_at: "2026-09-22 10:00:00",
+  updated_at: "2026-09-22 10:00:00",
+};
+
 function jsonResponse(payload: unknown, status = 200) {
   return Promise.resolve({
     ok: status >= 200 && status < 300,
@@ -65,6 +95,9 @@ describe("CustomerWalletPanel", () => {
           return Promise.reject(new Error("生成单价暂不可用，请稍后重试。"));
         }
         if (url.endsWith("/api/customer/wallet")) return jsonResponse(wallet);
+        if (url.endsWith("/api/customer/recharge-packages")) {
+          return jsonResponse({ items: [discountPackage] });
+        }
         return jsonResponse({ items: [], total: 0, limit: 20, offset: 0 });
       }),
     );
@@ -76,9 +109,46 @@ describe("CustomerWalletPanel", () => {
     );
     expect(screen.queryByText(/768P 10元/)).not.toBeInTheDocument();
     expect(screen.getByText("充值换算：1元 = 100 积分")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "充值100元" })).toHaveTextContent(
-      "10000 积分",
+    // 档位由管理端配置：赠送积分与折扣权益都要透传到客户可见的卡片上。
+    const packageCard = screen.getByRole("button", { name: "购买套餐畅享档" });
+    expect(packageCard).toHaveTextContent("100元 → 11000 积分");
+    expect(packageCard).toHaveTextContent("含赠送 1000 积分");
+    expect(packageCard).toHaveTextContent("视频生成 9折");
+  });
+
+  it("disables packages priced below the effective minimum recharge amount", async () => {
+    // 管理端可配任意档位（含 50 元档），但起充额 100 元时低于它的档位不可下单：
+    // 下单会被后端 422 RECHARGE_PACKAGE_BELOW_MINIMUM 拒绝，前端必须先行置灰。
+    const belowMinimumPackage = {
+      ...basicPackage,
+      id: "pkg-50",
+      name: "五十元档",
+      amount_fen: 5000,
+      credits: 5500,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (url.includes("/api/generation/price-quote")) {
+          return Promise.reject(new Error("生成单价暂不可用，请稍后重试。"));
+        }
+        if (url.endsWith("/api/customer/wallet")) return jsonResponse(wallet);
+        if (url.endsWith("/api/customer/recharge-packages")) {
+          return jsonResponse({ items: [belowMinimumPackage, basicPackage] });
+        }
+        return jsonResponse({ items: [], total: 0, limit: 20, offset: 0 });
+      }),
     );
+    render(
+      <CustomerWalletPanel store={fakeStore()} onSessionExpired={vi.fn()} />,
+    );
+    const lowCard = await screen.findByRole("button", {
+      name: "购买套餐五十元档",
+    });
+    expect(lowCard).toBeDisabled();
+    expect(lowCard).toHaveTextContent("低于起充金额");
+    const okCard = screen.getByRole("button", { name: "购买套餐标准档" });
+    expect(okCard).toBeEnabled();
   });
 
   it("shows the balance and creates a preset recharge under the customer session", async () => {
@@ -86,6 +156,9 @@ describe("CustomerWalletPanel", () => {
       .spyOn(HTMLFormElement.prototype, "submit")
       .mockImplementation(() => undefined);
     const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+      if (url.endsWith("/api/customer/recharge-packages")) {
+        return jsonResponse({ items: [basicPackage] });
+      }
       if (url.endsWith("/api/customer/wallet")) {
         return jsonResponse(wallet);
       }
@@ -161,7 +234,8 @@ describe("CustomerWalletPanel", () => {
     expect(screen.getByText("冻结中 2 积分")).toBeInTheDocument();
     expect(screen.getAllByText("充值到账")).toHaveLength(2);
 
-    fireEvent.click(screen.getByRole("button", { name: "充值200元" }));
+    // 套餐点击直接按套餐下单：到账积分与权益随订单快照，不走自定义金额。
+    fireEvent.click(screen.getByRole("button", { name: "购买套餐标准档" }));
 
     await waitFor(() => expect(submit).toHaveBeenCalledOnce());
     const paymentForm = submit.mock.instances[0] as HTMLFormElement;
@@ -172,11 +246,16 @@ describe("CustomerWalletPanel", () => {
         String(url).endsWith("/api/customer/recharge-orders") &&
         options?.method === "POST",
     );
-    expect(createCall?.[1]?.body).toBe(JSON.stringify({ amount_fen: 20000 }));
+    expect(createCall?.[1]?.body).toBe(
+      JSON.stringify({ amount_fen: 20000, package_id: "pkg-200" }),
+    );
   });
 
   it("resumes polling an outstanding pending payment after a remount", async () => {
     const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/api/customer/recharge-packages")) {
+        return jsonResponse({ items: [] });
+      }
       if (url.endsWith("/api/customer/wallet")) {
         return jsonResponse(wallet);
       }
@@ -261,6 +340,9 @@ describe("CustomerWalletPanel", () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     let closed = false;
     const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+      if (url.endsWith("/api/customer/recharge-packages")) {
+        return jsonResponse({ items: [] });
+      }
       if (url.endsWith("/api/customer/wallet")) {
         return jsonResponse(wallet);
       }
@@ -555,6 +637,9 @@ describe("CustomerWalletPanel", () => {
       () => undefined,
     );
     const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+      if (url.endsWith("/api/customer/recharge-packages")) {
+        return jsonResponse({ items: [basicPackage] });
+      }
       if (url.endsWith("/api/customer/wallet")) {
         return jsonResponse(wallet);
       }
@@ -614,7 +699,7 @@ describe("CustomerWalletPanel", () => {
     ).closest("section") as HTMLElement;
     await within(orderHistory).findByText("recent-order");
 
-    fireEvent.click(screen.getByRole("button", { name: "充值200元" }));
+    fireEvent.click(screen.getByRole("button", { name: "购买套餐标准档" }));
     fireEvent.click(
       within(orderHistory).getByRole("button", { name: "下一页" }),
     );
@@ -823,5 +908,105 @@ describe("CustomerWalletPanel", () => {
       view.unmount();
       vi.useRealTimers();
     }
+  });
+
+  it("shows the discount granted by a package on the price card", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (url.includes("/api/generation/price-quote")) {
+          return jsonResponse({
+            resolution: url.includes("resolution=2K") ? "2K" : "768P",
+            duration_seconds: 4,
+            quantity: 1,
+            unit_price_fen_per_second: 1000,
+            estimated_seconds: 4,
+            estimated_price_fen: 4000,
+            discount_rate: "0.9000",
+            discount_source: "recharge_package",
+          });
+        }
+        if (url.endsWith("/api/customer/wallet")) {
+          return jsonResponse(wallet);
+        }
+        if (url.endsWith("/api/customer/recharge-packages")) {
+          return jsonResponse({ items: [discountPackage] });
+        }
+        return jsonResponse({ items: [], total: 0, limit: 20, offset: 0 });
+      }),
+    );
+    render(
+      <CustomerWalletPanel store={fakeStore()} onSessionExpired={vi.fn()} />,
+    );
+
+    // 后端折扣来源是 token（recharge_package），面向客户要翻译成「充值套餐」。
+    expect(await screen.findByText("已享9折（充值套餐）")).toBeInTheDocument();
+  });
+
+  it("keeps the custom amount usable when packages fail to load", async () => {
+    const submit = vi
+      .spyOn(HTMLFormElement.prototype, "submit")
+      .mockImplementation(() => undefined);
+    const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+      if (url.endsWith("/api/customer/recharge-packages")) {
+        return Promise.reject(new Error("套餐接口不可用"));
+      }
+      if (url.endsWith("/api/customer/wallet")) {
+        return jsonResponse(wallet);
+      }
+      if (url.includes("/api/customer/wallet/transactions?")) {
+        return jsonResponse({ items: [], total: 0, limit: 20, offset: 0 });
+      }
+      if (url.includes("/api/customer/recharge-orders?")) {
+        return jsonResponse({ items: [], total: 0, limit: 20, offset: 0 });
+      }
+      if (
+        url.endsWith("/api/customer/recharge-orders") &&
+        options?.method === "POST"
+      ) {
+        return jsonResponse(
+          {
+            order_no: "202609220001",
+            status: "PENDING",
+            amount_fen: 10000,
+            credits: 10,
+            gateway_url: "https://zpayz.cn/submit.php",
+            method: "POST",
+            form_fields: {
+              pid: "merchant",
+              type: "alipay",
+              out_trade_no: "202609220001",
+              sign: "signature",
+              sign_type: "MD5",
+            },
+          },
+          201,
+        );
+      }
+      return jsonResponse({ items: [], total: 0, limit: 20, offset: 0 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <CustomerWalletPanel store={fakeStore()} onSessionExpired={vi.fn()} />,
+    );
+
+    expect(
+      await screen.findByText("充值套餐暂不可用，可使用自定义金额充值。"),
+    ).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("自定义充值金额（元）"), {
+      target: { value: "100" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认充值" }));
+
+    await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+    const createCall = fetchMock.mock.calls.find(
+      ([url, options]) =>
+        String(url).endsWith("/api/customer/recharge-orders") &&
+        options?.method === "POST",
+    );
+    // 自定义金额不带 package_id：按基础汇率到账，不享受套餐赠送/权益。
+    expect(createCall?.[1]?.body).toBe(JSON.stringify({ amount_fen: 10000 }));
   });
 });

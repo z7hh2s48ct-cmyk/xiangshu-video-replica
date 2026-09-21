@@ -55,6 +55,52 @@ COST_SUBJECTS = {
     "character_sheet_image": "character",
 }
 
+# 客户可配置的消耗侧折扣接口目录（管理员在套餐里勾选；空范围 = 全部接口）。
+INTERFACE_KEYS: tuple[str, ...] = (
+    "video_generation",
+    "video_analysis",
+    "first_frame",
+    "character",
+    "script_rewrite",
+    "oral",
+    "asr",
+    "viral_extract",
+    "link_resolution",
+    "prompt_optimize",
+)
+
+# 平台内部科目（客户不可充值消费）统一归入内部接口，不出现在套餐勾选目录。
+PLATFORM_INTERFACE_KEY = "platform_internal"
+
+# 计费科目 → 折扣接口键（覆盖 SERVICES 全集；可计费科目的键必须在 INTERFACE_KEYS 中）。
+SERVICE_INTERFACE: dict[str, str] = {
+    "video_768p": "video_generation",
+    "video_2k": "video_generation",
+    "analysis": "video_analysis",
+    "first_frame": "first_frame",
+    "character": "character",
+    "rewrite": "script_rewrite",
+    "oral": "oral",
+    "asr": "asr",
+    "viral_data": "viral_extract",
+    "link_resolution": "link_resolution",
+    "prompt_optimize": "prompt_optimize",
+    "avatar_clone": "oral",
+    "voice_clone": "oral",
+    "quality_inspection": PLATFORM_INTERFACE_KEY,
+    "analysis_repair": PLATFORM_INTERFACE_KEY,
+    "analysis_repair_deepseek": PLATFORM_INTERFACE_KEY,
+    "cos": PLATFORM_INTERFACE_KEY,
+    "zpay": PLATFORM_INTERFACE_KEY,
+}
+
+
+def interface_for_service(service: str) -> str:
+    """计费科目对应的折扣接口键；未知科目显式拒绝（沿用 read_tariff 口径）."""
+    if service not in SERVICES:
+        raise ValueError("未知计费科目")
+    return SERVICE_INTERFACE[service]
+
 
 class Tariff(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -102,6 +148,21 @@ def calculate_credits(
     return credits
 
 
+def merge_customer_discount(platform_basis_points: int, rate: Decimal | None) -> int:
+    """平台口径与客户折扣「取更优」：折算 basis points 后取较小者（bp 越小折扣越强）.
+
+    客户折扣是售价侧概念（R-A），只作用于 ``discount_basis_points``；平台侧已有更
+    强折扣时不会被客户的弱折扣顶掉。
+    """
+    if rate is None:
+        return platform_basis_points
+    from app.discount_service import validate_discount_rate
+
+    checked = validate_discount_rate(rate)
+    customer_basis_points = int((checked * 10_000).to_integral_value(rounding=ROUND_FLOOR))
+    return max(1, min(platform_basis_points, customer_basis_points))
+
+
 def read_tariff(conn: BusinessConnection, service: str) -> Tariff | None:
     if service not in SERVICES:
         raise ValueError("未知计费科目")
@@ -121,15 +182,53 @@ def read_tariff(conn: BusinessConnection, service: str) -> Tariff | None:
 
 
 def retail_snapshot(
-    conn: BusinessConnection, service: str, units: Decimal | str | int | float
+    conn: BusinessConnection,
+    service: str,
+    units: Decimal | str | int | float,
+    *,
+    user_id: str | None = None,
 ) -> dict[str, object]:
+    """零售计价快照；``user_id`` 给出时合并该用户的消耗侧折扣（取更优）.
+
+    折扣在快照里冻结为 ``discount_basis_points`` + ``discount_rate``（生效率）
+    + ``discount_source``（客户权益来源 token；平台口径更强时为 None）；
+    结算侧只读快照重算，事后改折扣配置不重算历史（R-D）。
+    """
     from app.customer_pricing import read_pricing
+    from app.discount_service import get_best_discount
 
     _, config = read_pricing(conn)
     tariff = read_tariff(conn, service)
-    discount = config.discount_basis_points if config else 10000
+    platform_basis_points = config.discount_basis_points if config else 10000
     rounding = config.consumption_rounding if config else "ceil"
     permitted = SERVICES[service].customer_charge_allowed
+    record_rate: Decimal | None = None
+    record_basis_points: int | None = None
+    record_source: str | None = None
+    if user_id is not None and permitted and conn.is_postgres:
+        record = get_best_discount(
+            conn.raw, user_id=user_id, interface_key=interface_for_service(service)
+        )
+        if record is not None:
+            record_rate = record.discount_rate
+            record_basis_points = max(
+                1, int((record_rate * 10_000).to_integral_value(rounding=ROUND_FLOOR))
+            )
+            record_source = "recharge_package" if record.source_recharge_order_id else "manual"
+    discount = merge_customer_discount(platform_basis_points, record_rate)
+    # 生效折扣归因：平台口径严格更强时不得虚报客户权益来源；``discount_rate``
+    # 冻结生效值（= bp/10000），账目与展示须与实收一致。客户权益与平台同强
+    # （record 折算 bp == 合并值）时仍归客户：权益真实生效。无任何折扣 → None。
+    if record_basis_points is not None and record_basis_points <= discount:
+        discount_rate = record_rate
+        discount_source = record_source
+    else:
+        discount_rate = (
+            (Decimal(discount) / Decimal(10_000)).quantize(Decimal("0.0001"))
+            if discount < 10_000
+            else None
+        )
+        discount_source = None
     credits = calculate_credits(
         tariff if permitted else None, units, discount_basis_points=discount, rounding=rounding
     )
@@ -143,6 +242,8 @@ def retail_snapshot(
         "unit_rounding": tariff.unit_rounding if tariff else "ceil",
         "credits": credits,
         "discount_basis_points": discount,
+        "discount_rate": str(discount_rate) if discount_rate is not None else None,
+        "discount_source": discount_source,
         "consumption_rounding": rounding,
         "points_per_yuan": config.points_per_yuan if config else None,
         "free_reason": None
@@ -170,6 +271,20 @@ def credits_from_snapshot(snapshot: dict[str, object], units: Decimal | str | in
         discount_basis_points=int(str(snapshot["discount_basis_points"])),
         rounding=str(snapshot["consumption_rounding"]),
     )
+
+
+def snapshot_discount_rate(snapshot: dict[str, object]) -> Decimal | None:
+    """快照里冻结的折扣率（账目落库侧解析）；缺失/非法一律 None."""
+    raw = snapshot.get("discount_rate")
+    if raw is None:
+        return None
+    try:
+        rate = Decimal(str(raw))
+    except InvalidOperation:
+        return None
+    if not rate.is_finite() or rate <= 0 or rate > 1:
+        return None
+    return rate.quantize(Decimal("0.0001"))
 
 
 def oral_budget_units(

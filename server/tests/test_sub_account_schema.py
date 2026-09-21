@@ -31,7 +31,7 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 USERS_TABLE = "users"
 WALLET_TX_TABLE = "wallet_transactions"
 
-_HEAD_REVISION = "20260921T0000_merge_wallet_actor_and_billing_metadata"
+_HEAD_REVISION = "20260922T1200_recharge_packages"
 # 1200 adds the sub-account columns; 1300 adds the wallet actor column;
 # 1500 + the 20260921T0000 merge revision sit on top of 1300.
 # Downgrading below 1200 must fail-closed while sub-accounts still exist.

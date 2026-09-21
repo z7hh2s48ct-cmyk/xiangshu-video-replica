@@ -138,6 +138,38 @@ const walletTransactionPage = {
 
 const emptyPage = { items: [], total: 0, limit: 20, offset: 0 };
 
+// 管理端配置的客户档位（含客户专属 50 元档）：钱包页与充值对话框共用。
+const customerRechargePackages = {
+  items: [
+    {
+      id: "pkg-50",
+      name: "体验档",
+      amount_fen: 5000,
+      credits: 5000,
+      discount_rate: null,
+      discount_interfaces: [],
+      sort_order: 0,
+      is_active: true,
+      version: 1,
+      created_at: "2026-09-22 10:00:00",
+      updated_at: "2026-09-22 10:00:00",
+    },
+    {
+      id: "pkg-200",
+      name: "标准档",
+      amount_fen: 20000,
+      credits: 20000,
+      discount_rate: null,
+      discount_interfaces: [],
+      sort_order: 1,
+      is_active: true,
+      version: 1,
+      created_at: "2026-09-22 10:00:00",
+      updated_at: "2026-09-22 10:00:00",
+    },
+  ],
+};
+
 const createdRechargeOrder = {
   order_no: "202609100001",
   status: "PENDING",
@@ -241,6 +273,9 @@ function installWalletFetch() {
         priceQuote(path.includes("resolution=2K") ? "2K" : "768P"),
       );
     }
+    if (path.endsWith("/api/customer/recharge-packages")) {
+      return jsonResponse(customerRechargePackages);
+    }
     if (path.endsWith("/api/customer/wallet")) {
       return jsonResponse(customerWalletSnapshot);
     }
@@ -313,9 +348,9 @@ describe("LiveWorkspacePanel 客户钱包入口 (CW-016)", () => {
     expect(screen.getByText("冻结中 2 积分")).toBeInTheDocument();
     expect(screen.getByText(/1元 = 100 积分/)).toBeInTheDocument();
     expect(screen.getByText("额度流水")).toBeInTheDocument();
-    // 客户专属档位（50 元）：内部 WalletPanel 档位从 100 起、无 50。
+    // 档位由管理端配置：客户专属 50 元档只在客户 lane 出现。
     expect(
-      screen.getByRole("button", { name: "充值50元" }),
+      screen.getByRole("button", { name: "购买套餐体验档" }),
     ).toBeInTheDocument();
     // 无内部定价泄漏：内部 WalletPanel 的「内部价/仅供内部运营使用/可用条数」不得出现。
     expect(screen.queryByText("内部价")).not.toBeInTheDocument();
@@ -343,7 +378,7 @@ describe("LiveWorkspacePanel 客户钱包入口 (CW-016)", () => {
     expect(screen.getByText("仅供内部运营使用")).toBeInTheDocument();
     expect(screen.getByText("可用条数")).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "充值50元" }),
+      screen.queryByRole("button", { name: "购买套餐体验档" }),
     ).not.toBeInTheDocument();
 
     await waitFor(() =>
@@ -359,8 +394,10 @@ describe("LiveWorkspacePanel 客户钱包入口 (CW-016)", () => {
     const fetchMock = installWalletFetch();
     renderWalletEntry(fakeCustomerAccount(fakeStore(), vi.fn()));
 
-    // 等客户钱包加载完成，点击客户档位 → 打开客户充值对话框。
-    fireEvent.click(await screen.findByRole("button", { name: "充值200元" }));
+    // 等客户钱包加载完成，点击客户档位 → 透传套餐打开客户充值对话框。
+    fireEvent.click(
+      await screen.findByRole("button", { name: "购买套餐标准档" }),
+    );
 
     const dialog = await screen.findByRole("dialog");
     const submit = await within(dialog).findByRole("button", {

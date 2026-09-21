@@ -55,10 +55,11 @@ MIGRATIONS_DIR = SERVER_DIR / "migrations"
 REPO_ROOT = SERVER_DIR.parent
 
 # 当前链尾。与 test_postgres_migrations.HEAD_REVISION 同源。
-# 20260921T0000_merge_wallet_actor_and_billing_metadata 把 CUSTOMER-CENTER-V2-20260919
-# （sub_accounts → wallet_actor）与 main（oral_soft_delete → merge_parallel_heads →
-# add_api_metadata_to_billing_ops）两条并行链线性化为单头。
-HEAD_REVISION = "20260921T0000_merge_wallet_actor_and_billing_metadata"
+# 20260922T1200_recharge_packages 在 20260921T0000 合并链尾之上追加：
+# recharge_packages 表（管理端配置档位）+ recharge_orders.package_id/package_snapshot_json
+# + customer_discounts.source_recharge_order_id，并重写 credit_calculation 三支与
+# amount_price/amount_step 的套餐豁免支。
+HEAD_REVISION = "20260922T1200_recharge_packages"
 
 # 最后一个已发布（受支持）起点。其后的 056…090 与本迁移尚未随任何受支持版本发布，
 # 故冻结范围止于此——把未发布 revision 也纳入哈希会让每次新增迁移都必须改常量，
@@ -102,16 +103,16 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # 例如 triggers 用 information_schema.triggers 的**行数**（BEFORE UPDATE 与
 # BEFORE DELETE 各算一行），故 18 行对应 10 个 distinct trigger，不是 10 行。
 HEAD_SCHEMA_COUNTS = {
-    "check_constraints": 313,
-    "columns": 1172,
-    "foreign_keys": 187,
+    "check_constraints": 318,
+    "columns": 1187,
+    "foreign_keys": 190,
     "identity_columns": 0,
     "jsonb_columns": 4,
     "partial_indexes": 37,
-    "primary_keys": 98,
+    "primary_keys": 99,
     "sequences": 4,
-    "tables": 98,
-    "timestamptz_columns": 54,
+    "tables": 99,
+    "timestamptz_columns": 56,
     "triggers": 27,
     "unique_constraints": 37,
 }
@@ -203,6 +204,7 @@ HEAD_TABLE_NAMES = (
     "publish_browser_logins",
     "publish_records",
     "recharge_orders",
+    "recharge_packages",
     "runtime_settings",
     "script_from_audio_tasks",
     "script_rewrite_tasks",
@@ -264,8 +266,14 @@ HEAD_TABLE_NAMES = (
 #   partial_indexes +2，无新表
 # - main 侧 browser_account_probe + oral_soft_delete + merge_parallel_heads +
 #   add_api_metadata_to_billing_ops（billing_operations.viral_data 补 api_metadata 列）
-# digest/counts 以 scripts/ci/migration_manifest.py --print-schema 于 postgres:16 重算。
-HEAD_SCHEMA_DIGEST = "ffcb63b8486dbda9c717b3066635d4081187d37585117fc66b90715e9665d402"
+# RECHARGE-PACKAGES-20260922 追加 recharge_packages 及订单两列/权益来源列：
+# tables/primary_keys +1、columns +15（recharge_packages 12 + recharge_orders 2 +
+# customer_discounts 1）、foreign_keys +3（package / source_order / created_by）、
+# check_constraints +5（recharge_packages 五条）、timestamptz_columns +2；
+# unique_constraints/partial_indexes/jsonb_columns 不变（唯一性用 unique index 表达，
+# 折扣接口范围维持 TEXT-JSON）。digest/counts 以 migration_manifest.py --print-schema
+# 于空库→head（postgres:16 fixture）重算。
+HEAD_SCHEMA_DIGEST = "465a2848fdd8040b0c4a1a2c2dfdc4c7632b50e9c424cd9550ecbb89ca5b85d9"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

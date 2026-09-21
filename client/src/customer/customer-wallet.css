@@ -63,3 +63,21 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* 充值套餐由管理端配置，数量不定：列数自适应，避免固定列数留白或挤压；
+   放在文件末尾以覆盖上面的固定列数媒体查询。 */
+.wallet-page .recharge-presets--packages {
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+}
+
+@media (max-width: 720px) {
+  .wallet-page .recharge-presets--packages {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* 低于生效起充额的档位（后端下单会 422 拒绝）：置灰并禁止点击。 */
+.wallet-page .recharge-presets button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
