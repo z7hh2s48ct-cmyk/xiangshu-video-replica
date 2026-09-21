@@ -284,6 +284,7 @@ def test_link_preflight_accepts_mp4_container_audio() -> None:
         kind="audio",
         content_type="audio/mp4",
         probe=Probe(),
+        purpose="replica",
     )
     assert names == ["source.m4a"]
 
@@ -420,7 +421,7 @@ def test_copy_resolution_rejects_audio_only_media() -> None:
 
 
 def test_link_preflight_rejects_video_over_duration_limit() -> None:
-    """视频实测时长超过 15 秒上限时，ffprobe 校验阶段必须明确报错。"""
+    """复刻（replica）用途下，视频实测时长超过 15 秒上限时，ffprobe 校验阶段必须明确报错。"""
 
     class Probe:
         def probe(self, content: bytes, *, filename: str) -> VideoMetadata:
@@ -432,6 +433,7 @@ def test_link_preflight_rejects_video_over_duration_limit() -> None:
             kind="video",
             content_type="video/mp4",
             probe=Probe(),
+            purpose="replica",
         )
     assert result.value.status_code == 422
     assert result.value.code == "VIRAL_LINK_MEDIA_DURATION_EXCEEDED"
@@ -450,13 +452,14 @@ def test_link_preflight_allows_long_audio_sample() -> None:
         kind="audio",
         content_type="audio/mp4",
         probe=Probe(),
+        purpose="replica",
     )
 
 
 def test_preflight_rejects_resolved_link_over_duration_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """链接解析已返回超长时长时，应在下载媒体前拦截，不浪费带宽。"""
+    """复刻（replica）用途下，链接解析已返回超长时长时，应在下载媒体前拦截，不浪费带宽。"""
     fetched: list[bool] = []
 
     class Pipeline:
@@ -482,10 +485,68 @@ def test_preflight_rejects_resolved_link_over_duration_limit(
     with pytest.raises(ViralLinkError) as result:
         viral_import_routes.preflight_resolved_media(
             resolved,
-            purpose="copy",
+            purpose="replica",
             storage=None,  # type: ignore[arg-type]
         )
     assert result.value.status_code == 422
     assert result.value.code == "VIRAL_LINK_DURATION_EXCEEDED"
     assert "15" in result.value.message
     assert fetched == []
+
+
+def test_copy_preflight_allows_resolved_link_over_duration_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """提取文案（copy）不受复刻的 15 秒上限约束：超长视频应照常下载原音轨。"""
+    fetched: list[bool] = []
+
+    class Pipeline:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def fetch(self, video: Any, *, prefer: str | None = None) -> ViralMediaResult:
+            fetched.append(True)
+            return ViralMediaResult(
+                kind="video",
+                storage_uri="cos://media/video.mp4",
+                url="https://media.example/video.mp4",
+                size=100,
+                content_type="video/mp4",
+                cache_hit=False,
+                sha256="hash",
+            )
+
+    monkeypatch.setattr(viral_import_routes, "ViralMediaPipeline", Pipeline)
+    resolved = ResolvedViralLink(
+        platform="douyin",
+        video_id="7672703482771972081",
+        title="long video for copy",
+        author="",
+        cover_url=None,
+        video_url="https://media.example/video.mp4",
+        audio_url=None,
+        duration_ms=81083,
+        source_description="",
+    )
+    viral_import_routes.preflight_resolved_media(
+        resolved,
+        purpose="copy",
+        storage=None,  # type: ignore[arg-type]
+    )
+    assert fetched == [True]
+
+
+def test_link_preflight_allows_long_video_for_copy() -> None:
+    """提取文案（copy）用途下，超长视频不触发 15 秒上限误拦。"""
+
+    class Probe:
+        def probe(self, content: bytes, *, filename: str) -> VideoMetadata:
+            return VideoMetadata(duration_seconds=81.0)
+
+    validate_resolved_media_content(
+        b"\x00\x00\x00\x18ftypisom",
+        kind="video",
+        content_type="video/mp4",
+        probe=Probe(),
+        purpose="copy",
+    )

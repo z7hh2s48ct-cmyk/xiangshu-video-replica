@@ -252,8 +252,9 @@ def _resolved_video(resolved: ResolvedViralLink) -> ViralVideo:
 def preflight_resolved_media(
     resolved: ResolvedViralLink, *, purpose: str, storage: StorageAdapter
 ) -> None:
-    # 链接解析已带时长时，先拦截超过 15 秒上限的视频，避免无谓下载与后续静默失败。
-    if resolved.duration_ms > _MAX_LINK_DURATION_MS:
+    # 链接解析已带时长时，先拦截超过 15 秒上限的参考视频，避免无谓下载与后续静默失败；
+    # 提取文案（copy）以原视频音轨转写，不受复刻的 15 秒上限约束。
+    if purpose != "copy" and resolved.duration_ms > _MAX_LINK_DURATION_MS:
         raise ViralLinkError(
             422,
             "VIRAL_LINK_DURATION_EXCEEDED",
@@ -272,6 +273,7 @@ def preflight_resolved_media(
             kind=kind,
             content_type=content_type,
             probe=FFprobeVideoProbe(),
+            purpose=purpose,
         )
 
     try:
@@ -320,6 +322,7 @@ def validate_resolved_media_content(
     kind: str,
     content_type: str | None,
     probe: VideoProbe,
+    purpose: str,
 ) -> None:
     source_path = content if isinstance(content, Path) else None
     if source_path is not None:
@@ -372,8 +375,13 @@ def validate_resolved_media_content(
             "链接媒体无法播放，请上传 MP4 或 MOV 文件。",
             retryable=False,
         )
-    # 仅视频受 15 秒上限约束；口播声音样本（audio）时长可较长，不在此拦截。
-    if kind == "video" and metadata.duration_seconds > _MAX_LINK_DURATION_SECONDS:
+    # 仅复刻链路的视频受 15 秒上限约束；提取文案（copy）与口播声音样本（audio）
+    # 时长可较长，不在此拦截。
+    if (
+        purpose != "copy"
+        and kind == "video"
+        and metadata.duration_seconds > _MAX_LINK_DURATION_SECONDS
+    ):
         raise ViralLinkError(
             422,
             "VIRAL_LINK_MEDIA_DURATION_EXCEEDED",
