@@ -11,6 +11,7 @@ import { SessionConflictDialog } from "./customer/SessionConflictDialog";
 import {
   type CustomerCredentialStore,
   customerCredentialStore,
+  type RememberedLogin,
   useCustomerSession,
 } from "./customer/useCustomerSession";
 
@@ -106,6 +107,25 @@ function CustomerSessionShell({
   const [accessMode, setAccessMode] = useState<"login" | "register">(
     window.location.pathname === "/register" ? "register" : "login",
   );
+  // 「记住密码」只在这里落地：登录页保持纯展示，凭据的读写都收在这一处，
+  // 免得口令散落到多个组件里。`undefined` 表示还没读完，用来推迟首帧渲染，
+  // 否则输入框会先空一下再被填上。
+  const [remembered, setRemembered] = useState<RememberedLogin | null>();
+  useEffect(() => {
+    let active = true;
+    void store
+      .loadRememberedLogin()
+      .then((login) => {
+        if (active) setRemembered(login);
+      })
+      // 读不出来就当没记住：不能让金库异常把用户挡在登录页外面。
+      .catch(() => {
+        if (active) setRemembered(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [store]);
   useEffect(() => {
     function syncAccessRoute() {
       const path = window.location.pathname;
@@ -150,18 +170,40 @@ function CustomerSessionShell({
             </div>
           )}
           {accessOpen ? (
-            <AccountAccessPage
-              initialMode={accessMode}
-              onModeChange={openAccess}
-              onSubmit={async (input) => {
-                await session.loginWithPassword(input);
-                setAccessOpen(false);
-              }}
-              onHome={() => {
-                setAccessOpen(false);
-                window.history.replaceState(null, "", "/#studio/workbench");
-              }}
-            />
+            // 等金库读完再挂载。登录页用 useState 初始化输入框，晚到的
+            // remembered 不会再写进去——先渲染空表单就永远填不上了。这里返回
+            // null 而不是退回欢迎页，否则读金库的这一瞬会闪出另一个屏。
+            remembered === undefined ? null : (
+              <AccountAccessPage
+                initialMode={accessMode}
+                onModeChange={openAccess}
+                remembered={remembered}
+                onSubmit={async (input) => {
+                  await session.loginWithPassword(input);
+                  // 只有登录成功才写入：登录失败时保存一份错口令，下次预填的就是
+                  // 错的，反而更难用。
+                  if (input.remember) {
+                    await store.saveRememberedLogin({
+                      username: input.username,
+                      password: input.password,
+                    });
+                    setRemembered({
+                      username: input.username,
+                      password: input.password,
+                    });
+                  } else {
+                    // 取消勾选等于撤回授权，必须当场清掉此前记住的口令。
+                    await store.clearRememberedLogin();
+                    setRemembered(null);
+                  }
+                  setAccessOpen(false);
+                }}
+                onHome={() => {
+                  setAccessOpen(false);
+                  window.history.replaceState(null, "", "/#studio/workbench");
+                }}
+              />
+            )
           ) : (
             <CustomerWelcomePage onLogin={() => openAccess("login")} />
           )}

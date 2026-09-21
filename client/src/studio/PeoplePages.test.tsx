@@ -28,6 +28,7 @@ const api = vi.hoisted(() => ({
   downloadMaterialAsset: vi.fn(),
   refreshOralAvatar: vi.fn(),
   refreshOralVoice: vi.fn(),
+  deleteSimpleCharacterIdentity: vi.fn(),
   updateSimpleCharacterProfile: vi.fn(),
   uploadMaterial: vi.fn(),
   getLatestSceneLookTask: vi.fn(async () => null),
@@ -349,6 +350,81 @@ describe("PeoplePages", () => {
         }),
       ),
     );
+  });
+
+  it("删除人物需二次确认，并逐条列出会被连带删除的内容", async () => {
+    // 后端 DELETE /api/simple-characters/identities/{id} 是**级联硬删**：
+    // oral_avatars / oral_voices 对 person_identities 的外键是 ON DELETE
+    // CASCADE，口播成片与声音试听样例的 asset 行也在删除清单内，最后还会清理
+    // 对象存储。用户点一次就不可撤销，因此弹窗必须把范围说清楚。
+    review = false;
+    api.deleteSimpleCharacterIdentity.mockResolvedValue(undefined);
+    render(<PeoplePage />);
+
+    const card = screen.getByText("测试人物").closest("article");
+    fireEvent.click(
+      within(card as HTMLElement).getByRole("button", { name: "删除" }),
+    );
+    // 确认前不得触达后端
+    expect(api.deleteSimpleCharacterIdentity).not.toHaveBeenCalled();
+
+    const dialog = await screen.findByText(/确定删除人物「测试人物」吗/);
+    const text = dialog.closest("div")?.textContent ?? "";
+    expect(text).toMatch(/口播分身/);
+    expect(text).toMatch(/声音/);
+    expect(text).toMatch(/不可撤销/);
+
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+    await waitFor(() =>
+      expect(api.deleteSimpleCharacterIdentity).toHaveBeenCalledWith("p1"),
+    );
+    await waitFor(() => expect(refresh).toHaveBeenCalled());
+  });
+
+  it("人物有账务历史时删除失败，原样展示后端给出的中文原因", async () => {
+    // 三种 409（账务历史 / 进行中任务 / 已被项目选用）后端返回的 message
+    // 本身就是可直接展示的中文，前端不要再包一层含糊的兜底文案。
+    review = false;
+    api.deleteSimpleCharacterIdentity.mockRejectedValue(
+      new Error("人物已产生口播账务历史，为保留对账记录不可删除。"),
+    );
+    // 文件级 mock 恒返回 fallback；这里只为本次调用还原真实行为
+    // （真函数在 error.message 非空时原样返回），以验证组件确实把 cause 透传
+    // 出去，而不是写死一句兜底文案。
+    api.customerVisibleErrorMessage.mockImplementationOnce(
+      (cause: unknown, fallback: string) =>
+        cause instanceof Error && cause.message.trim()
+          ? cause.message.trim()
+          : fallback,
+    );
+    render(<PeoplePage />);
+
+    const card = screen.getByText("测试人物").closest("article");
+    fireEvent.click(
+      within(card as HTMLElement).getByRole("button", { name: "删除" }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "确认删除" }));
+
+    await waitFor(() =>
+      expect(notify).toHaveBeenCalledWith(
+        "人物已产生口播账务历史，为保留对账记录不可删除。",
+      ),
+    );
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it("审核模式删除人物不调用后端", async () => {
+    review = true;
+    render(<PeoplePage />);
+
+    const card = screen.getByText("测试人物").closest("article");
+    fireEvent.click(
+      within(card as HTMLElement).getByRole("button", { name: "删除" }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "确认删除" }));
+
+    await waitFor(() => expect(notify).toHaveBeenCalled());
+    expect(api.deleteSimpleCharacterIdentity).not.toHaveBeenCalled();
   });
 
   it("renders the people library and its primary empty-safe actions", () => {

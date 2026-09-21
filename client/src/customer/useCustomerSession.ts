@@ -43,7 +43,13 @@ export interface CustomerCredentialStore {
   /** The stable device fingerprint (§14: generated once, read forever). */
   deviceInstanceId(): Promise<string>;
   devicePlatform(): string;
+  /** 「记住密码」：与会话令牌同住系统凭据库，桌面端之外一律不可用。 */
+  loadRememberedLogin(): Promise<RememberedLogin | null>;
+  saveRememberedLogin(login: RememberedLogin): Promise<void>;
+  clearRememberedLogin(): Promise<void>;
 }
+
+export type RememberedLogin = { username: string; password: string };
 
 export type CustomerSessionConflict = {
   deviceNameMasked: string;
@@ -874,6 +880,7 @@ export function isTauriRuntime(): boolean {
 type StoredCustomerCredentials = {
   device_token: string;
   session_token: string | null;
+  remembered_login?: { username: string; password: string } | null;
 };
 
 function tauriCustomerCredentialStore(): CustomerCredentialStore {
@@ -882,7 +889,10 @@ function tauriCustomerCredentialStore(): CustomerCredentialStore {
       const stored = await invoke<StoredCustomerCredentials | null>(
         "customer_load_credentials",
       );
-      return stored?.device_token ?? null;
+      // 空串按「没有」处理，与下面的 session_token 一致：金库记录可能只为
+      // 存「记住密码」而建（设备令牌尚未写入），此时不能让引导流程把空串
+      // 当成一个有效的设备凭据。
+      return stored?.device_token || null;
     },
     async loadSessionToken() {
       const stored = await invoke<StoredCustomerCredentials | null>(
@@ -921,6 +931,23 @@ function tauriCustomerCredentialStore(): CustomerCredentialStore {
     devicePlatform() {
       // The customer desktop build ships Windows-only (DESK-03 NSIS x64).
       return "windows";
+    },
+    async loadRememberedLogin() {
+      const stored = await invoke<StoredCustomerCredentials | null>(
+        "customer_load_credentials",
+      );
+      const remembered = stored?.remembered_login;
+      if (!remembered?.username.trim() || !remembered.password) return null;
+      return { username: remembered.username, password: remembered.password };
+    },
+    async saveRememberedLogin(login) {
+      await invoke("customer_save_remembered_login", {
+        username: login.username,
+        password: login.password,
+      });
+    },
+    async clearRememberedLogin() {
+      await invoke("customer_clear_remembered_login");
     },
   };
 }
@@ -1004,6 +1031,14 @@ function browserCookieCredentialStore(): CustomerCredentialStore {
     devicePlatform() {
       return "browser";
     },
+    // 浏览器没有系统凭据库。这里刻意不降级到 localStorage/sessionStorage——
+    // 那等于把账号口令明文留在磁盘上，是 §10.2 明令禁止的。读恒为空，写是
+    // 静默 no-op，于是「记住密码」在网页端就是不可用，而不是不安全地可用。
+    async loadRememberedLogin() {
+      return null;
+    },
+    async saveRememberedLogin() {},
+    async clearRememberedLogin() {},
   };
 }
 

@@ -3465,6 +3465,28 @@ describe("视频复刻（模块①）", () => {
     await waitFor(() => expect(screen.getByText(/已就绪/)).toBeInTheDocument());
   }
 
+  it("合成最终提示词时按草稿的时长逐秒下发，不再折叠成 4 或 15", async () => {
+    // 回归：早期 H3 只支持 4/15 两档，前端因此把 4–15 的选择压成
+    // `duration <= 9 ? 4 : 15`。PR #160 把契约放开到 4–15 每秒后这个映射就
+    // 过期了——默认 8 秒会被悄悄发成 4 秒，用户选 12 秒会变成 15 秒，中间值
+    // 永远拿不到。后端 output_duration_seconds 的约束是 ge=4, le=15。
+    const value = replicaStudio();
+    value.state = {
+      ...value.state,
+      draft: { ...value.state.draft, duration: 8 },
+    };
+    useStudio.mockReturnValue(value);
+    mockAnalysisSuccess();
+    render(<ReplicaPage />);
+    await screen.findByText(/已拆解/);
+    await prepareFinalReplica();
+
+    expect(replicaApi.compileGenerationPrompt).toHaveBeenCalledWith(
+      "project-1",
+      expect.objectContaining({ output_duration_seconds: 8 }),
+    );
+  });
+
   it("离开内容配置后迟到拆解回执不写入当前草稿", async () => {
     const value = replicaStudio();
     mockAnalysisSuccess();

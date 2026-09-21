@@ -114,6 +114,12 @@ function memoryStore(initial?: { deviceToken?: string | null }) {
     devicePlatform() {
       return "windows";
     },
+    // 「记住密码」不参与本文件的会话断言，给出满足接口的最小桩。
+    async loadRememberedLogin() {
+      return null;
+    },
+    async saveRememberedLogin() {},
+    async clearRememberedLogin() {},
   };
   return store;
 }
@@ -246,6 +252,7 @@ describe("useCustomerSession", () => {
         mode: "login",
         username: "alice",
         password: testPasswordText,
+        remember: false,
       });
     });
     expect(result.current.screen).toBe("login");
@@ -312,6 +319,7 @@ describe("useCustomerSession", () => {
           mode: "login",
           username: "alice",
           password: testPasswordText,
+          remember: false,
         });
       });
       expect(result.current.screen).toBe("workspace");

@@ -21,6 +21,8 @@ pub fn run() {
             customer_credentials::customer_load_credentials,
             customer_credentials::customer_clear_session_token,
             customer_credentials::customer_clear_all_credentials,
+            customer_credentials::customer_save_remembered_login,
+            customer_credentials::customer_clear_remembered_login,
             video_downloads::choose_video_download,
             video_downloads::start_video_download,
             video_downloads::cancel_video_download,

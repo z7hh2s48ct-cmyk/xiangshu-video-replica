@@ -1228,9 +1228,13 @@ const REVIEW_SAMPLE_SHOTS: ShotCard[] = [
   },
 ];
 
-/** 客户档位归一：非 4/15 秒的时长映射到最近的客户可选档（≤9s→4s，>9s→15s）。 */
-function normalizeCustomerDuration(seconds: number): 4 | 15 {
-  return seconds === 4 || seconds === 15 ? seconds : seconds <= 9 ? 4 : 15;
+/** 归一到后端契约的 4–15 秒整数区间（`output_duration_seconds` 是
+ * `ge=4, le=15`）。这里曾把时长折叠成 4/15 两档，那是 H3 早期只支持两档时的
+ * 权宜；PR #160 放开到每秒后，折叠会让提示词上下文里的时长与实际生成时长
+ * 对不上——按 12 秒生成、却按 15 秒写提示词。 */
+function normalizeCustomerDuration(seconds: number): number {
+  if (!Number.isFinite(seconds)) return 15;
+  return Math.min(15, Math.max(4, Math.round(seconds)));
 }
 
 export function ReplicaPage() {
@@ -1311,7 +1315,11 @@ export function ReplicaPage() {
     projectId: state.draft.projectId ?? "",
     scriptText: state.draft.script.text,
     firstFrameAssetId: state.draft.firstFrameId ?? "",
-    duration: state.draft.duration <= 9 ? 4 : 15,
+    // 时长逐秒下发。早期 H3 只支持 4/15 两档，这里曾折叠成
+    // `duration <= 9 ? 4 : 15`；PR #160 把契约放开到 4–15 每秒后该映射即失效，
+    // 默认 8 秒会被悄悄发成 4 秒。与 generation_context 共用同一个归一函数，
+    // 免得两处对「目标时长」的理解再次走岔。
+    duration: normalizeCustomerDuration(state.draft.duration),
     resolution: (state.draft.resolution === "2K" ? "2K" : "768P") as
       | "768P"
       | "2K",

@@ -56,11 +56,22 @@
 .person-card {
   overflow: hidden;
 }
+/* 容器比例固定，不再用固定高度。三列网格里卡片宽度随窗口变化，而高度钉死
+   360px 会让容器比例随窗口漂移——同一张人物图在不同窗口下被裁掉的部位都不
+   一样。改用 aspect-ratio 后比例恒定。
+   4/5 与 .scene-image 保持一致；内层 img 覆盖 .studio-media img 的默认 cover，
+   改为 contain，避免把人物的头或脚裁掉（外层那行 object-fit 作用在包裹 div
+   上，从来没生效过）。 */
 .person-card__portrait {
   width: 100%;
-  height: 360px;
-  object-fit: cover;
+  aspect-ratio: 4 / 5;
+  height: auto;
   background: #1d1d1b;
+}
+.person-card__portrait.studio-media img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 .person-card__body {
   padding: 18px;
@@ -422,4 +433,14 @@
 }
 .voice-card audio {
   max-width: 100%;
+}
+
+/* 删除人物确认弹窗：逐条列出会被连带删除的内容。级联范围比用户预期大得多
+   （口播分身、声音、成片与存储对象），所以用列表而非一句话带过。 */
+.person-delete-casualties {
+  margin: 12px 0 16px;
+  padding-left: 20px;
+  color: #d8c69a;
+  font-size: var(--font-label);
+  line-height: 1.9;
 }

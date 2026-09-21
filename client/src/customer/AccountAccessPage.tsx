@@ -7,6 +7,8 @@ export type AccountAccessInput = {
   mode: "login" | "register";
   username: string;
   password: string;
+  /** 用户是否勾选「记住密码」；持久化由调用方决定，本页不碰存储。 */
+  remember: boolean;
 };
 
 export function AccountAccessPage({
@@ -14,15 +16,19 @@ export function AccountAccessPage({
   onHome,
   initialMode = "login",
   onModeChange,
+  remembered = null,
 }: {
   onSubmit(input: AccountAccessInput): Promise<void>;
   onHome(): void;
   initialMode?: "login" | "register";
   onModeChange?(mode: "login" | "register"): void;
+  /** 系统凭据库里已记住的登录，用于预填；本页只读不写。 */
+  remembered?: { username: string; password: string } | null;
 }) {
   const [mode, setMode] = useState<"login" | "register">(initialMode);
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
+  const [username, setUsername] = useState(remembered?.username ?? "");
+  const [password, setPassword] = useState(remembered?.password ?? "");
+  const [remember, setRemember] = useState(remembered !== null);
   const [confirmation, setConfirmation] = useState("");
   const [visible, setVisible] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -43,7 +49,13 @@ export function AccountAccessPage({
     pending.current = true;
     setBusy(true);
     try {
-      await onSubmit({ mode, username: username.trim(), password });
+      await onSubmit({
+        mode,
+        username: username.trim(),
+        password,
+        // 注册模式不提供这个选项：口令刚由用户亲手设定，没有免输价值。
+        remember: mode === "login" && remember,
+      });
     } catch (cause) {
       setError(
         cause instanceof CustomerApiError
@@ -179,6 +191,21 @@ export function AccountAccessPage({
                 />
               </div>
             </>
+          )}
+          {mode === "login" && (
+            <label className="account-remember" htmlFor="account-remember">
+              <input
+                id="account-remember"
+                type="checkbox"
+                // 可见 label 里还带一行小字说明，显式命名避免读屏把说明一起念成控件名
+                aria-label="记住密码"
+                disabled={busy}
+                checked={remember}
+                onChange={(e) => setRemember(e.target.checked)}
+              />
+              <span>记住密码</span>
+              <small>保存在本机系统钥匙串，不会明文落盘</small>
+            </label>
           )}
           {error && (
             <p className="account-error" role="alert">

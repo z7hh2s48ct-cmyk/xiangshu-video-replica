@@ -14,6 +14,7 @@ import {
   customerVisibleErrorMessage,
   deleteOralAvatar,
   deleteOralVoice,
+  deleteSimpleCharacterIdentity,
   downloadMaterialAsset,
   putMaterial,
   refreshOralAvatar,
@@ -282,12 +283,47 @@ function PersonCard({
   person: StudioPerson;
   onOpen(): void;
 }) {
-  const { navigate, review } = useStudio();
+  const { navigate, review, notify, refresh, updateData } = useStudio();
   const portrait = person.portrait;
   const voices = person.voices.filter((voice) => voice.confirmed).length;
   const avatars = person.avatars.filter((avatar) => avatar.ready).length;
   const photoCount =
     person.photoCount ?? (review ? person.photoIds.length : undefined);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  // 删除是级联硬删：oral_avatars / oral_voices 对 person_identities 的外键是
+  // ON DELETE CASCADE，口播成片与声音试听样例的 asset 行也在删除清单内，最后
+  // 还会清理对象存储。逐条列出，别让用户以为只是「从列表移除」。
+  const casualties = [
+    `${person.avatars.length} 个口播分身`,
+    `${person.voices.length} 个声音档案`,
+    photoCount === undefined ? "全部形象照片" : `${photoCount} 张形象照片`,
+    "已生成的口播成片与声音试听样例",
+  ];
+  const deletePerson = async () => {
+    if (deleting) return;
+    setDeleting(true);
+    try {
+      // 审核示例没有真实身份可删，只做本地移除。
+      if (!review) {
+        await deleteSimpleCharacterIdentity(person.id);
+        refresh();
+      } else {
+        updateData((current) => ({
+          ...current,
+          people: current.people.filter((item) => item.id !== person.id),
+        }));
+      }
+      setConfirmingDelete(false);
+      notify(`人物「${person.name}」已删除。`);
+    } catch (cause) {
+      // 三种 409（账务历史 / 进行中任务 / 已被项目选用）后端返回的 message
+      // 本身就是可直接展示的中文原因，原样透出比再包一层兜底更有用。
+      notify(customerVisibleErrorMessage(cause, "删除人物失败，请稍后重试。"));
+    } finally {
+      setDeleting(false);
+    }
+  };
   return (
     <article className="person-card">
       <Media
@@ -333,8 +369,53 @@ function PersonCard({
           >
             用于创作
           </Button>
+          <Button
+            variant="quiet"
+            disabled={deleting}
+            onClick={() => setConfirmingDelete(true)}
+          >
+            <Icon name="close" size={16} />
+            删除
+          </Button>
         </div>
       </div>
+      {confirmingDelete ? (
+        <StudioDialog
+          title="删除人物"
+          onClose={() => setConfirmingDelete(false)}
+        >
+          <div className="oral-upload-panel">
+            <p className="oral-dialog-intro">
+              确定删除人物「{person.name}」吗？以下内容会被一并删除，
+              <strong>不可撤销</strong>：
+            </p>
+            <ul className="person-delete-casualties">
+              {casualties.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+            <p className="oral-dialog-intro">
+              若该人物已产生口播账务、存在进行中的任务或已被项目选用，
+              后端会拒绝删除并说明原因。
+            </p>
+            <div className="oral-dialog-actions">
+              <Button
+                variant="quiet"
+                onClick={() => setConfirmingDelete(false)}
+              >
+                取消
+              </Button>
+              <Button
+                variant="primary"
+                disabled={deleting}
+                onClick={() => void deletePerson()}
+              >
+                {deleting ? "删除中…" : "确认删除"}
+              </Button>
+            </div>
+          </div>
+        </StudioDialog>
+      ) : null}
     </article>
   );
 }

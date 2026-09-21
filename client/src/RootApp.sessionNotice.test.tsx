@@ -3,7 +3,10 @@ import { describe, expect, it, vi } from "vitest";
 
 const failure = "本机已退出，但服务端未能确认释放会话，请检查网络后重试";
 vi.mock("./customer/useCustomerSession", () => ({
-  customerCredentialStore: () => ({}),
+  // 登录页挂载前会读一次「记住密码」；桩里返回 null 表示没记住过。
+  customerCredentialStore: () => ({
+    loadRememberedLogin: async () => null,
+  }),
   useCustomerSession: () => ({
     screen: "login",
     error: new Error("本机已退出，但服务端未能确认释放会话，请检查网络后重试"),

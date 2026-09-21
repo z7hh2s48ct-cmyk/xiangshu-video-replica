@@ -386,11 +386,13 @@
   color: #a5a79d;
   margin: 0;
 }
+/* 纵向列表：一行一个分身。原先是三列网格，卡片宽度只有三分之一，
+   「使用此分身/下载源视频/删除」三个按钮必然换行，预览图也被压得很小。
+   改为纵向堆叠、左图右文后，每张卡拿到整行宽度，操作区一行放得下。 */
 .oral-library-cards {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 20px;
-  align-items: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 .oral-library-card {
   min-width: 0;
@@ -398,6 +400,9 @@
   background: #151713;
   border: 1px solid #2e3128;
   border-radius: 7px;
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  align-items: stretch;
 }
 .oral-library-preview {
   position: relative;
@@ -436,20 +441,29 @@
   right: 10px;
 }
 .oral-library-card-body {
-  padding: 16px 12px;
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 14px;
 }
 .oral-library-card-body h3 {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 500;
-  margin: 0 0 16px;
+  margin: 0;
   overflow-wrap: anywhere;
 }
+/* 整行宽度下按钮不再需要换行；窄窗口仍允许回落，避免横向溢出。 */
 .oral-library-card-body > div {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  justify-content: flex-start;
+  gap: 10px;
   flex-wrap: wrap;
+}
+/* 删除推到最右，与「使用/下载」这类正向操作拉开距离，避免误点。 */
+.oral-library-card-body > div > .studio-button:last-child {
+  margin-left: auto;
 }
 .oral-library-card-body .studio-button {
   color: #ebbb53;
@@ -468,18 +482,20 @@
   color: #a7d098;
   font-size: 11px;
 }
+/* 纵向列表里它是整行一条，不再是等高网格里的一格；315px 会突兀地高过
+   旁边的分身卡（卡高由 200px 缩略图 ÷ 1.1 ≈ 182px 决定）。 */
 .oral-create-tile {
-  min-height: 315px;
+  min-height: 108px;
   background: transparent;
   color: #ecece8;
   border: 1px dashed #515448;
   border-radius: 7px;
   font: inherit;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   justify-content: center;
   align-items: center;
-  gap: 23px;
+  gap: 16px;
   padding: 20px 10px;
   cursor: pointer;
 }
@@ -503,9 +519,6 @@
 .oral-create-tile:disabled {
   cursor: default;
   opacity: 0.6;
-}
-.oral-library-cards:has(> :only-child) {
-  grid-template-columns: 1fr;
 }
 .oral-library-footer {
   border-top: 1px solid #30332a;
@@ -685,10 +698,6 @@
     grid-template-columns: minmax(0, 1.5fr) minmax(290px, 1fr);
     gap: 24px;
   }
-  .oral-library-cards {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 16px;
-  }
   .oral-library-guide {
     padding-left: 24px;
   }
@@ -710,11 +719,15 @@
   }
 }
 @media (max-width: 540px) {
-  .oral-library-cards {
-    grid-template-columns: 1fr;
+  /* 窄屏放弃左图右文，回到上图下文；200px 缩略图会把正文挤到只剩一两个字。 */
+  .oral-library-card {
+    grid-template-columns: minmax(0, 1fr);
   }
   .oral-library-preview {
     aspect-ratio: 4 / 3;
+  }
+  .oral-library-card-body > div > .studio-button:last-child {
+    margin-left: 0;
   }
   .oral-create-tile {
     min-height: 180px;
@@ -845,18 +858,7 @@
 .oral-library-voice p span {
   font-size: 12px;
 }
-.oral-library-cards {
-  grid-template-columns: 1fr 1fr 0.78fr;
-}
-@media (max-width: 1200px) {
-  .oral-library-cards {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
 @media (max-width: 540px) {
-  .oral-library-cards {
-    grid-template-columns: 1fr;
-  }
   .studio-shell .oral-library-heading h2,
   .studio-shell .oral-voice-heading h2 {
     font-size: 24px;

@@ -16,6 +16,10 @@ function fakeStore(): CustomerCredentialStore {
     clearAllCredentials: vi.fn().mockResolvedValue(undefined),
     deviceInstanceId: vi.fn().mockResolvedValue("test-instance-id"),
     devicePlatform: () => "windows",
+    // 「记住密码」在这些用例里不参与断言，给出满足接口的最小桩。
+    loadRememberedLogin: async () => null,
+    saveRememberedLogin: async () => {},
+    clearRememberedLogin: async () => {},
   };
 }
 
