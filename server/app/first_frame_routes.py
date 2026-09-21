@@ -102,6 +102,9 @@ class ConfirmFirstFrameRequest(BaseModel):
     first_frame_asset_id: str = Field(min_length=1)
     # 显式确认未通过自动质检的候选；标记会随确认版本留痕。
     allow_unverified: bool = False
+    # 历史版本放开：显式指定候选版本（可指向历史版本）时，该图从此版本里
+    # 选定；缺省时仍只接受当前（最新）候选集。
+    first_frame_candidates_version_id: str | None = Field(default=None, min_length=1)
 
 
 class VersionResponse(BaseModel):
@@ -418,6 +421,7 @@ def confirm_project_first_frame(
                 first_frame_asset_id=request.first_frame_asset_id,
                 actor=actor,
                 allow_unverified=request.allow_unverified,
+                first_frame_candidates_version_id=request.first_frame_candidates_version_id,
             )
         )
 
@@ -435,25 +439,9 @@ def read_latest_first_frame_selection(
     row = latest_version(conn, project_id, FIRST_FRAME_SELECTION_KIND)
     if row is None:
         return None
-    payload = json.loads(str(row["payload_json"]))
-    try:
-        candidates = current_first_frame_candidates(conn, project_id=project_id)
-    except HTTPException as exc:
-        if (
-            exc.status_code == 409
-            and isinstance(exc.detail, dict)
-            and exc.detail.get("code") == "FIRST_FRAME_CANDIDATES_NOT_FOUND"
-        ):
-            return None
-        raise
-    if payload.get("first_frame_candidates_version_id") != str(candidates["id"]):
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "FIRST_FRAME_SELECTION_STALE",
-                "message": "Select a first frame from the latest candidate set.",
-            },
-        )
+    # 历史版本放开：已确认首帧可能指向旧候选版本（用户显式选择了历史图）。
+    # 这里只如实读取记录，不再用“必须等于最新候选版本”把已确认结果整体
+    # 置为 409；过期与否由 H3 生成门禁与前端警示承担。
     return version_response(row)
 
 

@@ -21,6 +21,7 @@ const replicaApi = vi.hoisted(() => ({
   getMaterialBatchPreviews: vi.fn(),
   selectCharacterReferences: vi.fn(),
   startVideoAnalysis: vi.fn(),
+  getAnalysisTask: vi.fn(),
   waitForAnalysisTask: vi.fn(),
   getLatestProjectShotCards: vi.fn(),
   getLatestProjectAnalysis: vi.fn(async () => ({ id: "av-x", payload: {} })),
@@ -699,6 +700,25 @@ describe("V1.4 创作页面", () => {
     expect(value.navigate).toHaveBeenCalledWith("oral", { returnTo: "copy" });
   });
 
+  it("未选择人物 IP 时用于数字人口播仍可跳转，并提示进入口播页后补选", () => {
+    const base = studio();
+    const value = studio({
+      state: {
+        ...base.state,
+        draft: { ...base.state.draft, ipId: undefined },
+      },
+    });
+    useStudio.mockReturnValue(value);
+    render(<CopyPage />);
+    expect(
+      screen.getByText("未选择人物 IP，进入数字人口播页后可选择"),
+    ).toBeInTheDocument();
+    const oralButton = screen.getByRole("button", { name: "用于数字人口播" });
+    expect(oralButton).toBeEnabled();
+    fireEvent.click(oralButton);
+    expect(value.navigate).toHaveBeenCalledWith("oral", { returnTo: "copy" });
+  });
+
   it("审计员可查看创作内容但文案、视频与口播提交控件只读", () => {
     const value = studio({
       review: false,
@@ -1353,9 +1373,10 @@ describe("V1.4 创作页面", () => {
         ".creation-shot-list .creation-shot-summary-list",
       ),
     ).toBeNull();
-    expect(screen.getByText("编辑完整分镜").closest("details")).toHaveAttribute(
-      "open",
-    );
+    // ③ 折叠：完整分镜表默认收起，展开入口文案随之调整。
+    expect(
+      screen.getByText("展开编辑完整分镜").closest("details"),
+    ).not.toHaveAttribute("open");
     expect(
       screen.getByRole("button", { name: "存入我的提示词" }),
     ).toBeDisabled();
@@ -3312,6 +3333,7 @@ describe("视频复刻（模块①）", () => {
   beforeEach(() => {
     useStudio.mockReset();
     replicaApi.startVideoAnalysis.mockClear();
+    replicaApi.getAnalysisTask.mockClear();
     replicaApi.getLatestProjectShotCards.mockReset();
     replicaApi.getLatestProjectAnalysis.mockReset();
     replicaApi.getLatestGenerationPrompt.mockReset();
@@ -3465,7 +3487,10 @@ describe("视频复刻（模块①）", () => {
     );
     const adopt = screen.queryByRole("button", { name: "采用这份最终稿" });
     if (adopt) fireEvent.click(adopt);
-    await waitFor(() => expect(screen.getByText(/已就绪/)).toBeInTheDocument());
+    // ⑧ 就绪徽标与 PromptEditor 状态行都含「已就绪」，这里只要求出现其一。
+    await waitFor(() =>
+      expect(screen.getAllByText(/已就绪/).length).toBeGreaterThan(0),
+    );
   }
 
   it("合成最终提示词时按草稿的时长逐秒下发，不再折叠成 4 或 15", async () => {
@@ -3569,6 +3594,62 @@ describe("视频复刻（模块①）", () => {
       expect(value.notify).toHaveBeenCalledWith("来源视频已失效，请重新上传"),
     );
     expect(value.openLive).not.toHaveBeenCalled();
+  });
+
+  it("拆解已完成但没有分镜时，重新拆解强制新建任务而不复用旧任务", async () => {
+    // 回归：视频过短 / 无有效镜头时任务 SUCCEEDED 却不落分镜。旧逻辑把
+    // 「重新拆解」判定为复用已完成的旧任务（getAnalysisTask），用户既拿不到
+    // 分镜、也点不动第二次拆解，陷入死循环；现在只有任务仍在排队 / 运行中
+    // 才复用，其余情况一律带 force 新建。
+    const value = replicaStudio();
+    value.state = {
+      ...value.state,
+      draft: {
+        ...value.state.draft,
+        analysisTaskId: "task-done",
+        analysisTaskStatus: "SUCCEEDED",
+      },
+    };
+    mockAnalysisSuccess();
+    replicaApi.getLatestProjectShotCards.mockResolvedValue({
+      id: "scv-empty",
+      payload: {
+        source_analysis_version_id: "av-1",
+        duration_seconds: 8,
+        shots: [],
+      },
+    });
+    replicaApi.getLatestProjectAnalysis.mockResolvedValue({
+      id: "av-1",
+      payload: {
+        analysis: {
+          summary: "",
+          duration_seconds: 8,
+          original_script: "",
+          shots: [],
+        },
+      },
+    });
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "启动 AI 拆解" }),
+    );
+
+    await waitFor(() =>
+      expect(replicaApi.startVideoAnalysis).toHaveBeenCalledWith(
+        "project-1",
+        "asset-1",
+        undefined,
+        true,
+      ),
+    );
+    await waitFor(() =>
+      expect(value.notify).toHaveBeenCalledWith(
+        "拆解完成。请确认文案和置换首帧，再合成最终提示词。",
+      ),
+    );
+    expect(replicaApi.getAnalysisTask).not.toHaveBeenCalled();
   });
 
   it("首帧置换前显示短提示，选定首帧后在同页展示最终合成", async () => {

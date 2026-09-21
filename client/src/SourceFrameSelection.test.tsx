@@ -201,6 +201,62 @@ describe("SourceFrameSelection", () => {
     expect(confirmSourceFrame).toHaveBeenCalledTimes(1);
   });
 
+  it("places the current frame beside the alternatives in the replica row layout", async () => {
+    render(
+      <SourceFrameSelection
+        candidatesAlwaysVisible
+        projectId="project-1"
+        referenceAssetId="reference-1"
+        simplified
+      />,
+    );
+    const currentFrame = await screen.findByAltText("当前原画面");
+    const alternatives = screen.getByText("查看或更换源画面");
+    const row = currentFrame.closest(".source-frame-selection__row");
+    expect(row).not.toBeNull();
+    expect(row).toContainElement(
+      alternatives.closest("details") as HTMLElement,
+    );
+    const currentColumn = row?.querySelector(
+      ".source-frame-selection__current",
+    );
+    expect(currentColumn).not.toBeNull();
+    expect(currentColumn).toContainElement(currentFrame as HTMLElement);
+    expect(currentColumn).toContainElement(
+      screen.getByRole("button", { name: "使用这张画面" }),
+    );
+    expect(alternatives.closest("details")).toHaveAttribute("open");
+  });
+
+  it("keeps the replica row layout free of the long explanatory copy", async () => {
+    render(
+      <SourceFrameSelection
+        candidatesAlwaysVisible
+        projectId="project-1"
+        referenceAssetId="reference-1"
+        simplified
+      />,
+    );
+    await screen.findByAltText("当前原画面");
+    expect(screen.queryByText(/选择人物清晰、无遮挡的画面/)).toBeNull();
+    expect(screen.queryByText(/后段画面也能作为人物与构图参考/)).toBeNull();
+  });
+
+  it("keeps the descriptive copy in the full-size layout", async () => {
+    render(
+      <SourceFrameSelection
+        projectId="project-1"
+        referenceAssetId="reference-1"
+      />,
+    );
+    expect(
+      await screen.findByText(/选择人物清晰、无遮挡的画面/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/后段画面也能作为人物与构图参考/),
+    ).toBeInTheDocument();
+  });
+
   it("hides and locks the previous source frame while new inputs are loading", async () => {
     const { rerender } = render(
       <SourceFrameSelection

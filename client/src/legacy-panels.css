@@ -3075,6 +3075,31 @@
   background: transparent;
 }
 
+/* 复刻页源画面行：当前画面与「查看或更换源画面」并排两栏，不再把预览、
+   候选与取帧工具纵向堆叠成多层。左栏跟随预览宽度（竖屏源画面按 44dvh
+   高度预算约 223px；横屏素材封顶 460px，避免挤掉右栏候选区）。 */
+.creation-replica .source-frame-selection__row {
+  display: grid;
+  grid-template-columns: fit-content(460px) minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+  min-width: 0;
+}
+
+.creation-replica .source-frame-selection__current {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* 并排形态下右栏自带标题（summary），不再需要独立的顶部分隔线。 */
+.creation-replica .source-frame-selection__row > .source-frame-advanced {
+  min-width: 0;
+  border-top: 0;
+  padding-top: 0;
+}
+
 .creation-replica .source-frame-summary h3,
 .creation-replica .first-frame-selection--compact > div:first-child {
   position: absolute;
@@ -3181,6 +3206,9 @@
   .creation-replica .first-frame-options,
   .creation-replica .source-frame-options {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .creation-replica .source-frame-selection__row {
+    grid-template-columns: minmax(0, 1fr);
   }
   .creation-replica .source-frame-toolbar > button,
   .creation-replica .source-frame-actions > button {

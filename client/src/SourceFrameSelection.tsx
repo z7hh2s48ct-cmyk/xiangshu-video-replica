@@ -476,6 +476,152 @@ export function SourceFrameSelection({
     </button>
   ) : null;
 
+  // 复刻页两栏形态（源画面行）：左栏源画面预览与确认按钮，右栏「查看或更换
+  // 源画面」候选区；不再把预览、候选与取帧工具纵向堆叠成多层。
+  const replicaRowLayout = candidatesAlwaysVisible;
+  const currentFramePreview =
+    materialReady &&
+    simplified &&
+    selectedAssetId &&
+    previewUrls[selectedAssetId] ? (
+      <VideoPreview
+        className="source-frame-current"
+        frameRatio="adaptive"
+        alt="当前原画面"
+        poster={previewUrls[selectedAssetId]}
+        onPosterError={() => {
+          setPreviewUrls((current) => {
+            const next = { ...current };
+            delete next[selectedAssetId];
+            return next;
+          });
+          setError("画面预览加载失败，请重新取帧。");
+        }}
+      />
+    ) : null;
+  const rowConfirmButton =
+    simplified && candidates.length > 0 ? confirmButton : null;
+  const alternativesPanel =
+    materialReady && candidates.length > 0 ? (
+      <details
+        className="source-frame-advanced"
+        open={
+          candidatesAlwaysVisible || (!simplified && manualConfirmationRequired)
+        }
+      >
+        <summary>{readOnly ? "查看源画面记录" : "查看或更换源画面"}</summary>
+        <div className="source-frame-advanced__body">
+          {!readOnly ? (
+            <div className="source-frame-toolbar">
+              {/* 复刻页两栏形态删去这段长提示，取帧工具本身的含义已足够。 */}
+              {replicaRowLayout ? null : (
+                <p>
+                  后段画面也能作为人物与构图参考；确认后请在最终提示词中填写开场衔接。
+                </p>
+              )}
+              <button
+                className="secondary-button"
+                disabled={isSubmitting || !referenceAssetId}
+                onClick={handleExtract}
+                type="button"
+              >
+                {isSubmitting ? "正在处理" : "重新取帧"}
+              </button>
+              <label>
+                取帧时间（秒）
+                <input
+                  disabled={isSubmitting}
+                  max={
+                    videoDurationSeconds === null
+                      ? undefined
+                      : Math.max(0, videoDurationSeconds - 0.1)
+                  }
+                  min="0"
+                  onChange={(event) =>
+                    setManualTimestamp(Number(event.target.value))
+                  }
+                  step="0.1"
+                  type="number"
+                  value={manualTimestamp}
+                />
+              </label>
+              <button
+                className="secondary-button"
+                disabled={isSubmitting || !referenceAssetId}
+                onClick={() => void handleManualExtract()}
+                type="button"
+              >
+                取出画面
+              </button>
+            </div>
+          ) : null}
+          <fieldset className="source-frame-options">
+            <legend>{readOnly ? "源画面记录" : "选择源画面"}</legend>
+            {candidates.map((candidate, index) => (
+              <label
+                className={
+                  selectedAssetId === candidate.asset_id
+                    ? "source-frame-option source-frame-option--selected"
+                    : "source-frame-option"
+                }
+                key={candidate.asset_id}
+              >
+                <input
+                  checked={selectedAssetId === candidate.asset_id}
+                  disabled={
+                    readOnly || isSubmitting || !previewUrls[candidate.asset_id]
+                  }
+                  name="source-frame"
+                  onChange={() => {
+                    setSelectedAssetId(candidate.asset_id);
+                    setManualConfirmationRequired(true);
+                    setStatus("已选择其他源画面，点击下方按钮应用。");
+                  }}
+                  type="radio"
+                  value={candidate.asset_id}
+                />
+                {previewUrls[candidate.asset_id] ? (
+                  <VideoPreview
+                    alt={`候选源画面 ${index + 1}`}
+                    fitContainer
+                    poster={previewUrls[candidate.asset_id]}
+                  />
+                ) : (
+                  <span className="source-frame-placeholder">
+                    {failedPreviewAssetIds.includes(candidate.asset_id)
+                      ? "预览加载失败"
+                      : readOnly
+                        ? "预览不可用"
+                        : "预览加载中"}
+                  </span>
+                )}
+                <span>
+                  <strong>
+                    画面 {index + 1}
+                    {candidate.asset_id ===
+                    preferredCandidateAssetId(candidates)
+                      ? " · 推荐"
+                      : ""}
+                  </strong>
+                  <small>
+                    {candidate.timestamp_seconds.toFixed(1)} 秒
+                    {candidate.timestamp_seconds <= 0.25
+                      ? " · 开场画面"
+                      : " · 后段画面，需补开场衔接"}
+                  </small>
+                </span>
+              </label>
+            ))}
+          </fieldset>
+          {readOnly ? (
+            <p className="status-note">只读身份不能更换源画面。</p>
+          ) : !simplified ? (
+            confirmButton
+          ) : null}
+        </div>
+      </details>
+    ) : null;
+
   return (
     <section
       className={
@@ -488,9 +634,12 @@ export function SourceFrameSelection({
       <div className="source-frame-summary">
         <div>
           <h3 id="source-frame-title">原视频画面</h3>
-          <p>
-            选择人物清晰、无遮挡的画面；开头有字幕、贴纸或多人遮挡时，可改用后段画面。
-          </p>
+          {/* 复刻页两栏形态不再渲染整段说明，标题与状态徽章已足够表意。 */}
+          {replicaRowLayout ? null : (
+            <p>
+              选择人物清晰、无遮挡的画面；开头有字幕、贴纸或多人遮挡时，可改用后段画面。
+            </p>
+          )}
         </div>
         <span
           className={
@@ -569,144 +718,21 @@ export function SourceFrameSelection({
       {materialReady && !error && candidates.length === 0 ? (
         <p className="file-note">尚未提取候选源画面。</p>
       ) : null}
-      {materialReady &&
-      simplified &&
-      selectedAssetId &&
-      previewUrls[selectedAssetId] ? (
-        <VideoPreview
-          className="source-frame-current"
-          frameRatio="adaptive"
-          alt="当前原画面"
-          poster={previewUrls[selectedAssetId]}
-          onPosterError={() => {
-            setPreviewUrls((current) => {
-              const next = { ...current };
-              delete next[selectedAssetId];
-              return next;
-            });
-            setError("画面预览加载失败，请重新取帧。");
-          }}
-        />
-      ) : null}
-      {simplified && candidates.length > 0 ? confirmButton : null}
-      {materialReady && candidates.length > 0 ? (
-        <details
-          className="source-frame-advanced"
-          open={
-            candidatesAlwaysVisible ||
-            (!simplified && manualConfirmationRequired)
-          }
-        >
-          <summary>{readOnly ? "查看源画面记录" : "查看或更换源画面"}</summary>
-          <div className="source-frame-advanced__body">
-            {!readOnly ? (
-              <div className="source-frame-toolbar">
-                <p>
-                  后段画面也能作为人物与构图参考；确认后请在最终提示词中填写开场衔接。
-                </p>
-                <button
-                  className="secondary-button"
-                  disabled={isSubmitting || !referenceAssetId}
-                  onClick={handleExtract}
-                  type="button"
-                >
-                  {isSubmitting ? "正在处理" : "重新取帧"}
-                </button>
-                <label>
-                  取帧时间（秒）
-                  <input
-                    disabled={isSubmitting}
-                    max={
-                      videoDurationSeconds === null
-                        ? undefined
-                        : Math.max(0, videoDurationSeconds - 0.1)
-                    }
-                    min="0"
-                    onChange={(event) =>
-                      setManualTimestamp(Number(event.target.value))
-                    }
-                    step="0.1"
-                    type="number"
-                    value={manualTimestamp}
-                  />
-                </label>
-                <button
-                  className="secondary-button"
-                  disabled={isSubmitting || !referenceAssetId}
-                  onClick={() => void handleManualExtract()}
-                  type="button"
-                >
-                  取出画面
-                </button>
-              </div>
-            ) : null}
-            <fieldset className="source-frame-options">
-              <legend>{readOnly ? "源画面记录" : "选择源画面"}</legend>
-              {candidates.map((candidate, index) => (
-                <label
-                  className={
-                    selectedAssetId === candidate.asset_id
-                      ? "source-frame-option source-frame-option--selected"
-                      : "source-frame-option"
-                  }
-                  key={candidate.asset_id}
-                >
-                  <input
-                    checked={selectedAssetId === candidate.asset_id}
-                    disabled={
-                      readOnly ||
-                      isSubmitting ||
-                      !previewUrls[candidate.asset_id]
-                    }
-                    name="source-frame"
-                    onChange={() => {
-                      setSelectedAssetId(candidate.asset_id);
-                      setManualConfirmationRequired(true);
-                      setStatus("已选择其他源画面，点击下方按钮应用。");
-                    }}
-                    type="radio"
-                    value={candidate.asset_id}
-                  />
-                  {previewUrls[candidate.asset_id] ? (
-                    <VideoPreview
-                      alt={`候选源画面 ${index + 1}`}
-                      poster={previewUrls[candidate.asset_id]}
-                    />
-                  ) : (
-                    <span className="source-frame-placeholder">
-                      {failedPreviewAssetIds.includes(candidate.asset_id)
-                        ? "预览加载失败"
-                        : readOnly
-                          ? "预览不可用"
-                          : "预览加载中"}
-                    </span>
-                  )}
-                  <span>
-                    <strong>
-                      画面 {index + 1}
-                      {candidate.asset_id ===
-                      preferredCandidateAssetId(candidates)
-                        ? " · 推荐"
-                        : ""}
-                    </strong>
-                    <small>
-                      {candidate.timestamp_seconds.toFixed(1)} 秒
-                      {candidate.timestamp_seconds <= 0.25
-                        ? " · 开场画面"
-                        : " · 后段画面，需补开场衔接"}
-                    </small>
-                  </span>
-                </label>
-              ))}
-            </fieldset>
-            {readOnly ? (
-              <p className="status-note">只读身份不能更换源画面。</p>
-            ) : !simplified ? (
-              confirmButton
-            ) : null}
+      {replicaRowLayout ? (
+        <div className="source-frame-selection__row">
+          <div className="source-frame-selection__current">
+            {currentFramePreview}
+            {rowConfirmButton}
           </div>
-        </details>
-      ) : null}
+          {alternativesPanel}
+        </div>
+      ) : (
+        <>
+          {currentFramePreview}
+          {rowConfirmButton}
+          {alternativesPanel}
+        </>
+      )}
     </section>
   );
 }

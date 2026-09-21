@@ -426,6 +426,18 @@ export function CharacterSelection({
     const visibleScenePreview =
       scenePreview?.contextKey === scenePreviewContext ? scenePreview : null;
     const scenePreviewError = scenePreviewErrorContext === scenePreviewContext;
+    // 上报场景图宽高比（可选）：onLoad 之外补一次挂载检查——缓存命中的图片
+    // 可能不再派发 load（与 VideoPreview 对缓存视频的兜底同因），漏报会让
+    // 上游拿不到当前素材的真实比例。
+    const reportSceneRatio = (image: HTMLImageElement | null) => {
+      if (!image?.complete) {
+        return;
+      }
+      if (image.naturalWidth <= 0 || image.naturalHeight <= 0) {
+        return;
+      }
+      onAspectRatioChange?.(image.naturalWidth / image.naturalHeight);
+    };
     const scenePreviewImage =
       sceneOnly && visibleScenePreview ? (
         <img
@@ -433,11 +445,9 @@ export function CharacterSelection({
           className="flow-character-row__preview"
           src={visibleScenePreview.url}
           alt="已选场景图"
+          ref={(node) => reportSceneRatio(node)}
           onLoad={(event) => {
-            const image = event.currentTarget;
-            if (image.naturalWidth > 0 && image.naturalHeight > 0) {
-              onAspectRatioChange?.(image.naturalWidth / image.naturalHeight);
-            }
+            reportSceneRatio(event.currentTarget);
           }}
           onError={() => {
             if (
@@ -557,7 +567,7 @@ export function CharacterSelection({
           <div className="band-ctrl">{versionSelect}</div>
           <div className="media-frame">
             {scenePreviewImage ?? (
-              <p className="file-note">选择场景形象后在此预览。</p>
+              <p className="file-note">请先选择场景形象。</p>
             )}
           </div>
           <div className="band-act" />

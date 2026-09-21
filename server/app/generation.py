@@ -1126,12 +1126,33 @@ def confirmed_first_frame_sources(
         project_id=project_id,
         kind="first_frame_selection",
     )
-    candidates = latest_version(
-        conn,
-        project_id=project_id,
-        kind="first_frame_candidates",
+    if selection is None:
+        raise generation_error(
+            409,
+            "FIRST_FRAME_CONFIRMATION_REQUIRED",
+            "Confirm a first-frame candidate before compiling or submitting H3 generation.",
+        )
+    # 历史版本放开：来源绑定与确认记录同源——从 selection 指向的候选版本读取，
+    # 而不是最新版本（用户可能显式选择了历史图，其输入绑定属于旧版本）。
+    selection_payload = json.loads(str(selection["payload_json"]))
+    candidates_version_id = (
+        selection_payload.get("first_frame_candidates_version_id")
+        if isinstance(selection_payload, dict)
+        else None
     )
-    if selection is None or candidates is None:
+    candidates = (
+        conn.execute(
+            """
+            SELECT id, payload_json
+            FROM versions
+            WHERE id = %s AND project_id = %s AND kind = 'first_frame_candidates'
+            """,
+            (candidates_version_id, project_id),
+        ).fetchone()
+        if isinstance(candidates_version_id, str)
+        else None
+    )
+    if candidates is None:
         raise generation_error(
             409,
             "FIRST_FRAME_CONFIRMATION_REQUIRED",
@@ -3034,7 +3055,7 @@ def require_confirmed_first_frame(
         """,
         (project_id,),
     ).fetchone()
-    candidates = conn.execute(
+    latest_candidates = conn.execute(
         """
         SELECT id, payload_json
         FROM versions
@@ -3044,7 +3065,7 @@ def require_confirmed_first_frame(
         """,
         (project_id,),
     ).fetchone()
-    if selection is None or candidates is None:
+    if selection is None or latest_candidates is None:
         raise generation_error(
             409,
             "FIRST_FRAME_CONFIRMATION_REQUIRED",
@@ -3052,13 +3073,42 @@ def require_confirmed_first_frame(
         )
     try:
         selection_payload = json.loads(str(selection["payload_json"]))
-        candidate_payload = json.loads(str(candidates["payload_json"]))
     except json.JSONDecodeError as exc:
         raise generation_error(
             409,
             "FIRST_FRAME_CONFIRMATION_REQUIRED",
             "Confirm a first-frame candidate before compiling or submitting H3 generation.",
         ) from exc
+    # 历史版本放开：确认记录指向的候选版本才是这次确认的依据（可能不是最新
+    # 版本）。候选内容、质检证据都从它读取；最新版本只用于判断“这次确认是否
+    # 仍是最新”，b5 输入新鲜度检查只作用于最新确认。
+    confirmed_candidates_id = (
+        selection_payload.get("first_frame_candidates_version_id")
+        if isinstance(selection_payload, dict)
+        else None
+    )
+    confirmed_candidates = (
+        conn.execute(
+            """
+            SELECT id, payload_json
+            FROM versions
+            WHERE id = %s AND project_id = %s AND kind = 'first_frame_candidates'
+            """,
+            (confirmed_candidates_id, project_id),
+        ).fetchone()
+        if isinstance(confirmed_candidates_id, str)
+        else None
+    )
+    candidate_payload: object = None
+    if confirmed_candidates is not None:
+        try:
+            candidate_payload = json.loads(str(confirmed_candidates["payload_json"]))
+        except json.JSONDecodeError as exc:
+            raise generation_error(
+                409,
+                "FIRST_FRAME_CONFIRMATION_REQUIRED",
+                "Confirm a first-frame candidate before compiling or submitting H3 generation.",
+            ) from exc
     candidate_values = (
         candidate_payload.get("candidates") if isinstance(candidate_payload, dict) else None
     )
@@ -3074,18 +3124,19 @@ def require_confirmed_first_frame(
         if isinstance(candidate_values, list)
         else None
     )
-    is_current_confirmation = (
-        isinstance(selection_payload, dict)
-        and selection_payload.get("first_frame_candidates_version_id") == str(candidates["id"])
-        and selection_payload.get("first_frame_asset_id") == first_frame_asset_id
-        and selected_candidate is not None
-    )
-    if not is_current_confirmation:
+    if (
+        selected_candidate is None
+        or not isinstance(selection_payload, dict)
+        or selection_payload.get("first_frame_asset_id") != first_frame_asset_id
+    ):
         raise generation_error(
             409,
             "FIRST_FRAME_CONFIRMATION_REQUIRED",
             "Confirm a first-frame candidate from the latest candidate set before H3 generation.",
         )
+    is_current_confirmation = confirmed_candidates is not None and str(
+        latest_candidates["id"]
+    ) == str(confirmed_candidates["id"])
     quality = selected_candidate.get("quality") if isinstance(selected_candidate, dict) else None
     quality_passed = isinstance(quality, dict) and quality.get("passed") is True
     quality_override = (
@@ -3105,7 +3156,8 @@ def require_confirmed_first_frame(
             "generate and confirm it again.",
         )
     if (
-        isinstance(candidate_payload, dict)
+        is_current_confirmation
+        and isinstance(candidate_payload, dict)
         and candidate_payload.get("schema_version") == "b5.first-frame.v1"
     ):
         from app.first_frames import current_first_frame_candidates

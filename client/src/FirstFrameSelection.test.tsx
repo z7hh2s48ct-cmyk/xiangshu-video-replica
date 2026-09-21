@@ -149,9 +149,7 @@ describe("FirstFrameSelection", () => {
     );
     await screen.findByRole("button", { name: "再生成1张" });
     expect(screen.getByLabelText("场景设置")).toHaveValue("replace");
-    expect(
-      screen.queryByText("画幅或场景已更改，请重新生成后确认首帧。"),
-    ).toBeNull();
+    expect(screen.queryByText("画幅或场景已更改，请重新生成。")).toBeNull();
   });
 
   it("shows the chosen candidate at full preview size without automatically confirming it", async () => {
@@ -276,7 +274,7 @@ describe("FirstFrameSelection", () => {
         simplified
       />,
     );
-    await screen.findByText("上游输入已更新，请重新生成人物置换首帧。");
+    await screen.findByText("上游输入已更新，请重新生成首帧。");
     await waitFor(() => expect(getLatestFirstFrameTask).toHaveBeenCalled());
     expect(resumeFirstFrameGeneration).not.toHaveBeenCalled();
   });
@@ -296,7 +294,7 @@ describe("FirstFrameSelection", () => {
         onBusyChange={onBusyChange}
       />,
     );
-    await screen.findByText("已自动预选最新生成的候选，请查看后单击确认。");
+    await screen.findByText("已自动预选最新候选，请查看后确认。");
     expect(onBusyChange).not.toHaveBeenCalledWith(true);
     expect(resumeFirstFrameGeneration).not.toHaveBeenCalled();
     expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
@@ -444,7 +442,7 @@ describe("FirstFrameSelection", () => {
       expect(confirmFirstFrame).toHaveBeenCalledWith("project-1", "first-1"),
     );
     expect(
-      await screen.findByText("已确认首帧候选 1。可继续编辑文案并生成视频。"),
+      await screen.findByText("已确认首帧候选 1，可继续生成视频。"),
     ).toBeInTheDocument();
   });
 
@@ -745,7 +743,7 @@ describe("FirstFrameSelection", () => {
     );
 
     expect(
-      await screen.findByText("已自动预选最新生成的候选，请查看后单击确认。"),
+      await screen.findByText("已自动预选最新候选，请查看后确认。"),
     ).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /首帧候选 2/ })).toBeChecked();
     expect(
@@ -879,11 +877,13 @@ describe("FirstFrameSelection", () => {
     );
 
     expect(
-      await screen.findByText("模拟输出：尚未调用正式图像生成服务。"),
+      await screen.findByText("模拟输出：未接入正式生成服务。"),
     ).toBeInTheDocument();
   });
 
-  it("does not treat a selection from another candidate version as current", async () => {
+  // 问题3（全面放开+警示）：确认指向历史候选版本时仍是有效确认（后端按
+  // selection 指向的版本放行生成），前端如实保留并给出“基于旧输入生成”警示。
+  it("keeps an older-version confirmation effective with a history warning", async () => {
     vi.mocked(getLatestProjectFirstFrameSelection).mockResolvedValue({
       stale: false,
       version: {
@@ -906,7 +906,7 @@ describe("FirstFrameSelection", () => {
 
     expect(
       await screen.findByText(
-        "已确认首帧与当前候选不一致，请重新确认最新候选。",
+        "已确认历史版本首帧（基于旧输入），仍可用于生成。",
       ),
     ).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /首帧候选 1/ })).not.toBeChecked();
@@ -946,7 +946,7 @@ describe("FirstFrameSelection", () => {
     );
 
     expect(
-      await screen.findByText("上游输入已更新，请重新生成人物置换首帧。"),
+      await screen.findByText("上游输入已更新，请重新生成首帧。"),
     ).toBeInTheDocument();
     expect(screen.queryByText(/读取候选首帧失败/)).toBeNull();
   });
@@ -999,9 +999,7 @@ describe("FirstFrameSelection", () => {
     fireEvent.click(screen.getByRole("button", { name: "版本 #1" }));
 
     expect(
-      await screen.findByText(
-        "正在查看历史版本；仅最新候选可确认用于视频生成。",
-      ),
+      await screen.findByText("正在查看历史版本（基于旧输入），可选中后确认。"),
     ).toBeInTheDocument();
     expect(onSelectionChange).toHaveBeenLastCalledWith(confirmedSelection);
   });
@@ -1281,7 +1279,7 @@ describe("FirstFrameSelection", () => {
     await waitFor(() => expect(generateFirstFrames).toHaveBeenCalledOnce());
 
     expect(
-      await screen.findByText("已自动预选最新生成的候选，请查看后单击确认。"),
+      await screen.findByText("已自动预选最新候选，请查看后确认。"),
     ).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /首帧候选 2/ })).toBeChecked();
     expect(screen.getByRole("radio", { name: /首帧候选 1/ })).not.toBeChecked();
@@ -1308,7 +1306,7 @@ describe("FirstFrameSelection", () => {
     );
     await screen.findByText("人物置换首帧");
     fireEvent.click(screen.getByRole("button", { name: "再生成1张" }));
-    await screen.findByText("已自动预选最新生成的候选，请查看后单击确认。");
+    await screen.findByText("已自动预选最新候选，请查看后确认。");
     expect(screen.getByRole("radio", { name: /首帧候选 2/ })).toBeChecked();
 
     const callsBeforeReload = vi.mocked(getLatestProjectFirstFrames).mock.calls
@@ -1353,7 +1351,7 @@ describe("FirstFrameSelection", () => {
     );
     expect(
       await screen.findByText(
-        "已确认首帧与当前候选不一致，请重新确认最新候选。",
+        "已确认历史版本首帧（基于旧输入），仍可用于生成。",
       ),
     ).toBeInTheDocument();
 
@@ -1362,7 +1360,7 @@ describe("FirstFrameSelection", () => {
 
     expect(
       await screen.findByText(
-        "已确认首帧与当前候选不一致，请重新确认最新候选。",
+        "已确认历史版本首帧（基于旧输入），仍可用于生成。",
       ),
     ).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /首帧候选 2/ })).toBeChecked();
@@ -1377,8 +1375,9 @@ describe("FirstFrameSelection", () => {
     );
   });
 
-  // P0-03-04：历史版本仅查看，不自动预选，确认保持禁用（历史与 stale 语义不变）。
-  it("does not auto-select candidates when browsing a history version (P0-03-04)", async () => {
+  // 问题3（全面放开+警示）：历史版本候选可选、可确认；确认时向后端指明
+  // 候选版本，并给出“该图基于旧输入生成”的警示。历史版本仍不自动预选。
+  it("allows selecting and confirming a candidate from a history version", async () => {
     const olderVersion = {
       ...candidatesVersion,
       id: "first-frame-candidates-1",
@@ -1388,6 +1387,15 @@ describe("FirstFrameSelection", () => {
       candidatesVersion,
       olderVersion,
     ]);
+    vi.mocked(confirmFirstFrame).mockResolvedValue({
+      ...candidatesVersion,
+      id: "first-frame-selection-history",
+      kind: "first_frame_selection",
+      payload: {
+        first_frame_candidates_version_id: "first-frame-candidates-1",
+        first_frame_asset_id: "first-1",
+      },
+    });
     render(
       <FirstFrameSelection
         projectId="project-1"
@@ -1400,13 +1408,68 @@ describe("FirstFrameSelection", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "版本 #1" }));
     expect(
+      await screen.findByText("正在查看历史版本（基于旧输入），可选中后确认。"),
+    ).toBeInTheDocument();
+    const historyRadio = screen.getByRole("radio", { name: /首帧候选 1/ });
+    await waitFor(() => expect(historyRadio).toBeEnabled());
+    expect(historyRadio).not.toBeChecked();
+    fireEvent.click(historyRadio);
+
+    const confirmButton = screen.getByRole("button", { name: "使用这张首帧" });
+    await waitFor(() => expect(confirmButton).toBeEnabled());
+    fireEvent.click(confirmButton);
+    await waitFor(() =>
+      expect(confirmFirstFrame).toHaveBeenCalledWith("project-1", "first-1", {
+        candidatesVersionId: "first-frame-candidates-1",
+      }),
+    );
+    expect(
       await screen.findByText(
-        "正在查看历史版本；仅最新候选可确认用于视频生成。",
+        "已确认首帧候选 1（基于旧输入生成），可继续生成视频。",
       ),
     ).toBeInTheDocument();
-    for (const radio of screen.getAllByRole("radio")) {
-      expect(radio).not.toBeChecked();
-    }
-    expect(screen.getByRole("button", { name: "使用这张首帧" })).toBeDisabled();
+  });
+
+  // 问题3：上游输入已更新（最新候选 stale）不再阻断历史版本确认——
+  // 历史图天然基于旧输入，后端按历史路径放行，前端如实放行并给警示。
+  it("keeps a history version confirmable after the latest inputs changed", async () => {
+    const olderVersion = {
+      ...candidatesVersion,
+      id: "first-frame-candidates-1",
+      version_number: 1,
+    };
+    vi.mocked(getProjectFirstFrameHistory).mockResolvedValue([
+      candidatesVersion,
+      olderVersion,
+    ]);
+    vi.mocked(getLatestProjectFirstFrames).mockResolvedValue({
+      version: null,
+      stale: true,
+    });
+    render(
+      <FirstFrameSelection
+        projectId="project-1"
+        referenceSelection={referenceSelection}
+        sourceFrameSelectionId="source-selection-1"
+      />,
+    );
+
+    await screen.findByRole("button", { name: "版本 #1" });
+    fireEvent.click(screen.getByRole("button", { name: "版本 #1" }));
+    expect(
+      await screen.findByText("正在查看历史版本（基于旧输入），可选中后确认。"),
+    ).toBeInTheDocument();
+    const historyRadio = screen.getByRole("radio", { name: /首帧候选 1/ });
+    await waitFor(() => expect(historyRadio).toBeEnabled());
+    fireEvent.click(historyRadio);
+
+    const confirmButton = screen.getByRole("button", { name: "使用这张首帧" });
+    await waitFor(() => expect(confirmButton).toBeEnabled());
+    fireEvent.click(confirmButton);
+    await waitFor(() =>
+      expect(confirmFirstFrame).toHaveBeenCalledWith("project-1", "first-1", {
+        candidatesVersionId: "first-frame-candidates-1",
+      }),
+    );
   });
 });

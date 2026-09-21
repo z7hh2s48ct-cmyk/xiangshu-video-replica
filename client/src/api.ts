@@ -4079,7 +4079,7 @@ async function pollFirstFrameTask(
 export async function confirmFirstFrame(
   projectId: string,
   firstFrameAssetId: string,
-  options?: { allowUnverified?: boolean },
+  options?: { allowUnverified?: boolean; candidatesVersionId?: string },
 ): Promise<AnalysisVersion> {
   return requestApiJson<AnalysisVersion>(
     `/api/projects/${encodeURIComponent(projectId)}/first-frames/confirm`,
@@ -4089,6 +4089,10 @@ export async function confirmFirstFrame(
       body: JSON.stringify({
         first_frame_asset_id: firstFrameAssetId,
         ...(options?.allowUnverified ? { allow_unverified: true } : {}),
+        // 问题3：历史版本确认显式指明候选版本，后端按该版本校验并放行。
+        ...(options?.candidatesVersionId
+          ? { first_frame_candidates_version_id: options.candidatesVersionId }
+          : {}),
       }),
     },
   );

@@ -142,7 +142,9 @@ export function ReplicaFinalPromptControls({
   // inputKey 上，换首帧或时长后自动失效，与 confirmedKey / snapshot 的口径一致。
   const [alignmentConflictKey, setAlignmentConflictKey] = useState("");
   const [compressionConflictKey, setCompressionConflictKey] = useState("");
-  const ready = snapshot?.inputKey === key;
+  // 与父组件 finalReady 同源：快照在、正文被清空时不算就绪，
+  // 「已就绪 / 待合成」不能与下游按钮的口径脱节。
+  const ready = Boolean(value.trim()) && snapshot?.inputKey === key;
   const requiresCompression =
     compressionConflictKey === key || sourceDuration > input.duration + 0.25;
   const extendsEnding =
@@ -408,10 +410,11 @@ export function ReplicaFinalPromptControls({
       )}
       <button
         type="button"
+        className="replica-final-compose"
         disabled={readOnly || busy || blockingChecks.length > 0}
         onClick={() => void compose()}
       >
-        {busy ? "正在合成…" : "合成最终提示词"}
+        {busy ? "正在合成…" : ready ? "重新合成" : "合成最终提示词"}
       </button>
       <p role="status">
         {ready ? "已就绪" : "待合成"}。{message}

@@ -53,7 +53,12 @@ export function FirstFrameSelection({
   sourceFrameSelectionId: string | null;
 }) {
   const [version, setVersion] = useState<AnalysisVersion | null>(null);
+  // 数据库里版本号最大的候选版本：输入过期时 latest 端点为 null，前端以历史
+  // 列表首项为准，用于区分“浏览历史版本”与“浏览最新版本”。
   const [latestVersionId, setLatestVersionId] = useState("");
+  // 最新候选相对上游输入是否已过期（b5 输入新鲜度）：过期后最新候选不可确认，
+  // 历史版本确认不受影响（问题3：历史版本全面放开+警示）。
+  const [candidatesStale, setCandidatesStale] = useState(false);
   const [history, setHistory] = useState<AnalysisVersion[]>([]);
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
   const [selectedAssetId, setSelectedAssetId] = useState("");
@@ -154,29 +159,53 @@ export function FirstFrameSelection({
         }
         setVersionInputContext(inputContext);
         const latest = latestState.version;
+        // 历史列表按版本号倒序，首项即数据库里最新的候选版本；latest 端点在
+        // 输入过期时返回 null，此时仍以历史首项判定“最新版本”。
+        const newestCandidatesVersionId = versions[0]?.id ?? latest?.id ?? "";
         currentCandidateVersionId.current = latestState.stale
           ? null
           : (latest?.id ?? null);
         const displayVersion = preferredVersion ?? latest;
-        const latestPayload = latest ? readFirstFrameCandidates(latest) : null;
         const confirmedSelection = selection.version
           ? readFirstFrameSelectionPayload(selection.version)
           : null;
         const confirmedAssetId = confirmedSelection?.first_frame_asset_id;
+        const confirmedCandidatesVersionId =
+          confirmedSelection?.first_frame_candidates_version_id;
+        // 问题3（历史版本全面放开+警示）：确认可能指向历史候选版本（用户
+        // 显式选了旧版本里已付费的图）。在历史列表里按 id 定位该版本做候选
+        // 校验，而不是强求等于最新版本；版本超出最近历史窗口时不再深校验，
+        // 由后端生成门禁兜底。
+        const confirmedCandidatesVersion =
+          typeof confirmedCandidatesVersionId === "string"
+            ? (versions.find(
+                (item) => item.id === confirmedCandidatesVersionId,
+              ) ??
+              (latest?.id === confirmedCandidatesVersionId ? latest : null))
+            : null;
+        const confirmedCandidatesPayload = confirmedCandidatesVersion
+          ? readFirstFrameCandidates(confirmedCandidatesVersion)
+          : null;
+        // 最新候选的确认仍受输入新鲜度约束：输入更新后原确认失效，需重新
+        // 生成并确认；指向历史版本的确认不受影响。
+        const confirmationSuperseded =
+          latestState.stale &&
+          typeof confirmedCandidatesVersionId === "string" &&
+          confirmedCandidatesVersionId === newestCandidatesVersionId;
         const currentSelection =
-          !latestState.stale &&
           !selection.stale &&
-          latest &&
-          latestPayload &&
-          confirmedSelection?.first_frame_candidates_version_id === latest.id &&
           typeof confirmedAssetId === "string" &&
-          latestPayload.candidates.some(
-            (candidate) => candidate.asset_id === confirmedAssetId,
-          )
+          typeof confirmedCandidatesVersionId === "string" &&
+          (confirmedCandidatesPayload === null ||
+            confirmedCandidatesPayload.candidates.some(
+              (candidate) => candidate.asset_id === confirmedAssetId,
+            )) &&
+          !confirmationSuperseded
             ? selection.version
             : null;
         onSelectionChange?.(currentSelection);
-        setLatestVersionId(latest?.id ?? "");
+        setLatestVersionId(newestCandidatesVersionId);
+        setCandidatesStale(latestState.stale || selection.stale);
         setHistory(versions);
         setVersion(displayVersion);
         setPreviewUrls({});
@@ -186,14 +215,14 @@ export function FirstFrameSelection({
           setSelectedAssetId("");
           setStatus(
             latestState.stale || selection.stale
-              ? "上游输入已更新，请重新生成人物置换首帧。"
+              ? "上游输入已更新，请重新生成首帧。"
               : !sourceFrameSelectionId
-                ? "请先确认当前源画面；已有首帧历史仍可查看。"
+                ? "请先确认当前源画面；首帧历史仍可查看。"
                 : referenceSelectionId
-                  ? "人物参考图已确认，可以生成人物置换首帧。"
+                  ? "人物参考图已确认，可以生成首帧。"
                   : legacyCharacterSelected
                     ? "历史兼容人物已恢复，可以继续生成首帧。"
-                    : "请先确认人物参考图；已有首帧历史仍可查看。",
+                    : "请先确认人物参考图；首帧历史仍可查看。",
           );
           return;
         }
@@ -212,11 +241,16 @@ export function FirstFrameSelection({
         // P0-03-04：预选仅是建议，确认仍为人工动作；候选生成的付费语义
         // 不变（仍由用户显式点击触发）。
         // 三带布局把候选列表收进折叠区，必须默认预选最新候选，确认按钮才有对象。
+        // 问题3：“最新候选已确认”只看指向最新版本的确认；指向历史版本的
+        // 确认仍有效，但重新生成后依然预选最新候选，便于重新确认。
+        const newestConfirmationIsCurrent =
+          currentSelection !== null &&
+          confirmedCandidatesVersionId === newestCandidatesVersionId;
         const canAutoSelect =
           (autoSelectFirstCandidate || banded) &&
           !(latestState.stale || selection.stale) &&
           displayVersion.id === latest?.id &&
-          !currentSelection;
+          !newestConfirmationIsCurrent;
         const canPreserveSelection =
           !(latestState.stale || selection.stale) &&
           displayVersion.id === latest?.id;
@@ -234,19 +268,24 @@ export function FirstFrameSelection({
             ? currentAssetId
             : "";
         });
-        if (latestState.stale || selection.stale) {
-          setStatus("上游输入已更新，请重新生成人物置换首帧。");
-        } else if (displayVersion.id !== latest?.id) {
-          setStatus("正在查看历史版本；仅最新候选可确认用于视频生成。");
-        } else if (currentSelection && typeof confirmedAssetId === "string") {
-          setSelectedAssetId(confirmedAssetId);
-          setStatus(
-            "当前候选首帧已确认，将作为后续视频生成提示词的唯一首帧输入。",
-          );
+        if (displayVersion.id !== newestCandidatesVersionId) {
+          // 问题3：历史版本放开为可选、可确认；确认时给出“基于旧输入生成”警示。
+          setStatus("正在查看历史版本（基于旧输入），可选中后确认。");
+        } else if (latestState.stale || selection.stale) {
+          setStatus("上游输入已更新，请重新生成首帧。");
+        } else if (currentSelection !== null) {
+          if (confirmedCandidatesVersionId === newestCandidatesVersionId) {
+            if (typeof confirmedAssetId === "string") {
+              setSelectedAssetId(confirmedAssetId);
+            }
+            setStatus("当前候选首帧已确认，将用于后续视频生成。");
+          } else {
+            setStatus("已确认历史版本首帧（基于旧输入），仍可用于生成。");
+          }
         } else if (selection.version) {
-          setStatus("已确认首帧与当前候选不一致，请重新确认最新候选。");
+          setStatus("已确认首帧与当前候选不一致，请重新确认。");
         } else if (canAutoSelect) {
-          setStatus("已自动预选最新生成的候选，请查看后单击确认。");
+          setStatus("已自动预选最新候选，请查看后确认。");
         } else {
           setStatus("");
         }
@@ -431,6 +470,8 @@ export function FirstFrameSelection({
     (payload?.aspect_ratio ?? "source") === aspectRatio &&
     Boolean(payload?.replace_scene) === replaceScene;
   const isHistoryVersion = Boolean(version && version.id !== latestVersionId);
+  // 输入过期（b5）只锁最新候选的确认：历史版本仍可选可确认（问题3）。
+  const isStaleLatestVersion = candidatesStale && !isHistoryVersion;
   const selectedPreview = previewUrls[selectedAssetId];
   const comparisonReady =
     payload?.review_mode !== "HUMAN_CONFIRMATION" ||
@@ -504,9 +545,9 @@ export function FirstFrameSelection({
       !selectedPreview ||
       !comparisonReady ||
       !aspectMatchesVersion ||
-      isHistoryVersion
+      isStaleLatestVersion
     ) {
-      setError("请先加载并查看最新候选首帧预览，再进行确认。");
+      setError("请先加载候选首帧预览再确认。");
       return;
     }
     const submittedBindingKey = confirmationBindingKey;
@@ -518,7 +559,14 @@ export function FirstFrameSelection({
     setIsSubmitting(true);
     setError("");
     try {
-      const selection = await confirmFirstFrame(projectId, selectedAssetId);
+      // 问题3：历史版本确认向后端指明候选版本（该图基于旧输入生成，上方已
+      // 给警示）；最新版本确认保持原有默认契约（不额外传参）。
+      const selection =
+        isHistoryVersion && version
+          ? await confirmFirstFrame(projectId, selectedAssetId, {
+              candidatesVersionId: version.id,
+            })
+          : await confirmFirstFrame(projectId, selectedAssetId);
       if (!isCurrentConfirmation()) {
         return;
       }
@@ -526,7 +574,9 @@ export function FirstFrameSelection({
         (candidate) => candidate.asset_id === selectedAssetId,
       );
       setStatus(
-        `已确认首帧候选 ${(selectedIndex ?? 0) + 1}。可继续编辑文案并生成视频。`,
+        isHistoryVersion
+          ? `已确认首帧候选 ${(selectedIndex ?? 0) + 1}（基于旧输入生成），可继续生成视频。`
+          : `已确认首帧候选 ${(selectedIndex ?? 0) + 1}，可继续生成视频。`,
       );
       onSelectionChange?.(selection);
     } catch (requestError) {
@@ -632,7 +682,7 @@ export function FirstFrameSelection({
         !selectedPreview ||
         !comparisonReady ||
         !aspectMatchesVersion ||
-        isHistoryVersion
+        isStaleLatestVersion
       }
       onClick={handleConfirm}
       type="button"
@@ -642,7 +692,7 @@ export function FirstFrameSelection({
   );
   const aspectChangedNote =
     !contextLoading && payload && !aspectMatchesVersion && !isSubmitting ? (
-      <p className="status-note">画幅或场景已更改，请重新生成后确认首帧。</p>
+      <p className="status-note">画幅或场景已更改，请重新生成。</p>
     ) : null;
   const progressBlock =
     generationStartedAt !== null ? (
@@ -663,9 +713,10 @@ export function FirstFrameSelection({
         <p>可离开页面，返回后继续查看。</p>
       </div>
     ) : null;
+  // 未接入正式生成服务是中性信息而非错误，用 info 样式与真实报错区分。
   const fakeProviderNote =
     payload?.provider === "fake" ? (
-      <p className="settings-error">模拟输出：尚未调用正式图像生成服务。</p>
+      <p className="creation-note-info">模拟输出：未接入正式生成服务。</p>
     ) : null;
   const comparisonBlock =
     payload?.review_mode === "HUMAN_CONFIRMATION" ? (
@@ -734,8 +785,7 @@ export function FirstFrameSelection({
             readOnly ||
             contextLoading ||
             isSubmitting ||
-            !previewUrls[candidate.asset_id] ||
-            isHistoryVersion
+            !previewUrls[candidate.asset_id]
           }
           index={index}
           key={candidate.asset_id}
@@ -786,8 +836,8 @@ export function FirstFrameSelection({
 
   /**
    * 三带布局（复刻页第 2 节右栏）：控制带 / 媒体带 / 操作带与左栏等位，
-   * 两侧媒体框因此同尺寸且上下边对齐。候选与历史收进折叠区，
-   * 避免它们撑高媒体带、破坏左右对齐。
+   * 两侧媒体框因此同尺寸且上下边对齐。候选与历史收在媒体带右侧的折叠侧栏
+   * （空间不足时整块换行回媒体框下方），展开也不撑高媒体带、不破坏左右对齐。
    */
   if (banded) {
     return (
@@ -802,22 +852,30 @@ export function FirstFrameSelection({
           {sceneSettings}
           {aspectSettings}
         </div>
-        <div className="media-frame">
-          {currentPreview ?? (
-            <p className="file-note">
-              {isSubmitting ? "正在生成首帧…" : "生成后在此预览并确认。"}
-            </p>
-          )}
+        <div className="first-frame-media-band">
+          <div className="media-frame">
+            {currentPreview ?? (
+              <p className="file-note">
+                {isSubmitting ? "正在生成首帧…" : "生成后在此确认。"}
+              </p>
+            )}
+          </div>
+          <details className="first-frame-band-extras" open>
+            <summary>候选与历史</summary>
+            {comparisonBlock}
+            {candidatesFieldset}
+            {historyBlock}
+          </details>
         </div>
-        <div className="band-act center">
+        <div className="band-act">
           {confirmButton}
           {generateButton}
+          <span className="band-act__price">
+            {batchCredits === null
+              ? pricingError || "正在读取费用…"
+              : `预计 ${batchCredits} 积分/次`}
+          </span>
         </div>
-        <p className="file-note">
-          {batchCredits === null
-            ? pricingError || "正在读取本批费用…"
-            : `本次预计 ${batchCredits} 积分；再次生成按新一次计费。`}
-        </p>
         {aspectChangedNote}
         {fakeProviderNote}
         {contextLoading ? (
@@ -830,12 +888,6 @@ export function FirstFrameSelection({
           <p className="setup-success">{status}</p>
         ) : null}
         {progressBlock}
-        <details className="first-frame-band-extras">
-          <summary>候选与历史</summary>
-          {comparisonBlock}
-          {candidatesFieldset}
-          {historyBlock}
-        </details>
       </section>
     );
   }
@@ -917,8 +969,8 @@ export function FirstFrameSelection({
         <p>每次生成1张；选定1张用于视频合成。</p>
         <p>
           {batchCredits === null
-            ? pricingError || "正在读取本批费用…"
-            : `本次预计 ${batchCredits} 积分；再次生成按新一次计费。`}
+            ? pricingError || "正在读取费用…"
+            : `预计 ${batchCredits} 积分/次`}
         </p>
         {sceneSettings}
         {aspectSettings}
@@ -1027,6 +1079,7 @@ function FirstFrameOption({
         value={candidate.asset_id}
       />
       <VideoPreview
+        fitContainer
         frameRatio="adaptive"
         alt={`首帧候选 ${index + 1}`}
         onPosterError={onPreviewError}

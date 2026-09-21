@@ -251,9 +251,13 @@ function mockAnalysisSuccessAt(durationSeconds: number) {
   });
 }
 
+// 步骤导航里也有「1 视频拆解」按钮，正则必须限定到拆解主按钮的三种状态，
+// 否则 getByRole 会因多匹配直接抛错。
+const ANALYSIS_BUTTON_NAME = /启动 AI 拆解|重新拆解|AI 拆解进行中/;
+
 /** 拆解按钮在不同阶段文案不同，用语义正则定位。 */
 function analysisButton() {
-  return screen.getByRole("button", { name: /拆解/ });
+  return screen.getByRole("button", { name: ANALYSIS_BUTTON_NAME });
 }
 
 beforeEach(() => {
@@ -356,7 +360,7 @@ describe("复刻页 A 类：上传与拆解流程", () => {
     );
     useStudio.mockReturnValue(value);
     const view = render(<ReplicaPage />);
-    await screen.findByRole("button", { name: /拆解/ });
+    await screen.findByRole("button", { name: ANALYSIS_BUTTON_NAME });
     fireEvent.click(analysisButton());
     await waitFor(() => expect(finish).toBeDefined());
 
@@ -397,7 +401,7 @@ describe("复刻页 A 类：第 3 节渲染条件", () => {
     useStudio.mockReturnValue(value);
     render(<ReplicaPage />);
 
-    await screen.findByRole("button", { name: /拆解/ });
+    await screen.findByRole("button", { name: ANALYSIS_BUTTON_NAME });
     expect(
       await screen.findByPlaceholderText(
         "完成拆解后，原视频口播文案会出现在这里。",
@@ -533,7 +537,7 @@ describe("复刻页 C 类：素材签名与提示词渲染", () => {
     useStudio.mockReturnValue(value);
     const _view = render(<ReplicaPage />);
 
-    await screen.findByRole("button", { name: /拆解/ });
+    await screen.findByRole("button", { name: ANALYSIS_BUTTON_NAME });
     fireEvent.click(analysisButton());
     await waitFor(
       () =>
@@ -548,9 +552,23 @@ describe("复刻页 C 类：素材签名与提示词渲染", () => {
       const box = screen.getByLabelText("最终提示词") as HTMLTextAreaElement;
       expect(box.value.includes("镜头缓推庭院")).toBe(true);
     }, RED_TIMEOUT);
-    expect(
-      screen.getByRole("button", { name: "去 AI 视频创作" }),
-    ).toBeEnabled();
+    // S3 契约：未合成最终提示词（无快照）时按钮保持禁用并给出原因，
+    // 不允许带着可能与设置脱节的正文跳去视频页；文本框仍可编辑。
+    const createButton = screen.getByRole("button", {
+      name: "去 AI 视频创作",
+    });
+    expect(createButton).toBeDisabled();
+    expect(createButton).toHaveAttribute(
+      "title",
+      "请先合成最终提示词，并确保与当前设置一致。",
+    );
+    // 禁用原因必须可见（title 在触屏/键盘下不可达）：提示与按钮通过
+    // aria-describedby 关联到同一文案。
+    const gateHint = screen.getByText(
+      "请先合成最终提示词，并确保与当前设置一致。",
+      { exact: true },
+    );
+    expect(createButton).toHaveAttribute("aria-describedby", gateHint.id);
   });
 });
 
@@ -568,7 +586,7 @@ describe("复刻页 D 类：输出时长与来源标注", () => {
     useStudio.mockReturnValue(value);
     render(<ReplicaPage />);
 
-    await screen.findByRole("button", { name: /拆解/ });
+    await screen.findByRole("button", { name: ANALYSIS_BUTTON_NAME });
     fireEvent.click(analysisButton());
 
     await waitFor(
@@ -587,7 +605,7 @@ describe("复刻页 D 类：输出时长与来源标注", () => {
     useStudio.mockReturnValue(value);
     render(<ReplicaPage />);
 
-    await screen.findByRole("button", { name: /拆解/ });
+    await screen.findByRole("button", { name: ANALYSIS_BUTTON_NAME });
     fireEvent.click(analysisButton());
 
     await waitFor(
@@ -605,7 +623,7 @@ describe("复刻页 D 类：输出时长与来源标注", () => {
     useStudio.mockReturnValue(value);
     render(<ReplicaPage />);
 
-    await screen.findByRole("button", { name: /拆解/ });
+    await screen.findByRole("button", { name: ANALYSIS_BUTTON_NAME });
     expect(screen.queryByText(/来源：/)).toBeNull();
   });
 });
