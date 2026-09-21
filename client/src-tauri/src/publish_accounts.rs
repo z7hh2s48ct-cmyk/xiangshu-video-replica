@@ -84,7 +84,10 @@ enum PagePhase {
 struct PageLogin {
     phase: PagePhase,
     image: Option<String>,
-    observed_at: u64,
+    // Milliseconds since the epoch as delivered by the page (`Date.now()`). Kept as
+    // f64: WebView2 can serialise the JS number in scientific notation, which an
+    // integer target rejects outright.
+    observed_at: f64,
 }
 
 #[derive(Deserialize)]
@@ -123,9 +126,8 @@ impl LoginStatus {
         let Some(page) = page else {
             return Self::phase("loading");
         };
-        if page.observed_at > now.saturating_add(5000)
-            || now.saturating_sub(page.observed_at) > 15000
-        {
+        let now = now as f64;
+        if page.observed_at > now + 5000.0 || now - page.observed_at > 15000.0 {
             return Self::phase("action_required");
         }
         let phase = match page.phase {
@@ -150,6 +152,18 @@ impl LoginStatus {
             Self::phase(phase)
         }
     }
+}
+
+/// Parse the snapshot returned by the login page's evaluation. The page script
+/// stringifies the payload, so the callback value is normally a JSON string holding
+/// the snapshot; a bare object stays accepted for pages that predate the change, and
+/// any `null` shape (bare or stringified) means the page reported nothing yet.
+fn parse_page_snapshot(value: &str) -> Result<Option<PageSnapshot>, String> {
+    let parsed = match serde_json::from_str::<Option<String>>(value) {
+        Ok(Some(inner)) => serde_json::from_str::<Option<PageSnapshot>>(&inner),
+        _ => serde_json::from_str::<Option<PageSnapshot>>(value),
+    };
+    parsed.map_err(|_| "平台账号信息解析失败".into())
 }
 
 fn valid_qr_image(value: &str) -> bool {
@@ -691,8 +705,11 @@ pub async fn check_local_publish_login(
         return Ok(LoginStatus::phase("action_required"));
     }
     let (send, receive) = std::sync::mpsc::channel();
+    // Return the payload as a JSON string: WebView2's default serialisation writes
+    // `Date.now()` as a float token (e.g. 1.789963907261e+12), which the Rust side
+    // must not have to guess at. Stringifying in the page keeps it byte-exact.
     let script = format!(
-        "location.origin === {} ? ({{identity: window.__xiangshuPublishIdentity || null, login: window.__xiangshuReadPublishLogin ? window.__xiangshuReadPublishLogin() : window.__xiangshuPublishLogin || null}}) : null",
+        "location.origin === {} ? JSON.stringify({{identity: window.__xiangshuPublishIdentity || null, login: window.__xiangshuReadPublishLogin ? window.__xiangshuReadPublishLogin() : window.__xiangshuPublishLogin || null}}) : \"null\"",
         serde_json::to_string(platform.origin()).map_err(|e| e.to_string())?
     );
     official
@@ -714,8 +731,7 @@ pub async fn check_local_publish_login(
     if value.len() > 620_000 {
         return Err("平台登录信息过大，请重新扫码".into());
     }
-    let snapshot =
-        serde_json::from_str::<Option<PageSnapshot>>(&value).map_err(|_| "平台账号信息解析失败")?;
+    let snapshot = parse_page_snapshot(&value)?;
     let Some(snapshot) = snapshot else {
         return Ok(LoginStatus::phase("loading"));
     };
@@ -1028,15 +1044,15 @@ mod tests {
                 observed_at: at,
             })
         };
-        let ready = LoginStatus::from_page(page(20_000), 20_001);
+        let ready = LoginStatus::from_page(page(20_000.0), 20_001);
         assert_eq!(ready.phase, "qr_ready");
         assert!(ready.image.is_some());
         assert!(ready.account.is_none());
-        let stale = LoginStatus::from_page(page(1000), 20_001);
+        let stale = LoginStatus::from_page(page(1000.0), 20_001);
         assert_eq!(stale.phase, "action_required");
         assert!(stale.image.is_none());
         assert_eq!(
-            LoginStatus::from_page(page(30_000), 20_001).phase,
+            LoginStatus::from_page(page(30_000.0), 20_001).phase,
             "action_required"
         );
     }
@@ -1166,5 +1182,54 @@ mod tests {
         fs::remove_file(account_path(&a, &account.id).unwrap()).unwrap();
         fs::remove_dir(a).unwrap();
         fs::remove_dir(root).unwrap();
+    }
+
+    // A real snapshot reaches Rust through WebView2's script callback: `Date.now()`
+    // serialises as a float (e.g. 1.789963907261e+12) and the callback may hand the
+    // whole object back wrapped in a JSON string. Both shapes must parse.
+    #[test]
+    fn page_snapshot_accepts_string_wrapped_payload() {
+        let inner = serde_json::to_string(&serde_json::json!({
+            "identity": null,
+            "login": {
+                "phase": "qr_ready",
+                "image": "data:image/png;base64,cXI=",
+                "observed_at": 1_789_963_907_261u64,
+            },
+        }))
+        .unwrap();
+        let wrapped = serde_json::to_string(&inner).unwrap();
+        let snapshot = parse_page_snapshot(&wrapped).unwrap().unwrap();
+        assert!(matches!(snapshot.login.unwrap().phase, PagePhase::QrReady));
+    }
+
+    #[test]
+    fn page_snapshot_accepts_scientific_notation_inside_wrapped_json() {
+        let inner = r#"{"identity":null,"login":{"phase":"qr_ready","image":"data:image/png;base64,cXI=","observed_at":1.789963907261e+12}}"#;
+        let wrapped = serde_json::to_string(inner).unwrap();
+        let snapshot = parse_page_snapshot(&wrapped).unwrap().unwrap();
+        assert!(matches!(snapshot.login.unwrap().phase, PagePhase::QrReady));
+    }
+
+    #[test]
+    fn page_snapshot_accepts_raw_float_timestamp() {
+        let raw = r#"{"identity":null,"login":{"phase":"loading","image":null,"observed_at":1789963907261.0}}"#;
+        let snapshot = parse_page_snapshot(raw).unwrap().unwrap();
+        assert!(matches!(snapshot.login.unwrap().phase, PagePhase::Loading));
+    }
+
+    #[test]
+    fn page_snapshot_treats_string_null_as_loading() {
+        assert!(parse_page_snapshot("\"null\"").unwrap().is_none());
+    }
+
+    #[test]
+    fn page_snapshot_treats_bare_null_as_loading() {
+        assert!(parse_page_snapshot("null").unwrap().is_none());
+    }
+
+    #[test]
+    fn page_snapshot_rejects_garbage() {
+        assert!(parse_page_snapshot("<html>login</html>").is_err());
     }
 }
