@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { AdminRechargeOrder } from "../api.admin";
 import { OrdersPage } from "./OrdersPage";
 
 function jsonResponse(payload: unknown, status = 200) {
@@ -25,7 +26,7 @@ function blobResponse() {
   });
 }
 
-const pendingOrder = {
+const pendingOrder: AdminRechargeOrder = {
   id: "order-1",
   user_id: "user-1",
   username: "operator-1",
@@ -35,7 +36,9 @@ const pendingOrder = {
   amount_fen: 10050,
   credits: 10,
   channel: "alipay",
+  provider: "zpay",
   provider_trade_no: null,
+  transaction_id: null,
   created_at: "2026-08-19 10:00:00",
   paid_at: null,
 };
@@ -48,12 +51,33 @@ const reconciliation = {
   pending_order_count: 1,
 };
 
-function installFetch() {
+/** A settled WeChat order: its trade reference lives in transaction_id, never
+ *  in provider_trade_no, which migration 083 constrains to stay NULL. */
+const paidWechatOrder: AdminRechargeOrder = {
+  ...pendingOrder,
+  id: "order-2",
+  order_no: "202608190002",
+  status: "PAID",
+  channel: "wxpay",
+  provider: "wechat_native",
+  transaction_id: "4200001234202608190001",
+  paid_at: "2026-08-19 10:05:00",
+};
+
+const pendingWechatOrder: AdminRechargeOrder = {
+  ...pendingOrder,
+  id: "order-3",
+  order_no: "202608190003",
+  channel: "wxpay",
+  provider: "wechat_native",
+};
+
+function installFetch(orders: AdminRechargeOrder[] = [pendingOrder]) {
   const fetchMock = vi.fn((url: string, _init?: RequestInit) => {
     if (url.includes("/api/control/recharge-orders?")) {
       const { searchParams } = new URL(String(url));
       return jsonResponse({
-        items: [{ ...pendingOrder }],
+        items: orders.map((order) => ({ ...order })),
         total: 25,
         limit: 20,
         offset: Number(searchParams.get("offset") ?? "0"),
@@ -216,5 +240,26 @@ describe("OrdersPage", () => {
 
     expect(await screen.findByText("¥100.50")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "查单同步" })).toBeNull();
+  });
+
+  it("shows the WeChat trade number and names the payment provider", async () => {
+    installFetch([paidWechatOrder]);
+    render(<OrdersPage />);
+
+    // Reading only provider_trade_no would leave every WeChat order blank here,
+    // which is exactly the column reconciliation and refunds are matched on.
+    expect(
+      await screen.findByText("4200001234202608190001"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("微信官方")).toBeInTheDocument();
+  });
+
+  it("does not offer ZPay-only 查单同步 on a pending WeChat order", async () => {
+    installFetch([pendingWechatOrder]);
+    render(<OrdersPage />);
+
+    expect(await screen.findByText("微信官方")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "查单同步" })).toBeNull();
+    expect(screen.getByText("客户详情核验")).toBeInTheDocument();
   });
 });

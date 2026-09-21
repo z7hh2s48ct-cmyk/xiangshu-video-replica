@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
 
 from app.db_portable import BusinessConnection
@@ -146,8 +147,14 @@ class PaymentProvider(Protocol):
         amount_fen: int,
         credits: int,
         client_ip: str,
+        expires_at: datetime | None = None,
     ) -> PaymentCodeResult:
         """Create a payment code/QR for display to the customer.
+
+        ``expires_at`` is the instant the caller considers the order dead. A
+        provider that can tell its gateway (WeChat Native's ``time_expire``)
+        should pass it on so both sides retire the order together; a provider
+        with no such field ignores it.
 
         Raises PaymentProviderError on failure.
         """

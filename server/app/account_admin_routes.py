@@ -329,6 +329,40 @@ def _payment_audit(
     )
 
 
+@router.post("/settings/customer-payments/wechat-native/self-check")
+def self_check_wechat_settings(
+    request: Request, response: Response, actor: AdminWriter
+) -> dict[str, object]:
+    """Probe WeChat once with the saved credentials (mchid + serial_no + private
+    key must sign acceptably, api_v3_key must decrypt the answer). Read-only:
+    nothing is saved and the shared certificate cache is left alone, so a
+    misconfiguration surfaces here instead of at the first real customer order.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    from app.wechat_native_client import (
+        PlatformCertificateManager,
+        WeChatNativeError,
+        merchant_config_from_settings,
+    )
+
+    with pg_transaction() as raw:
+        settings = SettingsRepository(BusinessConnection.postgres(raw)).load_wechat_native_config()
+    try:
+        merchant = merchant_config_from_settings(settings)
+    except ValueError as exc:
+        return {"ok": False, "code": "WECHAT_CONFIG_INVALID", "message": str(exc)}
+    try:
+        certificates = PlatformCertificateManager().check_credentials(merchant)
+    except WeChatNativeError as exc:
+        return {"ok": False, "code": "WECHAT_SELF_CHECK_FAILED", "message": str(exc)}
+    return {
+        "ok": True,
+        "code": None,
+        "message": "商户凭据有效：签名被微信接受，平台证书解密成功。",
+        "platform_certificates": certificates,
+    }
+
+
 @router.patch("/settings/customer-payments/wechat-native")
 def save_wechat_settings(
     body: WeChatSettingsUpdate, request: Request, response: Response, actor: AdminWriter

@@ -38,7 +38,7 @@ acceptance evidence. The ZPay byte-identical regression stays in ``test_payments
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any
@@ -57,10 +57,16 @@ from pg_test_kit import (
 from app.db_pg import DATABASE_URL_ENV, close_pg_pool, pg_transaction
 from app.db_portable import BusinessConnection
 from app.payment_routes import get_wechat_provider, get_zpay_provider, router
+from app.wechat_native_client import WeChatNativeError, WeChatOrderQueryResult
 from app.zpay_payments import (
     WECHAT_NATIVE_SETTLEMENT_SPEC,
+    NativeReconciliationOutcome,
     PaymentConfirmationError,
+    close_expired_native_orders,
     confirm_recharge_payment,
+    count_expired_native_orders,
+    count_stale_pending_native_orders,
+    reconcile_stale_pending_native_orders,
 )
 
 CW070_WECHAT_DB_NAME = "cw070_wechat_callback_test"
@@ -555,6 +561,344 @@ def test_settle_wechat_spec_rejects_zpay_order(wechat_db: str) -> None:
     assert paid_at is None
     assert _wallet_credits(wechat_db) == _SEEDED_WALLET_CREDITS
     assert len(_charge_ledger(wechat_db, "order_z")) == 0
+
+
+# ---------------------------------------------------------------------------
+# S7 — the expiry sweep: unpaid Native orders must not stay PENDING forever
+# ---------------------------------------------------------------------------
+
+_LAPSED_CREATED_AT = "2026-01-01 00:00:00+00"
+
+
+def _sweep(*, limit: int = 100) -> int:
+    with pg_transaction() as raw:
+        return close_expired_native_orders(BusinessConnection.postgres(raw), limit=limit)
+
+
+def _backlog() -> int:
+    with pg_transaction() as raw:
+        return count_expired_native_orders(BusinessConnection.postgres(raw))
+
+
+def _status(dsn: str, order_id: str) -> str:
+    with psycopg.connect(dsn) as raw:
+        row = raw.execute(
+            "SELECT status FROM recharge_orders WHERE id = %s", (order_id,)
+        ).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def test_expiry_sweep_closes_only_lapsed_unpaid_native_orders(wechat_db: str) -> None:
+    """Everything the sweep must leave alone is seeded alongside what it must close."""
+    _seed_order(wechat_db, order_id="fresh", merchant_order_no="sweep_fresh")
+    _seed_order(
+        wechat_db,
+        order_id="lapsed",
+        merchant_order_no="sweep_lapsed",
+        created_at=_LAPSED_CREATED_AT,
+    )
+    _seed_order(
+        wechat_db,
+        order_id="lapsed_paid",
+        merchant_order_no="sweep_paid",
+        created_at=_LAPSED_CREATED_AT,
+        status="PAID",
+        transaction_id=OTHER_TRANSACTION_ID,
+        paid_at="2026-01-01 00:30:00+00",
+    )
+    _seed_order(
+        wechat_db,
+        order_id="lapsed_zpay",
+        merchant_order_no="sweep_zpay",
+        wechat=False,
+        created_at=_LAPSED_CREATED_AT,
+    )
+
+    assert _backlog() == 1
+    assert _sweep() == 1
+
+    assert _status(wechat_db, "lapsed") == "CLOSED"
+    assert _status(wechat_db, "fresh") == "PENDING"
+    # A settled order keeps its money; ZPay orders have their own lifecycle.
+    assert _status(wechat_db, "lapsed_paid") == "PAID"
+    assert _status(wechat_db, "lapsed_zpay") == "PENDING"
+    assert _backlog() == 0
+
+
+def test_expiry_sweep_honours_its_limit_and_leaves_the_rest_for_the_next_run(
+    wechat_db: str,
+) -> None:
+    for index in range(3):
+        _seed_order(
+            wechat_db,
+            order_id=f"lapsed_{index}",
+            merchant_order_no=f"sweep_batch_{index}",
+            created_at=_LAPSED_CREATED_AT,
+        )
+
+    assert _backlog() == 3
+    assert _sweep(limit=2) == 2
+    assert _backlog() == 1
+    assert _sweep(limit=2) == 1
+    assert _backlog() == 0
+
+
+def test_a_swept_order_still_settles_a_late_notification(wechat_db: str) -> None:
+    """Closing is bookkeeping, not a refusal: WeChat retries for hours after expiry."""
+    _seed_order(
+        wechat_db,
+        order_id="order_1",
+        merchant_order_no=OUT_TRADE_NO,
+        created_at=_LAPSED_CREATED_AT,
+    )
+    assert _sweep() == 1
+    assert _status(wechat_db, "order_1") == "CLOSED"
+
+    _settle()
+
+    status, transaction_id, provider_trade_no, _, paid_at = _fetch_order(wechat_db, "order_1")
+    assert status == "PAID"
+    assert transaction_id == TRANSACTION_ID
+    assert provider_trade_no is None
+    assert paid_at is not None
+    assert _wallet_credits(wechat_db) == _SEEDED_WALLET_CREDITS + _ORDER_CREDITS
+    assert len(_charge_ledger(wechat_db, "order_1")) == 1
+
+
+# ---------------------------------------------------------------------------
+# S8 — the reconciliation sweep: a lost callback is recovered by asking WeChat
+# ---------------------------------------------------------------------------
+
+_STALE_CREATED_AT = "2026-01-01 00:00:00+00"
+_RECONCILE_GRACE_SECONDS = 60
+
+
+def _paid_query(order_no: str, *, transaction_id: str = TRANSACTION_ID) -> WeChatOrderQueryResult:
+    """What WeChat answers when the customer paid and our callback never landed."""
+    return WeChatOrderQueryResult(
+        trade_state="SUCCESS",
+        paid=True,
+        out_trade_no=order_no,
+        transaction_id=transaction_id,
+        amount_fen=_ORDER_AMOUNT_FEN,
+        response_digest=SOURCE_DIGEST,
+    )
+
+
+def _unpaid_query(order_no: str) -> WeChatOrderQueryResult:
+    return WeChatOrderQueryResult(
+        trade_state="NOTPAY",
+        paid=False,
+        out_trade_no=order_no,
+        transaction_id=None,
+        amount_fen=None,
+        response_digest=SOURCE_DIGEST,
+    )
+
+
+def _reconcile(
+    query: Callable[[str], WeChatOrderQueryResult],
+    *,
+    grace_seconds: int = _RECONCILE_GRACE_SECONDS,
+    limit: int = 100,
+) -> NativeReconciliationOutcome:
+    with pg_transaction() as raw:
+        return reconcile_stale_pending_native_orders(
+            BusinessConnection.postgres(raw),
+            query_order=query,
+            grace_seconds=grace_seconds,
+            limit=limit,
+        )
+
+
+def _stale_backlog(grace_seconds: int = _RECONCILE_GRACE_SECONDS) -> int:
+    with pg_transaction() as raw:
+        return count_stale_pending_native_orders(
+            BusinessConnection.postgres(raw), grace_seconds=grace_seconds
+        )
+
+
+def test_reconciliation_queries_only_stale_pending_native_orders(wechat_db: str) -> None:
+    """Fresh, settled, closed and ZPay orders are not the sweep's business."""
+    _seed_order(
+        wechat_db,
+        order_id="stale",
+        merchant_order_no="recon_stale",
+        created_at=_STALE_CREATED_AT,
+    )
+    _seed_order(wechat_db, order_id="fresh", merchant_order_no="recon_fresh")
+    _seed_order(
+        wechat_db,
+        order_id="stale_paid",
+        merchant_order_no="recon_paid",
+        created_at=_STALE_CREATED_AT,
+        status="PAID",
+        transaction_id=OTHER_TRANSACTION_ID,
+        paid_at="2026-01-01 00:30:00+00",
+    )
+    _seed_order(
+        wechat_db,
+        order_id="stale_closed",
+        merchant_order_no="recon_closed",
+        created_at=_STALE_CREATED_AT,
+        status="CLOSED",
+    )
+    _seed_order(
+        wechat_db,
+        order_id="stale_zpay",
+        merchant_order_no="recon_zpay",
+        wechat=False,
+        created_at=_STALE_CREATED_AT,
+    )
+
+    assert _stale_backlog() == 1
+
+    queried: list[str] = []
+
+    def spy_query(order_no: str) -> WeChatOrderQueryResult:
+        queried.append(order_no)
+        return _unpaid_query(order_no)
+
+    outcome = _reconcile(spy_query)
+
+    assert queried == ["recon_stale"]
+    assert outcome == NativeReconciliationOutcome(queried=1, settled=0, unpaid=1, skipped=0)
+    # The unpaid answer stays PENDING: retiring it is the expiry sweep's job.
+    assert _status(wechat_db, "stale") == "PENDING"
+    assert _stale_backlog() == 1
+
+
+def test_reconciliation_settles_a_wechat_confirmed_payment(wechat_db: str) -> None:
+    """The case that motivates the sweep: money arrived, our callback never did."""
+    _seed_order(
+        wechat_db,
+        order_id="order_1",
+        merchant_order_no=OUT_TRADE_NO,
+        created_at=_STALE_CREATED_AT,
+    )
+
+    outcome = _reconcile(_paid_query)
+
+    assert outcome == NativeReconciliationOutcome(queried=1, settled=1, unpaid=0, skipped=0)
+    status, transaction_id, provider_trade_no, _, paid_at = _fetch_order(wechat_db, "order_1")
+    assert status == "PAID"
+    assert transaction_id == TRANSACTION_ID  # 083: settlement writes transaction_id,
+    assert provider_trade_no is None  # ...never provider_trade_no
+    assert paid_at is not None
+    assert _wallet_credits(wechat_db) == _SEEDED_WALLET_CREDITS + _ORDER_CREDITS
+    assert len(_charge_ledger(wechat_db, "order_1")) == 1
+    # A settled order leaves the candidate set: re-running the sweep is a no-op.
+    assert _reconcile(_paid_query) == NativeReconciliationOutcome(
+        queried=0, settled=0, unpaid=0, skipped=0
+    )
+
+
+def test_reconciliation_survives_a_failing_query_and_finishes_the_rest(wechat_db: str) -> None:
+    """One unreachable order must not strand the recoverable ones behind it."""
+    _seed_order(
+        wechat_db,
+        order_id="dead",
+        merchant_order_no="recon_dead",
+        created_at="2026-01-01 00:00:00+00",
+    )
+    _seed_order(
+        wechat_db,
+        order_id="alive",
+        merchant_order_no="recon_alive",
+        created_at="2026-01-02 00:00:00+00",
+    )
+
+    def flaky_query(order_no: str) -> WeChatOrderQueryResult:
+        if order_no == "recon_dead":
+            raise WeChatNativeError("WeChat API request timed out", status_code=504)
+        return _paid_query(order_no)
+
+    outcome = _reconcile(flaky_query)
+
+    assert outcome == NativeReconciliationOutcome(queried=1, settled=1, unpaid=0, skipped=1)
+    assert _status(wechat_db, "dead") == "PENDING"  # the next run asks again
+    assert _status(wechat_db, "alive") == "PAID"
+
+
+def test_reconciliation_refuses_a_gateway_answer_for_a_different_order(wechat_db: str) -> None:
+    """The sweep settles only what it asked about, whatever the gateway claims."""
+    _seed_order(
+        wechat_db,
+        order_id="order_1",
+        merchant_order_no=OUT_TRADE_NO,
+        created_at=_STALE_CREATED_AT,
+    )
+    hijacked = WeChatOrderQueryResult(
+        trade_state="SUCCESS",
+        paid=True,
+        out_trade_no="someone_elses_order",
+        transaction_id=TRANSACTION_ID,
+        amount_fen=_ORDER_AMOUNT_FEN,
+        response_digest=SOURCE_DIGEST,
+    )
+
+    outcome = _reconcile(lambda order_no: hijacked)
+
+    assert outcome == NativeReconciliationOutcome(queried=1, settled=0, unpaid=0, skipped=1)
+    assert _status(wechat_db, "order_1") == "PENDING"
+    assert _wallet_credits(wechat_db) == _SEEDED_WALLET_CREDITS
+
+
+def test_reconciliation_refuses_an_amount_that_disagrees_with_the_order(wechat_db: str) -> None:
+    """confirm_recharge_payment re-validates: a disputed answer settles nothing."""
+    _seed_order(
+        wechat_db,
+        order_id="order_1",
+        merchant_order_no=OUT_TRADE_NO,
+        created_at=_STALE_CREATED_AT,
+    )
+    underpaid = WeChatOrderQueryResult(
+        trade_state="SUCCESS",
+        paid=True,
+        out_trade_no=OUT_TRADE_NO,
+        transaction_id=TRANSACTION_ID,
+        amount_fen=1,
+        response_digest=SOURCE_DIGEST,
+    )
+
+    outcome = _reconcile(lambda order_no: underpaid)
+
+    assert outcome == NativeReconciliationOutcome(queried=1, settled=0, unpaid=0, skipped=1)
+    assert _status(wechat_db, "order_1") == "PENDING"
+    assert _wallet_credits(wechat_db) == _SEEDED_WALLET_CREDITS
+    assert len(_charge_ledger(wechat_db, "order_1")) == 0
+
+
+def test_reconciliation_honours_its_limit_and_leaves_the_rest(wechat_db: str) -> None:
+    """A capped run settles its share; the next run picks up exactly the rest.
+
+    Paid answers shrink the candidate set (unlike unpaid ones, which stay
+    PENDING by design), so successive runs walk the backlog to zero.
+    """
+    for index in range(3):
+        _seed_order(
+            wechat_db,
+            order_id=f"stale_{index}",
+            merchant_order_no=f"recon_batch_{index}",
+            created_at=_STALE_CREATED_AT,
+        )
+
+    def unique_paid_query(order_no: str) -> WeChatOrderQueryResult:
+        # One distinct transaction id per order: a trade number bound to another
+        # order would (rightly) be refused by the settlement guards.
+        suffix = order_no.rsplit("_", 1)[1]
+        return _paid_query(order_no, transaction_id=f"{TRANSACTION_ID[:-1]}{suffix}")
+
+    assert _reconcile(unique_paid_query, limit=2) == NativeReconciliationOutcome(
+        queried=2, settled=2, unpaid=0, skipped=0
+    )
+    assert _reconcile(unique_paid_query, limit=2) == NativeReconciliationOutcome(
+        queried=1, settled=1, unpaid=0, skipped=0
+    )
+    assert _reconcile(unique_paid_query, limit=2) == NativeReconciliationOutcome(
+        queried=0, settled=0, unpaid=0, skipped=0
+    )
 
 
 if __name__ == "__main__":

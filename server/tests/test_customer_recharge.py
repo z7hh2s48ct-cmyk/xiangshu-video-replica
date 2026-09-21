@@ -1109,6 +1109,86 @@ def test_customer_payment_code_is_generated_server_side_for_owned_order(
     assert fake_client.order_numbers == [order_no]
 
 
+def _make_order_native(dsn: str, order_no: str, *, created_at: str | None = None) -> None:
+    """Re-point a freshly created order at WeChat Native, optionally back-dated.
+
+    The customer route creates orders on the configured provider (zpay in this
+    fixture); converting the row afterwards is the cheapest way to reach the
+    Native-only branches without standing up merchant credentials.
+    """
+    with psycopg.connect(dsn) as conn:
+        conn.execute(
+            "UPDATE recharge_orders SET provider = 'wechat_native', channel = 'wxpay', "
+            "created_at = COALESCE(%s, created_at) WHERE merchant_order_no = %s",
+            (created_at, order_no),
+        )
+        conn.commit()
+
+
+def _create_customer_order(client: TestClient, session_token: str) -> str:
+    created = client.post(
+        "/api/customer/recharge-orders",
+        json={"amount_fen": 10000},
+        headers=_recharge_headers(session_token),
+    )
+    assert created.status_code == 201, created.text
+    return str(created.json()["order_no"])
+
+
+def _activated_session(client: TestClient, dsn: str, slug: str) -> str:
+    code = generate_activation_code()
+    with psycopg.connect(dsn) as conn:
+        _insert_code(conn, code_id=f"code-{slug}", batch_id=f"batch-{slug}", plaintext=code)
+    activation = _activate_customer(client, code, f"fp-{slug}", f"key-{slug}")
+    return str(activation["session_token"])
+
+
+def test_native_payment_code_refuses_an_order_past_its_payment_window(
+    client: TestClient,
+    clean_state: str,
+    recharge_config_fixture,
+) -> None:
+    """A lapsed order's cached QR still renders but WeChat will refuse the payment.
+
+    Handing it back would look like a broken scanner to the customer, so the route
+    refuses before serving or minting a code and tells them to start over.
+    """
+    session_token = _activated_session(client, clean_state, "native-expired")
+    order_no = _create_customer_order(client, session_token)
+    _make_order_native(clean_state, order_no, created_at="2026-01-01 00:00:00+00")
+
+    response = client.post(
+        f"/api/customer/recharge-orders/{order_no}/payment-code",
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+    assert response.status_code == 409, response.text
+    assert "超过支付时限" in response.json()["detail"]
+
+
+def test_native_payment_code_proceeds_while_the_order_is_still_payable(
+    client: TestClient,
+    clean_state: str,
+    recharge_config_fixture,
+) -> None:
+    """The guard must not misfire on a fresh order: this one reaches the provider.
+
+    WeChat merchant settings are absent in this fixture, so getting as far as
+    PAYMENT_CONFIGURATION_UNAVAILABLE proves the expiry check let it through.
+    """
+    session_token = _activated_session(client, clean_state, "native-fresh")
+    order_no = _create_customer_order(client, session_token)
+    _make_order_native(clean_state, order_no)
+
+    response = client.post(
+        f"/api/customer/recharge-orders/{order_no}/payment-code",
+        headers={"Authorization": f"Bearer {session_token}"},
+    )
+
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"]["code"] == "PAYMENT_CONFIGURATION_UNAVAILABLE"
+
+
 def _signed_notify_params(order_no: str, *, trade_no: str) -> dict[str, str]:
     """ZPay callback query params signed with the fixture merchant secret."""
     from app.zpay import sign_zpay_params

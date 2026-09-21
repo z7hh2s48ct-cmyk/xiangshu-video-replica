@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import secrets
+import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -55,8 +56,37 @@ PUBLIC_BASE_URL_ENV = "PUBLIC_BASE_URL"
 AES_GCM_KEY_LENGTH = 32  # 256 bits
 WECHAT_TIMEOUT_SECONDS = 10.0
 MAX_WECHAT_RESPONSE_BYTES = 256 * 1024
+MAX_WECHAT_ERROR_BODY_BYTES = 4 * 1024
 CERTIFICATE_CACHE_TTL_SECONDS = 12 * 60 * 60
 WECHAT_USER_AGENT = "customer-v3-wechat-native/1.0"
+
+# How long a Native order stays payable. WeChat's own default is two hours; we
+# state it explicitly so the local order, the QR and the expiry sweep all agree
+# on one number instead of each assuming the gateway default.
+NATIVE_ORDER_VALIDITY_SECONDS = 2 * 60 * 60
+# WeChat rejects a time_expire that is not comfortably in the future, so an
+# order with less than this much life left can no longer be given a QR.
+NATIVE_ORDER_MIN_REMAINING_SECONDS = 120
+# How long an order may sit PENDING before the reconciliation sweep stops
+# trusting the callback path alone and asks WeChat directly
+# (scripts/reconcile_pending_native_orders). A callback normally lands within
+# seconds; the grace only has to outlast a transient outage, and stays far
+# short of the payment window so a lost callback is recovered while the order
+# can still be settled in the same maintenance pass that would close it.
+NATIVE_RECONCILIATION_GRACE_SECONDS = 10 * 60
+# WeChat retries a payment notification on a fixed backoff schedule that tops
+# out at roughly 24 hours (15s...6h). Inside the payment window plus this drain
+# horizon an order can still become PAID — by a payment, a retrying callback,
+# or the reconciliation sweep — so it blocks switching the merchant identity
+# and legacy credit conversion. Past the horizon nothing can land anymore:
+# payment is impossible (the code_url retired with the window), callbacks are
+# exhausted, and the sweep has asked WeChat about whatever was real.
+NATIVE_SETTLEMENT_DRAIN_SECONDS = 24 * 60 * 60
+# How long a Native order blocks merchant-identity changes and legacy credit
+# conversion: the payment window plus the callback drain horizon.
+NATIVE_MERCHANT_SWITCH_BLOCK_SECONDS = (
+    NATIVE_ORDER_VALIDITY_SECONDS + NATIVE_SETTLEMENT_DRAIN_SECONDS
+)
 
 logger = logging.getLogger(__name__)
 
@@ -294,6 +324,37 @@ class _RawResponse:
     serial: str | None
 
 
+def wechat_error_detail(exc: HTTPError) -> str:
+    """Summarize a WeChat error response as ``HTTP <status> code=... message=...``.
+
+    WeChat names the actionable cause (``SIGN_ERROR``, ``NOAUTH``, ``PARAM_ERROR``,
+    ``ORDERPAID``, ...) only in the error body. Without it every misconfiguration —
+    wrong serial_no, wrong private key, merchant not enabled for Native — reads as
+    the same opaque transport failure in the logs. The read is bounded and any
+    failure to parse degrades to the bare status rather than masking the original
+    error. The result is for server-side logs only; routes answer customers with
+    their own fixed messages.
+    """
+    status = f"HTTP {exc.code}"
+    if getattr(exc, "fp", None) is None:
+        return status
+    try:
+        body = exc.read(MAX_WECHAT_ERROR_BODY_BYTES)
+        payload = json.loads(body.decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return status
+    if not isinstance(payload, dict):
+        return status
+    parts = [status]
+    code = payload.get("code")
+    if isinstance(code, str) and code:
+        parts.append(f"code={code}")
+    message = payload.get("message")
+    if isinstance(message, str) and message:
+        parts.append(f"message={message[:200]}")
+    return " ".join(parts)
+
+
 def _execute_request(
     opener: WeChatHTTPOpener, request: Request, *, timeout_seconds: float
 ) -> _RawResponse:
@@ -306,8 +367,9 @@ def _execute_request(
             signature = response.getheader("Wechatpay-Signature")
             serial = response.getheader("Wechatpay-Serial")
     except HTTPError as exc:
-        logger.warning("WeChat API returned HTTP %s", exc.code)
-        raise WeChatNativeError("WeChat API request failed") from exc
+        detail = wechat_error_detail(exc)
+        logger.warning("WeChat API rejected the request: %s", detail)
+        raise WeChatNativeError(f"WeChat API request failed ({detail})") from exc
     except (TimeoutError, URLError, OSError) as exc:
         logger.warning("WeChat API request failed: %s", type(exc).__name__)
         raise WeChatNativeError("WeChat API request timed out", status_code=504) from exc
@@ -357,19 +419,51 @@ class PlatformCertificateManager:
         self._clock = clock or time.monotonic
         self._cache: dict[str, WeChatPlatformCertificate] = {}
         self._fetched_at: float | None = None
+        # One manager is shared by every request (see default_certificate_manager),
+        # and callbacks settle on a thread pool, so refreshes must be serialized:
+        # without this every concurrent caller on a cold cache would download the
+        # certificates again, which is exactly the burst WeChat rate-limits.
+        self._lock = threading.Lock()
 
     def get_certificate(
         self, merchant: WeChatMerchantConfig, serial_no: str
     ) -> WeChatPlatformCertificate:
         """Return the cached certificate for serial_no, refreshing when stale or missing."""
-        now = self._clock()
-        fresh = self._fetched_at is not None and (now - self._fetched_at) < self._cache_ttl_seconds
-        if not fresh or serial_no not in self._cache:
-            self._refresh(merchant, now=now)
-        certificate = self._cache.get(serial_no)
+        certificate = self._cached(serial_no)
+        if certificate is None:
+            with self._lock:
+                # Another thread may have refreshed while this one waited.
+                certificate = self._cached(serial_no)
+                if certificate is None:
+                    self._refresh(merchant, now=self._clock())
+                    certificate = self._cache.get(serial_no)
         if certificate is None:
             raise WeChatNativeError("WeChat platform certificate serial not found")
         return certificate
+
+    def _cached(self, serial_no: str) -> WeChatPlatformCertificate | None:
+        """The cached certificate for serial_no, or None when stale or absent."""
+        fetched_at = self._fetched_at
+        if fetched_at is None or (self._clock() - fetched_at) >= self._cache_ttl_seconds:
+            return None
+        return self._cache.get(serial_no)
+
+    def check_credentials(self, merchant: WeChatMerchantConfig) -> int:
+        """Live credential probe: download the platform certificates once.
+
+        Proves the whole merchant triple — the signed request is only accepted
+        when ``mchid`` is enabled for Native and ``serial_no`` names a
+        certificate matching ``private_key`` — and that ``api_v3_key`` decrypts
+        the downloaded list. Returns the certificate count; raises
+        ``WeChatNativeError`` (carrying WeChat's error code in the message)
+        otherwise. Always hits the network on purpose: a diagnostic that
+        answered from cache would prove nothing about the credentials.
+        """
+        request = self._build_request(merchant)
+        raw = _execute_request(self._opener, request, timeout_seconds=self._timeout_seconds)
+        self._cache = self._parse_certificates(merchant, raw.body)
+        self._fetched_at = self._clock()
+        return len(self._cache)
 
     def _refresh(self, merchant: WeChatMerchantConfig, *, now: float) -> None:
         request = self._build_request(merchant)
@@ -444,6 +538,27 @@ class PlatformCertificateManager:
         )
 
 
+_DEFAULT_CERTIFICATE_MANAGER: PlatformCertificateManager | None = None
+_DEFAULT_CERTIFICATE_MANAGER_LOCK = threading.Lock()
+
+
+def default_certificate_manager() -> PlatformCertificateManager:
+    """The process-wide platform-certificate manager used by production callers.
+
+    Providers and clients are constructed per request (the registry hands back a
+    fresh instance on every ``get_payment_provider``), so a per-instance manager
+    starts cold every time and the 12-hour cache never applies: each order and
+    each callback would re-download ``/v3/certificates``. Sharing one manager is
+    what makes that TTL real. Tests that inject an opener or a manager keep their
+    own isolated instance.
+    """
+    global _DEFAULT_CERTIFICATE_MANAGER
+    with _DEFAULT_CERTIFICATE_MANAGER_LOCK:
+        if _DEFAULT_CERTIFICATE_MANAGER is None:
+            _DEFAULT_CERTIFICATE_MANAGER = PlatformCertificateManager()
+        return _DEFAULT_CERTIFICATE_MANAGER
+
+
 # -----------------------------------------------------------------------------
 # Cycle 2: WeChat Pay V3 Native HTTP client (order placement + query)
 # -----------------------------------------------------------------------------
@@ -465,9 +580,17 @@ class WeChatNativeClient:
     ) -> None:
         self._opener = opener or cast(WeChatHTTPOpener, urlopen)
         self._timeout_seconds = timeout_seconds
-        self._cert_manager = cert_manager or PlatformCertificateManager(
-            opener=self._opener, timeout_seconds=timeout_seconds
-        )
+        if cert_manager is not None:
+            self._cert_manager = cert_manager
+        elif opener is None:
+            # Production path: share the process-wide cache so the TTL applies.
+            self._cert_manager = default_certificate_manager()
+        else:
+            # An injected opener must also serve the certificate download, so this
+            # client keeps its own manager bound to that opener.
+            self._cert_manager = PlatformCertificateManager(
+                opener=self._opener, timeout_seconds=timeout_seconds
+            )
 
     def create_native_order(
         self,
@@ -479,8 +602,14 @@ class WeChatNativeClient:
         amount_fen: int,
         attach: str | None = None,
         client_ip: str | None = None,
+        time_expire: str | None = None,
     ) -> WeChatNativeOrderResult:
-        """Place a Native order and return the weixin:// code_url for QR rendering."""
+        """Place a Native order and return the weixin:// code_url for QR rendering.
+
+        ``time_expire`` is an RFC 3339 instant after which WeChat stops accepting
+        payment for this order. Passing it keeps the gateway's idea of the order's
+        life identical to ours instead of relying on WeChat's implicit default.
+        """
         if amount_fen <= 0:
             raise WeChatNativeError("WeChat native order amount must be positive")
         payload: dict[str, object] = {
@@ -491,6 +620,8 @@ class WeChatNativeClient:
             "notify_url": deployment.notify_url,
             "amount": {"total": amount_fen, "currency": "CNY"},
         }
+        if time_expire:
+            payload["time_expire"] = time_expire
         if attach:
             payload["attach"] = attach
         if client_ip:

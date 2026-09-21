@@ -6928,8 +6928,12 @@ export interface components {
       credits: number;
       /** Channel */
       channel: string;
+      /** Provider */
+      provider: string;
       /** Provider Trade No */
       provider_trade_no: string | null;
+      /** Transaction Id */
+      transaction_id: string | null;
       /** Created At */
       created_at: string;
       /** Paid At */

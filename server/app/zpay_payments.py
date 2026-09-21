@@ -1,13 +1,22 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from typing import Literal, TypedDict, cast
 from uuid import uuid4
 
 from app.db_portable import BusinessConnection, IntegrityConstraintError
+from app.wechat_native_client import (
+    NATIVE_MERCHANT_SWITCH_BLOCK_SECONDS,
+    NATIVE_ORDER_VALIDITY_SECONDS,
+    NATIVE_RECONCILIATION_GRACE_SECONDS,
+    WeChatOrderQueryResult,
+)
 from app.zpay import ALLOWED_ZPAY_CHANNELS
+
+logger = logging.getLogger(__name__)
 
 ZPAY_NOTIFY_BUSY_TIMEOUT_MS = 1000
 RechargeStatus = Literal["PENDING", "PAID", "FAILED", "CLOSED"]
@@ -35,7 +44,8 @@ class SettlementProviderSpec:
 
 # WeChat Native only ever settles the wxpay channel; kept local so this fund module
 # does not import the provider module (avoids an import cycle at registration time).
-_WECHAT_NATIVE_CHANNEL_UNIVERSE = frozenset({"wxpay"})
+_WECHAT_NATIVE_CHANNEL = "wxpay"
+_WECHAT_NATIVE_CHANNEL_UNIVERSE = frozenset({_WECHAT_NATIVE_CHANNEL})
 
 ZPAY_SETTLEMENT_SPEC = SettlementProviderSpec(
     provider_name="zpay",
@@ -135,6 +145,220 @@ def serialize_recharge_order(row: sqlite3.Row) -> RechargeOrderData:
         "created_at": str(row["created_at"]),
         "paid_at": None if row["paid_at"] is None else str(row["paid_at"]),
     }
+
+
+# "PENDING and older than N seconds" — the shared shape behind the expiry sweep
+# (N = the payment window) and the reconciliation sweep (N = the callback grace).
+_PENDING_NATIVE_OLDER_THAN = (
+    "provider = 'wechat_native' AND status = 'PENDING' "
+    "AND created_at::timestamptz + make_interval(secs => %s) <= now()"
+)
+
+
+def count_expired_native_orders(
+    conn: BusinessConnection, *, validity_seconds: int = NATIVE_ORDER_VALIDITY_SECONDS
+) -> int:
+    """How many Native orders have outlived their payment window while still PENDING."""
+    row = conn.execute(
+        f"SELECT COUNT(*) FROM recharge_orders WHERE {_PENDING_NATIVE_OLDER_THAN}",  # noqa: S608
+        (float(validity_seconds),),
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def close_expired_native_orders(
+    conn: BusinessConnection,
+    *,
+    limit: int,
+    validity_seconds: int = NATIVE_ORDER_VALIDITY_SECONDS,
+) -> int:
+    """Retire Native orders nobody paid before their window lapsed; return the count.
+
+    ``CLOSED`` is the same terminal state a customer-closed order reaches, and
+    ``confirm_recharge_payment`` still settles from it, so a notification that
+    arrives late — WeChat retries for hours — still credits the wallet. The sweep
+    only stops orders that can no longer be paid from sitting in the orders page
+    and the reconciliation reports as PENDING forever.
+
+    It deliberately does *not* relax the merchant-identity guard in
+    ``SettingsRepository.save_wechat_native_config`` or the credit-conversion
+    check: both count CLOSED as well, precisely because a CLOSED order can still
+    settle against the current merchant. Narrowing either one needs a decision
+    about how long after expiry WeChat may still push a notification.
+
+    ``SKIP LOCKED`` leaves any order a callback is currently settling to that
+    callback rather than waiting on its lock.
+    """
+    updated = conn.execute(
+        f"""
+        UPDATE recharge_orders SET status = 'CLOSED'
+        WHERE id IN (
+            SELECT id FROM recharge_orders
+            WHERE {_PENDING_NATIVE_OLDER_THAN}
+            ORDER BY created_at
+            LIMIT %s
+            FOR UPDATE SKIP LOCKED
+        )
+        """,  # noqa: S608
+        (float(validity_seconds), limit),
+    )
+    return int(updated.rowcount)
+
+
+def count_stale_pending_native_orders(
+    conn: BusinessConnection, *, grace_seconds: int = NATIVE_RECONCILIATION_GRACE_SECONDS
+) -> int:
+    """How many Native orders have sat PENDING past the callback grace.
+
+    The reconciliation sweep's backlog: same shape as the expiry predicate, but
+    the window is the much shorter grace after which the callback path alone is
+    no longer trusted.
+    """
+    row = conn.execute(
+        f"SELECT COUNT(*) FROM recharge_orders WHERE {_PENDING_NATIVE_OLDER_THAN}",  # noqa: S608
+        (float(grace_seconds),),
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+_MERCHANT_SWITCH_BLOCKING_NATIVE_PREDICATE = (
+    "provider = 'wechat_native' AND status IN ('PENDING', 'CLOSED') "
+    "AND created_at::timestamptz + make_interval(secs => %s) > now()"
+)
+
+
+def count_blocking_native_orders(
+    conn: BusinessConnection, *, block_seconds: int = NATIVE_MERCHANT_SWITCH_BLOCK_SECONDS
+) -> int:
+    """Native orders still inside their payment-plus-callback window.
+
+    The settlement-drain criterion behind the merchant-identity guard: an order
+    blocks a merchant change only while it can still become PAID — payable QR
+    until the window ends (``NATIVE_ORDER_VALIDITY_SECONDS``), retrying
+    callbacks for roughly a day after that (``NATIVE_SETTLEMENT_DRAIN_SECONDS``).
+    Past the horizon nothing can land anymore, so the order stops blocking and
+    a merchant identity can always be changed in finite time.
+    """
+    row = conn.execute(
+        f"SELECT COUNT(*) FROM recharge_orders WHERE {_MERCHANT_SWITCH_BLOCKING_NATIVE_PREDICATE}",  # noqa: S608
+        (float(block_seconds),),
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def list_stale_pending_native_orders(
+    conn: BusinessConnection, *, grace_seconds: int, limit: int
+) -> list[str]:
+    """Order numbers of the oldest Native orders still PENDING past the grace.
+
+    Read-only and lock-free on purpose: the caller must have no transaction open
+    that would span the external query-order calls, so a concurrently arriving
+    callback never waits on the sweep's snapshot.
+    """
+    rows = conn.execute(
+        f"""
+        SELECT merchant_order_no FROM recharge_orders
+        WHERE {_PENDING_NATIVE_OLDER_THAN}
+        ORDER BY created_at
+        LIMIT %s
+        """,  # noqa: S608
+        (float(grace_seconds), limit),
+    ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
+@dataclass(frozen=True)
+class NativeReconciliationOutcome:
+    """Counts-only result of one reconciliation sweep pass (the CLI prints these)."""
+
+    queried: int
+    settled: int
+    unpaid: int
+    skipped: int
+
+
+def reconcile_stale_pending_native_orders(
+    conn: BusinessConnection,
+    *,
+    query_order: Callable[[str], WeChatOrderQueryResult],
+    grace_seconds: int = NATIVE_RECONCILIATION_GRACE_SECONDS,
+    limit: int = 200,
+) -> NativeReconciliationOutcome:
+    """Recover Native orders WeChat has paid but no callback ever confirmed.
+
+    掉单兜底 — the lost-order fallback. The customer polls only our own database
+    and WeChat retries a failed notification for hours at most, so a notify
+    route that was down means money arrived that nothing on our side credits.
+    The sweep asks WeChat about each stale PENDING order and settles the paid
+    ones through ``confirm_recharge_payment`` — the same idempotent fund path,
+    spec and guards as the callback — so a sweep racing a late callback is a
+    PAID short-circuit, never a double credit.
+
+    ``query_order`` performs the external call, so settlement row locks must
+    never be held across it: the CLI runs the sweep on an autocommit connection
+    (each settlement below is then its own short transaction), while tests may
+    drive the whole pass inside one outer transaction. A query that fails,
+    answers for a different order, or is refused by the settlement guards is
+    skipped with a warning and retried on the next run; an unpaid answer stays
+    PENDING for the expiry sweep to retire.
+    """
+    order_nos = list_stale_pending_native_orders(conn, grace_seconds=grace_seconds, limit=limit)
+    queried = settled = unpaid = skipped = 0
+    for order_no in order_nos:
+        try:
+            answer = query_order(order_no)
+        except Exception as exc:  # noqa: BLE001 - one dead order must not strand the rest
+            logger.warning(
+                "reconciliation query for order %s failed (%s); it stays PENDING",
+                order_no,
+                exc,
+            )
+            skipped += 1
+            continue
+        queried += 1
+        if answer.out_trade_no != order_no:
+            logger.warning(
+                "reconciliation query answered for %s while asking about %s; settling nothing",
+                answer.out_trade_no,
+                order_no,
+            )
+            skipped += 1
+            continue
+        if not answer.paid:
+            unpaid += 1
+            continue
+        if answer.transaction_id is None or answer.amount_fen is None:
+            logger.warning(
+                "reconciliation query for order %s is paid but incomplete; settling nothing",
+                order_no,
+            )
+            skipped += 1
+            continue
+        try:
+            confirm_recharge_payment(
+                conn,
+                merchant_order_no=order_no,
+                provider_trade_no=answer.transaction_id,
+                amount_fen=answer.amount_fen,
+                channel=_WECHAT_NATIVE_CHANNEL,
+                source_digest=answer.response_digest,
+                provider_spec=WECHAT_NATIVE_SETTLEMENT_SPEC,
+            )
+        except PaymentConfirmationError as exc:
+            logger.warning(
+                "reconciliation refused to settle order %s: %s; it stays PENDING",
+                order_no,
+                exc.code,
+            )
+            skipped += 1
+            continue
+        settled += 1
+    return NativeReconciliationOutcome(
+        queried=queried, settled=settled, unpaid=unpaid, skipped=skipped
+    )
 
 
 def confirm_recharge_payment(

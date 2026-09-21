@@ -670,3 +670,175 @@ def test_payment_channel_setup_preserves_secrets_and_order_provider(
         )
         audit = " ".join(row[0] for row in raw.execute("SELECT metadata_json FROM audit_logs"))
         assert api_key not in audit and "BEGIN PRIVATE KEY" not in audit
+
+
+def test_merchant_identity_can_change_once_settlement_window_has_passed(
+    operations_client, route_state
+):
+    """口径：支付窗（2h）+ 微信通知重推上限（24h）之内，订单阻塞商户身份变更；
+    窗口之外不再阻塞——付款已不可能、回调重试已耗尽、补单清扫已查过，变更
+    无从搁浅任何资金。原判据把 CLOSED 永久计入，只会把商户号锁死。"""
+    import secrets
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    client = operations_client
+    admin = admin_login(client, route_state)
+    path = "/api/control/settings/customer-payments"
+    private_key = (
+        rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        .private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        .decode()
+    )
+    config = {
+        "appid": "drain-app",
+        "mchid": "drain-merchant",
+        "serial_no": "0123ABCD",
+        "api_v3_key": secrets.token_hex(16),
+        "private_key": private_key,
+    }
+    saved = client.patch(
+        path + "/wechat-native",
+        headers={**admin, "Idempotency-Key": str(uuid4())},
+        json={"confirm": True, "reason": "drain window setup", "config": config},
+    )
+    assert saved.status_code == 200, saved.text
+
+    # 一笔三天前创建、已关闭的微信订单：远在支付窗与回调重推期之外。
+    with psycopg.connect(route_state) as raw:
+        uid = raw.execute("SELECT id FROM users ORDER BY created_at LIMIT 1").fetchone()[0]
+        raw.execute(
+            "INSERT INTO recharge_orders (id, user_id, merchant_order_no, provider, "
+            "status, channel, pricing_scope, base_unit_price_fen_snapshot, "
+            "charged_unit_price_fen_snapshot, min_recharge_fen_snapshot, "
+            "recharge_step_fen_snapshot, amount_fen, credits, prepay_id, code_url, "
+            "created_at) VALUES (%s, %s, %s, 'wechat_native', 'CLOSED', 'wxpay', "
+            "'CUSTOMER_STANDARD', 1000, 1000, 10000, 1000, 20000, 20, "
+            "'wx-prepay-drained', 'weixin://wxpay/bizpayurl?pr=drained', %s)",
+            (str(uuid4()), uid, str(uuid4()), "2026-01-01 00:00:00+00"),
+        )
+        raw.commit()
+
+    switched = client.patch(
+        path + "/wechat-native",
+        headers={**admin, "Idempotency-Key": str(uuid4())},
+        json={
+            "confirm": True,
+            "reason": "rotate merchant after drain",
+            "config": {**config, "appid": "next-app", "mchid": "next-merchant"},
+        },
+    )
+    assert switched.status_code == 200, switched.text
+    from app.db_portable import BusinessConnection
+    from app.settings import SettingsRepository
+
+    with psycopg.connect(route_state) as raw:
+        assert (
+            SettingsRepository(BusinessConnection.postgres(raw)).load_wechat_native_config()[
+                "mchid"
+            ]
+            == "next-merchant"
+        )
+
+
+def test_wechat_credential_self_check_reports_without_saving(
+    operations_client, route_state, monkeypatch
+):
+    """自检按钮：真实调一次微信验证三件套（不落库、不动共享缓存），配错在
+    这里暴露而不是在第一个真实客户下单时。"""
+    import secrets as secrets_module
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    from app import wechat_native_client as wnc
+
+    client = operations_client
+    admin = admin_login(client, route_state)
+    path = "/api/control/settings/customer-payments/wechat-native/self-check"
+
+    # 未配置：不触网即返回失败
+    probe = client.post(path, headers={**admin, "Idempotency-Key": str(uuid4())})
+    assert probe.status_code == 200, probe.text
+    body = probe.json()
+    assert body["ok"] is False and body["code"] == "WECHAT_CONFIG_INVALID"
+
+    private_key = (
+        rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        .private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        .decode()
+    )
+    saved = client.patch(
+        "/api/control/settings/customer-payments/wechat-native",
+        headers={**admin, "Idempotency-Key": str(uuid4())},
+        json={
+            "confirm": True,
+            "reason": "self-check setup",
+            "config": {
+                "appid": "check-app",
+                "mchid": "check-merchant",
+                "serial_no": "CHECKSERIAL01",
+                "api_v3_key": secrets_module.token_hex(16),
+                "private_key": private_key,
+            },
+        },
+    )
+    assert saved.status_code == 200, saved.text
+
+    calls: list[str] = []
+
+    class StubManager:
+        def check_credentials(self, merchant):
+            calls.append(merchant.mchid)
+            if calls[-1] == "bad-merchant":
+                raise wnc.WeChatNativeError(
+                    "WeChat API request failed (HTTP 401 code=SIGN_ERROR message=签名错误)"
+                )
+            return 2
+
+    monkeypatch.setattr(wnc, "PlatformCertificateManager", StubManager)
+
+    probe = client.post(path, headers={**admin, "Idempotency-Key": str(uuid4())})
+    assert probe.status_code == 200, probe.text
+    body = probe.json()
+    assert body == {
+        "ok": True,
+        "code": None,
+        "message": "商户凭据有效：签名被微信接受，平台证书解密成功。",
+        "platform_certificates": 2,
+    }, body
+
+    # 微信侧拒绝（如序列号与私钥不匹配）：错误体里的微信错误码原样透出
+    with psycopg.connect(route_state) as raw:
+        raw.execute(
+            "UPDATE provider_settings SET encrypted_config = encrypted_config WHERE "
+            "provider='wechat_native'"
+        )
+    from app.db_portable import BusinessConnection
+    from app.settings import SettingsRepository
+
+    with psycopg.connect(route_state) as raw:
+        admin_uid = raw.execute(
+            "SELECT id FROM users WHERE role='admin' ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()[0]
+    with psycopg.connect(route_state) as raw:
+        repo = SettingsRepository(BusinessConnection.postgres(raw))
+        config = repo.load_wechat_native_config()
+        repo.save_wechat_native_config(
+            {**config, "mchid": "bad-merchant"}, actor_user_id=str(admin_uid)
+        )
+
+    probe = client.post(path, headers={**admin, "Idempotency-Key": str(uuid4())})
+    assert probe.status_code == 200, probe.text
+    body = probe.json()
+    assert body["ok"] is False and body["code"] == "WECHAT_SELF_CHECK_FAILED"
+    assert "SIGN_ERROR" in body["message"], body

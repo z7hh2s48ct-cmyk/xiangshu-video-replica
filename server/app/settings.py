@@ -219,14 +219,20 @@ class SettingsRepository:
         merchant = merchant_config_from_settings(config)
         load_private_key(merchant.private_key_pem)
         if current and any(config.get(key) != current.get(key) for key in ("appid", "mchid")):
-            # Customer-side closure retains a payable gateway order and still
-            # accepts late settlement; it cannot retire the merchant identity.
-            unsettled = self.conn.execute(
-                "SELECT 1 FROM recharge_orders WHERE provider='wechat_native' "
-                "AND status IN ('PENDING', 'CLOSED') LIMIT 1"
-            ).fetchone()
-            if unsettled:
-                raise ValueError("Unsettled WeChat orders prevent changing merchant identity")
+            # Settlement-drain criterion: orders inside their payment window
+            # (payable QR) plus WeChat's callback retry horizon (about a day)
+            # can still become PAID under the current identity, so a change now
+            # would strand them. Past the horizon nothing can land anymore —
+            # counting CLOSED forever only deadlocked the merchant identity.
+            from app.zpay_payments import count_blocking_native_orders
+
+            blocking = count_blocking_native_orders(self.conn)
+            if blocking:
+                raise ValueError(
+                    f"{blocking} WeChat order(s) are inside their settlement window "
+                    "(payment window + callback retry horizon); changing merchant "
+                    "identity would strand them. Wait for the window to pass."
+                )
         self._save_encrypted_config("wechat_native", config, actor_user_id=actor_user_id)
         return self.read_wechat_native_config()
 

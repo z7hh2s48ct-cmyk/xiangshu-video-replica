@@ -9,8 +9,12 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import io
 import json
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor
+from typing import cast
 from urllib.error import HTTPError
 from urllib.request import Request
 
@@ -35,10 +39,12 @@ from app.wechat_native_client import (
     build_request_signature_message,
     build_response_verify_message,
     decrypt_aes_256_gcm,
+    default_certificate_manager,
     deployment_config_from_environment,
     merchant_config_from_settings,
     sign_sha256_rsa,
     verify_sha256_rsa,
+    wechat_error_detail,
 )
 
 
@@ -787,6 +793,160 @@ def test_query_order_not_paid_returns_unpaid(
     assert result.trade_state == "NOTPAY"
     assert result.transaction_id is None
     assert result.amount_fen is None
+
+
+# --- Order expiry (time_expire) ----------------------------------------------
+
+
+def _placed_order_payload(
+    platform_key: rsa.RSAPrivateKey,
+    platform_cert_pem: bytes,
+    platform_serial: str,
+    merchant_config: WeChatMerchantConfig,
+    deployment: WeChatDeploymentConfig,
+    **order_kwargs: object,
+) -> dict[str, object]:
+    """Place one Native order and return the JSON body that reached WeChat."""
+    body = json.dumps({"code_url": "weixin://wxpay/bizpayurl?pr=expiry"}).encode()
+    signed = _signed_response(platform_key, body, platform_serial)
+    opener = _RouteOpener(_native_routes(signed, platform_cert_pem, platform_serial))
+    client = WeChatNativeClient(opener=opener)
+    client.create_native_order(
+        merchant=merchant_config,
+        deployment=deployment,
+        out_trade_no="OUT_EXPIRY_001",
+        description="d",
+        amount_fen=100,
+        **order_kwargs,  # type: ignore[arg-type]
+    )
+    order_request = next(call for call in opener.calls if NATIVE_ORDER_PATH in call.full_url)
+    assert order_request.data is not None
+    return cast(dict[str, object], json.loads(order_request.data.decode("utf-8")))
+
+
+def test_create_native_order_forwards_time_expire(
+    platform_key: rsa.RSAPrivateKey,
+    platform_cert_pem: bytes,
+    platform_serial: str,
+    merchant_config: WeChatMerchantConfig,
+    deployment: WeChatDeploymentConfig,
+) -> None:
+    """Telling WeChat the deadline keeps its idea of the order's life equal to ours."""
+    payload = _placed_order_payload(
+        platform_key,
+        platform_cert_pem,
+        platform_serial,
+        merchant_config,
+        deployment,
+        time_expire="2026-09-21T12:30:00+08:00",
+    )
+
+    assert payload["time_expire"] == "2026-09-21T12:30:00+08:00"
+
+
+def test_create_native_order_omits_time_expire_when_none(
+    platform_key: rsa.RSAPrivateKey,
+    platform_cert_pem: bytes,
+    platform_serial: str,
+    merchant_config: WeChatMerchantConfig,
+    deployment: WeChatDeploymentConfig,
+) -> None:
+    """An absent deadline must not become an empty string WeChat would reject."""
+    payload = _placed_order_payload(
+        platform_key, platform_cert_pem, platform_serial, merchant_config, deployment
+    )
+
+    assert "time_expire" not in payload
+
+
+# --- Error reporting ----------------------------------------------------------
+
+
+def test_wechat_error_detail_surfaces_the_actionable_code_and_message() -> None:
+    """Wrong serial, wrong key and a disabled merchant are only distinguishable here."""
+    body = json.dumps({"code": "SIGN_ERROR", "message": "签名错误"}).encode()
+    error = HTTPError(
+        WECHAT_API_BASE + NATIVE_ORDER_PATH, 401, "Unauthorized", {}, io.BytesIO(body)
+    )
+
+    detail = wechat_error_detail(error)
+
+    assert "HTTP 401" in detail
+    assert "code=SIGN_ERROR" in detail
+    assert "message=签名错误" in detail
+
+
+@pytest.mark.parametrize(
+    "fp",
+    [
+        pytest.param(None, id="no-body"),
+        pytest.param(io.BytesIO(b"<html>gateway</html>"), id="not-json"),
+        pytest.param(io.BytesIO(b'"a string"'), id="json-but-not-an-object"),
+    ],
+)
+def test_wechat_error_detail_degrades_to_the_bare_status(fp: io.BytesIO | None) -> None:
+    """An unparseable body must never mask the original failure."""
+    error = HTTPError(WECHAT_API_BASE + NATIVE_ORDER_PATH, 502, "Bad Gateway", {}, fp)
+
+    assert wechat_error_detail(error) == "HTTP 502"
+
+
+def test_create_native_order_error_carries_the_wechat_code(
+    platform_cert_pem: bytes,
+    platform_serial: str,
+    merchant_config: WeChatMerchantConfig,
+    deployment: WeChatDeploymentConfig,
+) -> None:
+    body = json.dumps({"code": "NOAUTH", "message": "商户无权限"}).encode()
+    error = HTTPError(WECHAT_API_BASE + NATIVE_ORDER_PATH, 403, "Forbidden", {}, io.BytesIO(body))
+    opener = _RouteOpener(_native_routes(error, platform_cert_pem, platform_serial))
+    client = WeChatNativeClient(opener=opener)
+
+    with pytest.raises(WeChatNativeError, match="NOAUTH"):
+        client.create_native_order(
+            merchant=merchant_config,
+            deployment=deployment,
+            out_trade_no="OUT_NOAUTH",
+            description="d",
+            amount_fen=100,
+        )
+
+
+# --- Shared certificate cache -------------------------------------------------
+
+
+def test_default_certificate_manager_is_shared_process_wide() -> None:
+    assert default_certificate_manager() is default_certificate_manager()
+
+
+def test_client_without_an_injected_opener_uses_the_shared_manager() -> None:
+    """Production clients are built per call, so their cache must not be per call."""
+    assert WeChatNativeClient()._cert_manager is default_certificate_manager()
+    # An injected opener must still serve the certificate download it stubs.
+    stubbed = WeChatNativeClient(opener=_RouteOpener({}))
+    assert stubbed._cert_manager is not default_certificate_manager()
+
+
+def test_concurrent_cold_cache_reads_download_the_certificates_once(
+    platform_cert_pem: bytes, platform_serial: str, merchant_config: WeChatMerchantConfig
+) -> None:
+    """Without serialization a callback burst becomes a /v3/certificates burst."""
+    downloads = 0
+
+    def certificates(_request: Request) -> _MockResponse:
+        nonlocal downloads
+        downloads += 1
+        time.sleep(0.05)  # widen the window every racing thread would slip through
+        return _certificates_response(API_V3_KEY, platform_cert_pem, platform_serial)
+
+    manager = PlatformCertificateManager(opener=_RouteOpener({CERTIFICATES_PATH: certificates}))
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(
+            pool.map(lambda _: manager.get_certificate(merchant_config, platform_serial), range(8))
+        )
+
+    assert downloads == 1
+    assert {certificate.serial_no for certificate in results} == {platform_serial}
 
 
 if __name__ == "__main__":

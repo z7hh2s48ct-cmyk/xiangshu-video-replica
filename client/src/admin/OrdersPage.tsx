@@ -278,6 +278,7 @@ export function OrdersPage({ readOnly = false }: { readOnly?: boolean }) {
               <th>金额</th>
               <th>额度</th>
               <th>状态</th>
+              <th>支付通道</th>
               <th>支付渠道</th>
               <th>第三方单号</th>
               <th>下单时间</th>
@@ -297,22 +298,34 @@ export function OrdersPage({ readOnly = false }: { readOnly?: boolean }) {
               <td>
                 <OrderStatusBadge status={order.status} />
               </td>
+              <td>{providerLabel(order.provider)}</td>
               <td>{order.channel || "—"}</td>
               <td>
-                <code>{order.provider_trade_no ?? "—"}</code>
+                {/* WeChat Native keeps provider_trade_no NULL and settles into
+                    transaction_id, so both columns must be read to show a trade
+                    reference for every provider. */}
+                <code>
+                  {order.transaction_id ?? order.provider_trade_no ?? "—"}
+                </code>
               </td>
               <td>{formatDateTime(order.created_at)}</td>
               <td>{formatDateTime(order.paid_at)}</td>
               <td>
-                {order.status === "PENDING" && !readOnly ? (
+                {order.status !== "PENDING" || readOnly ? (
+                  "—"
+                ) : order.provider === "wechat_native" ? (
+                  // 查单同步 only speaks to ZPay. A WeChat order is reconciled
+                  // from 客户详情 → 充值核验, which picks the right gateway.
+                  <span title="微信订单请在客户详情页的“充值核验”中核验">
+                    客户详情核验
+                  </span>
+                ) : (
                   <button
                     type="button"
                     onClick={() => setPendingSyncOrderNo(order.order_no)}
                   >
                     查单同步
                   </button>
-                ) : (
-                  "—"
                 )}
               </td>
             </tr>
@@ -340,4 +353,15 @@ export function OrdersPage({ readOnly = false }: { readOnly?: boolean }) {
       />
     </section>
   );
+}
+
+const PROVIDER_LABELS: Record<string, string> = {
+  zpay: "ZPay",
+  wechat_native: "微信官方",
+  activation_code: "激活码",
+  admin_adjustment: "管理员调整",
+};
+
+function providerLabel(provider: string): string {
+  return PROVIDER_LABELS[provider] ?? provider;
 }

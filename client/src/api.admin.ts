@@ -61,6 +61,21 @@ export async function getCustomerPaymentSettings(): Promise<CustomerPaymentSetti
     throw await parseActivationError(response, "读取支付配置失败");
   return response.json();
 }
+export type WechatSelfCheckResult = {
+  ok: boolean;
+  code: string | null;
+  message: string;
+  platform_certificates?: number;
+};
+/** 真实调一次微信 /v3/certificates 验证已保存的商户三件套（只读探测）。 */
+export async function selfCheckWechatNative(): Promise<WechatSelfCheckResult> {
+  const response = await requestControl(
+    "/api/control/settings/customer-payments/wechat-native/self-check",
+    { method: "POST" },
+  );
+  if (!response.ok) throw await parseActivationError(response, "凭据自检失败");
+  return response.json();
+}
 export function updateCustomerPaymentBilling(
   input: Omit<BillingSettings, "charged_unit_price_fen">,
   reason: string,
@@ -321,7 +336,11 @@ export interface AdminRechargeOrder {
   amount_fen: number;
   credits: number;
   channel: string;
+  provider: string;
+  /** ZPay settles here; a WeChat Native order keeps it null by constraint. */
   provider_trade_no: string | null;
+  /** WeChat Native's trade reference; null for every other provider. */
+  transaction_id: string | null;
   created_at: string;
   paid_at: string | null;
 }

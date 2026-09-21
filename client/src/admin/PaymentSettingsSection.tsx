@@ -3,6 +3,7 @@ import {
   adminWrite,
   type CustomerPaymentSettings,
   getCustomerPaymentSettings,
+  selfCheckWechatNative,
   updateCustomerPaymentZPay,
 } from "../api.admin";
 import alipayLogo from "../assets/payments/alipay.ico";
@@ -56,6 +57,7 @@ export function PaymentSettingsSection({
   const [error, setError] = useState("");
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
+  const [selfChecking, setSelfChecking] = useState(false);
   const [confirmError, setConfirmError] = useState("");
   const saving = useRef(false);
   const retry = useRef<{ fingerprint: string; key: string } | null>(null);
@@ -101,6 +103,30 @@ export function PaymentSettingsSection({
     setError("");
     setConfirmError("");
     setPendingConfirm(kind);
+  }
+
+  /** 真实调一次微信验证已保存的三件套：配错在这里暴露，不等第一个客户下单。 */
+  async function runSelfCheck() {
+    if (readOnly || selfChecking) return;
+    setNotice("");
+    setError("");
+    setSelfChecking(true);
+    try {
+      const result = await selfCheckWechatNative();
+      if (result.ok)
+        setNotice(
+          `凭据自检通过（平台证书 ${result.platform_certificates ?? 0} 张）。`,
+        );
+      else setError(`凭据自检未通过：${result.message}`);
+    } catch (cause) {
+      setError(
+        cause instanceof Error && cause.message
+          ? cause.message
+          : "凭据自检失败。",
+      );
+    } finally {
+      setSelfChecking(false);
+    }
   }
 
   async function runConfirmedSave() {
@@ -358,9 +384,18 @@ export function PaymentSettingsSection({
             保存默认通道时会一起保存当前商户配置。回调地址使用服务端
             PUBLIC_BASE_URL，需配置可访问的 HTTPS 域名。
           </p>
-          <button disabled={disabled} type="submit">
-            保存微信官方设置
-          </button>
+          <div style={{ display: "flex", gap: "0.75rem" }}>
+            <button disabled={disabled} type="submit">
+              保存微信官方设置
+            </button>
+            <button
+              disabled={readOnly || selfChecking}
+              type="button"
+              onClick={() => void runSelfCheck()}
+            >
+              {selfChecking ? "自检中…" : "凭据自检"}
+            </button>
+          </div>
         </form>
       )}
       <ConfirmDialog

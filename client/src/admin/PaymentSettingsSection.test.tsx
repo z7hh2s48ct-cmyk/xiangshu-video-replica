@@ -8,11 +8,13 @@ vi.mock("../api.admin", () => ({
   getCustomerPaymentSettings: vi.fn(),
   updateCustomerPaymentZPay: vi.fn(),
   adminWrite: vi.fn(),
+  selfCheckWechatNative: vi.fn(),
 }));
 
 import {
   adminWrite,
   getCustomerPaymentSettings,
+  selfCheckWechatNative,
   updateCustomerPaymentZPay,
 } from "../api.admin";
 
@@ -285,5 +287,56 @@ describe("PaymentSettingsSection (A-01/A-03)", () => {
       await screen.findByText("回调域名尚未配置，充值暂不可用。"),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("新商户密钥")).toHaveValue("");
+  });
+});
+
+describe("PaymentSettingsSection 凭据自检", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getCustomerPaymentSettings).mockResolvedValue({
+      ...controlSettings,
+      active_provider: "wechat_native",
+      wechat_native: {
+        provider: "wechat_native",
+        configured: true,
+        config: {
+          appid: "app-live",
+          mchid: "mch-live",
+          serial_no: "SERIAL01",
+          api_v3_key: "********",
+          private_key: "********",
+        },
+      },
+    } as ControlSettings);
+  });
+
+  it("自检通过时展示平台证书数量", async () => {
+    vi.mocked(selfCheckWechatNative).mockResolvedValue({
+      ok: true,
+      code: null,
+      message: "商户凭据有效：签名被微信接受，平台证书解密成功。",
+      platform_certificates: 2,
+    });
+    render(<PaymentSettingsSection />);
+    const check = await screen.findByRole("button", { name: "凭据自检" });
+    fireEvent.click(check);
+    expect(
+      await screen.findByText("凭据自检通过（平台证书 2 张）。"),
+    ).toBeInTheDocument();
+    expect(selfCheckWechatNative).toHaveBeenCalledTimes(1);
+  });
+
+  it("自检失败时透出微信侧错误信息", async () => {
+    vi.mocked(selfCheckWechatNative).mockResolvedValue({
+      ok: false,
+      code: "WECHAT_SELF_CHECK_FAILED",
+      message:
+        "WeChat API request failed (HTTP 401 code=SIGN_ERROR message=签名错误)",
+    });
+    render(<PaymentSettingsSection />);
+    fireEvent.click(await screen.findByRole("button", { name: "凭据自检" }));
+    expect(
+      await screen.findByText(/凭据自检未通过：.*SIGN_ERROR/),
+    ).toBeInTheDocument();
   });
 });

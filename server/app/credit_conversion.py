@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from app.admin_auth_routes import AdminReader, AdminWriter
 from app.admin_write_contract import AdminWriteContract, write_with_idempotency
 from app.db_pg import pg_transaction
+from app.wechat_native_client import NATIVE_MERCHANT_SWITCH_BLOCK_SECONDS
 
 router = APIRouter(prefix="/api/control", tags=["legacy-credit-conversion"])
 
@@ -148,11 +149,16 @@ def preview_conversion(
             "user_id = %s AND (auth_source IS NOT NULL OR "
             "pricing_snapshot_json IS NOT NULL)) OR EXISTS(SELECT 1 FROM "
             "recharge_orders WHERE user_id = %s AND "
-            "(credit_pricing_snapshot_json IS NOT NULL OR (provider IN "
-            "('zpay', 'wechat_native') AND status IN ('PENDING', "
-            "'CLOSED'))))"
+            "(credit_pricing_snapshot_json IS NOT NULL OR (provider = 'zpay' "
+            "AND status IN ('PENDING', 'CLOSED')) OR (provider = "
+            "'wechat_native' AND status IN ('PENDING', 'CLOSED') AND "
+            "created_at::timestamptz + make_interval(secs => %s) > now())))"
         ),
-        (user_id, user_id),
+        # A wechat_native order is a top-up that may still complete only inside
+        # its payment window plus the callback retry horizon; past that it can
+        # no longer retroactively mix this wallet (same criterion as the
+        # merchant-identity guard).
+        (user_id, user_id, float(NATIVE_MERCHANT_SWITCH_BLOCK_SECONDS)),
     ).fetchone()
     if mixed and mixed[0]:
         raise HTTPException(409, detail="该账号已有新积分交易或可补付订单，需先核对账务。")

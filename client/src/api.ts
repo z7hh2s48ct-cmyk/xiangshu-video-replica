@@ -95,7 +95,11 @@ export type ControlRechargeOrder = RechargeOrder & {
   user_id: string;
   username: string;
   display_name: string;
+  provider: string;
+  /** ZPay settles here; a WeChat Native order keeps it null by constraint. */
   provider_trade_no: string | null;
+  /** WeChat Native's trade reference; null for every other provider. */
+  transaction_id: string | null;
 };
 
 export type ControlRechargeOrderPage = {

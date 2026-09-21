@@ -7,6 +7,8 @@ registry wiring. Uses an injected fake client so no network or database is touch
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from app.payment_provider import (
@@ -160,6 +162,54 @@ def test_create_payment_code_maps_code_url_to_payment_and_qr_fields(
     assert call["amount_fen"] == 1000
     assert call["client_ip"] == "203.0.113.7"
     assert "10" in str(call["description"])
+
+
+def _place_order(
+    merchant: MerchantConfig, deployment: DeploymentConfig, **extra: object
+) -> dict[str, object]:
+    """Place one order through the provider and return the client call it made."""
+    fake = _FakeNativeClient(
+        order_result=WeChatNativeOrderResult(
+            code_url="weixin://wxpay/bizpayurl?pr=EXPIRY", response_digest="digest"
+        )
+    )
+    WeChatNativeProvider(client=fake).create_payment_code(
+        merchant=merchant,
+        deployment=deployment,
+        merchant_order_no="OUT_EXPIRY_001",
+        amount_fen=1000,
+        credits=10,
+        client_ip="203.0.113.7",
+        **extra,  # type: ignore[arg-type]
+    )
+    return fake.order_calls[0]
+
+
+def test_create_payment_code_passes_the_deadline_as_rfc3339_time_expire(
+    generic_merchant: MerchantConfig, generic_deployment: DeploymentConfig
+) -> None:
+    """WeChat must retire the order at the same instant the expiry sweep does."""
+    deadline = datetime(2026, 9, 21, 12, 30, 0, tzinfo=timezone(timedelta(hours=8)))
+
+    call = _place_order(generic_merchant, generic_deployment, expires_at=deadline)
+
+    assert call["time_expire"] == "2026-09-21T12:30:00+08:00"
+
+
+def test_create_payment_code_without_a_deadline_sends_none(
+    generic_merchant: MerchantConfig, generic_deployment: DeploymentConfig
+) -> None:
+    assert _place_order(generic_merchant, generic_deployment)["time_expire"] is None
+
+
+def test_create_payment_code_refuses_a_naive_deadline(
+    generic_merchant: MerchantConfig, generic_deployment: DeploymentConfig
+) -> None:
+    """An unqualified offset would move the deadline by hours; refuse instead of guessing."""
+    with pytest.raises(PaymentCodeError):
+        _place_order(
+            generic_merchant, generic_deployment, expires_at=datetime(2026, 9, 21, 12, 30, 0)
+        )
 
 
 def test_create_payment_code_translates_wechat_error(

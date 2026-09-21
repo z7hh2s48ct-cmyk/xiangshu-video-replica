@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 
 from app.db_portable import BusinessConnection
 from app.payment_provider import (
@@ -36,10 +38,12 @@ from app.settings import SettingsRepository
 from app.wechat_native_client import (
     PlatformCertificateManager,
     WeChatDeploymentConfig,
+    WeChatMerchantConfig,
     WeChatNativeClient,
     WeChatNativeError,
     build_response_verify_message,
     decrypt_aes_256_gcm,
+    default_certificate_manager,
     deployment_config_from_environment,
     merchant_config_from_settings,
     verify_sha256_rsa,
@@ -59,6 +63,14 @@ WECHAT_CALLBACK_SIGNATURE_INVALID = "WECHAT_CALLBACK_SIGNATURE_INVALID"
 WECHAT_CALLBACK_RESOURCE_INVALID = "WECHAT_CALLBACK_RESOURCE_INVALID"
 WECHAT_CALLBACK_DECRYPT_FAILED = "WECHAT_CALLBACK_DECRYPT_FAILED"
 WECHAT_CALLBACK_PAYLOAD_INVALID = "WECHAT_CALLBACK_PAYLOAD_INVALID"
+WECHAT_CALLBACK_STALE_TIMESTAMP = "WECHAT_CALLBACK_STALE_TIMESTAMP"
+WECHAT_CALLBACK_MERCHANT_MISMATCH = "WECHAT_CALLBACK_MERCHANT_MISMATCH"
+
+# WeChat's own guidance: a notification older than five minutes is treated as a
+# replay and refused without any certificate work. The signature covers the
+# timestamp, so this gate only ever refuses what a retry (or a replay) looks
+# like — a skewed local clock shows up as every callback failing with this code.
+WECHAT_NOTIFY_FRESHNESS_SECONDS = 5 * 60
 
 
 @dataclass(frozen=True)
@@ -99,9 +111,10 @@ class WeChatNativeProvider(PaymentProvider):
     ) -> None:
         self._client = client
         # Provider-level certificate manager for raw callback verification. Injected in
-        # tests (a stub with a canned self-signed platform cert); defaults to the real
-        # downloader, which is only exercised in production callbacks.
-        self._cert_manager = cert_manager or PlatformCertificateManager()
+        # tests (a stub with a canned self-signed platform cert); defaults to the
+        # process-wide downloader. The registry builds a fresh provider per request, so
+        # a per-instance manager would re-download the certificates on every callback.
+        self._cert_manager = cert_manager or default_certificate_manager()
 
     @property
     def name(self) -> str:
@@ -150,11 +163,21 @@ class WeChatNativeProvider(PaymentProvider):
         amount_fen: int,
         credits: int,
         client_ip: str,
+        expires_at: datetime | None = None,
     ) -> PaymentCodeResult:
-        """Place a Native order and surface the weixin:// code_url for QR rendering."""
+        """Place a Native order and surface the weixin:// code_url for QR rendering.
+
+        ``expires_at`` becomes WeChat's ``time_expire`` so the gateway retires the
+        order at the same instant the local expiry sweep does; a naive datetime is
+        rejected rather than guessed at, because an unqualified offset would move
+        the deadline by hours.
+        """
         wechat_merchant = merchant_config_from_settings(merchant.raw)
         wechat_deployment = WeChatDeploymentConfig(notify_url=deployment.notify_url)
         client = self._client or WeChatNativeClient()
+        if expires_at is not None and expires_at.tzinfo is None:
+            raise PaymentCodeError("WeChat native order expiry must carry a timezone")
+        time_expire = expires_at.isoformat(timespec="seconds") if expires_at else None
         try:
             result = client.create_native_order(
                 merchant=wechat_merchant,
@@ -163,6 +186,7 @@ class WeChatNativeProvider(PaymentProvider):
                 description=f"众墅之家积分充值 {credits} 积分",
                 amount_fen=amount_fen,
                 client_ip=client_ip,
+                time_expire=time_expire,
             )
         except WeChatNativeError as exc:
             raise PaymentCodeError(str(exc), status_code=exc.status_code) from exc
@@ -247,6 +271,16 @@ class WeChatNativeProvider(PaymentProvider):
                 authenticated=False, error_code=WECHAT_CALLBACK_MISSING_HEADERS
             )
         try:
+            header_seconds = int(timestamp)
+        except ValueError:
+            return WeChatNotificationResult(
+                authenticated=False, error_code=WECHAT_CALLBACK_STALE_TIMESTAMP
+            )
+        if abs(time.time() - header_seconds) > WECHAT_NOTIFY_FRESHNESS_SECONDS:
+            return WeChatNotificationResult(
+                authenticated=False, error_code=WECHAT_CALLBACK_STALE_TIMESTAMP
+            )
+        try:
             wechat_merchant = merchant_config_from_settings(merchant.raw)
         except ValueError:
             return WeChatNotificationResult(
@@ -309,10 +343,10 @@ class WeChatNativeProvider(PaymentProvider):
                 authenticated=False, error_code=WECHAT_CALLBACK_DECRYPT_FAILED
             )
 
-        return self._parse_transaction_plaintext(plaintext, digest=digest)
+        return self._parse_transaction_plaintext(plaintext, digest=digest, merchant=wechat_merchant)
 
     def _parse_transaction_plaintext(
-        self, plaintext: bytes, *, digest: str
+        self, plaintext: bytes, *, digest: str, merchant: WeChatMerchantConfig
     ) -> WeChatNotificationResult:
         """Parse the decrypted transaction plaintext into a settlement-ready result."""
         try:
@@ -338,6 +372,24 @@ class WeChatNativeProvider(PaymentProvider):
         merchant_order_no = out_trade_no if isinstance(out_trade_no, str) else None
         state = trade_state if isinstance(trade_state, str) else None
         trade_no = transaction_id if isinstance(transaction_id, str) else None
+        appid = payload.get("appid")
+        mchid = payload.get("mchid")
+        if (isinstance(mchid, str) and mchid != merchant.mchid) or (
+            isinstance(appid, str) and appid != merchant.appid
+        ):
+            # The bytes are authentically WeChat's, but they describe a trade of
+            # another merchant identity — the replay window around a merchant
+            # change. Never settle under this configuration.
+            return WeChatNotificationResult(
+                authenticated=True,
+                trade_state=state,
+                merchant_order_no=None,
+                provider_trade_no=None,
+                amount_fen=None,
+                channel=WECHAT_NATIVE_CHANNEL,
+                source_digest=digest,
+                error_code=WECHAT_CALLBACK_MERCHANT_MISMATCH,
+            )
         # A SUCCESS notification must carry the transaction_id (settlement reference)
         # and the amount; anything else is authentic but not settleable.
         incomplete = (

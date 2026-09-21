@@ -98,6 +98,22 @@ CURRENT_CLI_MODULES: tuple[CommandRow, ...] = tuple(
             "write; ledger-keyed idempotent; counts-only output",
         ),
         (
+            "python -m scripts.close_expired_native_orders",
+            "scripts/close_expired_native_orders.py",
+            "current-pg",
+            "PostgreSQL (business)",
+            "maintenance timer",
+            "write; deadline-based re-run is a no-op; counts-only output",
+        ),
+        (
+            "python -m scripts.reconcile_pending_native_orders",
+            "scripts/reconcile_pending_native_orders.py",
+            "current-pg",
+            "PostgreSQL (business)",
+            "reconciliation timer",
+            "write; settlement rides the ledger-idempotent fund path; counts-only output",
+        ),
+        (
             "python -m scripts.check_ops_alerts",
             "scripts/check_ops_alerts.py",
             "current-pg",
@@ -327,6 +343,8 @@ _TIMER_CLI_MAINS: tuple[str, ...] = (
     "scripts.purge_expired_export_ciphertexts",
     "scripts.purge_stale_rate_limit_counters",
     "scripts.reconcile_dangling_billing_reservations",
+    "scripts.close_expired_native_orders",
+    "scripts.reconcile_pending_native_orders",
 )
 
 

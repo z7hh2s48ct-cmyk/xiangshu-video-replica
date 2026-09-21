@@ -39,6 +39,18 @@ ExecStart=/opt/video-replica/app/server/.venv/bin/python -m scripts.purge_stale_
 # BILL-03: close only terminal generation reservations whose SETTLE/RELEASE
 # ledger row was lost. Active and SUBMISSION_UNCERTAIN tasks stay untouched.
 ExecStart=/opt/video-replica/app/server/.venv/bin/python -m scripts.reconcile_dangling_billing_reservations
+# Lost-callback fallback: ask WeChat directly about Native orders that sat
+# PENDING past the callback grace. A lost notification is the one failure the
+# callback path cannot repair; settlement rides the same idempotent fund path
+# as the callback, and unpaid answers are left for the expiry sweep right
+# below. Runs BEFORE the closer so a paid order is settled, not closed blind.
+# Counts only in the output.
+ExecStart=/opt/video-replica/app/server/.venv/bin/python -m scripts.reconcile_pending_native_orders
+# Close WeChat Native orders nobody paid inside their window. CLOSED still
+# settles a late callback, so this only stops orders that can no longer be paid
+# from sitting in the orders page and the reconciliation reports as PENDING.
+# Counts only in the output.
+ExecStart=/opt/video-replica/app/server/.venv/bin/python -m scripts.close_expired_native_orders
 Restart=on-failure
 RestartSec=30
 UMask=0077

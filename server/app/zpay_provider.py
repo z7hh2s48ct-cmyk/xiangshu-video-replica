@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 from collections.abc import Mapping
+from datetime import datetime
 
 from app.db_portable import BusinessConnection
 from app.payment_provider import (
@@ -109,8 +110,13 @@ class ZPayProvider(PaymentProvider):
         amount_fen: int,
         credits: int,
         client_ip: str,
+        expires_at: datetime | None = None,
     ) -> PaymentCodeResult:
-        """Create a ZPay payment QR code."""
+        """Create a ZPay payment QR code.
+
+        ``expires_at`` is accepted for the Protocol and ignored: the ZPay submit
+        API has no order-expiry field, so its orders keep the gateway's lifetime.
+        """
         zpay_merchant = self._to_zpay_merchant(merchant)
         zpay_deployment = self._to_zpay_deployment(deployment)
         client = ZPayPaymentCodeClient()

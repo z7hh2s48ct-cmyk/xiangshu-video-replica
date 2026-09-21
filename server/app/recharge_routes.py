@@ -57,6 +57,10 @@ from app.security_rate_limit import _server_now, client_ip_from_request
 from app.settings import SettingsRepository, effective_customer_billing_settings
 from app.usage_billing import resolve_wallet_owner
 from app.wallet_routes import WalletResponse, WalletTransactionPage, WalletTransactionResponse
+from app.wechat_native_client import (
+    NATIVE_ORDER_MIN_REMAINING_SECONDS,
+    NATIVE_ORDER_VALIDITY_SECONDS,
+)
 from app.zpay import generate_merchant_order_no
 from app.zpay_payments import read_recharge_order, serialize_recharge_order
 
@@ -740,8 +744,15 @@ def create_customer_payment_code(
         provider_name = str(order["provider"])
         if provider_name not in {"zpay", "wechat_native"}:
             raise HTTPException(409, detail="此订单不支持在线支付。")
+        expires_at: datetime | None = None
         if provider_name == "wechat_native":
             provider = get_payment_provider(provider_name)
+            # Check the deadline before serving the cached QR: a lapsed order's
+            # code_url still renders but WeChat will refuse the payment, which is
+            # indistinguishable from a broken scanner to the customer.
+            expires_at, remaining = _native_order_deadline(conn, order_no=order_no)
+            if remaining <= timedelta(seconds=NATIVE_ORDER_MIN_REMAINING_SECONDS):
+                raise HTTPException(409, detail="该充值订单已超过支付时限，请重新创建订单。")
             cached = business_conn.execute(
                 "SELECT code_url FROM recharge_orders WHERE merchant_order_no=%s", (order_no,)
             ).fetchone()
@@ -771,6 +782,7 @@ def create_customer_payment_code(
             amount_fen=amount_fen,
             credits=credits,
             client_ip=client_ip_from_request(request),
+            expires_at=expires_at,
         )
     except PaymentCodeError as exc:
         raise HTTPException(
@@ -802,6 +814,26 @@ def create_customer_payment_code(
         qr_image_url=payment_code.qr_image_url,
         payment_url=payment_code.payment_url,
     )
+
+
+def _native_order_deadline(
+    conn: psycopg.Connection, *, order_no: str
+) -> tuple[datetime, timedelta]:
+    """The instant a Native order stops being payable, plus the life it has left.
+
+    ``recharge_orders.created_at`` is a text column, so the arithmetic is done in
+    SQL against the database clock: the QR, WeChat's ``time_expire`` and the expiry
+    sweep then all read one timeline instead of three process-local ones.
+    """
+    row = conn.execute(
+        "SELECT created_at::timestamptz + make_interval(secs => %s), now() "
+        "FROM recharge_orders WHERE merchant_order_no = %s",
+        (float(NATIVE_ORDER_VALIDITY_SECONDS), order_no),
+    ).fetchone()
+    # The caller has already read this order inside the same transaction.
+    assert row is not None
+    deadline, server_now = row[0], row[1]
+    return deadline, deadline - server_now
 
 
 def _native_payment_code_response(

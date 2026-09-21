@@ -105,7 +105,13 @@ class ControlRechargeOrder(BaseModel):
     amount_fen: int
     credits: int
     channel: str
+    provider: str
+    # ZPay settles into provider_trade_no; WeChat Native is constrained to keep
+    # that column NULL and put its transaction_id here (migration 083). Reading
+    # only one of them leaves every WeChat order without a trade reference, so
+    # reconciliation, refunds and support tickets have nothing to match on.
     provider_trade_no: str | None
+    transaction_id: str | None
     created_at: str
     paid_at: str | None
 
@@ -579,7 +585,9 @@ def list_recharge_orders(
             orders.amount_fen,
             orders.credits,
             COALESCE(orders.channel, '') AS channel,
+            orders.provider,
             orders.provider_trade_no,
+            orders.transaction_id,
             orders.created_at,
             orders.paid_at
         FROM recharge_orders AS orders
@@ -1408,7 +1416,9 @@ def export_recharge_orders_csv(
             orders.credits,
             orders.status,
             COALESCE(orders.channel, '') AS channel,
+            orders.provider,
             COALESCE(orders.provider_trade_no, '') AS provider_trade_no,
+            COALESCE(orders.transaction_id, '') AS transaction_id,
             orders.created_at,
             COALESCE(orders.paid_at, '') AS paid_at,
             COUNT(*) OVER () AS export_total
@@ -1430,7 +1440,9 @@ def export_recharge_orders_csv(
             "credits",
             "status",
             "channel",
+            "provider",
             "provider_trade_no",
+            "transaction_id",
             "created_at",
             "paid_at",
         ),

@@ -284,3 +284,27 @@ def test_conversion_rejects_concurrent_second_request(operations_client, route_s
         )
         with pytest.raises(psycopg.Error):
             conn.execute("DELETE FROM wallet_credit_conversions WHERE user_id = %s", (uid,))
+
+
+def test_conversion_ignores_wechat_orders_past_the_settlement_window(
+    operations_client, route_state
+):
+    """窗口外的微信订单不能追溯性污染钱包：付款已不可能、回调重试已耗尽，
+    补单清扫已查过——它不再是「可补付订单」，不再阻塞积分转换。"""
+    client = operations_client
+    _, uid, _admin = legacy_account(client, route_state)
+    with psycopg.connect(route_state) as conn:
+        conn.execute(
+            "INSERT INTO recharge_orders (id, user_id, merchant_order_no, provider, "
+            "status, channel, pricing_scope, base_unit_price_fen_snapshot, "
+            "charged_unit_price_fen_snapshot, min_recharge_fen_snapshot, "
+            "recharge_step_fen_snapshot, amount_fen, credits, prepay_id, code_url, "
+            "created_at) VALUES (%s, %s, %s, 'wechat_native', 'CLOSED', 'wxpay', "
+            "'CUSTOMER_STANDARD', 1000, 1000, 10000, 1000, 20000, 20, "
+            "'wx-prepay-lapsed', 'weixin://wxpay/bizpayurl?pr=lapsed', %s)",
+            (str(uuid4()), uid, str(uuid4()), "2026-01-01 00:00:00+00"),
+        )
+        conn.commit()
+
+    preview = client.get(f"/api/control/customers/{uid}/credit-conversion")
+    assert preview.status_code == 200, preview.text
