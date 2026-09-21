@@ -8,10 +8,7 @@ import {
   getLatestProjectShotCards,
   type PromptGenerationContext,
 } from "../api";
-import {
-  anchorReplicaPromptToFirstFrame,
-  countNarrationCharacters,
-} from "./promptIdentity";
+import { anchorReplicaPromptToFirstFrame } from "./promptIdentity";
 import { Icon } from "./ui";
 import { usePromptOptimization } from "./usePromptOptimization";
 import "./prompt-editor.css";
@@ -157,11 +154,6 @@ export function ReplicaFinalPromptControls({
     sourceFrameTimestamp === undefined ||
     sourceFrameTimestamp < 0 ||
     sourceFrameTimestamp > 0.25;
-  const narrationCharacters = countNarrationCharacters(input.scriptText);
-  const narrationLengthValid =
-    !input.scriptText.trim() ||
-    input.duration !== 15 ||
-    (narrationCharacters >= 60 && narrationCharacters <= 90);
   const preflightChecks: ReplicaPreflightCheck[] = [
     ...upstreamChecks,
     {
@@ -191,17 +183,15 @@ export function ReplicaFinalPromptControls({
         ? "请在口播文案区域点击“确认”。"
         : "请确认本视频无口播。",
     },
-    {
-      id: "script-length",
-      label: "口播字数",
-      passed: narrationLengthValid,
-      reason: `15 秒口播需为 60–90 字，当前为 ${narrationCharacters} 字；请调整后完整朗读，不得漏句。`,
-    },
+    // 口播字数不再设门禁（服务端同步取消）。长度与时长的匹配由服务端编译时
+    // 把文案按镜头切分到时间轴上承担，而不是在入口拒绝用户的文案。
     {
       id: "timeline",
       label: "视频时长",
       passed: !requiresCompression || scale,
-      reason: `源视频长于 ${input.duration} 秒，请确认压缩时间线。`,
+      // 这里的 input.duration 是目标输出时长，不是系统上限。旧文案「源视频长于 N 秒」
+      // 会让人以为 N 是个固定限制，必须把两个时长都写出来才说得清要调什么。
+      reason: `源视频 ${sourceDuration.toFixed(1)} 秒长于目标时长 ${input.duration} 秒，请调整时长或确认压缩时间线。`,
     },
     {
       id: "opening-action",

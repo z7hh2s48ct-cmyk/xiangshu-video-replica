@@ -105,37 +105,43 @@ def test_replacement_first_frame_neutralizes_source_presenter_identity() -> None
     assert "不得恢复源视频主持人的外观、性别或音色" in text
 
 
-@pytest.mark.parametrize("length", [59, 91])
-def test_fifteen_second_narration_requires_sixty_to_ninety_characters(length: int) -> None:
-    from fastapi import HTTPException
+@pytest.mark.parametrize("length", [5, 59, 60, 91, 200])
+def test_narration_length_is_never_gated_at_fifteen_seconds(length: int) -> None:
+    """口播字数不设门禁：15 秒下任意长度都必须编译成功。
 
-    from app.h3_prompts import compile_replica_final_text
-
-    with pytest.raises(HTTPException) as exc:
-        compile_replica_final_text(
-            shot_payload={
-                "shots": [{"start_time": 0, "end_time": 15, "segment_kind": "ACTION_BEAT"}]
-            },
-            script_text="字" * length,
-            duration=15,
-            source_duration=15,
-            timeline_policy="preserve",
-            source_frame_time=0,
-        )
-
-    assert exc.value.detail["code"] == "SCRIPT_LENGTH_INVALID"
-    assert f"当前为 {length} 字" in exc.value.detail["message"]
-
-
-def test_fifteen_second_narration_accepts_sixty_to_ninety_characters() -> None:
+    60–90 字区间是 H3 只支持 4/15 两档时的遗留，只在 duration == 15 生效，
+    造成 14 秒放行、15 秒硬拦的一秒断崖；其上限 90 还与通用上限 duration*6
+    完全重合。同类产品（HeyGen/Synthesia/Veo 生态）对文案长度只给估算建议、
+    不设准入门槛，长度与时长的匹配改由时间轴对齐承担。
+    """
     from app.h3_prompts import compile_replica_final_text, dialogue
 
-    script = "字" * 60
+    script = "字" * length
     text = compile_replica_final_text(
         shot_payload={"shots": [{"start_time": 0, "end_time": 15, "segment_kind": "ACTION_BEAT"}]},
         script_text=script,
         duration=15,
         source_duration=15,
+        timeline_policy="preserve",
+        source_frame_time=0,
+    )
+
+    assert dialogue(text) == script
+
+
+@pytest.mark.parametrize("duration,length", [(4, 100), (12, 200), (8, 400)])
+def test_narration_length_is_never_gated_on_other_durations(duration: int, length: int) -> None:
+    """通用上限 duration*6 同样取消：塞不塞得下由时间轴对齐与提示表达，不再拒绝编译。"""
+    from app.h3_prompts import compile_replica_final_text, dialogue
+
+    script = "字" * length
+    text = compile_replica_final_text(
+        shot_payload={
+            "shots": [{"start_time": 0, "end_time": duration, "segment_kind": "ACTION_BEAT"}]
+        },
+        script_text=script,
+        duration=duration,
+        source_duration=duration,
         timeline_policy="preserve",
         source_frame_time=0,
     )

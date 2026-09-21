@@ -1,7 +1,7 @@
 /**
  * 视频复刻（模块①）流程与布局缺陷的回归测试。
  *
- * 本文件只测试、不改源码：A1/A2/A3/B2/C1/C5 六项缺陷的期望行为在此固化。
+ * 本文件只测试、不改源码：A1/A2/A3/B2/C1/C5/D1/D2 八项缺陷的期望行为在此固化。
  * 对应修复均已落地，用例全绿，这些断言的作用是防止缺陷回潮。
  *
  * 隔离策略：只部分 mock `../api` 与 `./live`——
@@ -217,6 +217,35 @@ function mockAnalysisSuccess() {
         duration_seconds: 8,
         original_script: "这栋房子的采光设计非常好",
         shots: [shot],
+      },
+    },
+  });
+}
+
+/** 指定源时长的拆解结果：分镜末点即源视频时长，是 sourceDuration 的取值来源。 */
+function mockAnalysisSuccessAt(durationSeconds: number) {
+  const sized = { ...shot, end_time: durationSeconds };
+  api.startVideoAnalysis.mockResolvedValue({ id: "task-1", status: "RUNNING" });
+  api.waitForAnalysisTask.mockResolvedValue({
+    id: "task-1",
+    status: "SUCCEEDED",
+  });
+  api.getLatestProjectShotCards.mockResolvedValue({
+    id: "scv-1",
+    payload: {
+      source_analysis_version_id: "av-1",
+      duration_seconds: durationSeconds,
+      shots: [sized],
+    },
+  });
+  api.getLatestProjectAnalysis.mockResolvedValue({
+    id: "av-1",
+    payload: {
+      analysis: {
+        summary: "庭院复刻",
+        duration_seconds: durationSeconds,
+        original_script: "这栋房子的采光设计非常好",
+        shots: [sized],
       },
     },
   });
@@ -522,5 +551,61 @@ describe("复刻页 C 类：素材签名与提示词渲染", () => {
     expect(
       screen.getByRole("button", { name: "去 AI 视频创作" }),
     ).toBeEnabled();
+  });
+});
+
+describe("复刻页 D 类：输出时长与来源标注", () => {
+  /**
+   * 复刻页没有时长选择控件（时长下拉框只属于独立创作页的 ParameterControls），
+   * 所以草稿默认的 8 秒是用户既看不到也改不了的隐式值。源视频在上传时已被限定
+   * 为 4–15 秒，与 output_duration_seconds 的契约值域完全重合，因此输出时长必须
+   * 跟随源视频——否则 15 秒的源视频在默认 8 秒下必然撞上压缩门禁，而用户手上
+   * 没有任何把时长调到 15 的入口。
+   */
+  it("D1 拆解出 15 秒源视频后，输出时长自动对齐到 15 秒", async () => {
+    const value = replicaStudio();
+    mockAnalysisSuccessAt(15);
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+
+    await screen.findByRole("button", { name: /拆解/ });
+    fireEvent.click(analysisButton());
+
+    await waitFor(
+      () =>
+        expect(value.patchDraft).toHaveBeenCalledWith(
+          expect.objectContaining({ duration: 15 }),
+        ),
+      RED_TIMEOUT,
+    );
+  });
+
+  /** 源时长带小数时向上取整，保证对齐后不会反过来触发 0.25 秒容差的压缩门禁。 */
+  it("D1-b 源时长 11.4 秒时向上取整为 12 秒", async () => {
+    const value = replicaStudio();
+    mockAnalysisSuccessAt(11.4);
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+
+    await screen.findByRole("button", { name: /拆解/ });
+    fireEvent.click(analysisButton());
+
+    await waitFor(
+      () =>
+        expect(value.patchDraft).toHaveBeenCalledWith(
+          expect.objectContaining({ duration: 12 }),
+        ),
+      RED_TIMEOUT,
+    );
+  });
+
+  /** 参考视频面板只留标题与画面：平台原标题对复刻工作没有信息价值。 */
+  it("D2 拆解环节的参考视频面板不显示来源标题行", async () => {
+    const value = replicaStudio();
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+
+    await screen.findByRole("button", { name: /拆解/ });
+    expect(screen.queryByText(/来源：/)).toBeNull();
   });
 });

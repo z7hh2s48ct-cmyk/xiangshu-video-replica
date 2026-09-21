@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  anchorReplicaPromptToFirstFrame,
-  countNarrationCharacters,
-} from "./promptIdentity";
+import { anchorReplicaPromptToFirstFrame } from "./promptIdentity";
 
 const LEGACY_TEXT =
   "全片人物身份、服装和配饰以首帧为准，后续不得恢复源人物外观。";
@@ -85,9 +82,5 @@ describe("anchorReplicaPromptToFirstFrame", () => {
     expect(anchored).toContain("源视频排除：");
     expect(anchored).not.toContain("配音一致性：");
     expect(anchored).not.toContain("口播完整性：");
-  });
-
-  it("counts spoken characters without Chinese punctuation or whitespace", () => {
-    expect(countNarrationCharacters("宅基地，依法处理！\n不能漏句。")).toBe(11);
   });
 });

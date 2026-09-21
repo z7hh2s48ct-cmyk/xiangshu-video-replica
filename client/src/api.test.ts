@@ -2642,7 +2642,6 @@ describe("generation workflow API", () => {
   it.each([
     ["FIRST_FRAME_ALIGNMENT_REQUIRED", /开场衔接/],
     ["TIMELINE_CONFIRMATION_REQUIRED", /压缩/],
-    ["SCRIPT_DURATION_CONFLICT", /文案/],
     ["SCRIPT_TAG_INVALID", /纯文本/],
     ["DIALOGUE_MISMATCH", /台词/],
     ["SCRIPT_STALE", /文案/],

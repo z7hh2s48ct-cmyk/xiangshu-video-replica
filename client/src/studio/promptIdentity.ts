@@ -111,7 +111,3 @@ export function anchorReplicaPromptToFirstFrame(prompt: string): string {
   }
   return anchored;
 }
-
-export function countNarrationCharacters(script: string): number {
-  return Array.from(script.replace(/[\s，。！？、,.!?；;：:]/g, "")).length;
-}

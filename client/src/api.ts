@@ -5345,8 +5345,6 @@ const GENERATION_CONFLICT_MESSAGES: Readonly<Record<string, string>> = {
     "首帧不是视频开头，请在「开场衔接」里写明如何从这张画面开始，再合成。",
   TIMELINE_CONFIRMATION_REQUIRED:
     "源视频长于目标时长，请勾选压缩确认或调整目标时长，再合成。",
-  SCRIPT_DURATION_CONFLICT:
-    "确认文案预计超过目标时长，请缩短文案或改用更长的目标时长。",
   SCRIPT_TAG_INVALID: "确认文案需为纯文本，请删除其中的提示词标签后重试。",
   DIALOGUE_MISMATCH: "最终稿台词与确认文案不一致，请核对文案和分镜后重新合成。",
   SCRIPT_STALE: "文案不是基于当前分镜保存的，请重新保存文案后再合成。",

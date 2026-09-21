@@ -158,17 +158,11 @@ def compile_replica_final_text(
             "FIRST_FRAME_ALIGNMENT_REQUIRED",
             "首帧来自视频中段或缺少开场时间记录，请选择开场帧或填写动作衔接方案。",
         )
-    # Timing policy never discards a sentence. A conservative speaking estimate is
-    # surfaced as a conflict rather than silently accelerating the narration.
-    spoken_chars = len(re.sub(r"[\s，。！？、,.!?；;：:]", "", script_text))
-    if duration == 15 and spoken_chars and not 60 <= spoken_chars <= 90:
-        conflict(
-            "SCRIPT_LENGTH_INVALID",
-            f"15 秒口播需控制在 60–90 字，当前为 {spoken_chars} 字；"
-            "请调整文案后完整朗读，不得漏句或截断。",
-        )
-    if spoken_chars > duration * 6:
-        conflict("SCRIPT_DURATION_CONFLICT", "确认文案预计超过目标时长，请缩短文案或增加时长。")
+    # 口播长度不设门禁。曾有两条：15 秒专属的 60–90 字区间，以及通用的
+    # duration*6 上限。前者是 H3 只支持 4/15 两档时的遗留，只在 duration == 15
+    # 生效，造成 14 秒放行、15 秒硬拦的一秒断崖，其上限 90 还与后者在 15 秒处
+    # 完全重合；同类产品对文案长度一律只给估算建议、不设准入。长度与时长的
+    # 匹配改由 _narration_lines() 的时间轴对齐承担，而不是拒绝编译。
     if re.search(r"</?d>|<(?:Picture|Video|Audio)\s", script_text):
         conflict("SCRIPT_TAG_INVALID", "确认文案请使用纯文本，不包含提示词标签。")
     scale = duration / source_duration if source_duration != duration else 1.0

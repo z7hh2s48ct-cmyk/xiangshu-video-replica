@@ -815,6 +815,7 @@ describe("V1.4 创作页面", () => {
       id: "source-1",
       name: "当前草稿来源",
       kind: "video",
+      duration: "00:08",
       group: "项目",
       source: "用户上传",
       saved: true,
@@ -835,8 +836,10 @@ describe("V1.4 创作页面", () => {
     value.state = { ...value.state, selectedVideoId: "history-video" };
     useStudio.mockReturnValue(value);
     render(<ReplicaPage />);
-    expect(screen.getByText(/当前草稿来源/)).toBeInTheDocument();
-    expect(screen.queryByText(/历史浏览视频/)).not.toBeInTheDocument();
+    // 参考视频面板不再显示来源标注行，改由播放器的时长角标观察选中的是哪一个：
+    // 两个候选都无封面，Media 因此各自渲染自己的时长，优先级一错就会翻成 00:30。
+    expect(screen.getByText("00:08")).toBeInTheDocument();
+    expect(screen.queryByText("00:30")).not.toBeInTheDocument();
   });
 
   it("审核模式展示完整三镜头并用当前IP人物图作为目标首帧", () => {

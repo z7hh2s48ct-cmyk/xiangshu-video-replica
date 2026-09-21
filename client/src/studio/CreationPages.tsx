@@ -1991,6 +1991,21 @@ export function ReplicaPage() {
     (duration, shot) => Math.max(duration, shot.end_time),
     0,
   );
+  // 输出时长跟随源视频。复刻页没有时长控件（时长下拉框属于独立创作页的
+  // ParameterControls），草稿默认的 8 秒对用户既不可见也不可改；源视频在上传时
+  // 已被限定为 4–15 秒，与 output_duration_seconds 的契约值域完全重合，所以按源
+  // 时长生成总是可行的。不对齐的话，15 秒的源在默认 8 秒下必然撞上压缩门禁，而
+  // 用户手上没有任何把时长调上去的入口。向上取整是为了让对齐后的值不会反过来
+  // 落进 PromptEditor 那 0.25 秒容差的压缩判定里。
+  const alignedDuration = sourceDuration
+    ? normalizeCustomerDuration(Math.ceil(sourceDuration))
+    : 0;
+  useEffect(() => {
+    if (readOnly || !alignedDuration) return;
+    if (state.draft.duration === alignedDuration) return;
+    // 走 ref：patchDraft 每次 render 都是新引用，直接依赖会让本 effect 自激。
+    patchDraftRef.current({ duration: alignedDuration });
+  }, [alignedDuration, readOnly, state.draft.duration]);
   const analysisCheck: ReplicaPreflightCheck = {
     id: "analysis-ready",
     label: "AI 视频拆解",
@@ -2120,7 +2135,8 @@ export function ReplicaPage() {
                   <div className="creation-panel-title-row">
                     <span>参考视频</span>
                   </div>
-                  <SourceStrip source={source} />
+                  {/* 不显示来源标注：平台原标题对复刻工作没有信息价值，项目名
+                      已在右侧「拆解控制」面板给出定位。 */}
                   <div className="media-frame">
                     <Media
                       asset={source}
