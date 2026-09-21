@@ -5318,6 +5318,7 @@ async function requestApiJson<T>(
     error.status = response.status;
     error.code = details.code;
     error.retryable = details.retryable;
+    error.staleReasons = details.staleReasons;
     error.requestId = response.headers?.get?.("X-Request-Id") ?? undefined;
     throw error;
   }
@@ -5353,17 +5354,72 @@ const GENERATION_CONFLICT_MESSAGES: Readonly<Record<string, string>> = {
     "文案与当前分镜版本不匹配，请重新保存文案后再合成。",
   FIRST_FRAME_CONFIRMATION_REQUIRED:
     "请先在「首帧置换」里确认一张首帧，再合成。",
+  FIRST_FRAME_QUALITY_NOT_VERIFIED:
+    "首帧的质检结果已失效：请回到「首帧置换」重新生成并确认首帧，再合成。",
   SHOT_CARD_TIMELINE_INVALID: "拆解结果缺少有效时间轴，请重新拆解视频。",
+  PROMPT_STALE:
+    "上游（拆解、分镜、文案或首帧）已更新，最终提示词已失效：请重新合成后再继续。",
 };
 
+// 服务端在 409 详情里带上 stale_reasons：到底是哪一环又生成了新版本。把原因翻成
+// 环节名（hint），再按当前 code 给出该做的下一步（action），用户才能直接定位。
+const STALE_STAGE_HINTS: Readonly<Record<string, string>> = {
+  ANALYSIS_SUPERSEDED: "视频拆解已更新",
+  SHOT_CARD_SUPERSEDED: "分镜已更新",
+  SCRIPT_SUPERSEDED: "口播文案已更新",
+  PROMPT_SUPERSEDED: "最终提示词已更新",
+  TEMPLATE_SUPERSEDED: "合成模板已升级",
+  FIRST_FRAME_SUPERSEDED: "首帧选择已更新",
+};
+
+const STALE_CONFLICT_ACTIONS: Readonly<Record<string, string>> = {
+  SCRIPT_STALE: "请重新保存文案后再合成。",
+  SHOT_CARD_STALE: "请重新保存分镜、再重新保存文案后合成。",
+  PROMPT_STALE: "请重新合成最终提示词后再继续。",
+};
+
+// 当前提示词已被新版本取代时用户手上就有最新一版：让他改用最新版，别白跑一次重新合成。
+const PROMPT_SUPERSEDED_ACTION = "请改用最新一版，或重新合成后再继续。";
+
+// 动作必须对 stale_reasons 敏感：拆解更新会让分镜一并过期，只重存文案会被服务端再拒一次。
+function staleConflictAction(code: string, staleReasons: string[]): string {
+  if (code === "SCRIPT_STALE" && staleReasons.includes("ANALYSIS_SUPERSEDED")) {
+    return STALE_CONFLICT_ACTIONS.SHOT_CARD_STALE;
+  }
+  if (code === "PROMPT_STALE" && staleReasons.includes("PROMPT_SUPERSEDED")) {
+    return PROMPT_SUPERSEDED_ACTION;
+  }
+  return STALE_CONFLICT_ACTIONS[code];
+}
+
+function staleStageConflictMessage(
+  code: string,
+  staleReasons?: string[],
+): string | undefined {
+  if (!staleReasons?.length || !STALE_CONFLICT_ACTIONS[code]) {
+    return undefined;
+  }
+  const hints = staleReasons
+    .map((reason) => STALE_STAGE_HINTS[reason])
+    .filter((hint): hint is string => Boolean(hint));
+  if (!hints.length) {
+    return undefined;
+  }
+  return `${hints.join("、")}，${staleConflictAction(code, staleReasons)}`;
+}
+
 function generationRequestError(error: unknown, errorPrefix: string): Error {
-  const { status, code } = error as RequestError;
+  const { status, code, requestId, staleReasons } = error as RequestError;
   const conflictMessage =
-    status === 409 && code ? GENERATION_CONFLICT_MESSAGES[code] : undefined;
+    status === 409 && code
+      ? (staleStageConflictMessage(code, staleReasons) ??
+        GENERATION_CONFLICT_MESSAGES[code])
+      : undefined;
   if (conflictMessage) {
     const mapped = new Error(conflictMessage) as RequestError;
     mapped.status = status;
     mapped.code = code;
+    mapped.staleReasons = staleReasons;
     return mapped;
   }
   const archiveMessage =
@@ -5392,7 +5448,6 @@ function generationRequestError(error: unknown, errorPrefix: string): Error {
     return mapped;
   }
   if (status === 422 && error instanceof Error) {
-    const requestId = (error as RequestError).requestId;
     const message =
       code || error.message !== `${errorPrefix}（422）`
         ? error.message
@@ -5418,16 +5473,24 @@ function generationRequestError(error: unknown, errorPrefix: string): Error {
       : status === 403
         ? "当前账号无权执行此操作"
         : status === 409
-          ? "上游内容已变化，请重新确认后再试"
+          ? `上游内容已变化，请重新确认后再试${
+              code ? `（错误代码：${code}）` : ""
+            }`
           : status === 429
             ? "请求过于频繁，请稍后重试"
             : status !== undefined && status >= 500
               ? "生成服务暂不可用，请稍后重试"
               : null;
   if (statusMessage) {
-    const mapped = new Error(statusMessage) as RequestError;
+    // 未映射的 409 带上错误代码与问题编号：用户不必描述现象，客服可凭编号定位日志。
+    const diagnostic =
+      status === 409 && requestId && !statusMessage.includes(requestId)
+        ? `；问题编号：${requestId}`
+        : "";
+    const mapped = new Error(`${statusMessage}${diagnostic}`) as RequestError;
     mapped.status = status;
     mapped.code = code;
+    mapped.staleReasons = staleReasons;
     return mapped;
   }
   if (error instanceof Error && error.message === "请求超时，请重试") {
@@ -5484,6 +5547,7 @@ type RequestError = Error & {
   code?: string;
   retryable?: boolean;
   requestId?: string;
+  staleReasons?: string[];
 };
 
 const BRANDED_SERVICE_ERRORS: ReadonlyArray<{
@@ -5592,7 +5656,12 @@ export function customerVisibleErrorMessage(
 async function responseErrorDetails(
   response: Response,
   errorPrefix: string,
-): Promise<{ message: string; code?: string; retryable?: boolean }> {
+): Promise<{
+  message: string;
+  code?: string;
+  retryable?: boolean;
+  staleReasons?: string[];
+}> {
   try {
     const payload: unknown = await response.json();
     if (
@@ -5668,6 +5737,13 @@ async function responseErrorDetails(
         typeof payload.detail.retryable === "boolean"
           ? payload.detail.retryable
           : undefined;
+      // 服务端在 409 里给出机器可读的 stale_reasons（哪一环变旧），
+      // 这一层不能丢，否则上层只能回退到笼统的“上游内容已变化”。
+      const staleReasons = Array.isArray(payload.detail.stale_reasons)
+        ? payload.detail.stale_reasons.filter(
+            (reason): reason is string => typeof reason === "string",
+          )
+        : undefined;
       // The code must survive even when the server omits a message, otherwise
       // callers cannot tell a retryable failure from a permanent one.
       return {
@@ -5681,6 +5757,7 @@ async function responseErrorDetails(
         }),
         code,
         retryable,
+        staleReasons,
       };
     }
   } catch {

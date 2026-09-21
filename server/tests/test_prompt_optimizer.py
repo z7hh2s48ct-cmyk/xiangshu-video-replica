@@ -305,6 +305,234 @@ def test_final_replica_preview_submission_and_stale_script_on_pg(
         assert failure.value.detail["code"] == "PROMPT_STALE"
 
 
+def test_stale_conflicts_name_the_changed_stage(
+    client: TestClient,
+    route_state: str,
+) -> None:
+    """409 详情必须点名变旧的环节（stale_reasons）。
+
+    统一只说“上游内容已变化”，用户不知道回去改拆解、分镜还是文案；
+    服务端已经算出具体原因，不能丢掉。
+    """
+    from fastapi import HTTPException
+
+    from app.analysis import (
+        FakeGemini,
+        analyze_video,
+        create_analysis_version,
+        create_shot_card_version,
+        insert_version,
+    )
+    from app.auth import CurrentUser
+    from app.generation import (
+        PromptCompileRequest,
+        ScriptRequest,
+        compile_prompt_version,
+        create_script_version,
+    )
+
+    user, _ = _customer(client, route_state, credits=100)
+    actor = CurrentUser(id=user["user_id"], username="alice", display_name="alice", role="customer")
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+
+        def seed_project(project_id: str, source_id: str, frame_id: str) -> None:
+            conn.execute(
+                "INSERT INTO projects(id,name,owner_user_id) VALUES(%s,%s,%s)",
+                (project_id, project_id, actor.id),
+            )
+            for asset, kind, mime in (
+                (source_id, "reference_video", "video/mp4"),
+                (frame_id, "first_frame", "image/png"),
+            ):
+                conn.execute(
+                    "INSERT INTO assets(id,project_id,kind,storage_uri,sha256,size_bytes,"
+                    "content_type,created_by_user_id) "
+                    "VALUES(%s,%s,%s,%s,'hash',10,%s,%s)",
+                    (asset, project_id, kind, f"local://test/{asset}", mime, actor.id),
+                )
+            raw.commit()
+
+        seed_project("stale-project", "stale-source", "stale-frame")
+        result = analyze_video(video_uri="fake", video_duration_seconds=4, provider=FakeGemini())
+        analysis = create_analysis_version(
+            conn,
+            project_id="stale-project",
+            asset_id="stale-source",
+            asset_uri="fake",
+            created_by_user_id=actor.id,
+            result=result,
+        )
+        shots = create_shot_card_version(
+            conn,
+            analysis_version=analysis,
+            created_by_user_id=actor.id,
+            shots=result.analysis.shots,
+        )
+
+        def version(project_id: str, asset_id: str, kind: str, payload: dict[str, Any]):
+            return insert_version(
+                conn,
+                project_id=project_id,
+                asset_id=asset_id,
+                kind=kind,
+                created_by_user_id=actor.id,
+                payload=payload,
+            )
+
+        def confirm_first_frame(project_id: str, frame_id: str, review_mode: str) -> None:
+            source = version(
+                project_id, frame_id, "source_frame_selection", {"timestamp_seconds": 0}
+            )
+            candidates = version(
+                project_id,
+                frame_id,
+                "first_frame_candidates",
+                {
+                    "source_frame_selection_version_id": source["id"],
+                    "review_mode": review_mode,
+                    "candidates": [{"asset_id": frame_id}],
+                },
+            )
+            selection: dict[str, Any] = {
+                "first_frame_candidates_version_id": candidates["id"],
+                "first_frame_asset_id": frame_id,
+                "review_mode": review_mode,
+            }
+            if review_mode == "HUMAN_CONFIRMATION":
+                selection["reviewed_by_user_id"] = actor.id
+            version(project_id, frame_id, "first_frame_selection", selection)
+
+        confirm_first_frame("stale-project", "stale-frame", "HUMAN_CONFIRMATION")
+        script = create_script_version(
+            conn,
+            project_id="stale-project",
+            actor=actor,
+            request=ScriptRequest(
+                source="custom", text="今天带你看庭院", shot_card_version_id=shots["id"]
+            ),
+        )
+
+        # 分镜被新版本取代：保存文案与编译都必须点名“分镜”。
+        shots2 = create_shot_card_version(
+            conn,
+            analysis_version=analysis,
+            created_by_user_id=actor.id,
+            shots=result.analysis.shots,
+        )
+        with pytest.raises(HTTPException) as failure:
+            create_script_version(
+                conn,
+                project_id="stale-project",
+                actor=actor,
+                request=ScriptRequest(
+                    source="custom", text="今天带你看庭院", shot_card_version_id=shots["id"]
+                ),
+            )
+        assert failure.value.detail["code"] == "SHOT_CARD_STALE"
+        assert failure.value.detail["stale_reasons"] == ["SHOT_CARD_SUPERSEDED"]
+
+        with pytest.raises(HTTPException) as failure:
+            compile_prompt_version(
+                conn,
+                project_id="stale-project",
+                actor=actor,
+                request=PromptCompileRequest(
+                    script_version_id=script["id"],
+                    shot_card_version_id=shots["id"],
+                    first_frame_asset_id="stale-frame",
+                    output_duration_seconds=4,
+                ),
+            )
+        assert failure.value.detail["code"] == "SCRIPT_STALE"
+        assert failure.value.detail["stale_reasons"] == ["SHOT_CARD_SUPERSEDED"]
+
+        # 拆解被重跑：分镜基于旧拆解，保存文案与编译都必须点名“拆解”。
+        script2 = create_script_version(
+            conn,
+            project_id="stale-project",
+            actor=actor,
+            request=ScriptRequest(
+                source="custom", text="今天带你看庭院", shot_card_version_id=shots2["id"]
+            ),
+        )
+        create_analysis_version(
+            conn,
+            project_id="stale-project",
+            asset_id="stale-source",
+            asset_uri="fake",
+            created_by_user_id=actor.id,
+            result=result,
+        )
+        with pytest.raises(HTTPException) as failure:
+            create_script_version(
+                conn,
+                project_id="stale-project",
+                actor=actor,
+                request=ScriptRequest(
+                    source="custom", text="今天带你看庭院", shot_card_version_id=shots2["id"]
+                ),
+            )
+        assert failure.value.detail["code"] == "SHOT_CARD_STALE"
+        assert failure.value.detail["stale_reasons"] == ["ANALYSIS_SUPERSEDED"]
+
+        with pytest.raises(HTTPException) as failure:
+            compile_prompt_version(
+                conn,
+                project_id="stale-project",
+                actor=actor,
+                request=PromptCompileRequest(
+                    script_version_id=script2["id"],
+                    shot_card_version_id=shots2["id"],
+                    first_frame_asset_id="stale-frame",
+                    output_duration_seconds=4,
+                ),
+            )
+        assert failure.value.detail["code"] == "SCRIPT_STALE"
+        assert failure.value.detail["stale_reasons"] == ["ANALYSIS_SUPERSEDED"]
+
+        # 首帧质检证据过期是独立环节：客户端需要能单独识别这个码并可自救。
+        seed_project("quality-project", "quality-source", "quality-frame")
+        quality_analysis = create_analysis_version(
+            conn,
+            project_id="quality-project",
+            asset_id="quality-source",
+            asset_uri="fake",
+            created_by_user_id=actor.id,
+            result=result,
+        )
+        quality_shots = create_shot_card_version(
+            conn,
+            analysis_version=quality_analysis,
+            created_by_user_id=actor.id,
+            shots=result.analysis.shots,
+        )
+        confirm_first_frame("quality-project", "quality-frame", "AUTO")
+        quality_script = create_script_version(
+            conn,
+            project_id="quality-project",
+            actor=actor,
+            request=ScriptRequest(
+                source="custom",
+                text="今天带你看庭院",
+                shot_card_version_id=quality_shots["id"],
+            ),
+        )
+        with pytest.raises(HTTPException) as failure:
+            compile_prompt_version(
+                conn,
+                project_id="quality-project",
+                actor=actor,
+                request=PromptCompileRequest(
+                    script_version_id=quality_script["id"],
+                    shot_card_version_id=quality_shots["id"],
+                    first_frame_asset_id="quality-frame",
+                    output_duration_seconds=4,
+                ),
+            )
+        assert failure.value.detail["code"] == "FIRST_FRAME_QUALITY_NOT_VERIFIED"
+
+
 def test_async_request_replay_and_single_charge(
     client: TestClient, route_state: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:

@@ -971,10 +971,11 @@ def require_latest_version(
     kind: str,
     code: str,
     message: str,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     latest = latest_version(conn, project_id=project_id, kind=kind)
     if latest is None or str(latest["id"]) != str(row["id"]):
-        raise generation_error(409, code, message)
+        raise generation_error(409, code, message, extra=extra)
 
 
 def version_state(
@@ -1187,12 +1188,15 @@ def create_script_version(
             kind="shot_card",
             code="SHOT_CARD_STALE",
             message="Save the script against the latest shot-card version.",
+            extra={"stale_reasons": ["SHOT_CARD_SUPERSEDED"]},
         )
-        if shot_card_stale_reasons(conn, row=shot_card):
+        stale_reasons = shot_card_stale_reasons(conn, row=shot_card)
+        if stale_reasons:
             raise generation_error(
                 409,
                 "SHOT_CARD_STALE",
                 "Save the latest analysis as a new shot-card version before editing the script.",
+                extra={"stale_reasons": stale_reasons},
             )
         shot_payload = json.loads(str(shot_card["payload_json"]))
         text = request.text.strip()
@@ -1278,12 +1282,15 @@ def compile_prompt_version(
             kind=SCRIPT_KIND,
             code="SCRIPT_STALE",
             message="Compile the prompt from the latest script version.",
+            extra={"stale_reasons": ["SCRIPT_SUPERSEDED"]},
         )
-        if version_stale_reasons(conn, row=script):
+        stale_reasons = version_stale_reasons(conn, row=script)
+        if stale_reasons:
             raise generation_error(
                 409,
                 "SCRIPT_STALE",
                 "Save a script from the current analysis and shot-card version.",
+                extra={"stale_reasons": stale_reasons},
             )
         shot_card = require_version(
             conn,
@@ -1298,12 +1305,15 @@ def compile_prompt_version(
             kind="shot_card",
             code="SHOT_CARD_STALE",
             message="Compile the prompt from the latest shot-card version.",
+            extra={"stale_reasons": ["SHOT_CARD_SUPERSEDED"]},
         )
-        if shot_card_stale_reasons(conn, row=shot_card):
+        shot_stale_reasons = shot_card_stale_reasons(conn, row=shot_card)
+        if shot_stale_reasons:
             raise generation_error(
                 409,
                 "SHOT_CARD_STALE",
                 "Save the latest analysis as a new shot-card version before compiling.",
+                extra={"stale_reasons": shot_stale_reasons},
             )
         script_payload = json.loads(str(script["payload_json"]))
         if script_payload.get("shot_card_version_id") != request.shot_card_version_id:
@@ -1578,6 +1588,7 @@ def revise_prompt_version(
             kind=H3_PROMPT_KIND,
             code="PROMPT_STALE",
             message="Revise the latest prompt version.",
+            extra={"stale_reasons": ["PROMPT_SUPERSEDED"]},
         )
         stale_reasons = version_stale_reasons(conn, row=base)
         if stale_reasons:
@@ -1585,6 +1596,7 @@ def revise_prompt_version(
                 409,
                 "PROMPT_STALE",
                 "Upstream inputs changed; compile a new prompt before editing.",
+                extra={"stale_reasons": stale_reasons},
             )
         prompt_text = request.prompt_text.strip()
         if not prompt_text:
@@ -1854,12 +1866,15 @@ def lock_prompt_version(
             kind=H3_PROMPT_KIND,
             code="PROMPT_STALE",
             message="Lock the latest prompt version.",
+            extra={"stale_reasons": ["PROMPT_SUPERSEDED"]},
         )
-        if version_stale_reasons(conn, row=row):
+        lock_stale_reasons = version_stale_reasons(conn, row=row)
+        if lock_stale_reasons:
             raise generation_error(
                 409,
                 "PROMPT_STALE",
                 "Upstream inputs changed; compile a new prompt before locking.",
+                extra={"stale_reasons": lock_stale_reasons},
             )
         payload = json.loads(str(row["payload_json"]))
         if payload["status"] == "USED":
@@ -2148,10 +2163,10 @@ def create_generation_batch(
                         409, "PROMPT_CONTEXT_CHANGED", "素材或生成参数已改变，请核对提示词。"
                     )
 
-                for key, kind in (
-                    ("analysis_version_id", "analysis"),
-                    ("shot_card_version_id", "shot_card"),
-                    ("script_version_id", SCRIPT_KIND),
+                for key, kind, reason in (
+                    ("analysis_version_id", "analysis", "ANALYSIS_SUPERSEDED"),
+                    ("shot_card_version_id", "shot_card", "SHOT_CARD_SUPERSEDED"),
+                    ("script_version_id", SCRIPT_KIND, "SCRIPT_SUPERSEDED"),
                 ):
                     if snapshot.get(key):
                         source = require_version(
@@ -2164,16 +2179,17 @@ def create_generation_batch(
                             kind=kind,
                             code="PROMPT_STALE",
                             message="优化稿来源已更新，请重新合成最终提示词。",
+                            extra={"stale_reasons": [reason]},
                         )
                         if getattr(context, key) not in (None, snapshot[key]):
                             raise generation_error(
                                 409, "PROMPT_CONTEXT_CHANGED", "优化稿与确认来源不同。"
                             )
 
-            for version_id, kind in (
-                (context.analysis_version_id, "analysis"),
-                (context.shot_card_version_id, "shot_card"),
-                (context.script_version_id, SCRIPT_KIND),
+            for version_id, kind, reason in (
+                (context.analysis_version_id, "analysis", "ANALYSIS_SUPERSEDED"),
+                (context.shot_card_version_id, "shot_card", "SHOT_CARD_SUPERSEDED"),
+                (context.script_version_id, SCRIPT_KIND, "SCRIPT_SUPERSEDED"),
             ):
                 if version_id is not None:
                     source_version = require_version(
@@ -2186,6 +2202,7 @@ def create_generation_batch(
                         kind=kind,
                         code="PROMPT_STALE",
                         message="文案或分镜已更新，请重新合成最终提示词。",
+                        extra={"stale_reasons": [reason]},
                     )
             final_payload: dict[str, Any] = {}
             if context.final_prompt_version_id:
@@ -2195,8 +2212,14 @@ def create_generation_batch(
                     project_id=project_id,
                     kind=H3_PROMPT_KIND,
                 )
-                if version_stale_reasons(conn, row=final_version):
-                    raise generation_error(409, "PROMPT_STALE", "最终稿的来源已变化，请重新合成。")
+                final_stale_reasons = version_stale_reasons(conn, row=final_version)
+                if final_stale_reasons:
+                    raise generation_error(
+                        409,
+                        "PROMPT_STALE",
+                        "最终稿的来源已变化，请重新合成。",
+                        extra={"stale_reasons": final_stale_reasons},
+                    )
                 final_payload = json.loads(str(final_version["payload_json"]))
                 if not final_payload.get("final_composition"):
                     raise generation_error(409, "FINAL_PROMPT_REQUIRED", "请先完成最终提示词合成。")
@@ -2271,11 +2294,13 @@ def create_generation_batch(
                 kind=H3_PROMPT_KIND,
             )
         prompt_version_id = str(prompt["id"])
-        if version_stale_reasons(conn, row=prompt):
+        prompt_stale_reasons = version_stale_reasons(conn, row=prompt)
+        if prompt_stale_reasons:
             raise generation_error(
                 409,
                 "PROMPT_STALE",
                 "Upstream inputs changed; compile and lock a new prompt before generating.",
+                extra={"stale_reasons": prompt_stale_reasons},
             )
         prompt_snapshot = json.loads(str(prompt["payload_json"]))
         if prompt_snapshot.get("status") != "LOCKED":
@@ -7993,8 +8018,23 @@ def content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def generation_error(status_code: int, code: str, message: str) -> HTTPException:
-    return HTTPException(status_code=status_code, detail={"code": code, "message": message})
+def generation_error(
+    status_code: int,
+    code: str,
+    message: str,
+    *,
+    extra: dict[str, Any] | None = None,
+) -> HTTPException:
+    """业务错误统一从这里抛出。
+
+    ``extra`` 用于携带机器可读的补充字段（如 ``stale_reasons``：到底哪一环变旧）。
+    客户端据此把“上游内容已变化”落成具体的环节名与自救动作，而不是让用户
+    自己猜该回哪一步。
+    """
+    detail: dict[str, Any] = {"code": code, "message": message}
+    if extra:
+        detail.update(extra)
+    return HTTPException(status_code=status_code, detail=detail)
 
 
 def require_batch_access(

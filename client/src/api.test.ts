@@ -2632,7 +2632,9 @@ describe("generation workflow API", () => {
     expect(error).toMatchObject({
       status: 409,
       code: "PROMPT_STALE",
-      message: "上游内容已变化，请重新确认后再试",
+      // 送生成的 PROMPT_STALE 也改成可行动文案：不再丢出“上游内容已变化”。
+      message:
+        "上游（拆解、分镜、文案或首帧）已更新，最终提示词已失效：请重新合成后再继续。",
     });
   });
 
@@ -2649,6 +2651,7 @@ describe("generation workflow API", () => {
     ["SCRIPT_SHOT_CARD_MISMATCH", /分镜/],
     ["FIRST_FRAME_CONFIRMATION_REQUIRED", /首帧/],
     ["SHOT_CARD_TIMELINE_INVALID", /拆解/],
+    ["FIRST_FRAME_QUALITY_NOT_VERIFIED", /首帧/],
   ])(
     "explains compile conflict %s instead of the generic 409 copy",
     async (code, pattern) => {
@@ -2677,6 +2680,123 @@ describe("generation workflow API", () => {
       );
     },
   );
+
+  // 服务端在 409 详情里带上 stale_reasons（到底是哪一环变旧）。只报“上游内容已变化”
+  // 等于没说：用户不知道该回哪一步，这里必须把原因翻成环节名和下一步动作。
+  // 动作对 stale_reasons 敏感：拆解更新→必须先重存分镜；提示词被取代→改用最新版。
+  it.each([
+    [
+      "SCRIPT_STALE",
+      ["SHOT_CARD_SUPERSEDED"],
+      "分镜已更新，请重新保存文案后再合成。",
+    ],
+    [
+      "SCRIPT_STALE",
+      ["ANALYSIS_SUPERSEDED"],
+      "视频拆解已更新，请重新保存分镜、再重新保存文案后合成。",
+    ],
+    [
+      "SHOT_CARD_STALE",
+      ["ANALYSIS_SUPERSEDED"],
+      "视频拆解已更新，请重新保存分镜、再重新保存文案后合成。",
+    ],
+    [
+      "PROMPT_STALE",
+      ["PROMPT_SUPERSEDED"],
+      "最终提示词已更新，请改用最新一版，或重新合成后再继续。",
+    ],
+  ])(
+    "names the changed stage for %s with %j",
+    async (code, staleReasons, expectedMessage) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: false,
+          status: 409,
+          json: async () => ({
+            detail: {
+              code,
+              message: "server detail",
+              stale_reasons: staleReasons,
+            },
+          }),
+        }),
+      );
+
+      const error = await compileGenerationPrompt("project-1", {
+        script_version_id: "script-1",
+        shot_card_version_id: "shot-1",
+        first_frame_asset_id: "frame-1",
+        output_duration_seconds: 15,
+        resolution: "768P",
+        ratio: "adaptive",
+      }).catch((requestError: unknown) => requestError);
+
+      expect(error).toMatchObject({ status: 409, code, staleReasons });
+      expect((error as Error).message).toBe(expectedMessage);
+    },
+  );
+
+  it("names the changed stage when generation submission finds a stale prompt", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 409,
+        json: async () => ({
+          detail: {
+            code: "PROMPT_STALE",
+            message: "Upstream inputs changed.",
+            stale_reasons: ["SCRIPT_SUPERSEDED"],
+          },
+        }),
+      }),
+    );
+
+    const error = await createGenerationBatch("project-1", {
+      quantity: 1,
+      prompt_version_id: "prompt-1",
+      first_frame_asset_id: "frame-1",
+      output_duration_seconds: 10,
+      resolution: "768P",
+      ratio: "adaptive",
+      idempotency_key: "key-1",
+      provider: "fake_h3",
+      fake_audio_quality: "ok",
+    }).catch((requestError: unknown) => requestError);
+
+    expect(error).toMatchObject({ status: 409, code: "PROMPT_STALE" });
+    expect((error as Error).message).toBe(
+      "口播文案已更新，请重新合成最终提示词后再继续。",
+    );
+  });
+
+  it("appends the error code when a 409 conflict is not yet mapped", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 409,
+        json: async () => ({
+          detail: { code: "FUTURE_CONFLICT_CODE", message: "server detail" },
+        }),
+      }),
+    );
+
+    const error = await compileGenerationPrompt("project-1", {
+      script_version_id: "script-1",
+      shot_card_version_id: "shot-1",
+      first_frame_asset_id: "frame-1",
+      output_duration_seconds: 15,
+      resolution: "768P",
+      ratio: "adaptive",
+    }).catch((requestError: unknown) => requestError);
+
+    expect(error).toMatchObject({ status: 409, code: "FUTURE_CONFLICT_CODE" });
+    expect((error as Error).message).toBe(
+      "上游内容已变化，请重新确认后再试（错误代码：FUTURE_CONFLICT_CODE）",
+    );
+  });
 
   it("keeps the generic 409 copy when the server sends no known code", async () => {
     vi.stubGlobal(
