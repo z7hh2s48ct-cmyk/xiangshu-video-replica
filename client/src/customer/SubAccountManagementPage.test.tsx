@@ -250,6 +250,75 @@ describe("SubAccountManagementPage", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
+  it("keeps the session when the server denies an operation with 403 (SUB_ADMIN scope)", async () => {
+    // 上线前检查 P1-1：403 是权限拒绝，不是会话失效。旧实现把 403 与 401
+    // 同判，SUB_ADMIN 点任一母账号专属按钮就被强制登出且文案误导。
+    const onSessionExpired = vi.fn();
+    stubFetch((url, init) => {
+      if (url.includes("/api/customer/sub-accounts") && init?.method === "PATCH") {
+        return jsonResponse(
+          {
+            detail: {
+              code: "MASTER_ACCOUNT_REQUIRED",
+              message: "该操作仅限母账号执行。",
+            },
+          },
+          403,
+        );
+      }
+      return jsonResponse({ sub_accounts: [subAccount], total_count: 1 });
+    });
+    render(
+      <SubAccountManagementPage
+        store={storeWithSession(sessionToken)}
+        onSessionExpired={onSessionExpired}
+      />,
+    );
+
+    // 列表正常渲染（列表对 SUB_ADMIN 放行），会话保持在线。
+    expect(
+      await screen.findByText("张三", { selector: "strong" }),
+    ).toBeInTheDocument();
+    expect(onSessionExpired).not.toHaveBeenCalled();
+
+    // 触发一个会 403 的操作（设为管理员走 PATCH）：错误留在页面，不登出。
+    fireEvent.click(screen.getByRole("button", { name: "设为管理员" }));
+    await acknowledgeAndConfirm("设为管理员：「张三」？", "设为管理员");
+    await waitFor(() =>
+      expect(screen.getByText("该操作仅限母账号执行。")).toBeInTheDocument(),
+    );
+    expect(onSessionExpired).not.toHaveBeenCalled();
+  });
+
+  it("hides master-only controls for a SUB_ADMIN caller but keeps quota and permissions", async () => {
+    // 上线前检查 P1-1：服务端 _lock_master 边界 = 创建/改名/密码/角色/停用/删除
+    // 仅母账号；额度（PUT quota）与权限（PUT permissions）对 SUB_ADMIN 放行。
+    stubFetch(() =>
+      jsonResponse({ sub_accounts: [subAccount], total_count: 1 }),
+    );
+    render(
+      <SubAccountManagementPage
+        store={storeWithSession(sessionToken)}
+        onSessionExpired={vi.fn()}
+        isMasterCaller={false}
+      />,
+    );
+
+    expect(
+      await screen.findByText("张三", { selector: "strong" }),
+    ).toBeInTheDocument();
+    // 母账号专属：创建表单与行内操作全部隐藏。
+    expect(screen.queryByText("创建子账号")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重命名" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "设置密码" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "设为管理员" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "停用" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "删除" })).not.toBeInTheDocument();
+    // SUB_ADMIN 仍被授权的操作保留。
+    expect(screen.getByRole("button", { name: "设置额度" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "设置权限" })).toBeInTheDocument();
+  });
+
   it("delete degrades to deactivation with an explicit notice when history pins the row", async () => {
     stubFetch((_url, init) => {
       if (init?.method === "DELETE") {

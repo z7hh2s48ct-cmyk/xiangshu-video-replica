@@ -266,6 +266,10 @@ export function CustomerCenterPage({
   const retry = useRef<{ fingerprint: string; key: string } | null>(null);
   const defaultKey = useRef(crypto.randomUUID());
   const defaultPending = useRef(false);
+  // 上线前检查 P2-6：allow_api_keys=false 的子账号没有 default key 也建不了，
+  // 初始化恒 403——记住这个终局，本次挂载内不再重放注定失败的 POST
+  // （旧实现每次进 Token 页签/刷新都打一发 403）。
+  const defaultForbidden = useRef(false);
   const [recharge, setRecharge] = useState(false);
   const [displayName, setDisplayName] = useState(
     account.profile?.display_name ?? user.display_name,
@@ -458,8 +462,9 @@ export function CustomerCenterPage({
             try {
               let result = await customerListApiKeys(auth);
               if (
-                defaultPending.current ||
-                !result.items.some((item) => item.is_default)
+                !defaultForbidden.current &&
+                (defaultPending.current ||
+                  !result.items.some((item) => item.is_default))
               ) {
                 defaultPending.current = true;
                 const created = await customerInitializeDefaultApiKey(
@@ -484,6 +489,9 @@ export function CustomerCenterPage({
               ) {
                 defaultPending.current = false;
                 defaultKey.current = crypto.randomUUID();
+                // 403 = 该账号无权建 API key（如 allow_api_keys=false 的子账号），
+                // 属会话期终局：重试同一 POST 只会再 403。
+                if (cause.status === 403) defaultForbidden.current = true;
               }
               if (active) setTokenError(message(cause));
             }
@@ -1512,6 +1520,7 @@ export function CustomerCenterPage({
             <SubAccountManagementPage
               store={account.store}
               onSessionExpired={account.onSessionExpired}
+              isMasterCaller={isMasterAccount}
             />
           )}
           {tab === "settings" && (

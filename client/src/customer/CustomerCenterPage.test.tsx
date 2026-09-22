@@ -994,3 +994,25 @@ test("expired default recovery reloads existing credentials instead of looping o
   expect(await screen.findByText("默认 Token")).toBeVisible();
   expect(mocks.initialize).toHaveBeenCalledTimes(1);
 });
+
+test("403 on default initialization is remembered: no replay on reload (preflight P2-6)", async () => {
+  // 上线前检查 P2-6：allow_api_keys=false 的子账号列表恒无 default key、
+  // 初始化恒 403——本次挂载内不得重放注定失败的 POST。
+  const account = setup();
+  mocks.list.mockResolvedValue({ items: [], total: 0 });
+  mocks.initialize.mockRejectedValue(
+    new CustomerApiError({
+      message: "权限受限：该子账号不允许创建 API Token。",
+      status: 403,
+      code: "API_KEYS_NOT_ALLOWED",
+    }),
+  );
+  render(<CustomerCenterPage account={account} />);
+  expect(await screen.findByRole("alert")).toHaveTextContent("权限受限");
+  fireEvent.click(screen.getByRole("button", { name: "重新加载" }));
+  // 重新加载后列表重读（list 第二次被调），但 initialize 不再重放。
+  await waitFor(() =>
+    expect(mocks.list.mock.calls.length).toBeGreaterThanOrEqual(2),
+  );
+  expect(mocks.initialize).toHaveBeenCalledTimes(1);
+});

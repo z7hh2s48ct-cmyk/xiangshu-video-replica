@@ -48,11 +48,18 @@ export function SubAccountManagementPage({
   store,
   onSessionExpired,
   now,
+  isMasterCaller = true,
 }: {
   store: CustomerCredentialStore;
   onSessionExpired: () => void;
   /** 测试注入固定时刻；缺省取渲染时当前时间（月度进度按上海自然月折算）。 */
   now?: Date;
+  /**
+   * 调用方是否母账号。SUB_ADMIN 能进本页（服务端放行列表/额度/权限），
+   * 但创建/改名/密码/角色/停用/删除走 _lock_master 一律 403——对它隐藏这些
+   * 入口，避免「点按钮 → 403 报错」的死路（上线前检查 P1-1）。
+   */
+  isMasterCaller?: boolean;
 }) {
   const [subAccounts, setSubAccounts] = useState<CustomerSubAccount[] | null>(
     null,
@@ -467,13 +474,14 @@ export function SubAccountManagementPage({
       <header className="sub-accounts-page__header">
         <div>
           <p className="eyebrow">子账号管理</p>
-          <h3>为团队创建子账号</h3>
+          <h3>{isMasterCaller ? "为团队创建子账号" : "管理团队子账号"}</h3>
           <p>
             子账号共享本机构的余额与素材，消费记入母账号账单；每个子账号独立登录、独立设备。
           </p>
         </div>
       </header>
 
+      {isMasterCaller ? (
       <form className="sub-accounts-page__create" onSubmit={createSubAccount}>
         <label>
           用户名
@@ -541,6 +549,7 @@ export function SubAccountManagementPage({
           {isCreating ? "正在创建" : "创建子账号"}
         </button>
       </form>
+      ) : null}
 
       {error ? (
         <p className="settings-error" role="alert">
@@ -756,6 +765,8 @@ export function SubAccountManagementPage({
                     </>
                   ) : (
                     <>
+                      {isMasterCaller ? (
+                        <>
                       <button
                         disabled={busy}
                         onClick={() => {
@@ -766,13 +777,15 @@ export function SubAccountManagementPage({
                       >
                         重命名
                       </button>
-                      <button
-                        disabled={busy}
-                        onClick={() => void resetPassword(subAccount)}
-                        type="button"
-                      >
-                        设置密码
-                      </button>
+                        <button
+                          disabled={busy}
+                          onClick={() => void resetPassword(subAccount)}
+                          type="button"
+                        >
+                          设置密码
+                        </button>
+                        </>
+                      ) : null}
                       <button
                         disabled={busy}
                         onClick={() => void setQuota(subAccount)}
@@ -787,6 +800,8 @@ export function SubAccountManagementPage({
                       >
                         设置权限
                       </button>
+                      {isMasterCaller ? (
+                        <>
                       <button
                         disabled={busy}
                         onClick={() => void toggleAdminRole(subAccount)}
@@ -811,6 +826,8 @@ export function SubAccountManagementPage({
                       >
                         删除
                       </button>
+                        </>
+                      ) : null}
                     </>
                   )}
                 </div>
@@ -947,10 +964,10 @@ function parseQuotaInput(raw: string): number | null | undefined {
 
 /** 会话失效（401/403 围栏拒绝）统一收敛：停用/权限错误交给上层退回登录。 */
 function isSessionFailure(cause: unknown): boolean {
-  return (
-    cause instanceof CustomerApiError &&
-    (cause.status === 401 || cause.status === 403)
-  );
+  // 403 是权限拒绝（如 SUB_ADMIN 触达母账号专属操作），不是会话失效：
+  // 它必须落在页面错误区展示服务端文案，绝不能触发 onSessionExpired 把
+  // 在线用户踢回登录页（上线前检查 P1-1）。会话失效只有 401。
+  return cause instanceof CustomerApiError && cause.status === 401;
 }
 
 function errorMessage(error: unknown, fallback: string): string {
