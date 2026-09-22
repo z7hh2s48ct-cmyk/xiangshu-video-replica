@@ -585,8 +585,8 @@ describe("admin activation API adapter", () => {
   });
 
   it("runs the WeChat credential self-check through the CSRF-carrying admin write lane", async () => {
-    // self-check 是无 body 的 POST，但客户生产模式同样受 CSRF 门禁：裸
-    // requestControl 不带 X-Admin-CSRF 会被服务端 403 ADMIN_CSRF_REQUIRED，
+    // self-check 是无 body 的 POST，但 admin 会话对写方法一律强制 CSRF 门禁：
+    // 裸 requestControl 不带 X-Admin-CSRF 会被服务端 403 ADMIN_CSRF_REQUIRED，
     // 商户上线前的凭据自检按钮在生产完全不可用。与上一条 reconcile 用例
     // 同款钉住：必须经 adminWrite，防止日后被"因为不需要 body"简化掉。
     const fetchMock = vi.fn();

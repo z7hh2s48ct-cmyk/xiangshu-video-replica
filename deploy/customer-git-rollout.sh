@@ -401,7 +401,8 @@ IMAGE_SWITCHED=1
 compose config --quiet
 # Same fail-fast lock policy as deploy/postgres/migrate.sh: a DDL wait queued
 # behind peak traffic blocks wallet requests behind itself. Re-run at low peak
-# if this aborts on lock contention.
+# if this aborts on lock contention. The timeout variable expands inside the
+# container, so set it in the compose env file, not the host shell.
 compose run --rm --no-deps "$MIGRATION_SERVICE" \
   sh -lc 'cd /opt/video-replica/server && PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c lock_timeout=${VIDEO_REPLICA_MIGRATION_LOCK_TIMEOUT:-5s}" alembic upgrade head'
 

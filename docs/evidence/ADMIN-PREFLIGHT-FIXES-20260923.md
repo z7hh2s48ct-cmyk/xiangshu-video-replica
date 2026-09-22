@@ -22,7 +22,8 @@
   不带 `X-Admin-CSRF`；客户生产模式写方法强制 CSRF → 403 `ADMIN_CSRF_REQUIRED`，
   自检按钮在生产不可用（#200 提交信息已自认未修）。
 - 修复：改走 `adminWrite`（同文件 unit-price PUT 同款封装；服务端路由不读 body，
-  confirm/reason 仅随契约封装携带，行为不变）。
+  confirm/reason 仅随契约封装携带，行为不变。CSRF 门禁对 admin 会话写方法一律
+  生效，不限于客户生产模式）。
 - 测试：`client/src/api.admin.test.ts` 新增契约回归（照 #200 reconcile 用例模式），
   断言 POST 携带 X-Admin-CSRF 与 Idempotency-Key。先红（CSRF 头 null）后绿；
   `PaymentSettingsSection.test.tsx` 41 项全绿（调用方零改动）。

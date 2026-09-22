@@ -133,9 +133,10 @@ export type WechatSelfCheckResult = {
 };
 /** 真实调一次微信 /v3/certificates 验证已保存的商户三件套（只读探测）。 */
 export async function selfCheckWechatNative(): Promise<WechatSelfCheckResult> {
-  // 无 body 的 POST 也要走 adminWrite：客户生产模式对写方法强制 CSRF 门禁，
-  // 裸 requestControl 不带 X-Admin-CSRF 会被服务端 403 ADMIN_CSRF_REQUIRED。
-  // 服务端不读 body，confirm/reason 仅随契约封装携带。
+  // 无 body 的 POST 也要走 adminWrite：admin 会话对写方法一律强制 CSRF 门禁
+  // （GET 与三个会话路径白名单除外），裸 requestControl 不带 X-Admin-CSRF 会被
+  // 服务端 403 ADMIN_CSRF_REQUIRED。服务端不读 body，confirm/reason 仅随契约
+  // 封装携带。
   return adminWrite<WechatSelfCheckResult>(
     "/api/control/settings/customer-payments/wechat-native/self-check",
     {},
