@@ -124,6 +124,7 @@ import {
   Tabs,
 } from "./ui";
 import { type MediaRowStyle, useMediaRowFit } from "./useMediaRowFit";
+import { readAppliedOptimization } from "./usePromptOptimization";
 import "./creation.css";
 import { OralJourney } from "./OralJourney";
 
@@ -4416,6 +4417,19 @@ export function VideoPage() {
         !videoCapabilityError &&
         !videoModeDisabled &&
         (!firstFrameId || Boolean(firstFrame)));
+  // T2V 提交前的「建议优化提示词」引导（非强制）：仅当当前为文生视频、
+  // 已填写提示词、且本会话尚未对当前文本应用过 AI 优化时提示。用户可
+  // 忽略直接提交；readAppliedOptimization 命中已优化收据时返回 source="ai"。
+  const promptOptimizationScope = `${user.id}:${state.page}`;
+  const promptAlreadyOptimized =
+    readAppliedOptimization(promptOptimizationScope, state.draft.prompt)
+      .source === "ai";
+  const suggestOptimizePrompt =
+    !referenceMode &&
+    currentPromptMode === "T2VA" &&
+    !readOnly &&
+    Boolean(state.draft.prompt.trim()) &&
+    !promptAlreadyOptimized;
   const videoTask = state.draft.videoBatchId
     ? data.tasks.find((task) => task.id === state.draft.videoBatchId)
     : undefined;
@@ -4463,6 +4477,15 @@ export function VideoPage() {
 
   const generationActions = (
     <div className="creation-form-actions">
+      {suggestOptimizePrompt && (
+        <p className="creation-optimize-hint" role="status">
+          <Icon name="sparkles" size={14} />
+          <span>
+            建议先点击“AI 优化提示词”，把描述整理成符合 H3 标准格式（镜头 / 声景
+            / 配乐）再生成，成片更稳定；也可直接提交。
+          </span>
+        </p>
+      )}
       <Button
         variant="outline"
         disabled={readOnly}
@@ -4877,6 +4900,7 @@ export function VideoPage() {
               route: referenceMode ? "reference" : "text_image",
               duration_seconds: state.draft.duration,
               ratio: state.draft.ratio as GenerationRatio,
+              resolution: state.draft.resolution as "768P" | "2K",
               first_frame_asset_id: referenceMode
                 ? undefined
                 : state.draft.firstFrameId,

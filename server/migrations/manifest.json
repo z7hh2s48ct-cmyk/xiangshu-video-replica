@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20260922T2000_analysis_task_attempts"
+      "20260923T0000_open_h3_extended_modes"
     ],
     "parents": {
       "001_core": null,
@@ -131,9 +131,10 @@
       "20260922T1200_recharge_packages": "20260921T0000_merge_wallet_actor_and_billing_metadata",
       "20260922T1600_analysis_task_request_id": "20260922T1200_analysis_task_failure_diagnostic",
       "20260922T1800_sub_account_permissions": "20260921T1200_sub_account_quotas",
-      "20260922T2000_analysis_task_attempts": "20260922T1600_analysis_task_request_id"
+      "20260922T2000_analysis_task_attempts": "20260922T1600_analysis_task_request_id",
+      "20260923T0000_open_h3_extended_modes": "20260922T2000_analysis_task_attempts"
     },
-    "revision_count": 115
+    "revision_count": 116
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -607,6 +608,10 @@
     "20260922T2000_analysis_task_attempts": {
       "file": "versions/20260922T2000_analysis_task_attempts.py",
       "sha256": "94660c279da2698e0d37d184699a20f5458f278beda5006aab2f6b5b316216b2"
+    },
+    "20260923T0000_open_h3_extended_modes": {
+      "file": "versions/20260923T0000_open_h3_extended_modes.py",
+      "sha256": "5e35abd36eebeee5909b0099744e226d463999c9ce5c89f8b8236ddb34f0575d"
     }
   },
   "task": "MIGRATION-GUARD-20260912"

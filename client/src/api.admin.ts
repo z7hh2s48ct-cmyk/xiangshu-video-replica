@@ -1823,45 +1823,6 @@ export async function updateQueueMode(
   return payload.fair_queue_enabled;
 }
 
-// ---------------------------------------------------------------------------
-// H3 extended-modes switch (CW-063 / 缺口 4b): the production control-plane
-// read/write for runtime_settings.h3_extended_modes_enabled — the gate on real
-// paid T2V / R2V / last_frame submissions. Mirrors the queue-mode helpers and
-// rides the same shared admin write contract (reason + Idempotency-Key).
-// ---------------------------------------------------------------------------
-
-export async function fetchH3ExtendedModes(): Promise<boolean> {
-  const response = await requestControl(
-    "/api/control/settings/h3-extended-modes",
-    {
-      method: "GET",
-    },
-  );
-  if (!response.ok) {
-    throw await parseActivationError(response, "读取扩展模式开关失败");
-  }
-  const payload = (await response.json()) as {
-    h3_extended_modes_enabled: boolean;
-  };
-  return payload.h3_extended_modes_enabled;
-}
-
-export async function updateH3ExtendedModes(
-  enabled: boolean,
-  reason: string,
-  idempotencyKey?: string,
-): Promise<boolean> {
-  const payload = await adminWrite<{ h3_extended_modes_enabled: boolean }>(
-    "/api/control/settings/h3-extended-modes",
-    { h3_extended_modes_enabled: enabled },
-    reason,
-    "切换扩展模式失败",
-    idempotencyKey,
-    "PATCH",
-  );
-  return payload.h3_extended_modes_enabled;
-}
-
 export type ViralRuntimeControls = {
   collection_enabled: boolean;
   import_enabled: boolean;

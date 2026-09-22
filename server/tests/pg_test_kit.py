@@ -149,11 +149,6 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
         # FOR UPDATE SKIP LOCKED 并发抢占，reset per test and migrated to
         # alembic head so publish_accounts (082_publish_accounts) is present.
         "cw068_publish_accounts_test",
-        # CW-063 h3_extended_modes_enabled admin toggle: dedicated database
-        # for the GET/PATCH /api/control/settings/h3-extended-modes route
-        # tests (test_admin_h3_extended_modes.py), migrated to alembic head
-        # with admin_u/auditor_u operator seeds.
-        "cw063_h3_extended_modes_test",
         # CUSTOMER-CENTER-V2 迁移链合并验证（merge revision + cw056 重测基线）。
         "customer_center_v2_merge_test",
         # CUSTOMER-CENTER-V2 子账号 CRUD API 套件（test_sub_account_crud.py）：

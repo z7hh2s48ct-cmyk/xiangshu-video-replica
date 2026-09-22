@@ -35,8 +35,12 @@ domain's own contract and stay covered by ``test_generation.py``; this file owns
 the independent-creation database baseline plus its two dedicated routes per CW-010.
 
 Migration findings (SQLite → PostgreSQL):
-- ``runtime_settings.h3_extended_modes_enabled`` is a real boolean column, so the
-  SQLite lane's ``SET ... = 1`` becomes ``SET ... = true``.
+- ``runtime_settings.h3_extended_modes_enabled`` no longer exists: migration
+  ``20260923T0000_open_h3_extended_modes`` drops it, and the gate it carried was
+  removed from ``app.independent`` outright. T2V / R2V / last_frame are now
+  unconditionally open, so the cases below no longer have to flip a flag before
+  submitting. ``extended_modes_enabled`` stays on the capabilities payload (the
+  client type contract) but is reported ``True`` unconditionally.
 - ``operation_cost_rates`` FK-references ``users`` (ON DELETE SET NULL), so
   ``TRUNCATE users CASCADE`` clears the migration-seeded rate defaults that
   ``snapshot_generation_rates`` reads on the PG lane; the seed captures and
@@ -110,9 +114,6 @@ _INDEPENDENT_TABLES = (
     "generation_batches, user_queue_cursors, projects, wallets, "
     "runtime_settings, users"
 )
-
-# Real boolean column on PostgreSQL (the SQLite lane used ``= 1``).
-ENABLED_UPDATE = "UPDATE runtime_settings SET h3_extended_modes_enabled = true WHERE id = 1"
 
 EMPLOYEE_1 = CurrentUser(
     id="employee_1", username="employee_1", display_name="Employee One", role="employee"
@@ -292,11 +293,6 @@ def scene(independent_dsn: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[str
 # ---------------------------------------------------------------------------
 
 
-def _enable_extended_modes() -> None:
-    with pg_transaction() as raw:
-        BusinessConnection.postgres(raw).execute(ENABLED_UPDATE)
-
-
 def _create(request: IndependentVideoRequest, actor: CurrentUser) -> BatchResult:
     with pg_transaction() as raw:
         conn = BusinessConnection.postgres(raw)
@@ -405,28 +401,43 @@ def _override_business_db(actor: CurrentUser) -> _PgBusinessDb:
 # ---------------------------------------------------------------------------
 
 
-def test_capabilities_report_extended_modes_disabled_by_default(scene: str) -> None:
+def test_capabilities_report_extended_modes_enabled_by_default(scene: str) -> None:
+    """门禁移除后 capabilities 恒报开放。
+
+    migration 20260923T0000_open_h3_extended_modes 删除了开关列，``app.independent``
+    也不再查询任何 ``runtime_settings`` 开关；``extended_modes_enabled`` 保留在 payload
+    上（前端类型契约）但永远是 True。
+    """
     with pg_transaction() as raw:
         caps = read_independent_capabilities(BusinessConnection.postgres(raw))
 
     assert caps.i2v_enabled is True
-    assert caps.t2v_enabled is False
-    assert caps.r2v_enabled is False
-    assert caps.last_frame_enabled is False
-    assert caps.extended_modes_enabled is False
-    assert caps.max_quantity >= 1
-
-
-def test_capabilities_flip_with_runtime_flag(scene: str) -> None:
-    _enable_extended_modes()
-
-    with pg_transaction() as raw:
-        caps = read_independent_capabilities(BusinessConnection.postgres(raw))
-
-    assert caps.extended_modes_enabled is True
     assert caps.t2v_enabled is True
     assert caps.r2v_enabled is True
     assert caps.last_frame_enabled is True
+    assert caps.extended_modes_enabled is True
+    assert caps.max_quantity >= 1
+
+
+def test_gate_column_is_dropped_so_no_flag_can_close_extended_modes(
+    scene: str,
+) -> None:
+    """回归锁：门禁列必须保持不存在，「永远开放」不会被悄悄撤销。
+
+    直接对 ``information_schema`` 断言，比断言 capabilities 更能拦住
+    「把列加回来并重新接上 gating」这种回流——capabilities 的 True 可能只是
+    硬编码，列回来了却没人读。
+    """
+    with pg_transaction() as raw:
+        columns = {
+            row[0]
+            for row in raw.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'runtime_settings'"
+            ).fetchall()
+        }
+
+    assert "h3_extended_modes_enabled" not in columns
 
 
 def test_capabilities_route_serves_http_contract_on_pg(scene: str) -> None:
@@ -435,24 +446,20 @@ def test_capabilities_route_serves_http_contract_on_pg(scene: str) -> None:
     origin/main drove this through ``client.get``; the migration kept only the
     service call. The route rides the unfenced ``get_database`` dependency, so
     the real handler + real PG pool serve it with **zero** override — proving the
-    route (not just the service) reads the migrated runtime_settings flag.
+    route (not just the service) serves the contract off the real database.
+
+    门禁移除后 payload 恒报开放且保留 ``extended_modes_enabled`` 字段（前端契约）。
     """
     client = TestClient(app)
     response = client.get("/api/independent/capabilities")
     assert response.status_code == 200
     body = response.json()
     assert body["i2v_enabled"] is True
-    assert body["extended_modes_enabled"] is False
-    assert body["t2v_enabled"] is False
-    assert body["r2v_enabled"] is False
+    assert body["extended_modes_enabled"] is True
+    assert body["t2v_enabled"] is True
+    assert body["r2v_enabled"] is True
+    assert body["last_frame_enabled"] is True
     assert isinstance(body["max_quantity"], int) and body["max_quantity"] >= 1
-
-    _enable_extended_modes()
-    flipped = client.get("/api/independent/capabilities").json()
-    assert flipped["extended_modes_enabled"] is True
-    assert flipped["t2v_enabled"] is True
-    assert flipped["r2v_enabled"] is True
-    assert flipped["last_frame_enabled"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -535,43 +542,14 @@ def test_i2v_replay_returns_same_batch_and_conflicting_key_is_rejected(scene: st
     assert _wallet("employee_1") == (992, 8)
 
 
-def test_extended_modes_are_gated_until_verified(scene: str) -> None:
-    gated = [
-        IndependentVideoRequest(
-            mode="t2v",
-            prompt_text="纯文字生成",
-            output_duration_seconds=6,
-            quantity=1,
-            idempotency_key="gate-t2v",
-        ),
-        IndependentVideoRequest(
-            mode="i2v",
-            prompt_text="带尾帧",
-            first_frame_asset_id="frame-owned",
-            last_frame_asset_id="frame-owned",
-            output_duration_seconds=6,
-            quantity=1,
-            idempotency_key="gate-tail",
-        ),
-        IndependentVideoRequest(
-            mode="r2v",
-            prompt_text="参考生成",
-            reference_asset_ids=["frame-owned"],
-            output_duration_seconds=6,
-            quantity=1,
-            idempotency_key="gate-r2v",
-        ),
-    ]
-    for request in gated:
-        with pytest.raises(HTTPException) as exc:
-            _create(request, EMPLOYEE_1)
-        assert exc.value.status_code == 409, request.mode
-        assert exc.value.detail["code"] == "EXTENDED_MODE_PENDING_VERIFICATION"
+def test_extended_modes_submit_without_any_flag(scene: str) -> None:
+    """门禁移除后 T2V / R2V / 尾帧可直接提交，无需任何开关。
 
-
-def test_extended_modes_open_after_verification(scene: str) -> None:
-    _enable_extended_modes()
-
+    取代原 ``test_extended_modes_are_gated_until_verified`` /
+    ``test_extended_modes_open_after_verification`` 两例：原来的 gating 分支
+    （409 ``EXTENDED_MODE_PENDING_VERIFICATION``）连同开关列一起被删除，
+    本用例保留「三种扩展模式都能真正落库」这条回归。
+    """
     t2v = _create(
         IndependentVideoRequest(
             mode="t2v",
@@ -613,7 +591,6 @@ def test_extended_modes_open_after_verification(scene: str) -> None:
 
 
 def test_mode_asset_matrix_is_enforced(scene: str) -> None:
-    _enable_extended_modes()
 
     with pytest.raises(HTTPException) as missing_first:
         _create(
@@ -690,7 +667,6 @@ def test_mode_asset_matrix_is_enforced(scene: str) -> None:
 
 
 def test_reference_images_reject_duplicates_and_more_than_capability_limit(scene: str) -> None:
-    _enable_extended_modes()
 
     with pytest.raises(HTTPException) as duplicate:
         _create(
@@ -1086,7 +1062,6 @@ def test_failed_independent_task_releases_credits(
 
 
 def test_t2v_and_r2v_tasks_run_through_worker_with_protocol_payload(scene: str) -> None:
-    _enable_extended_modes()
     _create(
         IndependentVideoRequest(
             mode="t2v",
@@ -1134,7 +1109,6 @@ def test_r2v_reference_video_and_audio_flow_through_worker_payload(
     scene: str, library_assets: bool
 ) -> None:
     """R2V 参考视频/音频端到端：请求 → prompt_snapshot → lease → provider_request。"""
-    _enable_extended_modes()
     if library_assets:
         with pg_transaction() as raw:
             conn = BusinessConnection.postgres(raw)
@@ -1193,7 +1167,6 @@ def test_r2v_reference_video_and_audio_flow_through_worker_payload(
 def test_r2v_rejects_unbound_prompt_references_before_reserve(
     scene: str, unbound: str, code: str
 ) -> None:
-    _enable_extended_modes()
     balance = _wallet(EMPLOYEE_1.id)
     with pytest.raises(HTTPException) as exc:
         _create(
@@ -1219,7 +1192,6 @@ def test_r2v_rejects_replica_source_video_as_reference(scene: str) -> None:
     统一混合列表按 kind 分流，仅素材通道类别（material_image / material_video /
     material_audio 等）可作参考；被拆解的复刻源视频（reference_video）不在并集内。
     """
-    _enable_extended_modes()
     with pytest.raises(HTTPException) as exc:
         _create(
             IndependentVideoRequest(
@@ -1280,7 +1252,6 @@ def test_video_task_route_creates_batch_through_fenced_write_on_pg(scene: str) -
 def test_r2v_rejects_invalid_reference_duration_before_reserve(
     scene: str, duration: float | None
 ) -> None:
-    _enable_extended_modes()
     with pg_transaction() as raw:
         raw.execute(
             "UPDATE assets SET metadata_json=%s WHERE id='material-video-owned'",
@@ -1304,7 +1275,6 @@ def test_r2v_rejects_invalid_reference_duration_before_reserve(
 
 
 def test_r2v_rejects_total_reference_duration_before_reserve(scene: str) -> None:
-    _enable_extended_modes()
     with pg_transaction() as raw:
         raw.execute(
             "UPDATE assets SET metadata_json=%s WHERE id='material-video-owned'",
@@ -1332,7 +1302,6 @@ def test_r2v_rejects_total_reference_duration_before_reserve(scene: str) -> None
 
 
 def test_r2v_allows_fifteen_seconds_per_media_type(scene: str) -> None:
-    _enable_extended_modes()
     with pg_transaction() as raw:
         raw.execute(
             "UPDATE assets SET metadata_json=%s WHERE id IN "
@@ -1355,7 +1324,6 @@ def test_r2v_allows_fifteen_seconds_per_media_type(scene: str) -> None:
 
 
 def test_r2v_rejects_audio_total_before_reserve(scene: str) -> None:
-    _enable_extended_modes()
     with pg_transaction() as raw:
         raw.execute(
             "UPDATE assets SET kind='material_audio', content_type='audio/mpeg', "

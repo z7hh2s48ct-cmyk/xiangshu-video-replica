@@ -6,12 +6,9 @@
 worker 提交/轮询/归档、钱包按秒计费（RESERVE/SETTLE/RELEASE）、任务中心
 列表与对账。本模块只负责创建路径的准入与快照，不重建任何管线实体。
 
-供应商中立：表、行与对客文案不得出现数据源供应商名称（红线同 oral 域）。
+供应商中立：表、行与对客文案不得出现数据源供应商名称 (红线同 oral 域)。
 
-扩展模式（尾帧 / T2V / R2V）的真实提交由
-``runtime_settings.h3_extended_modes_enabled`` 总开关门禁：协议构造与
-测试已就绪，但按 docs/短视频复刻桌面端开发说明.md §21.3 必须先完成
-供应商 API 核对（付费探针）再由管理端打开。
+扩展模式（尾帧 / T2V / R2V）始终开放，无门禁控制。
 """
 
 from __future__ import annotations
@@ -92,11 +89,11 @@ class IndependentVideoRequest(BaseModel):
 class IndependentCapabilities(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    extended_modes_enabled: bool
-    t2v_enabled: bool
-    i2v_enabled: bool
-    r2v_enabled: bool
-    last_frame_enabled: bool
+    extended_modes_enabled: bool = True
+    t2v_enabled: bool = True
+    i2v_enabled: bool = True
+    r2v_enabled: bool = True
+    last_frame_enabled: bool = True
     l2v_enabled: bool = False
     max_reference_images: int = MAX_REFERENCE_IMAGES
     max_reference_videos: int = MAX_REFERENCE_VIDEOS
@@ -104,23 +101,15 @@ class IndependentCapabilities(BaseModel):
     max_quantity: int
 
 
-def _extended_modes_enabled(conn: BusinessConnection) -> bool:
-    row = conn.execute(
-        "SELECT h3_extended_modes_enabled FROM runtime_settings WHERE id = 1"
-    ).fetchone()
-    return bool(row and row["h3_extended_modes_enabled"])
-
-
 def read_independent_capabilities(conn: BusinessConnection) -> IndependentCapabilities:
-    runtime = read_runtime_limits(conn)
-    extended = _extended_modes_enabled(conn)
+    # 所有能力默认全部开放
     return IndependentCapabilities(
-        extended_modes_enabled=extended,
-        t2v_enabled=extended,
+        extended_modes_enabled=True,
+        t2v_enabled=True,
         i2v_enabled=True,
-        r2v_enabled=extended,
-        last_frame_enabled=extended,
-        max_quantity=runtime["max_generation_count_per_batch"],
+        r2v_enabled=True,
+        last_frame_enabled=True,
+        max_quantity=read_runtime_limits(conn)["max_generation_count_per_batch"],
     )
 
 
@@ -197,33 +186,17 @@ def _validated_frame_asset(
     }
 
 
-def _validate_independent_mode_assets(
-    request: IndependentVideoRequest, *, extended_enabled: bool
-) -> None:
-    """模式/素材矩阵校验（H3 输入互斥规则）。
-
-    抽成不触库的纯函数，便于在无 PostgreSQL 的环境单测。统一混合列表
-    ``reference_asset_ids``（图/视频/音频共用一个字段，由后端按资产 kind 自动
-    分流）仅 R2V 可携带：R2V 至少一项参考、不得带首尾帧、参考不得重复；
-    T2V/I2V 携带任何参考列表即冲突（参考仅 R2V）；I2V 必需首帧；T2V 不得带
-    首尾帧。扩展模式（T2V/R2V/尾帧）未核对开放时统一 409。每类数量上限
-    （图≤8/视≤3/音≤3）依赖资产 kind，在触库分流后由
-    ``_validate_reference_kind_limits`` 校验。
+def _validate_independent_mode_assets(request: IndependentVideoRequest) -> None:
     """
-    if request.mode == "l2v":
-        raise generation_error(
-            409,
-            "LAST_FRAME_MODE_PENDING_VERIFICATION",
-            "仅尾帧生成尚待供应商验证；可以编辑或优化提示词。",
-        )
+
+    抽成不触库的纯函数，便于在无 PostgreSQL 的单测。
+    T2V/R2V/I2V(含双帧/参考生) 始终可提交，无门禁拦截。
+    每类数量上限（图≤8/视≤3/音≤3）依赖资产 kind，在触库分流后由
+    ``_validate_reference_kind_limits``校验。
+    """
+    # T2V / R2V / I2V+ 尾帧始终开放，无门禁检查
     uses_tail_frame = request.last_frame_asset_id is not None
     uses_references = bool(request.reference_asset_ids)
-    if (request.mode in {"t2v", "r2v"} or uses_tail_frame) and not extended_enabled:
-        raise generation_error(
-            409,
-            "EXTENDED_MODE_PENDING_VERIFICATION",
-            "该模式需要完成供应商核对后开放，敬请期待。",
-        )
     if request.mode == "t2v" and (request.first_frame_asset_id or uses_tail_frame):
         raise generation_error(
             422, "INDEPENDENT_MODE_ASSET_CONFLICT", "文生视频不能携带首帧或尾帧。"
@@ -311,8 +284,7 @@ def create_independent_batch(
     )
 
     mode_upper = _MODE_UPPPER[request.mode]
-    extended_enabled = _extended_modes_enabled(conn)
-    _validate_independent_mode_assets(request, extended_enabled=extended_enabled)
+    _validate_independent_mode_assets(request)
 
     # 与复刻流同源的生产红线：客户生产禁止模拟任务；metaso 需配置就绪并
     # 遵守付费试用限额。仅对“真正的新提交”生效，幂等回放在此之前返回。

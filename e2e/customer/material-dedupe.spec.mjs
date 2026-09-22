@@ -2,43 +2,8 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { expect, test } from "@playwright/test";
 import { enterCustomerAccount } from "./workspace-navigation.mjs";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(__dirname, "..", "..");
-// Same venv layout rule as setup-backend.mjs (Windows uses Scripts/python.exe).
-const python =
-  process.platform === "win32"
-    ? path.join(repoRoot, "server", ".venv", "Scripts", "python.exe")
-    : path.join(repoRoot, "server", ".venv", "bin", "python");
-
-const TEST_PG_URL =
-  process.env.TEST_POSTGRESQL_URL ??
-  "postgresql://testuser:testpass@localhost:5433/customer_v3_test";
-const E2E_DSN = `${TEST_PG_URL.slice(0, TEST_PG_URL.lastIndexOf("/"))}/customer_e2e`;
-
-/** 参考生视频（r2v_enabled）由 runtime_settings.h3_extended_modes_enabled 派生。
- *  只在本用例内打开，避免改动共享 seed 影响其他 e2e。
- *  必须在工作区首次挂载前生效：能力探测只在挂载时发起一次，
- *  而后续的 #studio/<page> 跳转是同文档导航，不会重新探测。 */
-function enableExtendedModes() {
-  execFileSync(
-    python,
-    [
-      "-c",
-      `
-import psycopg
-with psycopg.connect("${E2E_DSN}", autocommit=True) as conn:
-    conn.execute(
-        "UPDATE runtime_settings SET h3_extended_modes_enabled = TRUE WHERE id = 1"
-    )
-`,
-    ],
-    { encoding: "utf8" },
-  );
-}
 
 /** 1x1 PNG：走图片分支，绕开时长探测，直接落在 uploadVideoMaterial 上。 */
 const PNG_BYTES = Buffer.from(
@@ -138,7 +103,6 @@ async function expectReusedOnSecondUpload(page, requests, file) {
 }
 
 async function openReferenceUpload(page, account) {
-  enableExtendedModes();
   await enterCustomerAccount(page, account);
   const requests = trackMaterialRequests(page);
   await page.goto("/#studio/reference");

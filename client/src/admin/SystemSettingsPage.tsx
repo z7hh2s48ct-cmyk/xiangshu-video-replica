@@ -11,7 +11,6 @@ import { AdminEnvironmentSwitch } from "./AdminEnvironmentSwitch";
 import { BillingRatesManager } from "./BillingRatesManager";
 import { CustomerPricingManager } from "./CustomerPricingManager";
 import { H3AccountsManager } from "./H3AccountsManager";
-import { H3ExtendedModesSection } from "./H3ExtendedModesSection";
 import { PaymentSettingsSection } from "./PaymentSettingsSection";
 import { QueueModeSection } from "./QueueModeSection";
 import { RechargePackageManager } from "./RechargePackageManager";
@@ -93,7 +92,6 @@ export function SystemSettingsPage({
             <div className="admin-services__runtime">
               <div className="admin-services__switches">
                 <QueueModeSection readOnly={readOnly} />
-                <H3ExtendedModesSection readOnly={readOnly} />
               </div>
               <SettingsPanel
                 controlBackend={controlBackend}

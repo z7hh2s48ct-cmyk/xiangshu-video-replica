@@ -3055,45 +3055,6 @@ export interface paths {
     patch: operations["update_queue_mode_api_control_settings_queue_mode_patch"];
     trace?: never;
   };
-  "/api/control/settings/h3-extended-modes": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    /**
-     * Read H3 Extended Modes
-     * @description CW-063: current h3_extended_modes_enabled flag for the admin UI.
-     *
-     *     Mirrors ``read_queue_mode``: reads the single boolean off the
-     *     runtime_settings row and defaults to FALSE when the row does not exist
-     *     yet (a fresh database whose limits were never configured). The per-mode
-     *     capability breakdown stays on ``GET /api/independent/capabilities`` and is
-     *     deliberately not duplicated here.
-     */
-    get: operations["read_h3_extended_modes_api_control_settings_h3_extended_modes_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    /**
-     * Update H3 Extended Modes
-     * @description CW-063: flip the H3 extended-modes gate as an audited, idempotent admin
-     *     write behind the shared write contract.
-     *
-     *     Mirrors ``update_queue_mode`` exactly. The reason field is the operator's
-     *     attestation that the supplier paid-probe (缺口 4a) completed, so a
-     *     real-money enablement is always attributable. When the settings row does
-     *     not exist yet (a fresh database whose limits were never configured), the
-     *     documented defaults seed it — with ``fair_queue_enabled`` left FALSE and
-     *     ``h3_extended_modes_enabled`` set to the requested value — so the switch
-     *     always lands on a real row.
-     */
-    patch: operations["update_h3_extended_modes_api_control_settings_h3_extended_modes_patch"];
-    trace?: never;
-  };
   "/api/control/audit-log": {
     parameters: {
       query?: never;
@@ -8460,47 +8421,6 @@ export interface components {
       enabled: boolean;
       /** Expected Version */
       expected_version: number;
-    };
-    /**
-     * H3ExtendedModesResponse
-     * @description CW-063: read-side of the h3_extended_modes_enabled admin toggle.
-     *
-     *     The column gates real paid submissions of the T2V / R2V / last_frame H3
-     *     forms (docs/视频生成独立创作-设计与实施-2026-09-07.md §五.1). It defaults
-     *     to FALSE (migration 075) and may only be flipped after the supplier
-     *     paid-probe verification (缺口 4a) completes. The response deliberately
-     *     echoes only the single boolean — the per-mode capability breakdown
-     *     (t2v_enabled / r2v_enabled / last_frame_enabled) is served by
-     *     ``GET /api/independent/capabilities`` and must not be duplicated here.
-     */
-    H3ExtendedModesResponse: {
-      /** H3 Extended Modes Enabled */
-      h3_extended_modes_enabled: boolean;
-    };
-    /**
-     * H3ExtendedModesUpdateRequest
-     * @description CW-063: write-side of the h3_extended_modes_enabled admin toggle.
-     *
-     *     Mirrors ``QueueModeUpdateRequest`` exactly: the shared admin write
-     *     contract (idempotency key header, ``confirm: true``, non-blank reason)
-     *     rides ``AdminWriteContract``, and the audit row names the operator's
-     *     reason so a paid-mode enablement is always attributable. The reason
-     *     field is the operator's attestation that the supplier paid-probe
-     *     (缺口 4a) has completed — the UI warns before opening the dialog.
-     */
-    H3ExtendedModesUpdateRequest: {
-      /**
-       * Confirm
-       * @default false
-       */
-      confirm: boolean;
-      /**
-       * Reason
-       * @default
-       */
-      reason: string;
-      /** H3 Extended Modes Enabled */
-      h3_extended_modes_enabled: boolean;
     };
     /** HTTPValidationError */
     HTTPValidationError: {
@@ -18054,59 +17974,6 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["QueueModeResponse"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  read_h3_extended_modes_api_control_settings_h3_extended_modes_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["H3ExtendedModesResponse"];
-        };
-      };
-    };
-  };
-  update_h3_extended_modes_api_control_settings_h3_extended_modes_patch: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["H3ExtendedModesUpdateRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["H3ExtendedModesResponse"];
         };
       };
       /** @description Validation Error */

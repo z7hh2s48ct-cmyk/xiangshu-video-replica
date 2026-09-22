@@ -74,7 +74,10 @@ REPO_ROOT = SERVER_DIR.parent
 # ——tables/primary_keys +1、columns +12、foreign_keys +1、unique_constraints +1
 # （task_id+attempt）、check_constraints +3（status/attempt/retryable）、jsonb_columns +1
 # （upstream_diagnostic_json）。
-HEAD_REVISION = "20260922T2000_analysis_task_attempts"
+# 20260923T0000_open_h3_extended_modes（本分支迁移，重挂于 main 新链尾之上）移除
+# T2V/R2V/L2V 门禁并 DROP 掉 runtime_settings.h3_extended_modes_enabled
+# ——columns -1；其余计数不变。
+HEAD_REVISION = "20260923T0000_open_h3_extended_modes"
 
 # 最后一个已发布（受支持）起点。其后的 056…090 与本迁移尚未随任何受支持版本发布，
 # 故冻结范围止于此——把未发布 revision 也纳入哈希会让每次新增迁移都必须改常量，
@@ -119,7 +122,7 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # BEFORE DELETE 各算一行），故 18 行对应 10 个 distinct trigger，不是 10 行。
 HEAD_SCHEMA_COUNTS = {
     "check_constraints": 322,
-    "columns": 1211,
+    "columns": 1210,
     "foreign_keys": 193,
     "identity_columns": 0,
     "jsonb_columns": 6,
@@ -296,9 +299,12 @@ HEAD_TABLE_NAMES = (
 #   P1-6 analysis_task_attempts（新建表 analysis_task_attempts：tables/primary_keys +1、
 #   columns +12、foreign_keys +1、check_constraints +3、jsonb_columns +1；
 #   task_id+attempt 唯一性用 unique index 表达，unique_constraints 不变）。
+# - 20260923T0000_open_h3_extended_modes（本分支迁移，重挂于 main 新链尾之上）：
+#   移除 T2V/R2V/L2V 门禁并 DROP 掉 runtime_settings.h3_extended_modes_enabled
+#   （columns -1=1210；表名集、primary_keys、其余计数均不变）。
 # digest/counts 以 scripts/ci/migration_manifest.py --print-schema 于 postgres:16 重算
-# （合并后新 head：sub_account_permissions + 三个 analysis 迁移叠加）。
-HEAD_SCHEMA_DIGEST = "00549d6b2ccffc8963ee7ca65d48529ef3863e3b190c2a538f746e3d1f871a46"
+# （合并后新 head：sub_account_permissions + 三个 analysis 迁移 + 本分支迁移叠加）。
+HEAD_SCHEMA_DIGEST = "0cd75046a00dc2d14889b4fccbd96dcbc0bbe696f9bf06406eebb249e8d9f740"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

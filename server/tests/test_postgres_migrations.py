@@ -41,9 +41,11 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 # BILLING-OBS-20260922 三个迁移重挂到 sub_account_permissions 之上：
 # 20260922T1200_analysis_task_failure_diagnostic 追加 analysis_tasks.upstream_diagnostic_json，
 # 20260922T1600_analysis_task_request_id 再追加 analysis_tasks.request_id，
-# 20260922T2000_analysis_task_attempts 新建失败历史表 analysis_task_attempts。
+# 20260922T2000_analysis_task_attempts 新建失败历史表 analysis_task_attempts，
+# 20260923T0000_open_h3_extended_modes（本分支迁移，重挂于链尾）移除 T2V/R2V/L2V
+# 门禁并 DROP 掉 runtime_settings.h3_extended_modes_enabled。
 # 迁移后 alembic 版本头即该值，9 处 assert version == HEAD_REVISION 依赖此值。
-HEAD_REVISION = "20260922T2000_analysis_task_attempts"
+HEAD_REVISION = "20260923T0000_open_h3_extended_modes"
 
 
 def test_viral_script_cache_migration_preserves_results_without_task_foreign_keys(

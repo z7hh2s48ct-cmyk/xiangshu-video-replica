@@ -7603,6 +7603,8 @@ export type PromptGenerationContext = {
   route: "text_image" | "reference" | "replica";
   duration_seconds: number;
   ratio?: GenerationRatio;
+  // 分辨率仅作为优化器的清晰度预期上下文，不写进提示词正文。
+  resolution?: "768P" | "2K" | null;
   project_id?: string | null;
   analysis_version_id?: string | null;
   shot_card_version_id?: string | null;

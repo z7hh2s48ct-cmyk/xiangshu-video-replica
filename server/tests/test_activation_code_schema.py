@@ -30,7 +30,7 @@ EVENTS_TABLE = "activation_code_events"
 
 # 重挂后链尾：#188 recharge_packages 之后是 Phase 3a sub_account_quotas、
 # Phase 3b sub_account_permissions，再叠加 BILLING-OBS-20260922 三个 analysis 迁移。
-_HEAD_REVISION = "20260922T2000_analysis_task_attempts"
+_HEAD_REVISION = "20260923T0000_open_h3_extended_modes"
 
 
 def _pg_dsn() -> str:

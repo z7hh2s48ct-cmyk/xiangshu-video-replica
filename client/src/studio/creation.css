@@ -1546,6 +1546,7 @@
 .creation-video-workspace .creation-form-actions {
   display: flex;
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 12px;
   border-top: 1px solid var(--studio-border);
   padding-top: 16px;
@@ -1553,6 +1554,17 @@
 }
 .creation-video-workspace .creation-form-actions .studio-button {
   min-width: 144px;
+}
+/* T2V 提交前的「建议优化提示词」引导（非强制）：独占一行，置于按钮上方。 */
+.creation-optimize-hint {
+  flex: 1 1 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: var(--font-caption);
+  line-height: 1.5;
+  color: var(--studio-text-secondary, #9aa0a6);
 }
 .creation-video-workspace .creation-video-controls > .studio-hint {
   font-size: var(--font-caption);

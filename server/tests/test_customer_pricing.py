@@ -324,7 +324,6 @@ def test_admin_price_publication_drives_authenticated_api_billing(pricing_client
     assert "upstream" not in public.text and "Price Admin" not in public.text
     with psycopg.connect(route_state) as raw:
         raw.execute("UPDATE wallets SET available_credits = 100 WHERE user_id = %s", (uid,))
-        raw.execute("UPDATE runtime_settings SET h3_extended_modes_enabled = true")
     quote = client.get(
         "/api/generation/price-quote?resolution=2K&duration_seconds=6&quantity=1",
         headers=token_headers(key),
@@ -400,7 +399,8 @@ def test_admin_discount_and_rounding_drive_quotes(pricing_client, route_state):
     assert result.json()["config"]["consumption_rounding"] == "floor"
     with psycopg.connect(route_state) as raw:
         raw.execute("UPDATE wallets SET available_credits = 100 WHERE user_id = %s", (uid,))
-        raw.execute("UPDATE runtime_settings SET h3_extended_modes_enabled = true")
+        # 扩展模式恒开放：h3_extended_modes_enabled 列已随
+        # 20260923T0000_open_h3_extended_modes 迁移 DROP，无需再翻开关。
     quote = client.get(
         "/api/generation/price-quote?resolution=2K&duration_seconds=6&quantity=1",
         headers=token_headers(key),

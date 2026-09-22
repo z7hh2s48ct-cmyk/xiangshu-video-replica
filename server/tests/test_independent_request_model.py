@@ -81,13 +81,12 @@ def test_request_rejects_reference_asset_ids_over_total_limit() -> None:
 def test_matrix_r2v_accepts_mixed_references() -> None:
     _validate_independent_mode_assets(
         _request(reference_asset_ids=["image-1", "video-1", "audio-1"]),
-        extended_enabled=True,
     )
 
 
 def test_matrix_r2v_requires_at_least_one_reference() -> None:
     with pytest.raises(HTTPException) as exc:
-        _validate_independent_mode_assets(_request(), extended_enabled=True)
+        _validate_independent_mode_assets(_request())
     assert exc.value.status_code == 422
     assert exc.value.detail["code"] == "INDEPENDENT_REFERENCE_REQUIRED"
 
@@ -96,7 +95,6 @@ def test_matrix_r2v_rejects_duplicate_references() -> None:
     with pytest.raises(HTTPException) as exc:
         _validate_independent_mode_assets(
             _request(reference_asset_ids=["image-1", "image-1"]),
-            extended_enabled=True,
         )
     assert exc.value.status_code == 422
     assert exc.value.detail["code"] == "INDEPENDENT_REFERENCE_DUPLICATE"
@@ -106,7 +104,6 @@ def test_matrix_r2v_rejects_first_frame() -> None:
     with pytest.raises(HTTPException) as exc:
         _validate_independent_mode_assets(
             _request(reference_asset_ids=["image-1"], first_frame_asset_id="frame-1"),
-            extended_enabled=True,
         )
     assert exc.value.status_code == 422
     assert exc.value.detail["code"] == "INDEPENDENT_MODE_ASSET_CONFLICT"
@@ -115,7 +112,7 @@ def test_matrix_r2v_rejects_first_frame() -> None:
 def test_matrix_rejects_reference_list_for_t2v() -> None:
     request = _request(mode="t2v", reference_asset_ids=["image-1"])
     with pytest.raises(HTTPException) as exc:
-        _validate_independent_mode_assets(request, extended_enabled=True)
+        _validate_independent_mode_assets(request)
     assert exc.value.status_code == 422
     assert exc.value.detail["code"] == "INDEPENDENT_MODE_ASSET_CONFLICT"
 
@@ -127,14 +124,14 @@ def test_matrix_rejects_reference_list_for_i2v() -> None:
         reference_asset_ids=["image-1"],
     )
     with pytest.raises(HTTPException) as exc:
-        _validate_independent_mode_assets(request, extended_enabled=True)
+        _validate_independent_mode_assets(request)
     assert exc.value.status_code == 422
     assert exc.value.detail["code"] == "INDEPENDENT_MODE_ASSET_CONFLICT"
 
 
 def test_matrix_i2v_requires_first_frame() -> None:
     with pytest.raises(HTTPException) as exc:
-        _validate_independent_mode_assets(_request(mode="i2v"), extended_enabled=True)
+        _validate_independent_mode_assets(_request(mode="i2v"))
     assert exc.value.status_code == 422
     assert exc.value.detail["code"] == "INDEPENDENT_FIRST_FRAME_REQUIRED"
 
@@ -143,41 +140,40 @@ def test_matrix_t2v_rejects_first_frame() -> None:
     with pytest.raises(HTTPException) as exc:
         _validate_independent_mode_assets(
             _request(mode="t2v", first_frame_asset_id="frame-1"),
-            extended_enabled=True,
         )
     assert exc.value.status_code == 422
     assert exc.value.detail["code"] == "INDEPENDENT_MODE_ASSET_CONFLICT"
 
 
-def test_matrix_extended_gate_blocks_r2v_when_disabled() -> None:
-    with pytest.raises(HTTPException) as exc:
-        _validate_independent_mode_assets(
-            _request(reference_asset_ids=["image-1"]), extended_enabled=False
-        )
-    assert exc.value.status_code == 409
-    assert exc.value.detail["code"] == "EXTENDED_MODE_PENDING_VERIFICATION"
+def test_matrix_r2v_with_references_is_always_accepted() -> None:
+    """门禁移除后 R2V 恒开放：不再有 409 ``EXTENDED_MODE_PENDING_VERIFICATION``。
+
+    取代原 ``test_matrix_extended_gate_blocks_r2v_when_disabled``：
+    ``extended_enabled`` 形参连同该错误码已随迁移
+    ``20260923T0000_open_h3_extended_modes`` 一并退休，带参考图的 R2V 提交
+    必须直接通过本函数（无异常），与 ``test_independent_creation`` 里
+    ``test_extended_modes_submit_without_any_flag`` 的新契约一致。
+    """
+    _validate_independent_mode_assets(_request(reference_asset_ids=["image-1"]))
 
 
 def test_matrix_t2v_rejects_adaptive_ratio() -> None:
     # BUG-1（2026-09-19 真实付费核对）：纯文本 T2V 供应商要求 ratio 必填
     # 且不能为 adaptive（否则 400/err 2013），建批入口必须 422 拦下。
     with pytest.raises(HTTPException) as exc:
-        _validate_independent_mode_assets(
-            _request(mode="t2v", ratio="adaptive"), extended_enabled=True
-        )
+        _validate_independent_mode_assets(_request(mode="t2v", ratio="adaptive"))
     assert exc.value.status_code == 422
     assert exc.value.detail["code"] == "INDEPENDENT_T2V_RATIO_REQUIRED"
 
 
 def test_matrix_t2v_accepts_concrete_ratio() -> None:
-    _validate_independent_mode_assets(_request(mode="t2v", ratio="16:9"), extended_enabled=True)
+    _validate_independent_mode_assets(_request(mode="t2v", ratio="16:9"))
 
 
 def test_matrix_i2v_allows_adaptive_ratio() -> None:
     # I2V 的 ratio 由 build_h3_request 归一为 adaptive，入口不应拦截。
     _validate_independent_mode_assets(
         _request(mode="i2v", first_frame_asset_id="frame-1", ratio="adaptive"),
-        extended_enabled=True,
     )
 
 

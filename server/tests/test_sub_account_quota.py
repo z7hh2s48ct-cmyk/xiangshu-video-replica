@@ -64,7 +64,7 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 QUOTA_TABLE = "sub_account_quotas"
 QUOTA_DB = "t_sub_account_quota"
 
-_HEAD_REVISION = "20260922T2000_analysis_task_attempts"
+_HEAD_REVISION = "20260923T0000_open_h3_extended_modes"
 # 合并 main 后 1200 重挂到 20260922T1200_recharge_packages（手册 §3）；Phase 3b
 # permissions 与其后的 analysis 三迁移（failure_diagnostic / request_id /
 # task_attempts）追加为链尾。降级到它只回退本迁移（及清零后的 permissions 空表），

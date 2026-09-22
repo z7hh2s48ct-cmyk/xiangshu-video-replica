@@ -84,6 +84,9 @@ class GenerationContext(BaseModel):
     route: Literal["text_image", "reference", "replica"] = "replica"
     duration_seconds: int = Field(default=15, ge=4, le=15, strict=True)
     ratio: Literal["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"] = "adaptive"
+    # 分辨率仅作为优化器的清晰度预期上下文（见 prompt_rules/optimizer.txt），
+    # 不写进提示词正文、不据此增删剧情；复刻流等旧调用方不传时为 None。
+    resolution: Literal["768P", "2K"] | None = None
     project_id: str | None = None
     analysis_version_id: str | None = None
     shot_card_version_id: str | None = None
