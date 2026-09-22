@@ -12,8 +12,9 @@ export function leaseIsActive(expiresAt: string | null): boolean {
 /**
  * 跟随租约到期自动翻面的在线态。
  *
- * 从旧个人中心（`CustomerProfilePanel`）提出来共用：新中心的「设备管理」页签与
- * 旧面板都要这份判据，两处各留一份实现迟早会分叉。到期时刻本身由服务端给，
+ * 这份判据曾被已下线的旧个人中心（`CustomerProfilePanel`）与新中心的「设备管理」
+ * 页签共用，故提到本模块；旧面板删除后新中心是唯一使用者，独立成模块仍然值得，
+ * 否则「设备是否在线」会在多处各留一份实现并迟早分叉。到期时刻本身由服务端给，
  * 这里只负责在那一刻把状态翻到 false，不轮询。
  */
 export function useLeaseActive(expiresAt: string | null): boolean {

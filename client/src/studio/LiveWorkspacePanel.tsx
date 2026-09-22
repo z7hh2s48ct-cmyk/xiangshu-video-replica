@@ -4,7 +4,6 @@ import { useState } from "react";
 import "../legacy-panels.css";
 import type { CurrentUser, GenerationBatch, Project } from "../api";
 import { CharacterLibrary } from "../CharacterLibrary";
-import { CustomerProfilePanel } from "../customer/CustomerProfilePanel";
 import { CustomerRechargeDialog } from "../customer/CustomerRechargeDialog";
 import { CustomerWalletPanel } from "../customer/CustomerWalletPanel";
 import { ProjectsPage } from "../ProjectsPage";
@@ -110,33 +109,6 @@ export function LiveWorkspacePanel({
         ) : (
           <WalletPanel currentUserId={currentUser.id} />
         )
-      ) : null}
-      {panel === "profile" && customerAccount ? (
-        <CustomerProfilePanel
-          deviceError={customerAccount.deviceError}
-          devices={customerAccount.devices}
-          identity={customerAccount.identity}
-          identityLoader={customerAccount.loadIdentity}
-          onApprovePairing={customerAccount.onApprovePairing}
-          onDismissPairing={customerAccount.onDismissPairing}
-          onManualHeartbeat={customerAccount.onManualHeartbeat}
-          onProfileUpdated={customerAccount.onProfileUpdated}
-          onRefreshProfile={customerAccount.onRefreshProfile}
-          onLogout={customerAccount.onLogout}
-          onPairDevice={customerAccount.onPairDevice}
-          onRecharge={(amountYuan, packageId) =>
-            openRecharge(amountYuan, packageId)
-          }
-          onRefreshDevices={customerAccount.onRefreshDevices}
-          onSessionExpired={customerAccount.onSessionExpired}
-          onUnbind={customerAccount.onUnbind}
-          onUpdateProfile={customerAccount.onUpdateProfile}
-          profile={customerAccount.profile}
-          profileLoadError={customerAccount.profileLoadError}
-          sessionRuntime={customerAccount.sessionRuntime}
-          store={customerAccount.store}
-          walletRefreshKey={walletRefreshKey}
-        />
       ) : null}
       {panel === "profile" && !customerAccount ? (
         <div className="studio-live-panel__identity">
