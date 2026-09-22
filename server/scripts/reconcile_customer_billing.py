@@ -101,6 +101,10 @@ PG_ONLY_TABLES: frozenset[str] = frozenset(
         # （迁移在非 postgresql 方言下 return，SQLite lane 不建表）。T07 导入源无此表，
         # 目标库为空属预期；非空即 divergent，仍 fail closed。
         "content_objects",
+        # 20260921T1200_sub_account_quotas: 子账号月度额度配置（母账号内控限额），
+        # PG-only（守卫同 20260916T1400）。T07 导入源无此表，目标库为空属预期；
+        # 非空即 divergent，仍 fail closed。
+        "sub_account_quotas",
         # 20260922T1200_recharge_packages: 管理员配置的充值套餐（档位 + 赠送积分 +
         # 折扣权益）仅在 PG 落地（非 postgresql 方言 return）。T07 导入源无此表，
         # 目标库为空属预期；非空即 divergent，仍 fail closed。

@@ -194,6 +194,16 @@ export function CustomerProfilePanel({
     setTab("overview");
   }
 
+  // Phase 3a：只有子账号会话带 quota 字段（母账号两者皆 null），据此决定
+  // 「本月额度」卡是否出现。负数已用量（历史跨月退回遗留）显示前钳到 0。
+  const quotaCap = profile?.monthly_quota_credits ?? null;
+  const rawQuotaUsed = profile?.quota_used_credits ?? null;
+  const quotaUsed = rawQuotaUsed === null ? null : Math.max(0, rawQuotaUsed);
+  const quotaRemaining =
+    quotaCap === null || quotaUsed === null
+      ? null
+      : Math.max(0, quotaCap - quotaUsed);
+
   return (
     <section className="customer-profile" aria-label="个人中心">
       <header className="customer-profile__hero">
@@ -349,6 +359,17 @@ export function CustomerProfilePanel({
               <strong>{pendingPairings.length}</strong>
               <small>请只批准本人设备</small>
             </article>
+            {quotaUsed !== null ? (
+              <article>
+                <span>本月额度</span>
+                <strong>
+                  {quotaCap === null
+                    ? `已用 ${quotaUsed} 积分`
+                    : `剩余 ${quotaRemaining} 积分`}
+                </strong>
+                <small>{quotaSummary(quotaUsed, quotaCap)}</small>
+              </article>
+            ) : null}
           </div>
 
           {/* 激活码方案已废弃（2026-09-19），改用注册登录 + user_id 绑定。
@@ -447,6 +468,17 @@ export function CustomerProfilePanel({
 }
 
 // activationStatus 已删除（激活码方案废弃，2026-09-19）
+
+/** Phase 3a 子账号额度小字：无上限 → 说明；用尽 → 警示；否则进度。 */
+function quotaSummary(used: number, cap: number | null): string {
+  if (cap === null) {
+    return "额度不限，消费由母账号统一承担";
+  }
+  if (used >= cap) {
+    return `本月已用 ${used} / ${cap} 积分，额度已用完`;
+  }
+  return `本月已用 ${used} / ${cap} 积分`;
+}
 
 function identityBadge(identity: CustomerStoredIdentity | null): string {
   if (!identity) {

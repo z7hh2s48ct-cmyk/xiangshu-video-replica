@@ -35,7 +35,7 @@ import uuid
 import psycopg
 from fastapi import APIRouter, Request
 from psycopg.errors import ForeignKeyViolation, UniqueViolation
-from pydantic import BaseModel, ConfigDict, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictStr
 
 from app.admin_write_contract import transaction_now_iso
 from app.api_errors import http_error as _http
@@ -52,6 +52,11 @@ from app.customer_session_service import (
     revoke_session,
 )
 from app.password_hashing import PasswordPolicyError, hash_password
+from app.sub_account_quota import (
+    MAX_MONTHLY_QUOTA_CREDITS,
+    read_quota_used,
+    read_quota_used_map,
+)
 
 router = APIRouter(prefix="/api/customer/sub-accounts", tags=["customer-sub-accounts"])
 
@@ -69,6 +74,9 @@ class CreateSubAccountRequest(BaseModel):
     # immediately; without one it exists but cannot hold a session until a
     # password is set through the reset endpoint.
     password: StrictStr | None = None
+    # Optional monthly spend cap in credits; omitted = unlimited, matching
+    # every pre-quota sub-account (the ``sub_account_quotas`` row is the cap).
+    monthly_quota_credits: int | None = Field(default=None, ge=0, le=MAX_MONTHLY_QUOTA_CREDITS)
 
 
 class UpdateSubAccountRequest(BaseModel):
@@ -82,6 +90,15 @@ class SetSubAccountPasswordRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     password: StrictStr
+
+
+class SetSubAccountQuotaRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Required on purpose: ``null`` clears the cap (the sub-account becomes
+    # unlimited again), while a missing key is a client bug — never a silent
+    # clear.
+    monthly_quota_credits: int | None = Field(ge=0, le=MAX_MONTHLY_QUOTA_CREDITS)
 
 
 def _require_snapshot(request: Request) -> CustomerSessionSnapshot:
@@ -138,11 +155,19 @@ def _lock_master(conn: psycopg.Connection, user_id: str) -> None:
 
 
 # SELECT column order: (id, username, display_name, account_type,
-# parent_user_id, is_active, has_password, created_at, updated_at).
+# parent_user_id, is_active, has_password, created_at, updated_at,
+# monthly_quota_credits).
+#
+# The quota rides as a correlated scalar subquery rather than a LEFT JOIN so
+# ``_lock_owned_sub``'s bare ``FOR UPDATE`` keeps locking exactly the intended
+# ``users`` row; the cap row is only ever written under that same row lock.
+_SUB_COLUMNS = (
+    "id, username, display_name, account_type, parent_user_id, is_active, "
+    "(password_hash IS NOT NULL), created_at, updated_at, "
+    "(SELECT q.monthly_credits FROM sub_account_quotas q WHERE q.user_id = users.id)"
+)
 _SUB_SELECT = (
-    "SELECT id, username, display_name, account_type, parent_user_id, is_active, "
-    "(password_hash IS NOT NULL), created_at, updated_at "
-    "FROM users WHERE id = %s AND parent_user_id = %s "
+    f"SELECT {_SUB_COLUMNS} FROM users WHERE id = %s AND parent_user_id = %s "
     "AND account_type IN ('SUB', 'SUB_ADMIN')"
 )
 
@@ -157,7 +182,11 @@ def _lock_owned_sub(
     return row
 
 
-def _sub_payload(row: tuple[object, ...]) -> dict[str, object]:
+def _sub_payload(row: tuple[object, ...], *, used_credits: int = 0) -> dict[str, object]:
+    # ``monthly_quota_credits`` = None means unlimited (no quota row). The
+    # remaining figure is clamped so a cap lowered below the month's usage
+    # renders as "0 left" instead of a negative number.
+    quota = None if row[9] is None else int(str(row[9]))
     return {
         "id": str(row[0]),
         "username": str(row[1]),
@@ -168,6 +197,9 @@ def _sub_payload(row: tuple[object, ...]) -> dict[str, object]:
         "has_password": bool(row[6]),
         "created_at": row[7],
         "updated_at": row[8],
+        "monthly_quota_credits": quota,
+        "quota_used_credits": used_credits,
+        "quota_remaining_credits": None if quota is None else max(0, quota - used_credits),
     }
 
 
@@ -203,13 +235,13 @@ def list_sub_accounts(request: Request) -> dict[str, object]:
         # ``_SUB_SELECT`` hard-codes the id filter; the list variant needs the
         # parent filter only, so run the dedicated statement instead.
         rows = conn.execute(
-            "SELECT id, username, display_name, account_type, parent_user_id, is_active, "
-            "(password_hash IS NOT NULL), created_at, updated_at "
-            "FROM users WHERE parent_user_id = %s AND account_type IN ('SUB', 'SUB_ADMIN') "
+            f"SELECT {_SUB_COLUMNS} FROM users WHERE parent_user_id = %s "
+            "AND account_type IN ('SUB', 'SUB_ADMIN') "
             "ORDER BY created_at DESC",
             (ctx.user_id,),
         ).fetchall()
-        items = [_sub_payload(row) for row in rows]
+        used = read_quota_used_map(conn, [str(row[0]) for row in rows])
+        items = [_sub_payload(row, used_credits=used.get(str(row[0]), 0)) for row in rows]
     return {"sub_accounts": items, "total_count": len(items)}
 
 
@@ -248,13 +280,22 @@ def create_sub_account(body: CreateSubAccountRequest, request: Request) -> dict[
                     registration_source,
                 ),
             )
+            if body.monthly_quota_credits is not None:
+                conn.execute(
+                    "INSERT INTO sub_account_quotas (user_id, monthly_credits) VALUES (%s, %s)",
+                    (sub_account_id, body.monthly_quota_credits),
+                )
             row = conn.execute(_SUB_SELECT, (sub_account_id, ctx.user_id)).fetchone()
             _write_audit(
                 conn,
                 actor_user_id=ctx.user_id,
                 action="customer.sub_account.create",
                 entity_id=sub_account_id,
-                metadata={"username": username, "has_password": password_hash is not None},
+                metadata={
+                    "username": username,
+                    "has_password": password_hash is not None,
+                    "monthly_quota_credits": body.monthly_quota_credits,
+                },
             )
     except UniqueViolation as exc:
         # The pre-check above answers the friendly 409; this catch is the race
@@ -310,6 +351,7 @@ def update_sub_account(
                 now_iso=transaction_now_iso(conn),
             )
         row = conn.execute(_SUB_SELECT, (sub_account_id, ctx.user_id)).fetchone()
+        used = read_quota_used(conn, sub_account_id)
         _write_audit(
             conn,
             actor_user_id=ctx.user_id,
@@ -319,7 +361,7 @@ def update_sub_account(
         )
     if row is None:  # pragma: no cover - the row lock above just found it
         raise _http(404, "SUB_ACCOUNT_NOT_FOUND", "子账号不存在。")
-    return _sub_payload(row)
+    return _sub_payload(row, used_credits=used)
 
 
 @router.post("/{sub_account_id}/password")
@@ -359,6 +401,47 @@ def set_sub_account_password(
             entity_id=sub_account_id,
         )
     return {"id": sub_account_id, "has_password": True}
+
+
+@router.put("/{sub_account_id}/quota")
+def set_sub_account_quota(
+    sub_account_id: str, body: SetSubAccountQuotaRequest, request: Request
+) -> dict[str, object]:
+    """Set (or, with an explicit null, clear) the monthly spend cap.
+
+    A number caps the sub-account's credit consumption for the current
+    Shanghai calendar month; ``null`` deletes the row and the sub-account is
+    unlimited again. Enforcement lives where the money moves —
+    ``accept_operation`` under the actor's billing lock — so this endpoint
+    owns the configuration row only. The billing lock does not span this
+    transaction: at most one already-accepted, still in-flight operation can
+    land under the previous cap; every later one re-reads the new value.
+    """
+    snapshot = _require_snapshot(request)
+    with fenced_pg_transaction(snapshot) as (conn, ctx):
+        _lock_master(conn, ctx.user_id)
+        _lock_owned_sub(conn, master_id=ctx.user_id, sub_account_id=sub_account_id)
+        if body.monthly_quota_credits is None:
+            conn.execute("DELETE FROM sub_account_quotas WHERE user_id = %s", (sub_account_id,))
+        else:
+            conn.execute(
+                "INSERT INTO sub_account_quotas (user_id, monthly_credits) VALUES (%s, %s) "
+                "ON CONFLICT (user_id) DO UPDATE SET "
+                "monthly_credits = EXCLUDED.monthly_credits, updated_at = NOW()",
+                (sub_account_id, body.monthly_quota_credits),
+            )
+        row = conn.execute(_SUB_SELECT, (sub_account_id, ctx.user_id)).fetchone()
+        used = read_quota_used(conn, sub_account_id)
+        _write_audit(
+            conn,
+            actor_user_id=ctx.user_id,
+            action="customer.sub_account.quota.set",
+            entity_id=sub_account_id,
+            metadata={"monthly_quota_credits": body.monthly_quota_credits},
+        )
+    if row is None:  # pragma: no cover - the row lock above just found it
+        raise _http(404, "SUB_ACCOUNT_NOT_FOUND", "子账号不存在。")
+    return _sub_payload(row, used_credits=used)
 
 
 @router.delete("/{sub_account_id}")

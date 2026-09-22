@@ -5615,6 +5615,9 @@ const CUSTOMER_ACCOUNT_ERROR_MESSAGES: Readonly<Record<string, string>> = {
   SESSION_EXPIRED: "登录已过期，请重新登录。",
   SESSION_REPLACED: "当前设备已被另一台设备切换下线，请重新登录。",
   DEVICE_REVOKED: "当前设备凭据已失效，请联系服务人员处理。",
+  // 子账号月度额度超限（accept_operation 403）：保留业务语义而不是落成泛化的
+  // 「无权操作」——额度是配置问题，母账号调整后即可继续，文案要给人下一步。
+  SUB_ACCOUNT_QUOTA_EXCEEDED: "本月额度已用完，请联系母账号调整额度后重试。",
 };
 
 /**
@@ -6931,6 +6934,12 @@ export type CustomerSubAccount = {
   has_password: boolean;
   created_at: string;
   updated_at: string | null;
+  /** Phase 3a 月度额度：null = 不限（无额度行）；单位与钱包余额一致（积分）。 */
+  monthly_quota_credits: number | null;
+  /** 当月已用积分（-SUM(available_delta)，在途预扣计入）。 */
+  quota_used_credits: number;
+  /** 剩余额度（钳制到 0）；无额度行时为 null。 */
+  quota_remaining_credits: number | null;
 };
 
 export async function customerListSubAccounts(
@@ -6945,7 +6954,13 @@ export async function customerListSubAccounts(
 
 export async function customerCreateSubAccount(
   credential: CustomerSessionCredential,
-  input: { username: string; display_name: string; password?: string },
+  input: {
+    username: string;
+    display_name: string;
+    password?: string;
+    /** Phase 3a：可选的初始月度额度；缺省 = 不限。 */
+    monthly_quota_credits?: number;
+  },
 ): Promise<CustomerSubAccount> {
   const { body } = await customerJson<CustomerSubAccount>(
     "/api/customer/sub-accounts",
@@ -6974,6 +6989,23 @@ export async function customerSetSubAccountPassword(
   const { body } = await customerJson<{ id: string; has_password: boolean }>(
     `/api/customer/sub-accounts/${encodeURIComponent(subAccountId)}/password`,
     { method: "POST", credential, body: { password } },
+  );
+  return body;
+}
+
+/** Phase 3a：设置（数字）或清除（null）子账号的月度积分上限。 */
+export async function customerSetSubAccountQuota(
+  credential: CustomerSessionCredential,
+  subAccountId: string,
+  monthlyQuotaCredits: number | null,
+): Promise<CustomerSubAccount> {
+  const { body } = await customerJson<CustomerSubAccount>(
+    `/api/customer/sub-accounts/${encodeURIComponent(subAccountId)}/quota`,
+    {
+      method: "PUT",
+      credential,
+      body: { monthly_quota_credits: monthlyQuotaCredits },
+    },
   );
   return body;
 }

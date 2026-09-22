@@ -157,6 +157,71 @@ describe("CustomerProfilePanel", () => {
     ).not.toBeInTheDocument();
   });
 
+  // Phase 3a：子账号带月度额度时，个人中心出现「本月额度」卡（含用尽警示）。
+  it("shows the monthly quota card for a sub-account with a cap", () => {
+    const cappedSubProfile: CustomerProfile = {
+      ...profile,
+      account_type: "SUB",
+      parent_user_id: "parent-1",
+      parent_display_name: "总部机构",
+      monthly_quota_credits: 1000,
+      quota_used_credits: 1200,
+    };
+    render(
+      <CustomerProfilePanel {...defaultProps} profile={cappedSubProfile} />,
+    );
+
+    expect(screen.getByText("本月额度")).toBeInTheDocument();
+    // 剩余额度钳制到 0，不出现负数。
+    expect(screen.getByText("剩余 0 积分")).toBeInTheDocument();
+    expect(
+      screen.getByText("本月已用 1200 / 1000 积分，额度已用完"),
+    ).toBeInTheDocument();
+  });
+
+  // 评审 P3：负数已用量（历史跨月退回遗留）显示前钳到 0，剩余与文案都不为负。
+  it("clamps a negative monthly usage to zero before display", () => {
+    const negativeSubProfile: CustomerProfile = {
+      ...profile,
+      account_type: "SUB",
+      parent_user_id: "parent-1",
+      parent_display_name: "总部机构",
+      monthly_quota_credits: 1000,
+      quota_used_credits: -50,
+    };
+    render(
+      <CustomerProfilePanel {...defaultProps} profile={negativeSubProfile} />,
+    );
+
+    expect(screen.getByText("剩余 1000 积分")).toBeInTheDocument();
+    expect(screen.getByText("本月已用 0 / 1000 积分")).toBeInTheDocument();
+  });
+
+  // Phase 3a：未设额度的子账号只展示用量说明；母账号不出现该卡。
+  it("explains an uncapped sub-account and hides the card for a master", () => {
+    const { unmount } = render(<CustomerProfilePanel {...defaultProps} />);
+    expect(screen.queryByText("本月额度")).not.toBeInTheDocument();
+    unmount();
+
+    const uncappedSubProfile: CustomerProfile = {
+      ...profile,
+      account_type: "SUB",
+      parent_user_id: "parent-1",
+      parent_display_name: "总部机构",
+      monthly_quota_credits: null,
+      quota_used_credits: 320,
+    };
+    render(
+      <CustomerProfilePanel {...defaultProps} profile={uncappedSubProfile} />,
+    );
+
+    expect(screen.getByText("本月额度")).toBeInTheDocument();
+    expect(screen.getByText("已用 320 积分")).toBeInTheDocument();
+    expect(
+      screen.getByText("额度不限，消费由母账号统一承担"),
+    ).toBeInTheDocument();
+  });
+
   // CW-062：身份未知（重装/旧金库）时徽章隐藏，但个人中心其余内容不受影响。
   it("degrades to no badge when the identity is unknown", async () => {
     const identityLoader = vi.fn().mockResolvedValue(null);

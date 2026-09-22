@@ -18,7 +18,7 @@
 }
 .sub-accounts-page__create {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
   align-items: end;
   gap: 12px;
   border: 1px solid var(--line);
@@ -44,7 +44,7 @@
 }
 .sub-account-card {
   display: grid;
-  grid-template-columns: minmax(160px, 1fr) auto auto;
+  grid-template-columns: minmax(160px, 1fr) minmax(150px, auto) auto auto;
   align-items: center;
   gap: 16px;
   border: 1px solid var(--line);
@@ -73,6 +73,39 @@
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+.sub-account-card__quota {
+  display: grid;
+  gap: 6px;
+  color: #aaa297;
+  font-size: var(--font-caption);
+}
+.sub-account-quota-bar {
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border: none;
+  border-radius: 999px;
+  background: #2a2a30;
+  overflow: hidden;
+}
+.sub-account-quota-bar::-webkit-progress-bar {
+  background: #2a2a30;
+  border-radius: 999px;
+}
+.sub-account-quota-bar::-webkit-progress-value {
+  background: #3f6b52;
+  border-radius: 999px;
+}
+.sub-account-quota-bar::-moz-progress-bar {
+  background: #3f6b52;
+  border-radius: 999px;
+}
+.sub-account-quota-bar.is-exhausted::-webkit-progress-value {
+  background: #b06060;
+}
+.sub-account-quota-bar.is-exhausted::-moz-progress-bar {
+  background: #b06060;
 }
 .sub-account-badge {
   border: 1px solid #4a4a4f;

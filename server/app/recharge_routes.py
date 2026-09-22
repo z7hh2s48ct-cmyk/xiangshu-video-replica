@@ -56,6 +56,7 @@ from app.permissions import require_not_auditor
 from app.recharge_packages import RechargePackage, build_package_snapshot, read_package
 from app.security_rate_limit import _server_now, client_ip_from_request
 from app.settings import SettingsRepository, effective_customer_billing_settings
+from app.sub_account_quota import read_quota_used
 from app.usage_billing import resolve_wallet_owner
 from app.wallet_routes import WalletResponse, WalletTransactionPage, WalletTransactionResponse
 from app.wechat_native_client import (
@@ -147,6 +148,12 @@ class CustomerProfileResponse(BaseModel):
     account_type: str = "MASTER"
     parent_user_id: str | None = None
     parent_display_name: str | None = None
+    # Phase 3a monthly quota view: only a sub-account session carries these
+    # (a master owns the wallet and is never capped, so it answers null/null).
+    # A sub-account without a quota row answers null for the cap while
+    # ``quota_used_credits`` still reports the month's consumption.
+    monthly_quota_credits: int | None = None
+    quota_used_credits: int | None = None
 
 
 class UpdateCustomerProfileRequest(BaseModel):
@@ -938,7 +945,12 @@ def _customer_profile(conn: psycopg.Connection, *, user_id: str) -> CustomerProf
                    SELECT parent.display_name
                    FROM users parent
                    WHERE parent.id = u.parent_user_id
-               ) AS parent_display_name
+               ) AS parent_display_name,
+               (
+                   SELECT quota.monthly_credits
+                   FROM sub_account_quotas quota
+                   WHERE quota.user_id = u.id
+               ) AS monthly_quota_credits
         FROM users u
         LEFT JOIN LATERAL (
             SELECT masked_code, status, activated_at
@@ -972,6 +984,8 @@ def _customer_profile(conn: psycopg.Connection, *, user_id: str) -> CustomerProf
         account_type=str(row[8]) if row[8] is not None else "MASTER",
         parent_user_id=str(row[9]) if row[9] is not None else None,
         parent_display_name=str(row[10]) if row[10] is not None else None,
+        monthly_quota_credits=None if row[11] is None else int(str(row[11])),
+        quota_used_credits=read_quota_used(conn, user_id) if row[9] is not None else None,
     )
 
 

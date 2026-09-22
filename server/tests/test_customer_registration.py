@@ -56,7 +56,8 @@ CW076_DB_NAME = "cw076_registration_test"
 CW076_MIGRATION_DB_NAME = "cw076_migration_test"
 
 REGISTER_PATH = "/api/customer/register"
-HEAD_REVISION = "20260922T1200_recharge_packages"
+# 重挂后链尾：#188 recharge_packages 之后是 Phase 3a 的 sub_account_quotas。
+HEAD_REVISION = "20260921T1200_sub_account_quotas"
 PRIOR_REVISION = "20260912T1353_customer_discounts"
 
 # A policy-valid password (>= MIN_PASSWORD_LENGTH, not blank). Never a secret.

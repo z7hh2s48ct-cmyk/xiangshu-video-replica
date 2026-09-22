@@ -18,6 +18,7 @@ from app.billing_catalog import (
     snapshot_discount_rate,
 )
 from app.db_portable import BusinessConnection
+from app.sub_account_quota import enforce_sub_account_quota
 
 
 def resolve_wallet_owner(conn: BusinessConnection, user_id: str) -> str:
@@ -94,6 +95,10 @@ def accept_operation(
     credits = int(str(snapshot["credits"]))
     funding: list[dict[str, Any]] = []
     if credits:
+        if wallet_owner_id != user_id:
+            # Sub-account monthly cap (Phase 3a): enforced under the actor's
+            # advisory lock, before the shared wallet is touched.
+            enforce_sub_account_quota(conn, actor_id=user_id, additional_credits=credits)
         wallet = conn.execute(
             "SELECT available_credits FROM wallets WHERE user_id=%s FOR UPDATE",
             (wallet_owner_id,),

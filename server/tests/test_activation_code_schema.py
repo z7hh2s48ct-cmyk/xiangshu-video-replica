@@ -28,7 +28,8 @@ EXPORTS_TABLE = "activation_code_exports"
 ACTIVATIONS_TABLE = "activation_code_activations"
 EVENTS_TABLE = "activation_code_events"
 
-_HEAD_REVISION = "20260922T1200_recharge_packages"
+# 重挂后链尾：#188 recharge_packages 之后是 Phase 3a 的 sub_account_quotas。
+_HEAD_REVISION = "20260921T1200_sub_account_quotas"
 
 
 def _pg_dsn() -> str:
