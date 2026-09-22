@@ -1321,8 +1321,10 @@ const REVIEW_SAMPLE_SHOTS: ShotCard[] = [
 /** 归一到后端契约的 4–15 秒整数区间（`output_duration_seconds` 是
  * `ge=4, le=15`）。这里曾把时长折叠成 4/15 两档，那是 H3 早期只支持两档时的
  * 权宜；PR #160 放开到每秒后，折叠会让提示词上下文里的时长与实际生成时长
- * 对不上——按 12 秒生成、却按 15 秒写提示词。 */
-function normalizeCustomerDuration(seconds: number): number {
+ * 对不上——按 12 秒生成、却按 15 秒写提示词。
+ * 导出供独立创作页共用：非法时长按钳位处理，不允许任何路径静默回落 8 秒
+ * （上线前检查 P1-4）。 */
+export function normalizeCustomerDuration(seconds: number): number {
   if (!Number.isFinite(seconds)) return 15;
   return Math.min(15, Math.max(4, Math.round(seconds)));
 }

@@ -207,19 +207,26 @@ export function useCustomerSession(
    * buttons. Failures stay silent — terminal outcomes arrive as the
    * lifecycle events, transient ones are retried by the next tick. */
   sendHeartbeatNow(): Promise<void>;
+  /** 「登录已过期」终屏的定制说明；null = 显示通用文案（P2-2）。 */
+  expiredNotice: string | null;
   logout(): Promise<CustomerLogoutOutcome>;
   restartAfterExpiry(): void;
   /** Local-only expiry: the workspace reports a lost session without a
    * transport lifecycle event (missing local token). Runs the same cleanup
    * as a transport expiry and lands on the expired terminal screen — never
-   * a silent no-op from the workspace screen. */
-  expireSessionLocally(): void;
+   * a silent no-op from the workspace screen. The optional notice replaces
+   * the generic「登录已过期」copy on the terminal screen (preflight P2-2:
+   * 改密/退出所有设备成功后的分情况文案要活着落到终屏). */
+  expireSessionLocally(notice?: string): void;
   restartAfterRevocation(): void;
 } {
   const [screen, dispatch] = useReducer(
     customerScreenReducer,
     initialCustomerScreen,
   );
+  // session-expired 终屏的定制说明（P2-2）：默认 null 显示通用文案；
+  // 由 expireSessionLocally(notice) 写入，任何新会话建立时清空。
+  const [expiredNotice, setExpiredNotice] = useState<string | null>(null);
   const [isBusy, setIsBusy] = useState(false);
   const [error, setError] = useState<CustomerApiError | null>(null);
   const [conflict, setConflict] = useState<CustomerSessionConflict | null>(
@@ -482,6 +489,9 @@ export function useCustomerSession(
     };
     const onExpired = () => {
       clearSession();
+      // 传输层过期没有定制文案；清掉旧 notice 避免上一次「改密成功」的
+      // 说明冒充本次过期原因（P2-2）。
+      setExpiredNotice(null);
       dispatch({ type: "session-expired" });
     };
     const onReplaced = () => {
@@ -848,18 +858,22 @@ export function useCustomerSession(
   // otherwise stay on a silently dead workspace screen. Same cleanup as the
   // transport-driven expiry, then the §4.2 expired terminal screen offers the
   // deterministic recovery path.
-  const expireSessionLocally = useCallback(() => {
-    sessionTokenRef.current = null;
-    sessionGenerationRef.current += 1;
-    latestHeartbeatRequestIdRef.current += 1;
-    setSessionToken(null);
-    setUser(null);
-    setConflict(null);
-    setSessionRuntime(null);
-    setError(null);
-    clearLifecycleCredentials(false);
-    dispatch({ type: "session-expired" });
-  }, [clearLifecycleCredentials]);
+  const expireSessionLocally = useCallback(
+    (notice?: string) => {
+      sessionTokenRef.current = null;
+      sessionGenerationRef.current += 1;
+      latestHeartbeatRequestIdRef.current += 1;
+      setSessionToken(null);
+      setUser(null);
+      setConflict(null);
+      setSessionRuntime(null);
+      setError(null);
+      setExpiredNotice(notice ?? null);
+      clearLifecycleCredentials(false);
+      dispatch({ type: "session-expired" });
+    },
+    [clearLifecycleCredentials],
+  );
 
   const restartAfterRevocation = useCallback(() => {
     setError((current) =>
@@ -871,6 +885,7 @@ export function useCustomerSession(
 
   return {
     screen,
+    expiredNotice,
     isBusy,
     error,
     conflict,

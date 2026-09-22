@@ -236,7 +236,9 @@ function CustomerSessionShell({ store }: { store: CustomerCredentialStore }) {
       return (
         <CustomerTerminalScreen
           title="登录已过期"
-          description="会话已过期，请重新登录。"
+          // P2-2：改密/退出所有设备后的落地说明由工作区带出（如「密码已修改，
+          // 其他设备已下线」），无定制说明才显示通用文案。
+          description={session.expiredNotice ?? "会话已过期，请重新登录。"}
           actionLabel="重新登录"
           onAction={session.restartAfterExpiry}
         />

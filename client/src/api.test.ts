@@ -1914,6 +1914,24 @@ describe("customer-visible service errors", () => {
       { code: "ZPAY_UNAVAILABLE", message: "gateway rejected" },
       "在线支付暂时不可用，请稍后重试；如已扣款，请勿重复支付并联系客服。",
     ],
+    // 上线前检查 P2-4：补齐缺口的四个供应商 pattern（纵深防御——服务端
+    // 文案当前全中性，此处保证未来任何一处带供应商名的报错也被拦下）。
+    [
+      { code: "ORAL_TASK_FAILED", message: "hifly render error" },
+      "数字人口播服务暂时不可用，请稍后重试；如持续失败，请联系客服。",
+    ],
+    [
+      { code: "VIRAL_FETCH_FAILED", message: "TikHub upstream timeout" },
+      "爆款数据服务暂时不可用，请稍后重试；如持续失败，请联系客服。",
+    ],
+    [
+      { code: "ASR_FAILED", message: "DashScope quota exceeded" },
+      "音频转写服务暂时不可用，请稍后重试；如持续失败，请联系客服。",
+    ],
+    [
+      { code: "LINK_RESOLUTION_FAILED", message: "douyidou解析超时" },
+      "链接解析服务暂时不可用，请稍后重试；如持续失败，请联系客服。",
+    ],
   ])("maps a branded provider failure to neutral copy", (error, expected) => {
     expect(customerVisibleErrorMessage(error)).toBe(expected);
   });
