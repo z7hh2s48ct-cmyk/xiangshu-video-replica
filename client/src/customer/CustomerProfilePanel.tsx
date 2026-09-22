@@ -9,7 +9,6 @@ import { CustomerWalletPanel } from "./CustomerWalletPanel";
 import { DeviceManagementPage } from "./DeviceManagementPage";
 import { HeartbeatStatus } from "./HeartbeatStatus";
 import { LeaseCountdown } from "./LeaseCountdown";
-import { PairingApprovalCard } from "./PairingApprovalCard";
 import {
   forecastQuota,
   type QuotaOverview,
@@ -32,8 +31,6 @@ export function CustomerProfilePanel({
   deviceError,
   identity = null,
   identityLoader,
-  onApprovePairing,
-  onDismissPairing,
   onManualHeartbeat,
   onLogout,
   onPairDevice,
@@ -85,17 +82,12 @@ export function CustomerProfilePanel({
   const [isRetryingProfile, setIsRetryingProfile] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   // isResettingCode / replacementCode 已删除（激活码方案废弃）
-  const [deferredPairingIds, setDeferredPairingIds] = useState<Set<string>>(
-    () => new Set(),
-  );
+  // deferredPairingIds 已删除：它只服务于「暂缓配对」，随配对审批入口一并摘除（B1）。
   // 批次1：母账号概览「子账号数 / 本月子账号消费」两卡——惰性拉一次列表，
   // 失败静默（概览卡是锦上添花，不打扰个人中心主路径）。
   const [subAccountOverview, setSubAccountOverview] =
     useState<QuotaOverview | null>(null);
   const pendingPairings = devices?.pending_pairings ?? [];
-  const overviewPairings = pendingPairings.filter(
-    (pairing) => !deferredPairingIds.has(pairing.pairing_request_id),
-  );
   const isOnline = useLeaseActive(sessionRuntime?.leaseExpiresAt ?? null);
 
   // CW-062：身份来自会话缓存（首登响应写入）；profile 是权威副本，加载后
@@ -228,12 +220,6 @@ export function CustomerProfilePanel({
     } finally {
       setIsLoggingOut(false);
     }
-  }
-
-  function deferPairing(pairingId: string) {
-    setDeferredPairingIds((current) => new Set(current).add(pairingId));
-    setProfileNotice("已暂不处理，可稍后在设备管理中继续确认。");
-    setTab("overview");
   }
 
   // Phase 3a：只有子账号会话带 quota 字段（母账号两者皆 null），据此决定
@@ -448,24 +434,8 @@ export function CustomerProfilePanel({
           {/* 激活码方案已废弃（2026-09-19），改用注册登录 + user_id 绑定。
               原「当前激活凭证」卡片与「新激活码显示区」已删除。 */}
 
-          {overviewPairings.length > 0 ? (
-            <section className="customer-profile__pending">
-              <h3>需要你确认</h3>
-              {overviewPairings.map((pending) => (
-                <PairingApprovalCard
-                  key={pending.pairing_request_id}
-                  onApprove={onApprovePairing}
-                  onDelete={onDismissPairing}
-                  onReject={() => deferPairing(pending.pairing_request_id)}
-                  pairing={{
-                    id: pending.pairing_request_id,
-                    deviceFingerprint: `${pending.display_name} · ${pending.platform}`,
-                    createdAt: pending.created_at,
-                  }}
-                />
-              ))}
-            </section>
-          ) : null}
+          {/* 任务书 B1：配对审批入口已摘除（新激活方案下密码登录即用，无需审批）。
+              组件文件保留，实际删除归 B2。 */}
         </div>
       ) : null}
 
@@ -491,19 +461,8 @@ export function CustomerProfilePanel({
               ) : null}
             </div>
           ) : null}
-          {pendingPairings.map((pending) => (
-            <PairingApprovalCard
-              key={pending.pairing_request_id}
-              onApprove={onApprovePairing}
-              onDelete={onDismissPairing}
-              onReject={() => deferPairing(pending.pairing_request_id)}
-              pairing={{
-                id: pending.pairing_request_id,
-                deviceFingerprint: `${pending.display_name} · ${pending.platform}`,
-                createdAt: pending.created_at,
-              }}
-            />
-          ))}
+          {/* 任务书 B1：配对审批入口已摘除（新激活方案下密码登录即用，无需审批）。
+              组件文件保留，实际删除归 B2。 */}
           {devices ? (
             <DeviceManagementPage
               devices={devices}

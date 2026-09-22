@@ -8,7 +8,6 @@ import {
   CustomerApiError,
   type CustomerDeviceCredential,
   clearCustomerBrowserCredentials,
-  customerActivate,
   customerBrowserCredentials,
   customerGetProfile,
   customerHeartbeat,
@@ -175,7 +174,7 @@ function logoutFailureError(
 
 /**
  * The customer session orchestrator (FE-02): boots from the credential
- * store, drives activate/login/logout, listens for the three lifecycle
+ * store, drives login/logout, listens for the three lifecycle
  * events (§10.1), and keeps the lease alive with heartbeats while the
  * workspace is live. Screen transitions all flow through the
  * customer-state reducer — nothing here jumps screens directly.
@@ -191,7 +190,6 @@ export function useCustomerSession(
   user: CustomerWorkspaceUser | null;
   /** Heartbeat/lease health while a session is live; null otherwise. */
   sessionRuntime: CustomerSessionRuntime | null;
-  activate(input: CustomerActivationFormInput): Promise<void>;
   loginWithPassword(input: AccountAccessInput): Promise<void>;
   retryLogin(): Promise<void>;
   /** The explicit takeover (FE-03): the user confirmed in the conflict dialog,
@@ -284,12 +282,6 @@ export function useCustomerSession(
     },
     [noteHeartbeatFailure, noteLease],
   );
-
-  // For the current activation attempt, retain this key until final outcome to
-  // enable retries when the response is lost/timed out. The server can recover
-  // by replaying the original key; a new key would reject the already-consumed
-  // activation code and leave the customer stranded.
-  const currentActivationIdempotencyKeyRef = useRef<string | null>(null);
 
   useEffect(
     () => () => {
@@ -544,63 +536,6 @@ export function useCustomerSession(
       window.clearInterval(timer);
     };
   }, [heartbeatIntervalMs, screen, sessionToken, sendHeartbeat]);
-
-  const activate = useCallback(
-    async (input: CustomerActivationFormInput) => {
-      setIsBusy(true);
-      setError(null);
-      setConflict(null);
-      try {
-        // Generate or reuse the idempotency key for this activation attempt
-        const idempotencyKey =
-          currentActivationIdempotencyKeyRef.current ?? newIdempotencyKey();
-        if (!currentActivationIdempotencyKeyRef.current) {
-          currentActivationIdempotencyKeyRef.current = idempotencyKey;
-        }
-
-        const response = await customerActivate({
-          activationCode: input.activationCode,
-          deviceFingerprint: await store.deviceInstanceId(),
-          deviceName: input.deviceName,
-          devicePlatform: store.devicePlatform(),
-          idempotencyKey,
-        });
-
-        // Clear the key only after successful activation completion
-        currentActivationIdempotencyKeyRef.current = null;
-        try {
-          await store.saveActivation(
-            response.device_token,
-            response.session_token,
-          );
-        } catch (cause) {
-          throw credentialStoreError(cause);
-        }
-        sessionTokenRef.current = response.session_token;
-        sessionGenerationRef.current += 1;
-        setSessionToken(response.session_token);
-        // 激活码只能铸造机构母账号（子账号仅限管理端创建），身份直给。
-        setUser({
-          userId: response.user_id,
-          username: response.username,
-          accountType: "MASTER",
-          parentUserId: null,
-          parentDisplayName: null,
-        });
-        noteLease(response.session_lease_expires_at);
-        dispatch({ type: "activation-succeeded" });
-      } catch (cause) {
-        setError(
-          cause instanceof CustomerApiError
-            ? cause
-            : credentialStoreError(cause),
-        );
-      } finally {
-        setIsBusy(false);
-      }
-    },
-    [store, noteLease],
-  );
 
   const passwordAttemptRef = useRef<{
     fingerprint: string;
@@ -931,7 +866,7 @@ export function useCustomerSession(
       current?.code === "CREDENTIAL_CLEAR_FAILED" ? current : null,
     );
     setConflict(null);
-    dispatch({ type: "restart-activation" });
+    dispatch({ type: "restart-login" });
   }, []);
 
   return {
@@ -941,7 +876,6 @@ export function useCustomerSession(
     conflict,
     user,
     sessionRuntime,
-    activate,
     loginWithPassword,
     retryLogin,
     switchSession,

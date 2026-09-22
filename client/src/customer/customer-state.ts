@@ -13,7 +13,6 @@
 
 export type CustomerScreen =
   | "checking"
-  | "activation"
   | "login"
   | "binding-conflict"
   | "workspace"
@@ -25,10 +24,9 @@ export const initialCustomerScreen: CustomerScreen = "checking";
 
 export type CustomerScreenEvent =
   // Boot: the credential store answered whether a device credential exists.
+  // 新激活方案（2026-09-18）后两个分支都落到登录屏：获客入口是自助注册，
+  // 注册与登录同在 AccountAccessPage，激活码不再是入口（任务书 B1）。
   | { type: "boot-check-completed"; hasDeviceCredential: boolean }
-  // The activation form (or an idempotent replay of it) established the
-  // account, the first device credential, and a live session.
-  | { type: "activation-succeeded" }
   | { type: "password-login-succeeded" }
   // A login with the stored device credential established a session.
   | { type: "login-succeeded" }
@@ -52,13 +50,13 @@ export type CustomerScreenEvent =
   // credential is dead and only the recovery flow (re-activation or an admin
   // approved rebind) can bring the user back.
   | { type: "device-revoked" }
-  // The session-expired / session-replaced screens offer a "log in again"
-  // path back to the login screen.
+  // The three terminal screens（session-expired / session-replaced /
+  // device-revoked）offer a "log in again" path back to the login screen.
+  // 设备凭据报废后的恢复手段同样是重新登录——激活码通道已退役（任务书 B1），
+  // 故本事件吸收了原先的 restart-activation。
   | { type: "restart-login" }
-  // The device-revoked screen offers the recovery path back to activation.
-  | { type: "restart-activation" }
   // A retry login failed to find a stored device credential (vault cleared / I/O failure):
-  // the user needs to recover via a new activation. This event is guarded to only fire
+  // the user recovers by logging in again. This event is guarded to only fire
   // from the login screen (§4.1 state machine);
   | { type: "credential-missing" };
 
@@ -71,18 +69,13 @@ export function customerScreenReducer(
       if (screen !== "checking") {
         return screen;
       }
-      return event.hasDeviceCredential ? "login" : "activation";
-
-    case "activation-succeeded":
-      // An activation can only originate from the activation screen; from
-      // anywhere else it would be a stale dispatch (e.g. a late reply racing
-      // the boot check) and must not move the UI.
-      return screen === "activation" ? "workspace" : screen;
+      // B1：有无线索都落到登录屏。获客入口已改为自助注册，注册与登录同在
+      // AccountAccessPage，不再有独立的激活屏；hasDeviceCredential 仅用于
+      // 调用方决定是否预填「记住密码」。
+      return "login";
 
     case "password-login-succeeded":
-      return screen === "activation" ||
-        screen === "login" ||
-        screen === "binding-conflict"
+      return screen === "login" || screen === "binding-conflict"
         ? "workspace"
         : screen;
 
@@ -116,18 +109,18 @@ export function customerScreenReducer(
       return "device-revoked";
 
     case "restart-login":
-      return screen === "session-expired" || screen === "session-replaced"
+      return screen === "session-expired" ||
+        screen === "session-replaced" ||
+        screen === "device-revoked"
         ? "login"
         : screen;
 
-    case "restart-activation":
-      return screen === "device-revoked" ? "activation" : screen;
     case "credential-missing":
       // The stored device credential vanished in the middle of a retry login
-      // or an explicit switch (FE-02 / P3 review): go straight back to
-      // activation for recovery.
+      // or an explicit switch (FE-02 / P3 review): back to the login screen
+      // for recovery（原先是回到激活屏，B1 后激活通道退役）。
       return screen === "login" || screen === "binding-conflict"
-        ? "activation"
+        ? "login"
         : screen;
   }
 }

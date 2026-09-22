@@ -3,7 +3,6 @@ import { lazy, Suspense, useEffect, useState } from "react";
 // 全局 reset、:root 令牌与激活/登录/配对等屏样式必须随本入口加载。
 import "./customer/customer-access.css";
 import { AccountAccessPage } from "./customer/AccountAccessPage";
-import { CustomerPairingFlow } from "./customer/CustomerPairingFlow";
 import { CustomerWelcomePage } from "./customer/CustomerWelcomePage";
 
 import { LoginPage } from "./customer/LoginPage";
@@ -56,46 +55,27 @@ export function RootApp({
         <ReviewWorkspace />
       </Suspense>
     );
-  return (
-    <CustomerShell startInPairing={path.startsWith("/customer/pairing")} />
-  );
+  return <CustomerShell />;
 }
 
-/** The customer entry (FE-02): the seven-screen customer state machine from
- * dev doc §4.1. It never renders the internal login shell, so the internal
+/** The customer entry (FE-02): the customer screen state machine from dev
+ * doc §4.1. It never renders the internal login shell, so the internal
  * access-token input is structurally not a customer entry. The workspace
- * screen reuses the shared shell under the customer identity. */
-function CustomerShell({
-  startInPairing = false,
-}: {
-  startInPairing?: boolean;
-}) {
+ * screen reuses the shared shell under the customer identity.
+ *
+ * 任务书 B1：配对入口（原 `/customer/pairing` 的 CustomerPairingFlow）已摘除。
+ * 新激活方案下不限设备台数、密码登录即用，不存在"添加已有账号设备"这一步。
+ * 组件文件保留，实际删除归 B2。 */
+function CustomerShell() {
   // The credential store owns session state, so its identity must survive
   // memo cache invalidation (including Fast Refresh). Browser reloads restore
   // CSRF handles from HttpOnly cookies; desktop credentials stay in the vault.
   const [store] = useState(customerCredentialStore);
-  const [pairing, setPairing] = useState(startInPairing);
 
-  if (pairing) {
-    return (
-      <CustomerPairingFlow store={store} onPaired={() => setPairing(false)} />
-    );
-  }
-
-  // Mount the normal boot flow after pairing so it reads the saved device
-  // credential. Returning without pairing still boots into activation.
-  return (
-    <CustomerSessionShell store={store} onPairDevice={() => setPairing(true)} />
-  );
+  return <CustomerSessionShell store={store} />;
 }
 
-function CustomerSessionShell({
-  store,
-  onPairDevice,
-}: {
-  store: CustomerCredentialStore;
-  onPairDevice(): void;
-}) {
+function CustomerSessionShell({ store }: { store: CustomerCredentialStore }) {
   const session = useCustomerSession(store);
   const [accessOpen, setAccessOpen] = useState(
     () =>
@@ -160,7 +140,6 @@ function CustomerSessionShell({
           </section>
         </main>
       );
-    case "activation":
     case "login":
       return (
         <>
@@ -250,7 +229,6 @@ function CustomerSessionShell({
             // restartAfterExpiry is a guarded no-op from the workspace screen —
             // the dedicated local expiry lands on the expired terminal instead.
             onSessionExpired={session.expireSessionLocally}
-            onPairDevice={onPairDevice}
           />
         </Suspense>
       );

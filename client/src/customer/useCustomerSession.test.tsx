@@ -342,7 +342,7 @@ describe("useCustomerSession", () => {
     },
   );
 
-  it("boots without a stored credential onto the activation screen", async () => {
+  it("boots onto the login screen without a stored credential", async () => {
     const store = memoryStore();
     const fetchMock = stubFetch(() => jsonResponse({}));
 
@@ -350,7 +350,7 @@ describe("useCustomerSession", () => {
       useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
     );
 
-    await waitFor(() => expect(result.current.screen).toBe("activation"));
+    await waitFor(() => expect(result.current.screen).toBe("login"));
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -360,9 +360,9 @@ describe("useCustomerSession", () => {
   // stable fingerprint is not a second authentication factor"), so the old
   // automaticRecovery lane could never succeed — its 201 "recovered" mock was
   // false evidence, forbidden by the CW-017 acceptance line. A wiped install
-  // now waits on the activation screen for the full code, which the server
+  // now waits on the login screen, which the server
   // binds to the same fingerprint (recover-or-bind) — never a boot-time probe.
-  it("never fires an empty-code recovery probe; a wiped install waits for the full activation code", async () => {
+  it("never fires an empty-code recovery probe; a wiped install waits on the login screen", async () => {
     const store = memoryStore();
     const fetchMock = stubFetch(() => jsonResponse({}, 500));
 
@@ -370,7 +370,7 @@ describe("useCustomerSession", () => {
       useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
     );
 
-    await waitFor(() => expect(result.current.screen).toBe("activation"));
+    await waitFor(() => expect(result.current.screen).toBe("login"));
     // No unattended POST /api/customer/activate carrying an empty code: the
     // recovery contract is user-driven (full code + the same fingerprint).
     const activateProbes = fetchMock.mock.calls.filter(([url]) =>
@@ -380,48 +380,15 @@ describe("useCustomerSession", () => {
     expect(result.current.error).toBeNull();
   });
 
-  it("activates with the device instance fingerprint and persists both credentials", async () => {
-    const store = memoryStore();
-    const fetchMock = stubFetch((url) => {
-      if (url.endsWith("/api/customer/activate")) {
-        return jsonResponse(activationBody, 201);
-      }
-      return jsonResponse({}, 500);
-    });
-
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
-    await waitFor(() => expect(result.current.screen).toBe("activation"));
-
-    await act(async () => {
-      await result.current.activate({
-        activationCode: "XS04-AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD",
-        deviceName: "工作电脑",
-      });
-    });
-
-    expect(result.current.screen).toBe("workspace");
-    expect(store.snapshot()).toEqual({
-      deviceToken: "device-token-1",
-      sessionToken: "session-token-1",
-      identity: null,
-    });
-    const request = fetchMock.mock.calls[0];
-    const body = JSON.parse(String(request[1]?.body));
-    expect(body.device_fingerprint).toBe("instance-1");
-    expect(body.device_name).toBe("工作电脑");
-    expect(body.device_platform).toBe("windows");
-  });
-
   // F-01 review (P0-3): the workspace calls expireSessionLocally when it lost
   // the session without a transport lifecycle event. It must land on the
   // expired terminal — never a silent no-op leaving a dead workspace.
   it("本地会话失效路径从工作台进入过期终局屏并清除会话令牌", async () => {
-    const store = memoryStore();
+    // B1：不再有激活入口，用「凭设备凭据重新登录」到达工作台。
+    const store = memoryStore({ deviceToken: "device-token-1" });
     stubFetch((url) => {
-      if (url.endsWith("/api/customer/activate")) {
-        return jsonResponse(activationBody, 201);
+      if (url.endsWith("/api/customer/sessions/login")) {
+        return jsonResponse(loginBody, 201);
       }
       return jsonResponse({}, 500);
     });
@@ -429,15 +396,7 @@ describe("useCustomerSession", () => {
     const { result } = renderHook(() =>
       useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
     );
-    await waitFor(() => expect(result.current.screen).toBe("activation"));
-
-    await act(async () => {
-      await result.current.activate({
-        activationCode: "XS04-AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD",
-        deviceName: "工作电脑",
-      });
-    });
-    expect(result.current.screen).toBe("workspace");
+    await waitFor(() => expect(result.current.screen).toBe("workspace"));
 
     act(() => {
       result.current.expireSessionLocally();
@@ -452,40 +411,6 @@ describe("useCustomerSession", () => {
       sessionToken: null,
       identity: null,
     });
-  });
-
-  it("keeps the activation screen and surfaces the anti-enumeration rejection", async () => {
-    const store = memoryStore();
-    stubFetch((url) => {
-      if (url.endsWith("/api/customer/activate")) {
-        // §13.2: one unified message — no existence/expiry/revocation detail.
-        return jsonResponse(
-          {
-            detail: { code: "ACTIVATION_UNAVAILABLE", message: "激活码不可用" },
-          },
-          400,
-        );
-      }
-      return jsonResponse({}, 500);
-    });
-
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
-    await waitFor(() => expect(result.current.screen).toBe("activation"));
-
-    await act(async () => {
-      await result.current.activate({
-        activationCode: "XS04-BADCODE",
-        deviceName: "工作电脑",
-      });
-    });
-
-    expect(result.current.screen).toBe("activation");
-    expect(result.current.error?.kind).toBe("bad-request");
-    expect(result.current.error?.message).toBe(
-      "该激活码当前无法使用，请确认激活码仍在有效期内。",
-    );
   });
 
   it("restores a restart by auto-logging-in with the stored device credential", async () => {
@@ -669,69 +594,6 @@ describe("useCustomerSession", () => {
     // F-01 review：切换失败原因走独立的 switchError（对话框告警位），
     // 全局 error 此时仍是进入冲突屏时的 409 消息，不得混用。
     expect(result.current.switchError).toBe("boom");
-  });
-
-  it("reports the request id on an idempotency conflict", async () => {
-    const store = memoryStore();
-    stubFetch((url) => {
-      if (url.endsWith("/api/customer/activate")) {
-        return jsonResponse(
-          {
-            detail: {
-              code: "IDEMPOTENCY_CONFLICT",
-              message: "幂等键冲突",
-            },
-          },
-          409,
-        );
-      }
-      return jsonResponse({}, 500);
-    });
-
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
-    await waitFor(() => expect(result.current.screen).toBe("activation"));
-
-    await act(async () => {
-      await result.current.activate({
-        activationCode: "XS04-AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD",
-        deviceName: "工作电脑",
-      });
-    });
-
-    expect(result.current.screen).toBe("activation");
-    expect(result.current.error?.kind).toBe("idempotency-conflict");
-    expect(result.current.error?.requestId).toBeTruthy();
-  });
-
-  it("keeps the rate limit retry hint instead of looping submits", async () => {
-    const store = memoryStore();
-    stubFetch((url) => {
-      if (url.endsWith("/api/customer/activate")) {
-        return jsonResponse(
-          { detail: { code: "RATE_LIMITED", message: "请求过于频繁" } },
-          429,
-          new Headers({ "Retry-After": "17" }),
-        );
-      }
-      return jsonResponse({}, 500);
-    });
-
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
-    await waitFor(() => expect(result.current.screen).toBe("activation"));
-
-    await act(async () => {
-      await result.current.activate({
-        activationCode: "XS04-AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD",
-        deviceName: "工作电脑",
-      });
-    });
-
-    expect(result.current.error?.kind).toBe("rate-limited");
-    expect(result.current.error?.retryAfterSeconds).toBe(17);
   });
 
   it("expires a live session but keeps the device credential for the next login", async () => {
@@ -1071,43 +933,6 @@ describe("useCustomerSession", () => {
     expect(store.snapshot().sessionToken).toBe(relaunchSessionTokenText);
   });
 
-  it("exposes the activated user identity for the workspace shell", async () => {
-    const store = memoryStore();
-    stubFetch((url) => {
-      if (url.endsWith("/api/customer/activate")) {
-        return jsonResponse(activationBody, 201);
-      }
-      return jsonResponse({}, 500);
-    });
-
-    const { result } = renderHook(() =>
-      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
-    );
-    await waitFor(() => expect(result.current.screen).toBe("activation"));
-    expect(result.current.user).toBeNull();
-
-    await act(async () => {
-      await result.current.activate({
-        activationCode: "XS04-AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD",
-        deviceName: "工作电脑",
-      });
-    });
-
-    expect(result.current.user).toEqual({
-      userId: "user-1",
-      username: "user-1",
-      // 激活码铸造的是机构母账号（子账号仅限管理端创建）。
-      accountType: "MASTER",
-      parentUserId: null,
-      parentDisplayName: null,
-    });
-
-    await act(async () => {
-      await result.current.logout();
-    });
-    expect(result.current.user).toBeNull();
-  });
-
   it("exposes the user id (without a username) after a restart restore login", async () => {
     // The login response carries no username; the restored workspace shows
     // the generic identity until a customer /me endpoint exists (later task).
@@ -1169,11 +994,12 @@ describe("useCustomerSession", () => {
     expect(beatsAfter).toBe(2);
   });
 
-  it("exposes the session lease runtime from activation and clears it on logout", async () => {
-    const store = memoryStore();
+  it("exposes the session lease runtime from login and clears it on logout", async () => {
+    // B1：不再有激活入口，改用「凭设备凭据重新登录」到达工作台。
+    const store = memoryStore({ deviceToken: "device-token-1" });
     stubFetch((url) => {
-      if (url.endsWith("/api/customer/activate")) {
-        return jsonResponse(activationBody, 201);
+      if (url.endsWith("/api/customer/sessions/login")) {
+        return jsonResponse(loginBody, 201);
       }
       if (url.endsWith("/api/customer/sessions/logout")) {
         return jsonResponse(undefined, 204);
@@ -1184,19 +1010,10 @@ describe("useCustomerSession", () => {
     const { result } = renderHook(() =>
       useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
     );
-    await waitFor(() => expect(result.current.screen).toBe("activation"));
-
-    await act(async () => {
-      await result.current.activate({
-        activationCode: "XS04-AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD",
-        deviceName: "工作电脑",
-      });
-    });
-
-    expect(result.current.screen).toBe("workspace");
+    await waitFor(() => expect(result.current.screen).toBe("workspace"));
     expect(result.current.sessionRuntime).not.toBeNull();
     expect(result.current.sessionRuntime?.leaseExpiresAt).toBe(
-      activationBody.session_lease_expires_at,
+      loginBody.session_lease_expires_at,
     );
     expect(
       Number.isNaN(
@@ -1410,10 +1227,10 @@ describe("useCustomerSession", () => {
   });
 
   it("never writes a credential into Web Storage (dev doc §7 red line)", async () => {
-    const store = memoryStore();
+    const store = memoryStore({ deviceToken: "device-token-1" });
     stubFetch((url) => {
-      if (url.endsWith("/api/customer/activate")) {
-        return jsonResponse(activationBody, 201);
+      if (url.endsWith("/api/customer/sessions/login")) {
+        return jsonResponse(loginBody, 201);
       }
       return jsonResponse({}, 500);
     });
@@ -1421,15 +1238,7 @@ describe("useCustomerSession", () => {
     const { result } = renderHook(() =>
       useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
     );
-    await waitFor(() => expect(result.current.screen).toBe("activation"));
-
-    await act(async () => {
-      await result.current.activate({
-        activationCode: "XS04-AAAAAAA-BBBBBBB-CCCCCCC-DDDDDDD",
-        deviceName: "工作电脑",
-      });
-    });
-    expect(result.current.screen).toBe("workspace");
+    await waitFor(() => expect(result.current.screen).toBe("workspace"));
 
     // FE-02 / §10.2: no plaintext secret may land in Web Storage — the
     // persistent copy lives only behind the injected credential store.

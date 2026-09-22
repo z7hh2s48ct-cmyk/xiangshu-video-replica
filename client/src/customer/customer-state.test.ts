@@ -11,28 +11,21 @@ describe("customerScreenReducer", () => {
     expect(initialCustomerScreen).toBe("checking");
   });
 
-  it("boots without a device credential into the activation screen", () => {
+  it("boots into the login screen with or without a device credential", () => {
+    // B1：获客入口已改为自助注册，注册与登录同在 AccountAccessPage，
+    // 不再有独立的激活屏——有无设备凭据两个分支都落到登录屏。
     expect(
       customerScreenReducer("checking", {
         type: "boot-check-completed",
         hasDeviceCredential: false,
       }),
-    ).toBe("activation");
-  });
-
-  it("boots with a stored device credential into the login screen", () => {
+    ).toBe("login");
     expect(
       customerScreenReducer("checking", {
         type: "boot-check-completed",
         hasDeviceCredential: true,
       }),
     ).toBe("login");
-  });
-
-  it("moves activation success straight into the workspace", () => {
-    expect(
-      customerScreenReducer("activation", { type: "activation-succeeded" }),
-    ).toBe("workspace");
   });
 
   it("moves login success into the workspace", () => {
@@ -67,10 +60,10 @@ describe("customerScreenReducer", () => {
     ).toBe("workspace");
   });
 
-  it("sends a credential-missing switch straight to activation for recovery", () => {
+  it("sends a credential-missing switch back to login for recovery", () => {
     expect(
       customerScreenReducer("binding-conflict", { type: "credential-missing" }),
-    ).toBe("activation");
+    ).toBe("login");
   });
 
   it("keeps a logout on the login screen (the device credential survives)", () => {
@@ -96,7 +89,6 @@ describe("customerScreenReducer", () => {
   it("routes a revoked device to the dedicated revoked screen from anywhere", () => {
     for (const from of [
       "checking",
-      "activation",
       "login",
       "workspace",
       "session-expired",
@@ -117,10 +109,11 @@ describe("customerScreenReducer", () => {
     ).toBe("login");
   });
 
-  it("sends a revoked device through the recovery flow back to activation", () => {
+  it("sends a revoked device through the recovery flow back to login", () => {
+    // B1：设备凭据报废后不再有「重新激活」出口，恢复手段是重新登录。
     expect(
-      customerScreenReducer("device-revoked", { type: "restart-activation" }),
-    ).toBe("activation");
+      customerScreenReducer("device-revoked", { type: "restart-login" }),
+    ).toBe("login");
   });
 
   it("ignores transient events that do not apply to the current screen", () => {
@@ -128,14 +121,12 @@ describe("customerScreenReducer", () => {
     // of its current screen.
     const event: CustomerScreenEvent = { type: "login-succeeded" };
     expect(customerScreenReducer("workspace", event)).toBe("workspace");
-    expect(customerScreenReducer("activation", { type: "logout" })).toBe(
-      "activation",
-    );
+    expect(customerScreenReducer("login", { type: "logout" })).toBe("login");
   });
 
-  it("returns to the activation screen when a credential-missing event fires from the login screen", () => {
+  it("stays on the login screen when a credential-missing event fires there", () => {
     expect(customerScreenReducer("login", { type: "credential-missing" })).toBe(
-      "activation",
+      "login",
     );
     // Guarded: only from login — no-op from other screens.
     expect(
