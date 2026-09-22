@@ -19,6 +19,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.admin_auth_routes import AdminWriter
+from app.csv_export import spreadsheet_safe_cell
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
 
@@ -119,18 +120,22 @@ def generate_csv_content(conn: BusinessConnection, request: ExportRequest) -> by
         ]
     )
     for row in rows:
+        # username 是客户可控输入，与其它导出 lane 一致走六前缀防护，防公式注入。
         writer.writerow(
             [
-                str(row["id"]),
-                str(row["user_id"] or "N/A"),
-                row["username"] or "N/A",
-                row["billing_date"].isoformat(),
-                row["service_type"],
-                int(row["credits_delta"]),
-                int(row["credits_used"]),
-                float(row["unit_cost_fen"] or 0),
-                float(row["cost_fen"] or 0),
-                int(row["billing_round"]),
+                spreadsheet_safe_cell(cell)
+                for cell in (
+                    str(row["id"]),
+                    str(row["user_id"] or "N/A"),
+                    row["username"] or "N/A",
+                    row["billing_date"].isoformat(),
+                    row["service_type"],
+                    int(row["credits_delta"]),
+                    int(row["credits_used"]),
+                    float(row["unit_cost_fen"] or 0),
+                    float(row["cost_fen"] or 0),
+                    int(row["billing_round"]),
+                )
             ]
         )
     return gzip.compress(output.getvalue().encode("utf-8"))
