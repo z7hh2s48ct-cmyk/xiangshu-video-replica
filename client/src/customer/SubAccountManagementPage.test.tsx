@@ -255,7 +255,10 @@ describe("SubAccountManagementPage", () => {
     // 同判，SUB_ADMIN 点任一母账号专属按钮就被强制登出且文案误导。
     const onSessionExpired = vi.fn();
     stubFetch((url, init) => {
-      if (url.includes("/api/customer/sub-accounts") && init?.method === "PATCH") {
+      if (
+        url.includes("/api/customer/sub-accounts") &&
+        init?.method === "PATCH"
+      ) {
         return jsonResponse(
           {
             detail: {
@@ -309,14 +312,28 @@ describe("SubAccountManagementPage", () => {
     ).toBeInTheDocument();
     // 母账号专属：创建表单与行内操作全部隐藏。
     expect(screen.queryByText("创建子账号")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "重命名" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "设置密码" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "设为管理员" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "停用" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "删除" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "重命名" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "设置密码" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "设为管理员" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "停用" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "删除" }),
+    ).not.toBeInTheDocument();
     // SUB_ADMIN 仍被授权的操作保留。
-    expect(screen.getByRole("button", { name: "设置额度" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "设置权限" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "设置额度" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "设置权限" }),
+    ).toBeInTheDocument();
   });
 
   it("delete degrades to deactivation with an explicit notice when history pins the row", async () => {
@@ -506,9 +523,8 @@ describe("SubAccountManagementPage", () => {
     ).toBe(false);
   });
 
-  // Phase 3a：「设置额度」经 window.prompt 取值，PUT 到子账号额度端点。
-  it("sets the monthly quota through the prompt and the quota endpoint", async () => {
-    const promptSpy = vi.spyOn(window, "prompt").mockReturnValue("500");
+  // Phase 3a → P2-3：「设置额度」经受控弹窗取值，PUT 到子账号额度端点。
+  it("sets the monthly quota through the dialog and the quota endpoint", async () => {
     const fetchMock = stubFetch((_url, init) => {
       if (init?.method === "PUT") {
         return jsonResponse({
@@ -528,8 +544,14 @@ describe("SubAccountManagementPage", () => {
     await screen.findByText("张三", { selector: "strong" });
 
     fireEvent.click(screen.getByRole("button", { name: "设置额度" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "设置额度 张三",
+    });
+    fireEvent.change(within(dialog).getByLabelText("月度额度"), {
+      target: { value: "500" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存额度" }));
 
-    expect(promptSpy).toHaveBeenCalled();
     await waitFor(() =>
       expect(
         fetchMock.mock.calls.some(([, init]) => init?.method === "PUT"),
@@ -557,7 +579,6 @@ describe("SubAccountManagementPage", () => {
       quota_used_credits: 300,
       quota_remaining_credits: 1700,
     };
-    vi.spyOn(window, "prompt").mockReturnValue("");
     const fetchMock = stubFetch((_url, init) => {
       if (init?.method === "PUT") {
         return jsonResponse(subAccount);
@@ -573,6 +594,14 @@ describe("SubAccountManagementPage", () => {
     await screen.findByText("张三", { selector: "strong" });
 
     fireEvent.click(screen.getByRole("button", { name: "设置额度" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "设置额度 张三",
+    });
+    // 弹窗预填现值 2000；清空后提交即清除额度。
+    fireEvent.change(within(dialog).getByLabelText("月度额度"), {
+      target: { value: "" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存额度" }));
 
     await waitFor(() =>
       expect(
@@ -587,6 +616,64 @@ describe("SubAccountManagementPage", () => {
     });
     expect(
       await screen.findByText("已清除「张三」的额度限制。"),
+    ).toBeInTheDocument();
+  });
+
+  // P2-3：「设置密码」改受控弹窗：密码遮蔽输入、6 字符下限就地报错、
+  // 提交 PUT 到密码端点（原 window.prompt 明文回显）。
+  it("sets the password through the masked dialog with a length floor", async () => {
+    const fetchMock = stubFetch((_url, init) => {
+      if (init?.method === "POST") {
+        return jsonResponse({ ...subAccount, has_password: true });
+      }
+      return jsonResponse({ sub_accounts: [subAccount], total_count: 1 });
+    });
+    render(
+      <SubAccountManagementPage
+        store={storeWithSession(sessionToken)}
+        onSessionExpired={vi.fn()}
+      />,
+    );
+    await screen.findByText("张三", { selector: "strong" });
+
+    fireEvent.click(screen.getByRole("button", { name: "设置密码" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "设置密码 张三",
+    });
+    const input = within(dialog).getByLabelText(
+      /新密码（6–128 个字符/,
+    ) as HTMLInputElement;
+    expect(input.type).toBe("password");
+
+    // 过短密码在弹窗内就地报错，不发请求。
+    fireEvent.change(input, { target: { value: "abc" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存密码" }));
+    expect(
+      await within(dialog).findByText("密码至少 6 个字符。"),
+    ).toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(([, init]) => init?.method === "POST"),
+    ).toBe(false);
+
+    // 合法密码提交成功并关闭弹窗。
+    fireEvent.change(input, { target: { value: "new-pw9" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存密码" }));
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([, init]) => init?.method === "POST"),
+      ).toBe(true),
+    );
+    const putCall = fetchMock.mock.calls.find(
+      ([, init]) => init?.method === "POST",
+    );
+    expect(String(putCall?.[0])).toContain(
+      "/api/customer/sub-accounts/sub-1/password",
+    );
+    expect(JSON.parse(String(putCall?.[1]?.body))).toEqual({
+      password: "new-pw9",
+    });
+    expect(
+      await screen.findByText("密码已更新；该子账号的旧登录已失效。"),
     ).toBeInTheDocument();
   });
 

@@ -4568,7 +4568,9 @@ describe("V1.4 内容与运营页面", () => {
     expect(createMaterialUploadIntent).toHaveBeenCalledTimes(1);
     // 上线前检查 P2-6：秒传复用已有行，服务端 total 不变——本地「共 N 条」
     // 不虚增（旧实现 +1，要等下一次刷新才纠正）。
-    await waitFor(() => expect(screen.getByText(/共 0 条/)).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText(/共 0 条/)).toBeInTheDocument(),
+    );
   });
 
   it("MATERIAL-UX-04：拖拽文件到素材页入队上传", async () => {

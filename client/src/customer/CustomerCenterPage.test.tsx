@@ -965,7 +965,7 @@ test("Token 列表没读到时，撤销全部 Token 不报数字（不拿 0 冒�
   ).toBeVisible();
 });
 
-test("退出所有设备 logs the user out once the server confirms", async () => {
+test("退出所有设备 lands on the expired terminal with the reason notice (preflight P2-2)", async () => {
   const account = setup();
   render(<CustomerCenterPage account={account} />);
   await screen.findByText("125");
@@ -975,7 +975,12 @@ test("退出所有设备 logs the user out once the server confirms", async () =
   const dialog = await screen.findByRole("dialog", { name: "退出所有设备？" });
   fireEvent.click(screen.getByRole("checkbox"));
   fireEvent.click(within(dialog).getByRole("button", { name: "退出所有设备" }));
-  await waitFor(() => expect(account.onLogout).toHaveBeenCalledTimes(1));
+  // P2-2：会话已被服务端撤销——本地过期并携带说明到终屏，不再发注定 401
+  // 的二次 logout（旧实现 onLogout 的 EXPIRED 事件会抢先切屏吞掉说明）。
+  await waitFor(() =>
+    expect(account.onSessionExpired).toHaveBeenCalledTimes(1),
+  );
+  expect(account.onLogout).not.toHaveBeenCalled();
 });
 
 test("expired default recovery reloads existing credentials instead of looping on the expired key", async () => {

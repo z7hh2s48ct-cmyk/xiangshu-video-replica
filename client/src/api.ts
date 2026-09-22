@@ -5755,9 +5755,14 @@ const BRANDED_SERVICE_ERRORS: ReadonlyArray<{
     message: "文案优化服务暂时不可用，请稍后重试；如持续失败，请联系客服。",
   },
   // 上线前检查 P2-4：hifly/tikhub/dashscope/douyidou 是既有缺口——服务端
-  // 文案当前全中性，这四条是第二道防线，拦未来任何一处漏改的供应商名。
+  // 客户侧文案当前全中性，这四条是第二道防线，拦未来任何一处漏改的供应商名。
+  // 注意 hifly 不能整词匹配：管理端自检的服务端文案有意带名（如「Hifly 凭据
+  // 认证失败；未创建收费任务。」，SettingsPanel 只读检查用），responseErrorDetails
+  // 对管理 lane 同样走本表——只拦技术泄漏形态（URL/api/error 等），放过正常
+  // 中文运营文案。
   {
-    pattern: /hifly|飞影/i,
+    pattern:
+      /hifly\.[a-z]{2,}|hifly[-_ ]?(?:api|request|upstream|timeout|error|failed|exception|render)|飞影/,
     message: "数字人口播服务暂时不可用，请稍后重试；如持续失败，请联系客服。",
   },
   {

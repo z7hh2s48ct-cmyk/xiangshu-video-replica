@@ -2809,16 +2809,17 @@ describe("视频生成（C2 独立创作）", () => {
     await waitFor(() =>
       expect(api.createIndependentVideoTask).toHaveBeenCalledOnce(),
     );
-    const call = api.createIndependentVideoTask.mock.calls[0]?.[0] as {
-      output_duration_seconds?: number;
-    } | undefined;
+    const call = api.createIndependentVideoTask.mock.calls[0]?.[0] as
+      | {
+          output_duration_seconds?: number;
+        }
+      | undefined;
     expect(call?.output_duration_seconds).toBe(15);
-    const quoteCalls = api.getGenerationPriceQuote.mock.calls as unknown as Array<
-      [{ duration_seconds?: number }]
-    >;
-    expect(
-      quoteCalls.some(([input]) => input.duration_seconds === 15),
-    ).toBe(true);
+    const quoteCalls = api.getGenerationPriceQuote.mock
+      .calls as unknown as Array<[{ duration_seconds?: number }]>;
+    expect(quoteCalls.some(([input]) => input.duration_seconds === 15)).toBe(
+      true,
+    );
   });
   beforeEach(() => {
     vi.clearAllMocks();

@@ -1598,10 +1598,11 @@ export function CustomerCenterPage({
                 }
                 credential={credential}
                 onSessionsEnded={async (reason) => {
-                  // 改密/下线以后当前会话已经死了：先留一句说明，再走正常登出
-                  // 流程回登录页（本地凭据由会话钩子清理）。
-                  setNotice(reason);
-                  await account.onLogout();
+                  // 改密/下线以后当前会话已被服务端撤销：直接本地过期并把
+                  // reason 带到「登录已过期」终屏（P2-2）。不再走 onLogout——
+                  // 那会拿已撤销的 token 再发一次注定 401 的请求，且传输层
+                  // EXPIRED 事件会抢先切屏，让 setNotice 的说明永远不可见。
+                  account.onSessionExpired(reason);
                 }}
                 onTokensRevoked={refreshData}
               />

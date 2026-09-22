@@ -2775,8 +2775,8 @@ function MaterialsPageContent() {
           page_size: pageSize,
           // 上线前检查 P2-6：秒传（upload_required === false）复用已有行，
           // 服务端 total 不变——本地计数 +1 会短暂虚增，等刷新才纠正。
-          total: (current?.total ?? 0) +
-            (intent.upload_required === false ? 0 : 1),
+          total:
+            (current?.total ?? 0) + (intent.upload_required === false ? 0 : 1),
         }));
       }
       notify(`素材“${completed.title}”已上传，云端可用`);

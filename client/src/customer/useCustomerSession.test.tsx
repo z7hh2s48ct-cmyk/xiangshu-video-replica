@@ -413,6 +413,38 @@ describe("useCustomerSession", () => {
     });
   });
 
+  // 上线前检查 P2-2：改密/退出所有设备成功后的分情况说明要活着落到终屏。
+  it("expireSessionLocally(notice) 把定制说明带到过期终局，且不被后续传输层过期冒用", async () => {
+    const store = memoryStore({ deviceToken: "device-token-1" });
+    stubFetch((url) => {
+      if (url.endsWith("/api/customer/sessions/login")) {
+        return jsonResponse(loginBody, 201);
+      }
+      return jsonResponse({}, 500);
+    });
+
+    const { result } = renderHook(() =>
+      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
+    );
+    await waitFor(() => expect(result.current.screen).toBe("workspace"));
+    expect(result.current.expiredNotice).toBeNull();
+
+    const reason = "密码已修改，其他设备已下线；请用新密码重新登录。";
+    act(() => {
+      result.current.expireSessionLocally(reason);
+    });
+
+    expect(result.current.screen).toBe("session-expired");
+    expect(result.current.expiredNotice).toBe(reason);
+
+    // 传输层随后的 401 过期不带说明：清空旧 notice，终屏回通用文案，
+    // 避免上一次「改密成功」的说明冒充本次过期原因。
+    act(() => {
+      window.dispatchEvent(new Event(CUSTOMER_SESSION_EXPIRED_EVENT));
+    });
+    expect(result.current.expiredNotice).toBeNull();
+  });
+
   it("restores a restart by auto-logging-in with the stored device credential", async () => {
     // FE-02 exit gate: after a real app restart the stored credential logs
     // the user back in without retyping anything.
