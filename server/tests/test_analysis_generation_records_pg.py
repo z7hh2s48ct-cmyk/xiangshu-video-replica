@@ -320,3 +320,95 @@ def test_summary_honours_the_same_filters_as_the_records_list(
     # 当前视图里没有失败行时不能凭空给失败原因。
     assert succeeded_only.failure_reasons == []
     assert succeeded_only.total == 1
+
+
+def _seed_source_frames(dsn: str) -> dict[str, str]:
+    """两条源画面任务：一条带语义质检审计留痕，一条没有。"""
+    suffix = uuid.uuid4().hex[:12]
+    user_id = f"obs-src-user-{suffix}"
+    project_id = f"obs-src-project-{suffix}"
+    asset_id = f"obs-src-asset-{suffix}"
+    plain_task = f"obs-src-plain-{suffix}"
+    scored_task = f"obs-src-scored-{suffix}"
+    with psycopg.connect(dsn, autocommit=True) as raw:
+        raw.execute(
+            "INSERT INTO users (id, username, display_name, role, is_active) "
+            "VALUES (%s, %s, '源画面观测客户', 'customer', 1)",
+            (user_id, user_id),
+        )
+        raw.execute(
+            "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, '源画面观测项目')",
+            (project_id, user_id),
+        )
+        raw.execute(
+            "INSERT INTO assets (id, project_id, kind, storage_uri, sha256, size_bytes, "
+            "content_type, created_by_user_id) VALUES (%s, %s, 'reference_video', %s, %s, "
+            "1024, 'video/mp4', %s)",
+            (asset_id, project_id, f"cos://bucket/{asset_id}.mp4", "b" * 64, user_id),
+        )
+        for task_id, created_at in (
+            (plain_task, "2026-09-21 09:00:00"),
+            (scored_task, "2026-09-21 09:30:00"),
+        ):
+            raw.execute(
+                "INSERT INTO source_frame_tasks (id, project_id, asset_id, created_by_user_id, "
+                "idempotency_key, request_hash, request_json, status, created_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, '{}', 'SUCCEEDED', %s)",
+                (
+                    task_id,
+                    project_id,
+                    asset_id,
+                    user_id,
+                    f"ik-{task_id}",
+                    f"rh-{task_id}",
+                    created_at,
+                ),
+            )
+        # 只有这条任务跑过语义质检：审计留痕是它被归入 AI 评分类的依据。
+        raw.execute(
+            "INSERT INTO audit_logs (id, actor_user_id, action, entity_type, entity_id, "
+            "metadata_json) VALUES (%s, NULL, 'source_frame.semantic_quality_started', "
+            "'source_frame_task', %s, %s)",
+            (
+                f"obs-src-audit-{suffix}",
+                scored_task,
+                json.dumps({"provider": "apilio_gemini", "model": "gemini-3.8-flash"}),
+            ),
+        )
+    return {"user": user_id, "plain": plain_task, "scored": scored_task}
+
+
+def test_source_frame_filters_use_portable_sql_on_postgres(
+    records_dsn: str, owner: CurrentUser
+) -> None:
+    """源画面筛选（素材处理 / AI 评分）在 PG 上必须可用。
+
+    回归：列表 SQL 曾用 SQLite 专有的 json_valid/json_extract 做语义归类，
+    PG 上直接 ``function json_valid(...) does not exist`` → 500，管理端两个
+    筛选选项全废。summary 已改走审计 EXISTS（跨方言），本用例钉住列表分支
+    （含 total 计数与行查询两处拼接点）同样只用跨方言 SQL。
+    """
+    seeded = _seed_source_frames(records_dsn)
+    from app.control_routes import list_generation_records
+
+    with psycopg.connect(records_dsn) as raw:
+        conn = BusinessConnection.postgres(raw)
+        process_page = list_generation_records(
+            conn, owner, record_type="SOURCE_FRAME_PROCESS", limit=50, offset=0
+        )
+        scored_page = list_generation_records(
+            conn, owner, record_type="SOURCE_FRAME_AI_SCORE", limit=50, offset=0
+        )
+
+    process_ids = {item.record_id for item in process_page.items}
+    assert seeded["plain"] in process_ids
+    assert seeded["scored"] not in process_ids
+    assert process_page.total >= 1
+
+    scored_ids = {item.record_id for item in scored_page.items}
+    assert seeded["scored"] in scored_ids
+    assert seeded["plain"] not in scored_ids
+    assert scored_page.total >= 1
+    scored_row = next(item for item in scored_page.items if item.record_id == seeded["scored"])
+    assert scored_row.record_type == "SOURCE_FRAME_AI_SCORE"
+    assert scored_row.username == seeded["user"]
