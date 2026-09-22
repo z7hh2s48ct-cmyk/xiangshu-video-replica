@@ -55,20 +55,76 @@ def test_required_view_types_are_exactly_the_five_real_views() -> None:
     )
 
 
-def test_five_view_prompts_require_live_action_skin_and_reject_plastic_ai_texture() -> None:
+def test_five_view_prompts_include_physical_photography_anchors() -> None:
+    """Verify new prompts emphasize physical camera gear and positive texture descriptors."""
     scene_prompt = scene_contact_sheet_prompt(
         scene_description="乡村工地",
         costume_description="蓝色施工马甲",
     )
+
     for prompt in (SIMPLE_CONTACT_SHEET_PROMPT, scene_prompt):
         # 提示词按行宽折行，断言只关心措辞本身，不应被折行位置左右。
         flat = " ".join(prompt.split())
-        assert "skin microtexture" in flat
-        assert "fine pores" in flat
-        assert "individual hair strands" in flat
-        assert "waxy or plastic skin" in flat
-        assert "CGI sheen" in flat
-        assert "beauty filter" in flat or "beauty-filter" in flat
+        # 材质要点在提示词里是列表项、句首大写，这一类措辞用大小写不敏感比对。
+        lowered = flat.lower()
+
+        # Physical camera anchors (both prompts must have these)
+        assert "Canon EOS R5" in flat, "Must specify professional camera model"
+        assert "85mm" in flat, "Must specify portrait lens focal length"
+
+        # Positive texture descriptors (at least one variant)
+        assert "visible pores" in flat or "fine pores" in flat, "Must describe skin texture"
+        assert "vellus hairs" in flat or "peach fuzz" in flat or "individual strands" in flat, (
+            "Must describe hair detail"
+        )
+        assert "fabric weave" in lowered or "fabric texture" in lowered, (
+            "Must describe clothing texture"
+        )
+
+        # Anti-plastic terms (updated wording)
+        assert "plastic skin" in flat or "smooth plastic skin" in flat, (
+            "Must reject plastic appearance"
+        )
+        assert "beauty filter" in flat or "beauty-filter" in flat, (
+            "Must reject beauty filter effects"
+        )
+
+
+def test_base_prompt_includes_studio_lighting_anchor() -> None:
+    """Base prompt should reference specific studio lighting equipment."""
+    flat = " ".join(SIMPLE_CONTACT_SHEET_PROMPT.split())
+    assert "Elinchrom" in flat or "softbox" in flat.lower(), (
+        "Base prompt must specify studio lighting"
+    )
+
+
+def test_scene_prompt_includes_aperture_and_editorial_positioning() -> None:
+    """Scene prompt should have aperture spec and editorial/commercial positioning."""
+    scene_prompt = scene_contact_sheet_prompt(
+        scene_description="乡村工地",
+        costume_description="蓝色施工马甲",
+    )
+    flat = " ".join(scene_prompt.split())
+
+    assert "f/4" in flat, "Scene prompt must specify aperture for depth of field"
+    assert "editorial" in flat.lower() or "commercial portrait" in flat.lower(), (
+        "Scene prompt must position output as professional editorial/commercial work"
+    )
+
+
+def test_old_negative_word_wall_removed() -> None:
+    """Confirm we removed the old wall-of-negatives approach."""
+    flat_base = " ".join(SIMPLE_CONTACT_SHEET_PROMPT.split())
+
+    # This exact string was in the old prompt as a continuous negative list
+    old_nasty_string = (
+        "waxy or plastic skin, porcelain-doll smoothness, rubbery facial features, "
+        "CGI sheen, excessive denoising, beauty-filter skin, artificial HDR, and uniformly "
+        "airbrushed texture"
+    )
+    assert old_nasty_string not in flat_base, (
+        "Old negative word wall should be removed and distributed into specific constraints"
+    )
 
 
 @pytest.mark.parametrize("legacy_views", [[], ["RIGHT_45", "RIGHT_SIDE"], ["IMPORTED_REFERENCE"]])
@@ -153,3 +209,43 @@ def test_right_facing_source_frames_map_to_the_real_left_views(
         body_completeness="FULL_BODY",
     )
     assert recommended_body_view(features) == expected
+
+
+def test_contact_sheet_size_is_wide_enough_for_the_full_body_panels() -> None:
+    """整图必须足够宽，否则左侧全身格会被右侧近景列挤到验收区间以下。
+
+    实测（2026-09-22，同源图同提示词）：模型把约 815px 固定留给近景列，剩余宽度才
+    分给三个全身格。2048x1152 时最窄全身格只有 386px，比不声明尺寸时的 405px 还窄；
+    2560x1440 时全身格 548~573px，才落进计划的 500-700px 验收区间。
+    """
+    from app.simple_character import CONTACT_SHEET_SIZE
+
+    width_text, height_text = CONTACT_SHEET_SIZE.split("x")
+    width, height = int(width_text), int(height_text)
+
+    assert width % 16 == 0, f"{CONTACT_SHEET_SIZE} 宽度 {width} 不能被 16 整除"
+    assert height % 16 == 0, f"{CONTACT_SHEET_SIZE} 高度 {height} 不能被 16 整除"
+    # 近景列实测约占 815px，三个全身格各需 ≥500px。
+    assert width >= 3 * 500 + 815, (
+        f"{CONTACT_SHEET_SIZE} 太窄：全身格会被近景列挤到 500px 验收下限以下"
+    )
+
+
+def test_contact_sheet_below_the_resolution_floor_is_rejected() -> None:
+    """低于清晰度下限的五视图必须报错，而不是静默发布成客户人物形象。"""
+    from fastapi import HTTPException
+
+    from app.simple_character import (
+        CONTACT_SHEET_MIN_SHEET_WIDTH,
+        _require_contact_sheet_resolution,
+        contact_sheet_placeholder_png,
+    )
+
+    narrow = contact_sheet_placeholder_png(b"narrow", width=CONTACT_SHEET_MIN_SHEET_WIDTH - 16)
+    with pytest.raises(HTTPException) as excinfo:
+        _require_contact_sheet_resolution(narrow, "image/png")
+    assert excinfo.value.status_code == 502
+    assert excinfo.value.detail["code"] == "CONTACT_SHEET_RESOLUTION_TOO_LOW"
+
+    wide = contact_sheet_placeholder_png(b"wide", width=CONTACT_SHEET_MIN_SHEET_WIDTH)
+    _require_contact_sheet_resolution(wide, "image/png")

@@ -5,10 +5,12 @@ import json
 import socket
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from fractions import Fraction
 
 import pytest
 
 from app.first_frames import (
+    FIRST_FRAME_IMAGE_SIZES,
     ApilioImageProvider,
     ImageInput,
     ImageProviderFailed,
@@ -1078,11 +1080,11 @@ def test_apilio_data_uri_rejects_unsupported_or_mismatched_type(header):
 @pytest.mark.parametrize(
     "ratio,size",
     [
-        ("9:16", "1008x1792"),
-        ("16:9", "1792x1008"),
-        ("1:1", "1024x1024"),
-        ("3:4", "1152x1536"),
-        ("4:3", "1536x1152"),
+        ("9:16", "1152x2048"),
+        ("16:9", "2048x1152"),
+        ("1:1", "2048x2048"),
+        ("3:4", "1536x2048"),
+        ("4:3", "2048x1536"),
     ],
 )
 def test_selected_aspect_ratio_is_sent_to_provider_and_validated_by_api(ratio, size):
@@ -1116,3 +1118,74 @@ def test_aspect_ratio_api_rejects_arbitrary_dimensions():
 
     with pytest.raises(ValidationError):
         GenerateFirstFramesRequest(aspect_ratio="9999:1")
+
+
+def test_gpt_image_2_request_carries_no_unsupported_size_alias():
+    """回归护栏：档位别名会被 apilio 静默忽略，不得再夹带。
+
+    2026-09-22 实测：`image_size=2K` 与不传该字段的出图逐像素同尺寸
+    （均 1792x1008），即该字段对 gpt-image-2 是空操作——既不生效也不报错，
+    只会让"看起来设了 2K"的假象混过评审。这里钉住请求体：尺寸只走协议字段
+    `size`，且值就是 2K 档位。
+    """
+    transport = FakeApilioTransport(response_body=b'{"task_id":"size-alias-task"}')
+    provider = ApilioImageProvider(api_key="test-key", transport=transport)
+    provider.submit_edit(
+        model="gpt-image-2",
+        prompt="replace",
+        source_image=image(b"x", "image/png", "x.png"),
+        character_reference_images=[],
+        output_count=1,
+        aspect_ratio="9:16",
+    )
+
+    body = transport.requests[-1].body
+    assert b'name="image_size"' not in body
+    assert b'name="size"\r\n\r\n1152x2048' in body
+
+
+@pytest.mark.parametrize("ratio", sorted(FIRST_FRAME_IMAGE_SIZES))
+def test_first_frame_image_sizes_satisfy_provider_dimension_rules(ratio):
+    """每个档位都必须满足网关硬约束，否则请求被拒或出图被静默缩放。
+
+    约束来源：apilio / gpt-image-2 图像接口文档——宽高各能被 16 整除、
+    宽高比在 1:3~3:1、总像素在 655,360~8,294,400，且超过 2560x1440
+    属实验档位。档位值与声明的宽高比允许 1% 以内的取整漂移。
+    """
+    width_text, height_text = FIRST_FRAME_IMAGE_SIZES[ratio].split("x")
+    width, height = int(width_text), int(height_text)
+
+    assert width % 16 == 0, f"{ratio} 宽度 {width} 不能被 16 整除"
+    assert height % 16 == 0, f"{ratio} 高度 {height} 不能被 16 整除"
+    assert 655_360 <= width * height <= 8_294_400, f"{ratio} 总像素 {width * height} 越界"
+    assert max(width, height) <= 2560, f"{ratio} 长边 {max(width, height)} 进入实验档位"
+
+    declared = Fraction(*map(int, ratio.split(":")))
+    actual = Fraction(width, height)
+    assert Fraction(1, 3) <= actual <= 3, f"{ratio} 实际宽高比 {actual} 越界"
+    drift = abs(actual - declared) / declared
+    assert drift <= Fraction(1, 100), f"{ratio} 取整后比例漂移 {float(drift):.2%} 超过 1%"
+
+
+def test_size_override_replaces_the_declared_aspect_ratio_size():
+    """size_override 用于"同一宽高比但需要另一种整图尺寸"的调用方（五视图复合排版）。
+
+    实测依据：同为 16:9，五视图需要比首帧档位（2048x1152）更宽的整图，否则右侧近景
+    列会把左侧三个全身格挤到验收区间以下（2048 实测最窄 386px）。
+    """
+    transport = FakeApilioTransport(response_body=b'{"task_id":"override-task"}')
+    provider = ApilioImageProvider(api_key="test-key", transport=transport)
+
+    provider.submit_edit(
+        model="gpt-image-2",
+        prompt="replace",
+        source_image=image(b"x", "image/png", "x.png"),
+        character_reference_images=[],
+        output_count=1,
+        aspect_ratio="16:9",
+        size_override="2560x1440",
+    )
+
+    body = transport.requests[-1].body
+    assert b'name="size"\r\n\r\n2560x1440' in body
+    assert b"2048x1152" not in body

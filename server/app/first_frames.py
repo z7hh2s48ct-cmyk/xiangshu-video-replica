@@ -67,6 +67,24 @@ FIRST_FRAME_IMAGE_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
 MAX_FIRST_FRAME_CANDIDATES = 3
 APILIO_DEFAULT_BASE_URL = "https://api.apilio.ai"
 APILIO_IMAGE_EDIT_PATH = "/v1/images/edits"
+# gpt-image-2 的尺寸档位。2K 必须通过 `size` 兑现：2026-09-22 对 apilio 的实测
+# 证明 `image_size=2K` 这类档位别名会被网关静默忽略——同图同参下，带该字段与
+# 不带该字段的出图逐像素同尺寸（1792x1008），既不生效也不报错。只有把尺寸写成
+# WIDTHxHEIGHT 才真正改变出图（2048x1152 / 1152x2048 均实测命中）。
+# 取值须满足网关硬约束：宽高各能被 16 整除、宽高比在 1:3~3:1、总像素在
+# 655,360~8,294,400；超过 2560x1440 属实验档位，故上限压在 2048 长边。
+FIRST_FRAME_IMAGE_SIZES: Mapping[str, str] = {
+    "9:16": "1152x2048",
+    "16:9": "2048x1152",
+    "1:1": "2048x2048",
+    "3:4": "1536x2048",
+    "4:3": "2048x1536",
+    "2:3": "1360x2048",
+    "3:2": "2048x1360",
+    "4:5": "1632x2048",
+    "5:4": "2048x1632",
+    "21:9": "2048x880",
+}
 APILIO_OUTPUT_HOSTS = frozenset({"files.closeai.fans"})
 MAX_PROVIDER_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_QUALITY_IMAGE_BYTES = 12 * 1024 * 1024
@@ -304,6 +322,8 @@ class ImageProvider(Protocol):
         source_image: ImageInput,
         character_reference_images: list[ImageInput],
         output_count: int,
+        aspect_ratio: str | None = None,
+        size_override: str | None = None,
     ) -> list[GeneratedImage]: ...
 
 
@@ -486,8 +506,10 @@ class FakeImageProvider:
         source_image: ImageInput,
         character_reference_images: list[ImageInput],
         output_count: int,
+        aspect_ratio: str | None = None,
+        size_override: str | None = None,
     ) -> list[GeneratedImage]:
-        del model, prompt, character_reference_images
+        del model, prompt, character_reference_images, aspect_ratio, size_override
         return [
             GeneratedImage(content=source_image.content, content_type=source_image.content_type)
             for _ in range(output_count)
@@ -648,6 +670,7 @@ class ApilioImageProvider:
         character_reference_images: list[ImageInput],
         output_count: int,
         aspect_ratio: str | None = None,
+        size_override: str | None = None,
     ) -> str:
         body, content_type = build_apilio_edit_multipart(
             model=model,
@@ -656,6 +679,7 @@ class ApilioImageProvider:
             character_reference_images=character_reference_images,
             output_count=output_count,
             aspect_ratio=aspect_ratio,
+            size_override=size_override,
         )
         raw, _ = self.transport.post(
             f"{self.base_url}{APILIO_IMAGE_EDIT_PATH}?async=true",
@@ -720,6 +744,7 @@ class ApilioImageProvider:
         character_reference_images: list[ImageInput],
         output_count: int,
         aspect_ratio: str | None = None,
+        size_override: str | None = None,
     ) -> list[GeneratedImage]:
         body, content_type = build_apilio_edit_multipart(
             model=model,
@@ -728,6 +753,7 @@ class ApilioImageProvider:
             character_reference_images=character_reference_images,
             output_count=output_count,
             aspect_ratio=aspect_ratio,
+            size_override=size_override,
         )
         raw_body, _ = self.transport.post(
             f"{self.base_url}{APILIO_IMAGE_EDIT_PATH}",
@@ -1112,6 +1138,7 @@ def build_apilio_edit_multipart(
     character_reference_images: list[ImageInput],
     output_count: int,
     aspect_ratio: str | None = None,
+    size_override: str | None = None,
 ) -> tuple[bytes, str]:
     boundary = f"----video-replica-{uuid4().hex}"
     body = bytearray()
@@ -1144,21 +1171,17 @@ def build_apilio_edit_multipart(
     add_field("response_format", "b64_json")
     add_field("n", str(output_count))
     if model == "gpt-image-2":
-        sizes = {
-            "9:16": "1008x1792",
-            "16:9": "1792x1008",
-            "1:1": "1024x1024",
-            "3:4": "1152x1536",
-            "4:3": "1536x1152",
-            "2:3": "1024x1536",
-            "3:2": "1536x1024",
-            "4:5": "1024x1280",
-            "5:4": "1280x1024",
-            "21:9": "1792x768",
-        }
-        if aspect_ratio is not None and aspect_ratio not in sizes:
+        if aspect_ratio is not None and aspect_ratio not in FIRST_FRAME_IMAGE_SIZES:
             raise ImageProviderFailed("Unsupported image aspect ratio")
-        add_field("size", sizes[aspect_ratio] if aspect_ratio else "auto")
+
+        # size 是 OpenAI Images Edit 协议的尺寸字段，也是 gpt-image-2 唯一的尺寸
+        # 入口；2K 由 FIRST_FRAME_IMAGE_SIZES 的档位值本身兑现（见该常量注释）。
+        # size_override 供"同一宽高比但需要另一种整图尺寸"的调用方覆盖档位：五视图
+        # 复合排版就属此类，见 simple_character.CONTACT_SHEET_SIZE。
+        add_field(
+            "size",
+            size_override or (FIRST_FRAME_IMAGE_SIZES[aspect_ratio] if aspect_ratio else "auto"),
+        )
     else:
         add_field("aspect_ratio", aspect_ratio or image_aspect_ratio(source_image))
         add_field("image_size", "2K")
