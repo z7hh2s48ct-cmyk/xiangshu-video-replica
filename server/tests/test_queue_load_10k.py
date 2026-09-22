@@ -110,9 +110,20 @@ def t27_state(t27_dsn: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
 
 
 def _seed_10k(dsn: str) -> None:
-    """TRUNCATE and insert 10,000 PENDING tasks across 200 users (50 each)."""
+    """TRUNCATE and insert 10,000 PENDING tasks across 200 users (50 each).
+
+    本函数同时把三张被测表的 autovacuum 关掉。原因是一起真实事故：计划断言
+    （``test_explain_hot_paths_use_indexes_at_10k`` 等）依赖规划器此刻所见的
+    统计；autoanalyze 若**恰好**在灌数与 EXPLAIN 之间跑完，规划器就会改用
+    基于真实行数的计划，断言随之翻车（PR #208 的 CI 上真实红过）。
+    夹具库每次 run 都新建，统计状态本就由建库/迁移序列唯一确定；关掉
+    autovacuum 只是把这份确定性固定下来，不改任何断言、也不改数据形状。
+    """
     users = [f"u{i:03d}" for i in range(1, _N_USERS + 1)]
     with psycopg.connect(dsn, autocommit=True) as pg:
+        pg.execute("ALTER TABLE user_queue_cursors SET (autovacuum_enabled = false)")
+        pg.execute("ALTER TABLE generation_tasks SET (autovacuum_enabled = false)")
+        pg.execute("ALTER TABLE generation_batches SET (autovacuum_enabled = false)")
         pg.execute("SET session_replication_role = replica")
         pg.execute(f"TRUNCATE {_TABLES} CASCADE")
         pg.execute("SET session_replication_role = DEFAULT")
