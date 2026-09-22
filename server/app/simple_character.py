@@ -35,7 +35,6 @@ from app.character_identity import (
     CHARACTER_TEMPLATE_HASH,
     CHARACTER_TEMPLATE_VERSION,
     REQUIRED_CHARACTER_VIEW_TYPES,
-    approved_character_asset_key,
     character_error,
     encode_json,
     generated_character_asset_key,
@@ -269,9 +268,10 @@ class PreparedSimpleCharacterViewStorage:
     view_type: RequiredCharacterViewType
     character_asset_id: str
     generated_asset: PreparedSimpleCharacterAsset
-    approved_asset: PreparedSimpleCharacterAsset
+    # Publishing writes no objects: the approved row reuses the generated
+    # object, so only its row UUID is carried (no second StoredObject/bytes).
+    approved_asset_id: str
     review_id: str
-    content: bytes
 
 
 @dataclass(frozen=True)
@@ -395,19 +395,9 @@ def store_simple_character_publication(
                 content_type="image/png",
             )
             object_keys.append(generated_stored.key)
-            approved_key = approved_character_asset_key(
-                owner_user_id=actor.id,
-                persona_id=persona_id,
-                version_id=version_id,
-                view_type=view_type,
-                asset_id=approved_asset_id,
-            )
-            approved_stored = storage.put_object(
-                approved_key,
-                content,
-                content_type="image/png",
-            )
-            object_keys.append(approved_stored.key)
+            # MATERIAL-UX-14: the approved asset reuses the generated object
+            # byte-for-byte (same key/uri/sha256/size); only its assets-row
+            # UUID stays distinct, so each view stores a single COS object.
             prepared_views.append(
                 PreparedSimpleCharacterViewStorage(
                     view_type=view_type,
@@ -416,12 +406,8 @@ def store_simple_character_publication(
                         asset_id=generated_asset_id,
                         stored=generated_stored,
                     ),
-                    approved_asset=PreparedSimpleCharacterAsset(
-                        asset_id=approved_asset_id,
-                        stored=approved_stored,
-                    ),
+                    approved_asset_id=approved_asset_id,
                     review_id=str(uuid.uuid4()),
-                    content=content,
                 )
             )
     except (
@@ -613,16 +599,13 @@ def create_simple_character(
         )
         publication_hash, assets_by_view = _publish_views(
             conn,
-            storage=storage,
             actor=actor,
             version_id=version_id,
-            persona_id=persona_id,
             persona_snapshot_json=persona_snapshot_json,
             views=views,
             contact_sheet_asset_id=contact_sheet_asset_id,
             generation_source=contact_source,
             now_iso=now_iso,
-            attempted_keys=attempted_keys,
             prepared_views=(
                 prepared_publication.views if prepared_publication is not None else None
             ),
@@ -1402,16 +1385,13 @@ def regenerate_simple_character_contact_sheet(
         )
         publication_hash, assets_by_view = _publish_views(
             conn,
-            storage=storage,
             actor=actor,
             version_id=version_id,
-            persona_id=persona_id,
             persona_snapshot_json=persona_snapshot_json,
             views=views,
             contact_sheet_asset_id=contact_sheet_asset_id,
             generation_source=contact_source,
             now_iso=now_iso,
-            attempted_keys=attempted_keys,
         )
 
         write_audit(
@@ -1588,16 +1568,13 @@ def create_simple_scene_look(
         )
         publication_hash, assets_by_view = _publish_views(
             conn,
-            storage=storage,
             actor=actor,
             version_id=version_id,
-            persona_id=persona_id,
             persona_snapshot_json=persona_snapshot_json,
             views=views,
             contact_sheet_asset_id=contact_sheet_asset_id,
             generation_source=prepared_generation.contact_source,
             now_iso=now_iso,
-            attempted_keys=attempted_keys,
             scene_quality=prepared_generation.scene_quality,
         )
         write_audit(
@@ -1954,9 +1931,11 @@ def delete_simple_character_identity(
         else []
     )
 
-    cleanup_targets: list[CharacterStorageCleanupTarget] = []
+    # Keyed by object identity (provider/bucket/key): the approved row reuses
+    # the generated row's key and one image can back several views, so targets
+    # must be deduped or planned/deleted counts inflate to asset-row counts.
+    cleanup_targets_by_object: dict[tuple[str, str, str], CharacterStorageCleanupTarget] = {}
     storage_resolution_failed_count = 0
-    shared_object_count = 0
     for asset in asset_rows:
         uri = str(asset["storage_uri"])
         try:
@@ -1985,16 +1964,18 @@ def delete_simple_character_identity(
                     None if own_content_id is None else str(own_content_id)
                 ),
             )
-            if still_referenced:
-                shared_object_count += 1
-            cleanup_targets.append(
-                CharacterStorageCleanupTarget(
+            object_identity = (storage.provider, storage.bucket, key)
+            existing_target = cleanup_targets_by_object.get(object_identity)
+            if existing_target is None or (
+                still_referenced and not existing_target.still_referenced
+            ):
+                # still_referenced 一旦为真就保持为真（宁可保留共享字节）。
+                cleanup_targets_by_object[object_identity] = CharacterStorageCleanupTarget(
                     asset_id=str(asset["id"]),
                     storage=storage,
                     key=key,
                     still_referenced=still_referenced,
                 )
-            )
         except (HTTPException, StorageBackendUnavailable, OSError, ValueError):
             storage_resolution_failed_count += 1
 
@@ -2048,6 +2029,8 @@ def delete_simple_character_identity(
                 tuple(asset_ids),
             )
 
+    cleanup_targets = tuple(cleanup_targets_by_object.values())
+    shared_object_count = sum(1 for target in cleanup_targets if target.still_referenced)
     write_audit(
         conn,
         actor=actor,
@@ -2064,7 +2047,7 @@ def delete_simple_character_identity(
     return CharacterStorageCleanupPlan(
         identity_id=identity_id,
         actor_id=actor.id,
-        targets=tuple(cleanup_targets),
+        targets=cleanup_targets,
         resolution_failed_count=storage_resolution_failed_count,
     )
 
@@ -2550,13 +2533,13 @@ def _insert_version(
 
 @dataclass(frozen=True)
 class _ApprovedView:
+    # MATERIAL-UX-14: the approved row reuses the generated view's stored
+    # object (same key/uri/sha256/size) instead of uploading a second copy.
     view_type: RequiredCharacterViewType
     character_asset_id: str
     generated_asset_id: str
     review_id: str
-    content: bytes
-    content_type: str
-    sha256: str
+    stored: StoredObject
 
 
 # Per-view images are cropped out of the real contact sheet so the published
@@ -2977,10 +2960,12 @@ def _generate_and_approve_views(
     contact_content_type: str,
     prepared_views: tuple[PreparedSimpleCharacterViewStorage, ...] | None = None,
 ) -> list[_ApprovedView]:
-    """Store one approved per-view asset for each required view type.
+    """Record one approved per-view asset for each required view type.
 
-    Every view is cropped from the contact sheet. Uncroppable provider output
-    must fail before any view is approved or published.
+    Every view is cropped from the contact sheet and uploaded once as its
+    generated object; ``_publish_views`` then reuses that object for the
+    approved row. Uncroppable provider output must fail before any view is
+    approved or published.
     """
     cropped_views = _require_contact_sheet_views(contact_content, contact_content_type)
     prepared_by_view = (
@@ -3007,7 +2992,6 @@ def _generate_and_approve_views(
             character_asset_id = prepared_view.character_asset_id
             generated_asset_id = prepared_view.generated_asset.asset_id
             review_id = prepared_view.review_id
-            content = prepared_view.content
             stored = prepared_view.generated_asset.stored
         conn.execute(
             """
@@ -3063,9 +3047,7 @@ def _generate_and_approve_views(
                 character_asset_id=character_asset_id,
                 generated_asset_id=generated_asset_id,
                 review_id=review_id,
-                content=content,
-                content_type=stored.content_type,
-                sha256=stored.sha256,
+                stored=stored,
             )
         )
     return views
@@ -3074,16 +3056,13 @@ def _generate_and_approve_views(
 def _publish_views(
     conn: BusinessConnection,
     *,
-    storage: StorageAdapter,
     actor: CurrentUser,
     version_id: str,
-    persona_id: str,
     persona_snapshot_json: str,
     views: list[_ApprovedView],
     contact_sheet_asset_id: str,
     generation_source: str,
     now_iso: str,
-    attempted_keys: list[str],
     prepared_views: tuple[PreparedSimpleCharacterViewStorage, ...] | None = None,
     scene_quality: SceneContactSheetQualityResult | None = None,
 ) -> tuple[str, dict[str, dict[str, object]]]:
@@ -3095,22 +3074,11 @@ def _publish_views(
         prepared_view = prepared_by_view.get(view.view_type)
         if prepared_view is None:
             approved_asset_id = str(uuid.uuid4())
-            approved_key = approved_character_asset_key(
-                owner_user_id=actor.id,
-                persona_id=persona_id,
-                version_id=version_id,
-                view_type=view.view_type,
-                asset_id=approved_asset_id,
-            )
-            stored = storage.put_object(
-                approved_key,
-                view.content,
-                content_type=view.content_type,
-            )
-            attempted_keys.append(stored.key)
         else:
-            approved_asset_id = prepared_view.approved_asset.asset_id
-            stored = prepared_view.approved_asset.stored
+            approved_asset_id = prepared_view.approved_asset_id
+        # MATERIAL-UX-14: publishing writes no objects; the approved row
+        # records the generated view's stored object as-is.
+        stored = view.stored
         conn.execute(
             """
             INSERT INTO assets (
