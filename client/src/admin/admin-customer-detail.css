@@ -388,6 +388,43 @@
     width: 10%;
   }
 }
+/* 任务书 C（2026-09-18）：客户详情设备视图 CustomerDeviceSection。
+   只读角色不渲染操作列，故样式只覆盖可写态。 */
+.customer-devices {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.customer-devices__header {
+  align-items: baseline;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.customer-devices__header h2 {
+  font-size: 16px;
+  margin: 0;
+}
+
+.customer-devices__header small {
+  color: var(--admin-muted);
+}
+
+.customer-devices__actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* 吊销为终态不可逆操作，比解绑更强，用危险色区分（同 admin-sessions__revoke 口径）。 */
+.admin-shell--control button.customer-devices__revoke {
+  border-color: #75483e;
+  color: #e78974;
+  background: transparent;
+}
+
 @media (max-width: 760px) {
   .customer-list-filters.admin-toolbar {
     grid-template-columns: repeat(2, minmax(0, 1fr));

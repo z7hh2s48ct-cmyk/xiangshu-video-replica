@@ -437,10 +437,22 @@ describe("CustomersPage (ADM-02 / T33)", () => {
         limit: 3,
         offset: 0,
       });
-      expect(adminApi.listDevices).not.toHaveBeenCalled();
+      // 任务书 C（2026-09-18）第 2 项：客户详情恢复设备视图，
+      // 进入详情即按 user_id 拉取该客户的 BOUND 设备。
+      // 本条此前断言 listDevices 不被调用，是 PR #102 删除设备页后的固化状态，
+      // 随任务书 C 反转；会话与调账仍未在详情内直连，两条否定断言保持。
+      expect(adminApi.listDevices).toHaveBeenCalledWith({
+        status: "BOUND",
+        userId: "user-1",
+        limit: 50,
+      });
       expect(adminApi.listCustomerSessions).not.toHaveBeenCalled();
       expect(adminApi.listAdminAdjustments).not.toHaveBeenCalled();
     });
+    expect(
+      screen.getByRole("region", { name: "客户设备" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("该客户当前没有已绑定设备。")).toBeInTheDocument();
     expect(screen.queryByText("绑定设备")).not.toBeInTheDocument();
     expect(screen.queryByText("登录设备")).not.toBeInTheDocument();
     expect(

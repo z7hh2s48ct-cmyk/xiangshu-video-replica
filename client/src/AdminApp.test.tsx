@@ -799,6 +799,7 @@ describe("AdminApp", () => {
       "经营分析",
       "资金流水",
       "客户管理",
+      "会话与设备",
       "生成记录",
       "审计中心",
       "系统设置",
@@ -836,6 +837,21 @@ describe("AdminApp", () => {
       screen.getByRole("tab", { name: "API 端点与价格" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "服务配置" })).toBeInTheDocument();
+  });
+
+  it("mounts the restored sessions page from the customer-operations group", async () => {
+    // 任务书 C：SessionsPage 此前是孤儿（只被自身测试引用），这里钉住恢复挂载。
+    installFetch({ session: "valid" });
+
+    render(<AdminApp />);
+    await screen.findByRole("navigation", { name: "管理端导航" });
+
+    fireEvent.click(screen.getByRole("button", { name: "会话与设备" }));
+
+    expect(await screen.findByLabelText("客户 ID")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "查看客户" }),
+    ).toBeInTheDocument();
   });
 
   it("returns to the login gate and clears admin session state when a control 401 emits the shared expiry event", async () => {

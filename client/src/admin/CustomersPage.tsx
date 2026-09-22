@@ -22,6 +22,7 @@ import {
   updateCustomerUnitPrice,
 } from "../api.admin";
 import { AccountCreditPanel } from "./AccountCreditPanel";
+import { CustomerDeviceSection } from "./CustomerDeviceSection";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { CopyCustomerId } from "./ui/CopyCustomerId";
 import { PageBanner } from "./ui/PageBanner";
@@ -659,6 +660,8 @@ function CustomerDetailView({
         key={`ledger:${customer.user_id}:${customer.available_credits}`}
         userId={customer.user_id}
       />
+      {/* 任务书 C：设备视图（BOUND 设备 + 解绑/吊销凭据）。 */}
+      <CustomerDeviceSection readOnly={readOnly} userId={customer.user_id} />
       <div className="customer-detail-settings-grid">
         {customer.activation_code !== "账号注册" && (
           <CustomerPriceEditor readOnly={readOnly} userId={customer.user_id} />

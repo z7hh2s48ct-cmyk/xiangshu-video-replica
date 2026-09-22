@@ -11,6 +11,7 @@ import { CustomersManagementPage } from "./admin/CustomersManagementPage";
 import { FundsPage } from "./admin/FundsPage";
 import { GenerationRecordsPage } from "./admin/GenerationRecordsPage";
 import { OverviewPage } from "./admin/OverviewPage";
+import { SessionsPage } from "./admin/SessionsPage";
 import { SubAccountsPage } from "./admin/SubAccountsPage";
 import { SystemSettingsPage } from "./admin/SystemSettingsPage";
 import { AdminErrorBoundary } from "./admin/ui/AdminErrorBoundary";
@@ -67,6 +68,7 @@ export type AdminTab =
   | "analytics"
   | "funds"
   | "customersMgmt"
+  | "sessions"
   | "subAccounts"
   | "generationRecords"
   | "viralVideos"
@@ -95,6 +97,11 @@ const tabGroups: Array<{
         id: "customersMgmt",
         label: "客户管理",
         helper: "客户账户与积分管理",
+      },
+      {
+        id: "sessions",
+        label: "会话与设备",
+        helper: "在线会话、强制下线与设备解绑",
       },
       {
         id: "subAccounts",
@@ -131,6 +138,7 @@ const tabPageTitles: Record<AdminTab, string> = {
   analytics: "经营分析",
   funds: "资金流水",
   customersMgmt: "客户管理",
+  sessions: "会话与设备",
   subAccounts: "子账号管理",
   generationRecords: "用户生成记录",
   viralVideos: "爆款视频库",
@@ -144,6 +152,7 @@ const navigationIcons: Record<AdminTab, string> = {
   analytics: chartIcon,
   funds: walletIcon,
   customersMgmt: usersIcon,
+  sessions: shieldIcon,
   subAccounts: usersIcon,
   generationRecords: clapperboardIcon,
   viralVideos: clapperboardIcon,
@@ -789,6 +798,11 @@ export function AdminApp() {
               operatorId={actor.user_id}
               readOnly={readOnly}
             />
+          ) : null}
+          {/* 任务书 C：恢复在线会话挂载。多设备并存下按设备强制下线是管理刚需，
+              readOnly 由会话页自身收敛（auditor 不渲染强制下线与调账入口）。 */}
+          {activeTab === "sessions" ? (
+            <SessionsPage readOnly={readOnly} />
           ) : null}
           {activeTab === "subAccounts" ? (
             <AdminErrorBoundary>
