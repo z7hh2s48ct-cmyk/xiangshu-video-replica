@@ -18,9 +18,17 @@ import {
   packageBenefitLabel,
   packageBonusCredits,
 } from "../rechargePackageDisplay";
+import { orderPollDelay, orderPollWithinWindow } from "./orderPolling";
 import type { CustomerCredentialStore } from "./useCustomerSession";
 
-const ORDER_POLL_INTERVAL_MS = 2_000;
+/**
+ * 轮询窗口（5 分钟）用尽后的口径，与钱包面板逐字一致。
+ *
+ * 窗口用尽后自动轮询就停了：此时若还把「系统会继续查询」留在弹窗上，客户会一直等
+ * 一个不再发生的查询（同一次改动里钱包面板有明确提示，只有弹窗漏了）。
+ */
+const POLL_WINDOW_EXHAUSTED_NOTICE =
+  "支付结果仍待确认，可稍后刷新页面继续查询。";
 
 export function CustomerRechargeDialog({
   isOpen,
@@ -120,8 +128,13 @@ export function CustomerRechargeDialog({
     }
     let active = true;
     let timer: number | undefined;
+    // P2#20：与本页钱包面板同一个节奏（2s 起、翻倍、封顶 32s、5 分钟窗口）。
+    let attempts = 0;
+    const startedAt = Date.now();
 
     async function pollOrder() {
+      const nextDelay = orderPollDelay(attempts);
+      attempts += 1;
       const credential = await loadCredential();
       if (!active || credential === null) {
         return;
@@ -144,13 +157,24 @@ export function CustomerRechargeDialog({
           setPaymentState("choosing");
           return;
         }
-        timer = window.setTimeout(pollOrder, ORDER_POLL_INTERVAL_MS);
+        if (orderPollWithinWindow(startedAt)) {
+          timer = window.setTimeout(pollOrder, nextDelay);
+        } else {
+          // 窗口用尽即停：必须同时改文案——否则屏幕上留着「系统会继续查询」，
+          // 客户会一直等一个已经不存在的轮询（钱包面板对同一情形就是这样做的）。
+          setError(POLL_WINDOW_EXHAUSTED_NOTICE);
+        }
       } catch (cause) {
-        if (active) {
+        if (!active) {
+          return;
+        }
+        if (orderPollWithinWindow(startedAt)) {
           setError(
             visibleError(cause, "暂时无法确认支付结果，系统会继续查询。"),
           );
-          timer = window.setTimeout(pollOrder, ORDER_POLL_INTERVAL_MS);
+          timer = window.setTimeout(pollOrder, nextDelay);
+        } else {
+          setError(POLL_WINDOW_EXHAUSTED_NOTICE);
         }
       }
     }

@@ -23,6 +23,7 @@ import type {
   CustomerSessionRuntime,
   CustomerStoredIdentity,
 } from "./useCustomerSession";
+import { useLeaseActive } from "./useLeaseActive";
 
 type ProfileTab = "overview" | "devices" | "billing" | "sub-accounts";
 
@@ -279,7 +280,7 @@ export function CustomerProfilePanel({
             {isLoggingOut ? "正在退出" : "退出登录"}
           </button>
           <button onClick={() => onRecharge()} type="button">
-            充值秒数
+            充值积分
           </button>
         </div>
       </header>
@@ -537,30 +538,4 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message.trim()
     ? error.message
     : fallback;
-}
-
-function useLeaseActive(expiresAt: string | null): boolean {
-  const [isActive, setIsActive] = useState(() => leaseIsActive(expiresAt));
-
-  useEffect(() => {
-    const expiry = expiresAt ? Date.parse(expiresAt) : Number.NaN;
-    const delayMs = expiry - Date.now();
-    if (!Number.isFinite(expiry) || delayMs <= 0) {
-      setIsActive(false);
-      return;
-    }
-    setIsActive(true);
-    const timer = window.setTimeout(() => setIsActive(false), delayMs + 1);
-    return () => window.clearTimeout(timer);
-  }, [expiresAt]);
-
-  return isActive;
-}
-
-function leaseIsActive(expiresAt: string | null): boolean {
-  if (!expiresAt) {
-    return false;
-  }
-  const expiry = Date.parse(expiresAt);
-  return Number.isFinite(expiry) && expiry > Date.now();
 }

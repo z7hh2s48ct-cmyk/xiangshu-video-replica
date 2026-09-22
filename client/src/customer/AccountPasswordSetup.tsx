@@ -5,6 +5,7 @@ import {
   customerPasswordState,
   customerSetInitialPassword,
 } from "../api";
+import { passwordStrength } from "./passwordStrength";
 
 export function AccountPasswordSetup({
   credential,
@@ -18,6 +19,7 @@ export function AccountPasswordSetup({
   const [password, setPassword] = useState("");
   const [repeat, setRepeat] = useState("");
   const [error, setError] = useState("");
+  const strength = passwordStrength(password);
   const [busy, setBusy] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const retry = useRef<{ fingerprint: string; key: string } | null>(null);
@@ -121,6 +123,21 @@ export function AccountPasswordSetup({
               onChange={(event) => setPassword(event.target.value)}
               autoComplete="new-password"
             />
+            {strength.label ? (
+              <p
+                className={`uc-password-strength uc-password-strength--${strength.score}`}
+                role="status"
+              >
+                <span
+                  className="uc-password-strength__meter"
+                  aria-hidden="true"
+                >
+                  <i />
+                </span>
+                强度：{strength.label}
+                {strength.hint ? ` · ${strength.hint}` : ""}
+              </p>
+            ) : null}
             <label htmlFor="legacy-repeat">再次输入密码</label>
             <input
               id="legacy-repeat"

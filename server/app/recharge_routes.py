@@ -1,25 +1,37 @@
 from __future__ import annotations
 
 import base64
+import csv
 import io
 import json
 import sqlite3
-from collections.abc import Sequence
-from datetime import datetime, timedelta
+from collections.abc import Iterator, Sequence
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal, cast
 from uuid import uuid4
 
 import psycopg
 import qrcode  # type: ignore[import-untyped]
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, StrictInt
 
 import app.wechat_native_provider  # noqa: F401
 
 # Import to trigger provider registration
 import app.zpay_provider  # noqa: F401
+from app.admin_dates import SHANGHAI
 from app.auth import AuthenticatedUser, Database
 from app.billing_catalog import SERVICES
+from app.csv_export import spreadsheet_safe_cell
 from app.customer_fence import (
     BusinessDbDep,
     CustomerSessionSnapshot,
@@ -57,9 +69,12 @@ from app.permissions import require_not_auditor
 from app.recharge_packages import RechargePackage, build_package_snapshot, read_package
 from app.security_rate_limit import _server_now, client_ip_from_request
 from app.settings import SettingsRepository, effective_customer_billing_settings
+from app.sub_account_permissions import SERVICE_FEATURE
 from app.sub_account_quota import read_quota_used
 from app.usage_billing import resolve_wallet_owner
 from app.wallet_routes import (
+    ConsumptionByBusinessItem,
+    ConsumptionByBusinessResponse,
     WalletResponse,
     WalletTransactionPage,
     WalletTransactionResponse,
@@ -73,6 +88,19 @@ from app.zpay import generate_merchant_order_no
 from app.zpay_payments import read_recharge_order, serialize_recharge_order
 
 router = APIRouter(prefix="/api", tags=["recharge"])
+# 导出 CSV 的列：与文档字符串一致，且**不含**内部 actor_user_id（操作人给显示名）。
+_CSV_HEADER = (
+    "时间",
+    "类型",
+    "可用积分变化",
+    "待结算变化",
+    "业务",
+    "Token 组",
+    "任务 ID",
+    "凭证版本",
+    "认证来源",
+    "操作人",
+)
 MAX_ORDER_NUMBER_ATTEMPTS = 3
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
 REPLAY_HEADER = "X-Idempotent-Replay"
@@ -1125,6 +1153,61 @@ def read_customer_wallet(request: Request) -> WalletResponse:
         )
 
 
+def _ledger_filter_clauses(
+    *,
+    wallet_owner_id: str,
+    sub_account_id: str | None,
+    token_group_id: str | None,
+    auth_source: str | None,
+    transaction_type: str | None,
+    business: str | None,
+    started_at: datetime | None,
+    ended_at: datetime | None,
+) -> tuple[list[str], list[object]]:
+    """流水筛选 → SQL 子句与参数（**列表与 CSV 导出共用**）。
+
+    这两条路径此前各拼一套，于是同一组筛选在两边语义不同：导出「视频生成」查
+    ``op.service = 'video'`` 而列表查 ``task_id IS NOT NULL OR service IN
+    (video_768p, video_2k)``；``historical`` 一边映射成 ``IS NULL`` 一边做等值比较；
+    时间上界一边开区间一边闭区间。客户看到的现象是「界面有行、导出的 CSV 只有表头」。
+    共用一份是唯一能让两边不漂移的写法——新增筛选项只需要改这里一处。
+    """
+    clauses = ["wt.user_id = %s"]
+    params: list[object] = [wallet_owner_id]
+    if sub_account_id:
+        clauses.append("wt.actor_user_id = %s")
+        params.append(sub_account_id)
+    if token_group_id:
+        clauses.append("k.token_group_id = %s")
+        params.append(token_group_id)
+    if auth_source == "historical":
+        clauses.append("wt.auth_source IS NULL")
+    elif auth_source:
+        clauses.append("wt.auth_source = %s")
+        params.append(auth_source)
+    if transaction_type:
+        clauses.append("wt.type = %s")
+        params.append(transaction_type)
+    if business:
+        clauses.append(
+            {
+                "video": "(wt.task_id IS NOT NULL OR op.service IN ('video_768p','video_2k'))",
+                "oral": "(wt.oral_task_id IS NOT NULL OR op.service = 'oral')",
+                "recharge": "wt.type = 'CHARGE'",
+            }.get(business, "op.service = %s")
+        )
+        if business not in {"video", "oral", "recharge"}:
+            params.append(business)
+    if started_at:
+        clauses.append("wt.created_at::timestamptz >= %s")
+        params.append(started_at)
+    if ended_at:
+        # 开区间：结束日期在调用方已 +1 天，边界那一瞬不该算进来。
+        clauses.append("wt.created_at::timestamptz < %s")
+        params.append(ended_at)
+    return clauses, params
+
+
 @router.get("/customer/wallet/transactions", response_model=WalletTransactionPage)
 def list_customer_wallet_transactions(
     request: Request,
@@ -1151,6 +1234,10 @@ def list_customer_wallet_transactions(
     | None = None,
     started_at: datetime | None = None,
     ended_at: datetime | None = None,
+    sub_account_id: str | None = Query(
+        default=None, max_length=128
+    ),  # B3: single sub-account filter
+    group_by_sub_account: bool = Query(default=False),  # B3: aggregation mode
 ) -> WalletTransactionPage:
     if any(value is not None and value.tzinfo is None for value in (started_at, ended_at)):
         raise HTTPException(422, detail="筛选时间必须包含时区。")
@@ -1161,35 +1248,16 @@ def list_customer_wallet_transactions(
         # the organisation sits on the master's wallet (T2.10), including a
         # sub-account's consumption (attributed through actor_user_id).
         wallet_owner_id = resolve_wallet_owner(BusinessConnection.postgres(conn), user_id)
-        clauses = ["wt.user_id = %s"]
-        params: list[object] = [wallet_owner_id]
-        if token_group_id:
-            clauses.append("k.token_group_id = %s")
-            params.append(token_group_id)
-        if auth_source == "historical":
-            clauses.append("wt.auth_source IS NULL")
-        elif auth_source:
-            clauses.append("wt.auth_source = %s")
-            params.append(auth_source)
-        if transaction_type:
-            clauses.append("wt.type = %s")
-            params.append(transaction_type)
-        if business:
-            clauses.append(
-                {
-                    "video": "(wt.task_id IS NOT NULL OR op.service IN ('video_768p','video_2k'))",
-                    "oral": "(wt.oral_task_id IS NOT NULL OR op.service = 'oral')",
-                    "recharge": "wt.type = 'CHARGE'",
-                }.get(business, "op.service = %s")
-            )
-            if business not in {"video", "oral", "recharge"}:
-                params.append(business)
-        if started_at:
-            clauses.append("wt.created_at::timestamptz >= %s")
-            params.append(started_at)
-        if ended_at:
-            clauses.append("wt.created_at::timestamptz < %s")
-            params.append(ended_at)
+        clauses, params = _ledger_filter_clauses(
+            wallet_owner_id=wallet_owner_id,
+            sub_account_id=sub_account_id,
+            token_group_id=token_group_id,
+            auth_source=auth_source,
+            transaction_type=transaction_type,
+            business=business,
+            started_at=started_at,
+            ended_at=ended_at,
+        )
         from_sql = (
             " FROM wallet_transactions wt LEFT JOIN customer_api_keys k ON k.id = "
             "wt.api_key_id AND k.user_id = wt.user_id "
@@ -1248,12 +1316,242 @@ def list_customer_wallet_transactions(
             """,
             [*params, limit, offset],
         ).fetchall()
+
+        # B3: compute summary for aggregation mode
+        sub_account_summary = None
+        if group_by_sub_account:
+            # 口径（B3 收口时定义，界面按此展示）：
+            #   debit_total  = 该子账号 SETTLE 掉的额度（-reserved_delta 求和）
+            #   credit_total = 退回到该子账号名下的额度（RELEASE 的 available_delta）
+            # 并且**复用下面那张表的同一套筛选**（clauses/params 就是列表用的那套），
+            # 否则「摘要说 3 笔、表里只有 1 行」这种对不上的账会让客户没法对账。
+            summary_rows = conn.execute(
+                "SELECT wt.actor_user_id, "
+                "(SELECT u.display_name FROM users u WHERE u.id = wt.actor_user_id), "
+                "COALESCE(SUM(CASE WHEN wt.type = 'SETTLE' THEN -wt.reserved_delta "
+                "ELSE 0 END), 0), "
+                "COALESCE(SUM(CASE WHEN wt.type = 'RELEASE' THEN wt.available_delta "
+                "ELSE 0 END), 0), "
+                "COUNT(*)"
+                + from_sql
+                # 不设 LIMIT：摘要的用途就是和下方那张表对账，静默只回前 N 个
+                # 会让「表里有、摘要里没有」再次发生（这正是本功能的立身之本）。
+                + " AND wt.actor_user_id IS NOT NULL"
+                + " GROUP BY wt.actor_user_id ORDER BY 3 DESC",
+                params,
+            ).fetchall()
+
+            sub_account_summary = [
+                {
+                    "sub_account_id": str(row[0]),
+                    "sub_account_name": row[1] or "未知子账号",
+                    "debit_total": int(row[2]),
+                    "credit_total": int(row[3]),
+                    "transaction_count": int(row[4]),
+                }
+                for row in summary_rows
+            ]
         return WalletTransactionPage(
             items=[_customer_ledger_entry(row) for row in rows],
             total=total,
             limit=limit,
             offset=offset,
+            sub_account_summary=sub_account_summary,
         )
+
+
+# ============================================================================
+# B3: CSV Export Endpoint
+# ============================================================================
+
+
+def _csv_record(values: Sequence[object], *, spreadsheet_safe: bool = False) -> bytes:
+    """一行 CSV 的 UTF-8 字节：交给 ``csv.writer`` 做引号转义，NULL 写成空串。
+
+    手拼字符串在值里带逗号（Token 名称、业务名）时会直接破坏列对齐，也会把 NULL
+    渲染成字面量 ``None``。``spreadsheet_safe`` 再对用户可控单元格（Token 名称、
+    显示名）套一层公式前缀防护——见 ``csv_export.spreadsheet_safe_cell``：以
+    ``= + - @`` 开头的单元格会让 Excel/WPS 当公式执行。
+    """
+    buffer = io.StringIO()
+    cells = ["" if value is None else value for value in values]
+    if spreadsheet_safe:
+        cells = [spreadsheet_safe_cell(cell) for cell in cells]
+    csv.writer(buffer, lineterminator="\r\n").writerow(cells)
+    return buffer.getvalue().encode("utf-8")
+
+
+@router.get(
+    "/customer/wallet/transactions/export",
+    response_class=StreamingResponse,
+    tags=["customer", "experimental", "consumption logs"],
+    summary="Export wallet transactions to CSV",
+    description="Streams wallet transaction rows as a UTF-8 encoded CSV file. "
+    "Intended for bulk export workflows (B3).\n\n"
+    "Headers:\n"
+    "- Content-Disposition: attachment; filename=wallet-transactions-YYYYMM.csv\n"
+    "- Content-Type: text/csv; charset=utf-8\n"
+    "- X-Export-Truncated: true 表示行数撞到 limit，文件不是全量\n\n"
+    "Columns (与消费记录页表格的列一一对应，顺序即表头顺序；这里用半角逗号，"
+    "与 CSV 分隔符一致):\n"
+    "时间,类型,可用积分变化,待结算变化,业务,Token 组,任务 ID,凭证版本,认证来源,操作人\n\n"
+    "选择 business / auth_source 等筛选时，导出与列表端点走**同一份** WHERE 子句，"
+    "所以「界面上有几行」与「CSV 里有几行」始终一致。",
+)
+def export_customer_wallet_transactions_csv(
+    request: Request,
+    limit: int = Query(default=50_000, ge=1, le=100_000),  # B3: high cap for export
+    offset: int = Query(default=0, ge=0),
+    token_group_id: str | None = Query(default=None, max_length=128),
+    auth_source: Literal["session", "api_key", "internal", "historical"] | None = None,
+    transaction_type: Literal["CHARGE", "RESERVE", "SETTLE", "RELEASE", "CONVERSION"] | None = None,
+    business: Literal[
+        "video",
+        "oral",
+        "recharge",
+        "character",
+        "first_frame",
+        "analysis",
+        "rewrite",
+        "asr",
+        "link_resolution",
+        "prompt_optimize",
+        "avatar_clone",
+        "voice_clone",
+        "viral_data",
+    ]
+    | None = None,
+    started_at: datetime | None = None,
+    ended_at: datetime | None = None,
+    sub_account_id: str | None = Query(default=None, max_length=128),
+) -> StreamingResponse:
+    """把当前筛选下的流水导成 CSV。
+
+    与列表端点**共用** `_ledger_filter_clauses`——此前两边各拼一套，同一组筛选在
+    导出侧语义不同（business 走等值比较、historical 不做 IS NULL 映射、时间上界开闭
+    不一致），客户看到的是「界面有行、导出的 CSV 只有表头」。时间边界按列表口径校验。
+    """
+    if any(value is not None and value.tzinfo is None for value in (started_at, ended_at)):
+        raise HTTPException(422, detail="筛选时间必须包含时区。")
+    if started_at and ended_at and ended_at <= started_at:
+        raise HTTPException(422, detail="结束时间必须晚于开始时间。")
+    with customer_read_transaction(request) as (conn, user_id):
+        wallet_owner_id = resolve_wallet_owner(BusinessConnection.postgres(conn), user_id)
+        clauses, params = _ledger_filter_clauses(
+            wallet_owner_id=wallet_owner_id,
+            sub_account_id=sub_account_id,
+            token_group_id=token_group_id,
+            auth_source=auth_source,
+            transaction_type=transaction_type,
+            business=business,
+            started_at=started_at,
+            ended_at=ended_at,
+        )
+        where_sql = " AND ".join(clauses)
+        sql = (
+            # 「金额」不再是单列：SETTLE 行的金额记在 reserved_delta 上（available_delta
+            # 恒为 0），只导一列会让每一笔真实消费都显示成 0。导两列与界面一致。
+            "SELECT wt.created_at, wt.type, wt.available_delta, wt.reserved_delta, "
+            "op.service, k.label, wt.task_id, k.credential_version, wt.auth_source, "
+            "(SELECT u.display_name FROM users u WHERE u.id=wt.actor_user_id) as actor_name "
+            "FROM wallet_transactions wt "
+            "LEFT JOIN customer_api_keys k ON k.id = wt.api_key_id "
+            # 别名必须是 op：共用筛选子句里写的是 op.service（列表侧一直用的别名）。
+            "LEFT JOIN billing_operations op ON op.id=wt.billing_operation_id "
+            "WHERE " + where_sql + " ORDER BY wt.created_at DESC LIMIT %s OFFSET %s"
+        )
+        rows = conn.execute(sql, [*params, limit, offset]).fetchall()
+        # 静默截断会让客户以为拿到的是全量账；与 billing_routes 同款信号头。
+        truncated = len(rows) >= limit
+
+        def csv_stream() -> Iterator[bytes]:
+            # csv.writer 负责引号转义；每个单元格再走 spreadsheet_safe_cell——Token 名称
+            # 与显示名是用户可控的，以 = + - @ 开头会让 Excel 当公式执行（CSV 注入）。
+            # 开头的 BOM 是给 Excel 认 UTF-8 用的，否则中文表头显示成乱码。
+            yield "﻿".encode()
+            yield _csv_record(_CSV_HEADER, spreadsheet_safe=True)
+            for row in rows:
+                yield _csv_record(
+                    (
+                        row[0],
+                        row[1],
+                        row[2],
+                        row[3],
+                        row[4],
+                        row[5],
+                        row[6],
+                        row[7],
+                        row[8],
+                        row[9],
+                    ),
+                    spreadsheet_safe=True,
+                )
+
+        filename = (
+            "wallet-transactions-"
+            + datetime.now(UTC).astimezone(SHANGHAI).strftime("%Y%m")
+            + ".csv"
+        )
+        return StreamingResponse(
+            csv_stream(),
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}",
+                "X-Export-Truncated": str(truncated).lower(),
+            },
+        )
+
+
+@router.get(
+    "/customer/wallet/consumption-by-business",
+    response_model=ConsumptionByBusinessResponse,
+)
+def customer_consumption_by_business(
+    request: Request,
+    days: int = Query(default=30, ge=1, le=180),
+) -> ConsumptionByBusinessResponse:
+    """近 N 天按业务汇总的消费构成（审计方案 F / P1 清单 #10）。
+
+    只统计 ``SETTLE``：预扣会随后被结算或退回，把它算进来会让同一笔消费出现两次；
+    退回也不是消费。没有关联 operation 的历史行归到 ``other``（界面显示为「其他」）。
+
+    **业务键用客户口径的 12 类**（``sub_account_permissions.SERVICE_FEATURE``），不是
+    计费科目本身：``billing_operations.service`` 存的是 ``video_768p`` / ``video_2k``
+    这类科目名，前端没有任何一份映射覆盖它们（消费构成于是把原始科目名原样显示出来），
+    而筛选下拉、子账号权限矩阵用的都是 ``video`` 这类业务键。同一功能在界面里出现
+    「视频生成」与「video_768p」两个名字，客户会当成两种服务；两档视频规格也本该合成
+    一项。归一到业务键后，前端只需要 ``BUSINESS_FEATURES`` 一份中文名。
+    """
+    with customer_read_transaction(request) as (conn, user_id):
+        wallet_owner_id = resolve_wallet_owner(BusinessConnection.postgres(conn), user_id)
+        rows = conn.execute(
+            "SELECT COALESCE(op.service, 'other') AS business, "
+            "COALESCE(SUM(-wt.reserved_delta), 0) AS credits "
+            "FROM wallet_transactions wt "
+            "LEFT JOIN billing_operations op ON op.id = wt.billing_operation_id "
+            "WHERE wt.user_id = %s AND wt.type = 'SETTLE' "
+            "AND wt.created_at::timestamptz >= now() - make_interval(days => %s) "
+            "GROUP BY 1 HAVING COALESCE(SUM(-wt.reserved_delta), 0) > 0 "
+            "ORDER BY 2 DESC",
+            (wallet_owner_id, days),
+        ).fetchall()
+    # 合并在 Python 侧做：SERVICE_FEATURE 是既有唯一权威的科目→业务映射，在 SQL 里
+    # 再写一份 CASE 就等于又开了一处会漂移的口径。科目数是个位数量级，代价可忽略。
+    totals: dict[str, int] = {}
+    for row in rows:
+        service = str(row[0])
+        key = SERVICE_FEATURE.get(service, service)
+        totals[key] = totals.get(key, 0) + int(row[1])
+    # 按金额倒序；同额时按键名定序，避免依赖 dict 插入顺序（测试要可比）。
+    items = [
+        ConsumptionByBusinessItem(business=key, credits=credits)
+        for key, credits in sorted(totals.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    return ConsumptionByBusinessResponse(
+        days=days,
+        total_credits=sum(item.credits for item in items),
+        items=items,
+    )
 
 
 def _customer_ledger_entry(row: Sequence[Any]) -> WalletTransactionResponse:

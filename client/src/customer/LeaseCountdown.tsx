@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+
 /** Lease countdown display with auto-refresh (FE-04 / T31).
  * Shows formatted expiry time, warning states, and provides refresh action.
  */
@@ -8,7 +10,15 @@ export function LeaseCountdown({
   expiresAt: string;
   onRefresh: () => void;
 }): React.JSX.Element {
-  const now = new Date();
+  // 审计 P2 清单 #15：最后一分钟要真的在跳。此前只在重渲染（心跳回来）时重算，
+  // 于是「剩余 0 分钟」会停住不动——最需要预警的那一分钟里反而看不出变化。
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const now = new Date(nowMs);
   const expiry = new Date(expiresAt);
   const diffMs = expiry.getTime() - now.getTime();
 
@@ -19,6 +29,7 @@ export function LeaseCountdown({
     // Less than 5 minutes
     status = "warning";
   }
+  const secondsRemaining = Math.max(0, Math.ceil(diffMs / 1_000));
 
   const minutesRemaining = Math.floor(diffMs / 60_000);
   const formattedExpiry = expiry.toLocaleString("zh-CN", {
@@ -41,7 +52,9 @@ export function LeaseCountdown({
 
       {status === "warning" && (
         <span className="status-text warning">
-          ⏰ 即将过期（剩余 {minutesRemaining} 分钟）
+          {secondsRemaining <= 60
+            ? `⏰ 约 ${secondsRemaining} 秒后失效——点「立即续约」可续期`
+            : `⏰ 即将过期（剩余 ${minutesRemaining} 分钟）`}
         </span>
       )}
 

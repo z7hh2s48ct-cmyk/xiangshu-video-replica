@@ -9,6 +9,7 @@ import {
 import { Icon } from "../studio/ui";
 import { ChangePasswordForm } from "./ChangePasswordForm";
 import { useCustomerConfirm } from "./CustomerConfirmDialog";
+import { RetryButton } from "./RetryButton";
 
 // 会话事件的中文说法。服务端只会回 029 里那几个取值；认不出的原样显示，
 // 总比显示空白好——这条记录的意义就是「看得见发生过什么」。
@@ -177,12 +178,7 @@ export function SecuritySection({
         {historyError ? (
           <div className="uc-error" role="alert">
             {historyError}
-            <button
-              type="button"
-              onClick={() => setRefresh((value) => value + 1)}
-            >
-              重新加载
-            </button>
+            <RetryButton onClick={() => setRefresh((value) => value + 1)} />
           </div>
         ) : events === null ? (
           <p role="status">正在读取登录记录…</p>

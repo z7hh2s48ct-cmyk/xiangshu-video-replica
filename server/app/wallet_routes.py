@@ -97,6 +97,30 @@ class WalletTransactionPage(BaseModel):
     total: int
     limit: int
     offset: int
+    # B3: optional aggregation summary array
+    sub_account_summary: list[dict[str, str | int]] | None = None
+
+
+class ConsumptionByBusinessItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    business: str
+    credits: int
+
+
+class ConsumptionByBusinessResponse(BaseModel):
+    """近 N 天的消费构成（审计方案 F / P1 清单 #10）。
+
+    口径：只算 ``SETTLE``（真正结算掉的消费），不含退回与充值；窗口是**滚动**
+    的 N×24 小时，不做自然日对齐——「最近 30 天」按滚动窗口解释更直白，也免得
+    在时区边界上多一层解释。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    days: int
+    total_credits: int
+    items: list[ConsumptionByBusinessItem]
 
 
 def _snapshot_text(value: object) -> str | None:

@@ -34,12 +34,12 @@ import {
   type LedgerPairState,
   netAvailableDelta,
 } from "./ledger-pairing";
+import { orderPollDelay, orderPollWithinWindow } from "./orderPolling";
+import { RetryButton } from "./RetryButton";
 import { TransactionPricingBreakdown } from "./TransactionPricingBreakdown";
 import type { CustomerCredentialStore } from "./useCustomerSession";
 import "./customer-wallet.css";
 
-const ORDER_POLL_INTERVAL_MS = 2_000;
-const MAX_ORDER_POLL_ATTEMPTS = 30;
 const HISTORY_PAGE_SIZE = 20;
 
 /** The customer wallet view (task #7): balance, recharge and orders under the
@@ -307,9 +307,12 @@ export function CustomerWalletPanel({
     }
     let active = true;
     let timer: number | undefined;
+    // P2#20：2s 起、每次翻倍、封顶 32s，总窗口 5 分钟（原来是固定 2s×30 次）。
     let attempts = 0;
+    const startedAt = Date.now();
 
     async function checkOrder() {
+      const nextDelay = orderPollDelay(attempts);
       attempts += 1;
       const credential = await loadSession();
       if (!active || credential === null) {
@@ -337,20 +340,20 @@ export function CustomerWalletPanel({
           return;
         }
         setNotice("支付结果确认中，请完成支付后返回本页。");
-        if (attempts >= MAX_ORDER_POLL_ATTEMPTS) {
+        if (!orderPollWithinWindow(startedAt)) {
           setNotice("支付结果仍待确认，可稍后刷新页面继续查询。");
           return;
         }
-        timer = window.setTimeout(checkOrder, ORDER_POLL_INTERVAL_MS);
+        timer = window.setTimeout(checkOrder, nextDelay);
       } catch (cause) {
         if (!active) {
           return;
         }
         setPollingError(errorMessage(cause, "暂时无法查询充值状态。"));
-        if (attempts >= MAX_ORDER_POLL_ATTEMPTS) {
+        if (!orderPollWithinWindow(startedAt)) {
           return;
         }
-        timer = window.setTimeout(checkOrder, ORDER_POLL_INTERVAL_MS);
+        timer = window.setTimeout(checkOrder, nextDelay);
       }
     }
 
@@ -494,13 +497,10 @@ export function CustomerWalletPanel({
     return (
       <section className="settings-error" role="alert">
         <span>{summaryError || "钱包暂不可用。"}</span>
-        <button
-          className="secondary-button"
+        <RetryButton
+          label="重新加载钱包"
           onClick={() => void loadSummary().catch(() => undefined)}
-          type="button"
-        >
-          重新加载钱包
-        </button>
+        />
       </section>
     );
   }
@@ -687,13 +687,10 @@ export function CustomerWalletPanel({
         {summaryError ? (
           <div className="settings-error" role="alert">
             <span>{summaryError}</span>
-            <button
-              className="secondary-button"
+            <RetryButton
+              label="重新加载钱包和最近订单"
               onClick={() => void loadSummary().catch(() => undefined)}
-              type="button"
-            >
-              重新加载钱包和最近订单
-            </button>
+            />
           </div>
         ) : null}
         <div className="table-scroll">
@@ -784,17 +781,14 @@ export function CustomerWalletPanel({
           {orderHistoryError ? (
             <div className="settings-error" role="alert">
               <span>{orderHistoryError}</span>
-              <button
-                className="secondary-button"
+              <RetryButton
+                label="重试加载充值记录"
                 onClick={() =>
                   void loadOrderHistory(
                     failedOrderHistoryOffset ?? orderHistoryPage?.offset ?? 0,
                   )
                 }
-                type="button"
-              >
-                重试加载充值记录
-              </button>
+              />
             </div>
           ) : null}
           <Pagination
@@ -865,17 +859,14 @@ export function CustomerWalletPanel({
         {transactionError ? (
           <div className="settings-error" role="alert">
             <span>{transactionError}</span>
-            <button
-              className="secondary-button"
+            <RetryButton
+              label="重试加载额度流水"
               onClick={() =>
                 void loadTransactions(
                   failedTransactionOffset ?? transactionPage?.offset ?? 0,
                 )
               }
-              type="button"
-            >
-              重试加载额度流水
-            </button>
+            />
           </div>
         ) : null}
         <Pagination

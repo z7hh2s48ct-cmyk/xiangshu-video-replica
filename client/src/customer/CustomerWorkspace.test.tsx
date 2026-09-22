@@ -438,7 +438,7 @@ describe("CustomerWorkspace (T31)", () => {
     expect(olderExpired).not.toHaveBeenCalled();
   });
 
-  it("personal center has no device or pairing management and does not load devices", async () => {
+  it("device management lives in its own desktop tab and the settings tab never touches it", async () => {
     const fetchMock = stubDeviceFetch();
     vi.stubGlobal("fetch", fetchMock);
     render(
@@ -451,6 +451,14 @@ describe("CustomerWorkspace (T31)", () => {
     );
     fireEvent.click(await screen.findByRole("button", { name: /^用户档案$/ }));
     await screen.findByRole("heading", { name: "用户中心" });
+
+    // 桌面端（store.devicePlatform() !== "browser"）多一个设备管理页签：
+    // 这是审计方案 A 的 IA，取代了此前「个人中心不展示设备」的产品决定。
+    expect(screen.getByRole("tab", { name: "设备管理" })).toBeVisible();
+
+    // 打开账号设置时不出现任何设备/配对能力，也不发设备请求——设备只在它自己
+    // 的页签里、且由该页签自己按需读取。
+    fetchMock.mockClear();
     fireEvent.click(screen.getByRole("tab", { name: "账号设置" }));
     expect(screen.queryByText("登录设备")).toBeNull();
     // 断言的是「没有设备/配对管理」这项能力（绑定、解绑、配对审批），不是「设备」

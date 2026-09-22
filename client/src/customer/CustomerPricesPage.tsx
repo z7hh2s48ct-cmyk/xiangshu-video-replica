@@ -1,9 +1,13 @@
 import { useEffect, useState } from "react";
 import {
+  type CustomerConsumptionByBusiness,
   type CustomerPricing,
   type CustomerSessionCredential,
+  customerGetConsumptionByBusiness,
   customerGetPricing,
 } from "../api";
+import { ConsumptionDonut } from "./ConsumptionDonut";
+import { RetryButton } from "./RetryButton";
 
 export function CustomerPricesPage({
   credential,
@@ -11,8 +15,19 @@ export function CustomerPricesPage({
   credential: () => Promise<CustomerSessionCredential>;
 }) {
   const [prices, setPrices] = useState<CustomerPricing | null>(null);
+  // P1#10：价格与「我实际花在哪」的关联感——单独取一次构成，失败不影响价目表。
+  const [consumption, setConsumption] =
+    useState<CustomerConsumptionByBusiness | null>(null);
+  /**
+   * 构成的失败原因。`consumption === null` 同时表示「还在读」与「读失败」，只靠它
+   * 分不出两者，页面会永久停在「正在读取消费构成…」——客户既不被告知失败，也没有
+   * 重试入口（重试按钮只挂在价目表的失败分支上）。
+   */
+  const [consumptionError, setConsumptionError] = useState("");
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
+  /** 构成自己的重试计数：价目表已经成功时不该被拉回全页 loading。 */
+  const [consumptionRetry, setConsumptionRetry] = useState(0);
   useEffect(() => {
     void retry;
     let active = true;
@@ -31,6 +46,29 @@ export function CustomerPricesPage({
       active = false;
     };
   }, [credential, retry]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: retry 是刻意的：用户点「重新加载价格」时构成要跟着重取。
+  useEffect(() => {
+    let active = true;
+    setConsumption(null);
+    setConsumptionError("");
+    void credential()
+      .then((auth) => customerGetConsumptionByBusiness(auth, 30))
+      .then((value) => {
+        if (active) setConsumption(value);
+      })
+      .catch((cause) => {
+        // 构成是锦上添花：取不到不影响价目表本身可用——但要说出「取不到」，
+        // 不能把失败留在「正在读取消费构成…」上骗客户一直等。
+        if (active) {
+          setConsumptionError(
+            cause instanceof Error ? cause.message : "读取消费构成失败",
+          );
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [credential, retry, consumptionRetry]);
   return (
     <section className="uc-card" aria-label="接口价格">
       <div className="uc-section-heading">
@@ -42,14 +80,36 @@ export function CustomerPricesPage({
       {error ? (
         <div role="alert">
           <p>{error}</p>
-          <button type="button" onClick={() => setRetry((v) => v + 1)}>
-            重新加载价格
-          </button>
+          <RetryButton
+            label="重新加载价格"
+            onClick={() => setRetry((v) => v + 1)}
+          />
         </div>
       ) : !prices ? (
         <p role="status">正在读取价格…</p>
       ) : (
         <>
+          <section className="uc-donut-block" aria-label="最近 30 天消费构成">
+            <h3>最近 30 天消费构成</h3>
+            {consumption ? (
+              <ConsumptionDonut
+                days={consumption.days}
+                items={consumption.items}
+              />
+            ) : consumptionError ? (
+              <div role="alert" className="uc-donut__error">
+                <p>{consumptionError}</p>
+                <RetryButton
+                  label="重新加载消费构成"
+                  onClick={() => setConsumptionRetry((value) => value + 1)}
+                />
+              </div>
+            ) : (
+              <p className="uc-donut__empty" role="status">
+                正在读取消费构成…
+              </p>
+            )}
+          </section>
           <p>
             {prices.configured
               ? `当前价格版本：V${prices.version}`

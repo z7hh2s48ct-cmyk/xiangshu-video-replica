@@ -3,7 +3,15 @@ import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CustomerRechargeDialog } from "./CustomerRechargeDialog";
+import { orderPollWithinWindow } from "./orderPolling";
 import type { CustomerCredentialStore } from "./useCustomerSession";
+
+// 轮询窗口默认按真实实现判定（5 分钟内继续轮询）；只有专门验证「窗口用尽」的用例
+// 才把它临时压成 false，避免真的等五分钟。
+vi.mock("./orderPolling", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./orderPolling")>()),
+  orderPollWithinWindow: vi.fn(() => true),
+}));
 
 const sessionCredentialText = "recharge-dialog-session-credential";
 
@@ -80,6 +88,65 @@ const walletPayload = {
   recharge_step_fen: 1000,
 };
 
+/**
+ * 下单 → 出码 → 轮询这条链路的 fetch 桩：订单保持 PENDING，好让轮询一直跑到
+ * 窗口用尽或断言结束。默认付款链接是站外 URL。
+ */
+function paymentFlowFetchMock(paymentUrl = "https://payment.example/pay") {
+  return vi.fn((url: string, options?: RequestInit) => {
+    if (url.endsWith("/api/customer/recharge-packages")) {
+      return jsonResponse(rechargePackagePayload);
+    }
+    if (url.endsWith("/api/customer/wallet")) {
+      return jsonResponse({
+        available_credits: 12,
+        reserved_credits: 0,
+        internal_unit_price_fen: 1000,
+        min_recharge_fen: 10000,
+        recharge_step_fen: 1000,
+      });
+    }
+    if (
+      url.endsWith("/api/customer/recharge-orders") &&
+      options?.method === "POST"
+    ) {
+      return jsonResponse(
+        {
+          order_no: "202608270001",
+          status: "PENDING",
+          amount_fen: 10000,
+          credits: 10,
+          gateway_url: "https://payment.example/submit",
+          method: "POST",
+          form_fields: {},
+        },
+        201,
+      );
+    }
+    if (url.endsWith("/payment-code")) {
+      return jsonResponse({
+        order_no: "202608270001",
+        amount_fen: 10000,
+        credits: 10,
+        qr_image_url: "https://payment.example/qr.png",
+        payment_url: paymentUrl,
+      });
+    }
+    if (url.endsWith("/api/customer/recharge-orders/202608270001")) {
+      return jsonResponse({
+        order_no: "202608270001",
+        status: "PENDING",
+        amount_fen: 10000,
+        credits: 10,
+        channel: "wechat",
+        created_at: "2026-08-27T00:00:00Z",
+        paid_at: null,
+      });
+    }
+    throw new Error(`unexpected request: ${url}`);
+  });
+}
+
 function renderDialog(
   props: Partial<ComponentProps<typeof CustomerRechargeDialog>> = {},
 ) {
@@ -109,58 +176,7 @@ describe("CustomerRechargeDialog", () => {
     "creates a payment code and renders its QR image inside the app",
     async (paymentUrl) => {
       const onOrderCreated = vi.fn();
-      const fetchMock = vi.fn((url: string, options?: RequestInit) => {
-        if (url.endsWith("/api/customer/recharge-packages")) {
-          return jsonResponse(rechargePackagePayload);
-        }
-        if (url.endsWith("/api/customer/wallet")) {
-          return jsonResponse({
-            available_credits: 12,
-            reserved_credits: 0,
-            internal_unit_price_fen: 1000,
-            min_recharge_fen: 10000,
-            recharge_step_fen: 1000,
-          });
-        }
-        if (
-          url.endsWith("/api/customer/recharge-orders") &&
-          options?.method === "POST"
-        ) {
-          return jsonResponse(
-            {
-              order_no: "202608270001",
-              status: "PENDING",
-              amount_fen: 10000,
-              credits: 10,
-              gateway_url: "https://payment.example/submit",
-              method: "POST",
-              form_fields: {},
-            },
-            201,
-          );
-        }
-        if (url.endsWith("/payment-code")) {
-          return jsonResponse({
-            order_no: "202608270001",
-            amount_fen: 10000,
-            credits: 10,
-            qr_image_url: "https://payment.example/qr.png",
-            payment_url: paymentUrl,
-          });
-        }
-        if (url.endsWith("/api/customer/recharge-orders/202608270001")) {
-          return jsonResponse({
-            order_no: "202608270001",
-            status: "PENDING",
-            amount_fen: 10000,
-            credits: 10,
-            channel: "wechat",
-            created_at: "2026-08-27T00:00:00Z",
-            paid_at: null,
-          });
-        }
-        throw new Error(`unexpected request: ${url}`);
-      });
+      const fetchMock = paymentFlowFetchMock(paymentUrl);
       vi.stubGlobal("fetch", fetchMock);
 
       renderDialog({ onOrderCreated });
@@ -355,5 +371,26 @@ describe("CustomerRechargeDialog", () => {
     expect(card).toHaveTextContent("视频生成 9折");
     expect(card).toHaveTextContent("含赠送 1801 积分");
     expect(screen.getByLabelText("自定义金额（元）")).toHaveValue(1998);
+  });
+
+  // 刻意放在最后：本用例把 orderPollWithinWindow 压成一次 false，虽然只是
+  // `mockReturnValueOnce`（只吃一次调用），但把它摆在末尾就不必依赖
+  // afterEach 的 restoreAllMocks 是否会把默认实现还原——后续用例的轮询行为
+  // 不受任何残留影响。
+  it("轮询窗口用尽后停止自动查询并改口径，不留下「系统会继续查询」（评审 #10）", async () => {
+    // 第一次轮询就判定窗口已用尽：订单仍是 PENDING，但不能再自动查询下去。
+    vi.mocked(orderPollWithinWindow).mockReturnValueOnce(false);
+    vi.stubGlobal("fetch", paymentFlowFetchMock());
+    renderDialog();
+
+    fireEvent.click(await screen.findByRole("button", { name: /100元/ }));
+    await screen.findByRole("img", { name: "充值支付二维码" });
+
+    // 此前这里只是不再 setTimeout，屏幕上「系统会继续查询」会一直留着，
+    // 客户以为系统还在查、继续等。
+    expect(
+      await screen.findByText("支付结果仍待确认，可稍后刷新页面继续查询。"),
+    ).toBeVisible();
+    expect(screen.queryByText(/系统会继续查询/)).toBeNull();
   });
 });

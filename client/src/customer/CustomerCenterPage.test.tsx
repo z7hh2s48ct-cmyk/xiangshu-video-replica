@@ -23,9 +23,10 @@ const mocks = vi.hoisted(() => ({
   notice: vi.fn(),
   transactions: vi.fn(),
   orders: vi.fn(),
+  subAccounts: vi.fn(),
+  exportCsv: vi.fn(),
   history: vi.fn(),
   passwordState: vi.fn(),
-  subAccounts: vi.fn(),
 }));
 vi.mock("../studio/context", () => ({
   useStudio: () => ({
@@ -50,8 +51,9 @@ vi.mock("../api", async (original) => ({
   customerGetCenterSummary: mocks.summary,
   customerListWalletTransactions: mocks.transactions,
   customerListRechargeOrders: mocks.orders,
-  customerListLoginHistory: mocks.history,
   customerListSubAccounts: mocks.subAccounts,
+  customerExportWalletTransactionsCSV: mocks.exportCsv,
+  customerListLoginHistory: mocks.history,
   // 账号设置里的「账号登录」卡片会读密码状态；不 mock 就会打真实网络。
   customerPasswordState: mocks.passwordState,
   getStudioNotificationPreferences: async () => ({ enabled: true }),
@@ -131,6 +133,7 @@ function setup(
     offset: 0,
   });
   mocks.orders.mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0 });
+  mocks.subAccounts.mockResolvedValue([]);
   mocks.history.mockResolvedValue({ items: [], total: 0 });
   mocks.revokeAllSessions.mockResolvedValue({ revoked_sessions: 1 });
   mocks.subAccounts.mockResolvedValue([]);
@@ -177,6 +180,289 @@ test("renders real account points and seven focused tabs without reissuing an ex
   expect(mocks.initialize).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "返回主界面" }));
   expect(mocks.navigate).toHaveBeenCalledWith("workbench");
+});
+
+test("桌面端多一个「设备管理」页签，进入时按需读取设备", async () => {
+  const account = setup();
+  const onRefreshDevices = vi.fn().mockResolvedValue(undefined);
+  // 桌面端判据是 store.devicePlatform() !== "browser"；设备数据此处刻意留空，
+  // 用来验证页签自己会把第一次读取补上（工作区只在明确动作时拉设备）。
+  const desktop = {
+    ...account,
+    devices: null,
+    onRefreshDevices,
+    store: {
+      devicePlatform: () => "windows",
+      loadSessionToken: async () => "s",
+    },
+  } as unknown as NonNullable<WorkspaceShellProps["customerAccount"]>;
+  render(<CustomerCenterPage account={desktop} />);
+  await screen.findByText("125");
+
+  // 八 = 六项基础 + 设备管理（桌面端）+ 子账号管理（母账号）。两者来自不同分支，
+  // 合并后各自 +1。
+  expect(screen.getAllByRole("tab")).toHaveLength(8);
+  fireEvent.click(screen.getByRole("tab", { name: "设备管理" }));
+
+  await waitFor(() => expect(onRefreshDevices).toHaveBeenCalledTimes(1));
+  expect(screen.getByText("正在读取设备信息…")).toBeVisible();
+});
+
+test("web 端（devicePlatform 为 browser）不出现设备管理页签", async () => {
+  const account = setup();
+  const web = {
+    ...account,
+    store: {
+      devicePlatform: () => "browser",
+      loadSessionToken: async () => "s",
+    },
+  } as unknown as NonNullable<WorkspaceShellProps["customerAccount"]>;
+  render(<CustomerCenterPage account={web} />);
+  await screen.findByText("125");
+
+  // 七 = 六项基础 + 子账号管理（母账号）；设备管理在 web 端被平台过滤掉，
+  // 所以比桌面端少的那一项正是它。
+  expect(screen.getAllByRole("tab")).toHaveLength(7);
+  expect(screen.queryByRole("tab", { name: "设备管理" })).toBeNull();
+});
+
+test("消费记录：子账号下拉把筛选传给后端，汇总开关拉聚合摘要", async () => {
+  const account = setup();
+  mocks.subAccounts.mockResolvedValue([
+    { id: "sub-1", username: "zhangsan", display_name: "张三" },
+  ]);
+  render(<CustomerCenterPage account={account} />);
+  await screen.findByText("125");
+  fireEvent.click(screen.getByRole("tab", { name: "消费记录" }));
+
+  // 子账号下拉出现后，选中它应带上 sub_account_id
+  const subSelect = await screen.findByLabelText("子账号");
+  fireEvent.change(subSelect, { target: { value: "sub-1" } });
+  await waitFor(() =>
+    expect(mocks.transactions).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        filters: expect.objectContaining({ sub_account_id: "sub-1" }),
+      }),
+    ),
+  );
+
+  // 打开汇总：请求带 group_by_sub_account，并渲染摘要表
+  mocks.transactions.mockResolvedValue({
+    items: [],
+    total: 0,
+    limit: 20,
+    offset: 0,
+    sub_account_summary: [
+      {
+        sub_account_id: "sub-1",
+        sub_account_name: "张三",
+        debit_total: 200,
+        credit_total: 25,
+        transaction_count: 3,
+      },
+    ],
+  });
+  fireEvent.click(screen.getByRole("checkbox", { name: "按子账号汇总" }));
+
+  await waitFor(() =>
+    expect(mocks.transactions).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        filters: expect.objectContaining({ group_by_sub_account: "true" }),
+      }),
+    ),
+  );
+  // 「张三」同时出现在筛选下拉与摘要表里，用 getAllByText 而不是 getByText
+  expect(await screen.findByText("200 积分")).toBeVisible();
+  expect(screen.getByText("25 积分")).toBeVisible();
+  expect(screen.getAllByText("张三").length).toBeGreaterThan(1);
+  expect(screen.getByText("3")).toBeVisible();
+});
+
+test("消费记录：导出 CSV 带上当前筛选，清除筛选只在有筛选时出现", async () => {
+  const account = setup();
+  mocks.exportCsv.mockResolvedValue({
+    filename: "wallet-transactions-202609.csv",
+    text: "时间,类型\r\n2026-09-20 10:00:00+08,SETTLE\r\n",
+  });
+  // jsdom 没有实现 createObjectURL
+  const createObjectURL = vi.fn(() => "blob:e2e");
+  const revokeObjectURL = vi.fn();
+  Object.assign(URL, { createObjectURL, revokeObjectURL });
+  render(<CustomerCenterPage account={account} />);
+  await screen.findByText("125");
+  fireEvent.click(screen.getByRole("tab", { name: "消费记录" }));
+
+  // 没有任何筛选时不显示「清除筛选」
+  expect(screen.queryByRole("button", { name: "清除筛选" })).toBeNull();
+
+  fireEvent.change(screen.getByLabelText("流水类型"), {
+    target: { value: "SETTLE" },
+  });
+  const clear = await screen.findByRole("button", { name: "清除筛选" });
+
+  fireEvent.click(screen.getByRole("button", { name: "导出 CSV" }));
+  await waitFor(() =>
+    expect(mocks.exportCsv).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ transaction_type: "SETTLE" }),
+    ),
+  );
+
+  // 清除筛选：回到无筛选态并重取
+  fireEvent.click(clear);
+  await waitFor(() =>
+    expect(mocks.transactions).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({ filters: {} }),
+    ),
+  );
+});
+
+test("消费记录：业务筛选按类分组，不再平铺 12 项", async () => {
+  render(<CustomerCenterPage account={setup()} />);
+  await screen.findByText("125");
+  fireEvent.click(screen.getByRole("tab", { name: "消费记录" }));
+
+  const business = screen.getByLabelText("业务");
+  const groups = business.querySelectorAll("optgroup");
+  expect(groups.length).toBeGreaterThan(1);
+  expect(
+    Array.from(groups).map((group) => group.getAttribute("label")),
+  ).toContain("数字人");
+});
+
+test("发布账号页签给出上下文说明与跳转（P1#11）", async () => {
+  render(<CustomerCenterPage account={setup()} />);
+  await screen.findByText("125");
+  fireEvent.click(screen.getByRole("tab", { name: "发布账号" }));
+
+  expect(screen.getByText(/这里绑定的是各平台的登录状态/)).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "去发布成片" }));
+  expect(mocks.navigate).toHaveBeenCalledWith("publishing");
+});
+
+test("待结算与累计消费从首屏挪进消费记录页签（P1#6）", async () => {
+  render(<CustomerCenterPage account={setup()} />);
+  await screen.findByText("125");
+
+  // 首屏（Token 管理）不再出现这两个数字
+  expect(screen.queryByRole("region", { name: "流水总额" })).toBeNull();
+
+  fireEvent.click(screen.getByRole("tab", { name: "消费记录" }));
+  const totals = await screen.findByRole("region", { name: "流水总额" });
+  expect(totals).toHaveTextContent("待结算");
+  expect(totals).toHaveTextContent("累计消费");
+  // 数字本身来自 summary（reserved 10 / consumed 22）
+  expect(totals).toHaveTextContent("10");
+  expect(totals).toHaveTextContent("22");
+});
+
+test("Token 卡片化并显示消费占比（机会点 2 / P1#5）", async () => {
+  const account = setup();
+  mocks.list.mockResolvedValue({
+    items: [
+      {
+        ...token,
+        id: "key-a",
+        label: "主力 Token",
+        total_consumed_credits: 300,
+      },
+      {
+        ...token,
+        id: "key-b",
+        label: "备用 Token",
+        is_default: false,
+        total_consumed_credits: 100,
+      },
+    ],
+    total: 2,
+  });
+  render(<CustomerCenterPage account={account} />);
+
+  expect(await screen.findByText("主力 Token")).toBeVisible();
+  // 占比以可访问名暴露（300/400 = 75%）
+  expect(screen.getByRole("img", { name: "占账号累计消费 75%" })).toBeVisible();
+  expect(screen.getByRole("img", { name: "占账号累计消费 25%" })).toBeVisible();
+  // 卡片保留原有操作与状态文案
+  expect(screen.getAllByRole("button", { name: /更新/ }).length).toBe(2);
+  expect(screen.getAllByRole("button", { name: /撤销/ }).length).toBe(2);
+});
+
+test("没有 Token 时给出空态引导与创建入口（机会点 2）", async () => {
+  const account = setup();
+  // 页面在「没有默认 Token」时会自动初始化一枚；这里让初始化成功但列表仍为空，
+  // 才能走到「加载完成且确实没有 Token」的空态分支（否则会落到错误分支）。
+  mocks.initialize.mockResolvedValue({
+    ...token,
+    id: "key-new",
+    plaintext: "one-time-secret",
+  });
+  mocks.list.mockResolvedValue({ items: [], total: 0 });
+  render(<CustomerCenterPage account={account} />);
+
+  expect(await screen.findByText("还没有 Token")).toBeVisible();
+  // 首访引导的第一步也提到同一件事，用 getAllByText 而不是 getByText
+  expect(
+    screen.getAllByText(/完整值只在创建时显示一次/).length,
+  ).toBeGreaterThanOrEqual(1);
+  // 头部与空态里各有一个创建入口
+  expect(
+    screen.getAllByRole("button", { name: /创建第一个 Token|新建 Token/ })
+      .length,
+  ).toBeGreaterThanOrEqual(2);
+});
+
+test("数字键 1..N 直达页签（P2#17）", async () => {
+  render(<CustomerCenterPage account={setup()} />);
+  await screen.findByText("125");
+
+  fireEvent.keyDown(screen.getByRole("tab", { name: "Token 管理" }), {
+    key: "2",
+  });
+  expect(screen.getByRole("tab", { name: "消费记录" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+
+  // 超出页签数量的数字键不做事，也不会把焦点弄丢
+  fireEvent.keyDown(screen.getByRole("tab", { name: "消费记录" }), {
+    key: "9",
+  });
+  expect(screen.getByRole("tab", { name: "消费记录" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+});
+
+test("显示名称给字数提示（P2#19）", async () => {
+  render(<CustomerCenterPage account={setup()} />);
+  await screen.findByText("125");
+  fireEvent.click(screen.getByRole("tab", { name: "账号设置" }));
+
+  // 初始是资料里的昵称长度，输入后跟着变
+  expect(await screen.findByText("5/50")).toBeVisible();
+  fireEvent.change(screen.getByLabelText("显示名称"), {
+    target: { value: "Alice 的账号" },
+  });
+  expect(screen.getByText("9/50")).toBeVisible();
+});
+
+test("术语去技术化：Token 表说「第 N 次更新」、来源下拉说「早期版本消费」", async () => {
+  render(<CustomerCenterPage account={setup()} />);
+  await screen.findByText("125");
+
+  // Token 表不再裸露「凭据版本」（audit-7 类术语泄漏）
+  expect(screen.queryByText(/凭据版本/)).toBeNull();
+  expect(screen.getByText(/第 1 次更新/)).toBeVisible();
+
+  // 消费来源下拉：把「历史来源未记录」换成客户能懂的「早期版本消费」
+  fireEvent.click(screen.getByRole("tab", { name: "消费记录" }));
+  expect(
+    screen.getByRole("option", { name: "早期版本消费" }),
+  ).toBeInTheDocument();
+  expect(screen.queryByRole("option", { name: "历史来源未记录" })).toBeNull();
 });
 
 test("母账号能进入子账号管理页签，读到的是真实子账号接口", async () => {
@@ -335,9 +621,11 @@ test("filters the actual image, transcription and link services shown in the led
   render(<CustomerCenterPage account={setup()} />);
   await screen.findByText("125");
   fireEvent.click(screen.getByRole("tab", { name: "消费记录" }));
+  // 文案与子账号权限矩阵同源（permissionViz.BUSINESS_FEATURES）：同一个业务在客户
+  // 界面里只能有一个名字，所以这里不是「视频分析 / 语音转写 / 人物形象及任务图片」。
   for (const [value, label] of [
-    ["character", "人物形象及任务图片"],
-    ["asr", "语音转写"],
+    ["character", "人物形象"],
+    ["asr", "语音识别"],
     ["link_resolution", "链接解析"],
   ]) {
     expect(screen.getByRole("option", { name: label })).toBeInTheDocument();
@@ -351,6 +639,21 @@ test("filters the actual image, transcription and link services shown in the led
       ),
     );
   }
+});
+
+test("进入消费记录先显示加载态，而不是「暂无积分流水」（评审 #6）", async () => {
+  const account = setup();
+  // 请求一直悬着：加载态期间界面不能宣称「暂无积分流水」。
+  mocks.transactions.mockReturnValue(new Promise(() => {}));
+  render(<CustomerCenterPage account={account} />);
+  await screen.findByText("125");
+
+  fireEvent.click(screen.getByRole("tab", { name: "消费记录" }));
+
+  expect(screen.getByText("正在读取记录…")).toBeVisible();
+  expect(
+    screen.queryByText("暂无积分流水，开始创作后会在这里记录。"),
+  ).toBeNull();
 });
 
 test("opens the pricing basis of a settled row inside the records tab", async () => {
@@ -523,6 +826,32 @@ test("creates a Token through the API and clears its one-time secret on close", 
   expect(
     screen.queryByDisplayValue("one-time-test-value"),
   ).not.toBeInTheDocument();
+});
+
+test("错误按类给提示：5xx 说稍后重试，401 说重新登录（P1#8）", async () => {
+  const account = setup();
+  mocks.summary.mockRejectedValueOnce(
+    new CustomerApiError({ message: "服务暂时不可用", status: 503 }),
+  );
+  const { unmount } = render(<CustomerCenterPage account={account} />);
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "平台这边出了点问题",
+  );
+  expect(screen.getByRole("alert")).toHaveTextContent("服务暂时不可用");
+  unmount();
+
+  const second = setup();
+  mocks.summary.mockRejectedValueOnce(
+    new CustomerApiError({
+      message: "session required",
+      status: 401,
+      code: "SESSION_REQUIRED",
+    }),
+  );
+  render(<CustomerCenterPage account={second} />);
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "登录状态已失效，请重新登录",
+  );
 });
 
 test("failed summary stays unknown and retry loads the real balance", async () => {

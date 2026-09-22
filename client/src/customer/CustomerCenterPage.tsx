@@ -3,6 +3,7 @@ import {
   Fragment,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -12,13 +13,17 @@ import {
   CustomerApiError,
   type CustomerApiKey,
   type CustomerCenterSummary,
+  type CustomerSubAccount,
+  type CustomerWalletTransactionPage,
   customerCloseRechargeOrder,
   customerCreateApiKey,
+  customerExportWalletTransactionsCSV,
   customerGetCenterSummary,
   customerGetProfile,
   customerInitializeDefaultApiKey,
   customerListApiKeys,
   customerListRechargeOrders,
+  customerListSubAccounts,
   customerListWalletTransactions,
   customerRevokeApiKey,
   customerRotateApiKey,
@@ -26,7 +31,6 @@ import {
   type RechargeOrderPage,
   updateStudioNotificationPreferences,
   type WalletTransaction,
-  type WalletTransactionPage,
 } from "../api";
 import { BrandIdentity } from "../BrandIdentity";
 import { useStudio } from "../studio/context";
@@ -34,9 +38,13 @@ import { PublishAccountsPanel } from "../studio/MainPages";
 import { Icon } from "../studio/ui";
 import type { WorkspaceShellProps } from "../workspace-shell";
 import { AccountPasswordSetup } from "./AccountPasswordSetup";
+import { BUSINESS_LABEL } from "./businessLabels";
 import { useCustomerConfirm } from "./CustomerConfirmDialog";
 import { CustomerPricesPage } from "./CustomerPricesPage";
 import { CustomerRechargeDialog } from "./CustomerRechargeDialog";
+import { DeviceSection } from "./DeviceSection";
+import { ErrorNote } from "./ErrorNote";
+import { HelpDialog, TermHint } from "./HelpDialog";
 import { LedgerPairingSummary } from "./LedgerPairingSummary";
 import {
   groupLedgerRows,
@@ -44,25 +52,33 @@ import {
   netAvailableDelta,
   netReservedDelta,
 } from "./ledger-pairing";
+import { useOnboarding } from "./OnboardingTour";
 import { quotaPercentUsed, quotaState } from "./quotaViz";
+import { RetryButton } from "./RetryButton";
 import { SecuritySection } from "./SecuritySection";
 import { SubAccountManagementPage } from "./SubAccountManagementPage";
 import { TransactionPricingBreakdown } from "./TransactionPricingBreakdown";
+import { tokenIdleDays, tokenUsageShares } from "./tokenUsage";
 import type { CustomerStoredIdentity } from "./useCustomerSession";
 import "./customer-center.css";
 
-/** 页签全集。子账号管理对普通子账号不可见（见 `visibleTabs`），
- * 所以这里保留全集、渲染前再过滤，键盘导航才和可见页签一致。 */
+/** 页签全集。渲染前按**两条**规则过滤成 `visibleTabs`：
+ * - 子账号管理对普通子账号不可见（母账号与获授权 SUB_ADMIN 可见）；
+ * - 设备管理是桌面客户端独有：心跳/租约/配对在 web 端只会得到一张说不清状态的卡片
+ *   （审计方案 A 的 IA）。
+ * 保留全集、渲染前再过滤，页签条与键盘导航才都和可见页签一致。 */
 const ALL_TABS = [
   ["tokens", "Token 管理"],
   ["consumption", "消费记录"],
   ["recharge", "充值记录"],
   ["prices", "接口价格"],
   ["publishing", "发布账号"],
+  ["devices", "设备管理"],
   ["sub-accounts", "子账号管理"],
   ["settings", "账号设置"],
 ] as const;
 type Tab = (typeof ALL_TABS)[number][0];
+const DESKTOP_ONLY_TABS: ReadonlySet<Tab> = new Set<Tab>(["devices"]);
 type Mutation =
   | { kind: "create" }
   | { kind: "rotate" | "revoke"; token: CustomerApiKey };
@@ -73,6 +89,7 @@ const date = (value: string | null) =>
         hour12: false,
       })
     : "尚未使用";
+// 记录错误对象本身（分类提示要用它的 status/code），文案照旧由调用方决定。
 const message = (error: unknown) =>
   error instanceof Error ? error.message : "操作失败，请稍后重试。";
 
@@ -131,16 +148,73 @@ function businessDescription(item: WalletTransaction): string {
   return "充值 / 赠送";
 }
 
+/** 消费记录筛选变化后等多久再发请求（P1#16：避免连续切换打出一串请求）。 */
+const LEDGER_FILTER_DEBOUNCE_MS = 300;
+
+// 与服务端一致的名字长度上限（`users.display_name` / Token label）。
+const NAME_MAX_LENGTH = 50;
+const TOKEN_NAME_MAX_LENGTH = 100;
+
+const BUSINESS_GROUPS: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ["视频生成", ["video", "first_frame"]],
+  ["数字人", ["oral", "avatar_clone", "voice_clone"]],
+  ["内容处理", ["analysis", "rewrite", "asr", "link_resolution"]],
+  ["提示词", ["prompt_optimize"]],
+  ["资产与账务", ["character", "viral_data", "recharge"]],
+];
+
+type LedgerFilters = {
+  source: string;
+  type: string;
+  business: string;
+  start: string;
+  end: string;
+  subAccount: string;
+};
+
+/**
+ * 消费记录的筛选 → 查询参数。
+ *
+ * **列表与 CSV 导出共用这一个函数**：两个入口各拼一套参数，迟早会出现「导出的是
+ * 全部、界面显示的是筛选后的」这类对不上账的问题。
+ */
+function ledgerFilterParams(
+  filters: LedgerFilters,
+  options: { summarize?: boolean } = {},
+): Record<string, string> {
+  const params: Record<string, string> = {};
+  if (filters.source.startsWith("token:")) {
+    params.token_group_id = filters.source.slice(6);
+  } else if (filters.source) {
+    params.auth_source = filters.source;
+  }
+  if (filters.type) params.transaction_type = filters.type;
+  if (filters.business) params.business = filters.business;
+  if (filters.subAccount) params.sub_account_id = filters.subAccount;
+  if (filters.start) {
+    params.started_at = new Date(
+      `${filters.start}T00:00:00+08:00`,
+    ).toISOString();
+  }
+  if (filters.end) {
+    params.ended_at = new Date(
+      new Date(`${filters.end}T00:00:00+08:00`).getTime() + 86_400_000,
+    ).toISOString();
+  }
+  if (options.summarize) params.group_by_sub_account = "true";
+  return params;
+}
+
 function ledgerSource(item: WalletTransaction) {
   const label = item.credit_source
     ? (CREDIT_SOURCE_LABEL[item.credit_source] ?? "后台入账")
     : item.api_key_id
-      ? `${item.token_label || "Token"} · V${item.credential_version ?? 1}`
+      ? `${item.token_label || "Token"} · 第 ${item.credential_version ?? 1} 次更新`
       : item.auth_source === "session"
         ? "软件操作"
         : item.auth_source === "internal"
           ? "内部操作"
-          : "历史来源未记录";
+          : "早期版本消费";
   return (
     <>
       {label}
@@ -159,10 +233,28 @@ export function CustomerCenterPage({
   const { navigate, notify, user } = useStudio();
   const { confirm: confirmAction, dialog: confirmDialog } =
     useCustomerConfirm();
+  // 读不到平台就按 web 处理：少一个页签不会误操作，多一个会误导。
+  const isDesktopClient = useMemo(() => {
+    try {
+      return account.store.devicePlatform() !== "browser";
+    } catch {
+      return false;
+    }
+  }, [account.store]);
+  // 首访引导（方案 G / P2#14）：按账号记「看过」，换账号会重新引导一次。
+  const { tour } = useOnboarding(account.profile?.user_id ?? "anonymous");
+  const [help, setHelp] = useState(false);
   const [tab, setTab] = useState<Tab>("tokens");
   const [summary, setSummary] = useState<CustomerCenterSummary | null>(null);
   const [tokens, setTokens] = useState<CustomerApiKey[] | null>(null);
   const [error, setError] = useState("");
+  // 分类提示要看错误对象的 status/code，而状态里只存了文案；这里留一份原始对象。
+  const [lastError, setLastError] = useState<unknown>(null);
+  // 记录错误对象本身（分类提示要用 status/code），文案照旧。
+  const captureError = useCallback((cause: unknown) => {
+    setLastError(cause);
+    setError(message(cause));
+  }, []);
   const [tokenError, setTokenError] = useState("");
   const [notice, setNotice] = useState("");
   const [refresh, setRefresh] = useState(0);
@@ -184,25 +276,61 @@ export function CustomerCenterPage({
   const [notifications, setNotifications] = useState<boolean | null>(null);
   const [preferencesError, setPreferencesError] = useState("");
   const [transactionPage, setTransactionPage] =
-    useState<WalletTransactionPage | null>(null);
+    useState<CustomerWalletTransactionPage | null>(null);
   // P1-7：同一计费周期的行折叠成一组，展开状态只属于当前页面。
   const [expandedPairs, setExpandedPairs] = useState<ReadonlySet<string>>(
     new Set(),
   );
   const [orderPage, setOrderPage] = useState<RechargeOrderPage | null>(null);
   const [offset, setOffset] = useState(0);
-  const [filters, setFilters] = useState({
+  const [filters, setFilters] = useState<LedgerFilters>({
     source: "",
     type: "",
     business: "",
     start: "",
     end: "",
+    subAccount: "",
   });
-  function updateFilter(key: keyof typeof filters, value: string) {
+  // P1#16：筛选变化不立刻清空列表——旧数据留在屏幕上比闪成「正在读取记录…」好读得多；
+  // 真正的新结果由下面带 debounce 的 effect 换上。
+  function updateFilter(key: keyof LedgerFilters, value: string) {
     setFilters((previous) => ({ ...previous, [key]: value }));
+    // 切换子账号/汇总维度时旧的摘要已经不适用，清掉避免误读。
+    // 这一句必须在 updater **外面**：React 会在有 pending update 时于渲染阶段
+    // 调用 updater（StrictMode 下还调两次），在里面改另一个 state 等于渲染期更新。
+    if (key === "subAccount") setTransactionPage(null);
+    setOffset(0);
+  }
+  function clearFilters() {
+    setFilters({
+      source: "",
+      type: "",
+      business: "",
+      start: "",
+      end: "",
+      subAccount: "",
+    });
+    setSummarize(false);
     setOffset(0);
     setTransactionPage(null);
   }
+  const [summarize, setSummarize] = useState(false);
+  const [subAccounts, setSubAccounts] = useState<CustomerSubAccount[] | null>(
+    null,
+  );
+  const [isExporting, setIsExporting] = useState(false);
+  const anyFilterActive =
+    filters.source !== "" ||
+    filters.type !== "" ||
+    filters.business !== "" ||
+    filters.start !== "" ||
+    filters.end !== "" ||
+    filters.subAccount !== "" ||
+    summarize;
+  // P2#19：重名只提示不拦截——服务端允许同名，这里只是让用户有机会区分开。
+  const duplicateTokenLabel = (tokens ?? []).some(
+    (item) => !item.revoked_at && item.label === tokenName.trim(),
+  );
   const [recordsError, setRecordsError] = useState("");
   const [recordsBusy, setRecordsBusy] = useState(false);
   const dialog = useRef<HTMLDialogElement>(null);
@@ -216,8 +344,16 @@ export function CustomerCenterPage({
   // 所以只对「确认是 SUB」的会话隐藏（产品判断：组织管理，Web 与桌面都出现——
   // 它跟 devices 那种端专属能力不同，没有设备依赖；要改成端专属只需动这一行）。
   const canManageSubAccounts = accountType !== "SUB";
-  const visibleTabs = ALL_TABS.filter(
-    ([id]) => id !== "sub-accounts" || canManageSubAccounts,
+  // 唯一的可见页签口径：两边的过滤条件合在这里，页签条 / 键盘导航 / 数字键都用它。
+  // （合并前的两份过滤曾各改一半——那样 web 端会漏出设备管理页签。）
+  const visibleTabs = useMemo(
+    () =>
+      ALL_TABS.filter(
+        ([id]) =>
+          (!DESKTOP_ONLY_TABS.has(id) || isDesktopClient) &&
+          (id !== "sub-accounts" || canManageSubAccounts),
+      ),
+    [isDesktopClient, canManageSubAccounts],
   );
   const parentDisplayName =
     profile?.parent_display_name ?? cachedIdentity?.parentDisplayName ?? null;
@@ -316,7 +452,7 @@ export function CustomerCenterPage({
               if (active) setSummary(data);
             })
             .catch((cause) => {
-              if (active) setError(message(cause));
+              if (active) captureError(cause);
             }),
           (async () => {
             try {
@@ -355,7 +491,7 @@ export function CustomerCenterPage({
         ]);
       })
       .catch((cause) => {
-        if (active) setError(message(cause));
+        if (active) captureError(cause);
       });
     return () => {
       active = false;
@@ -379,48 +515,18 @@ export function CustomerCenterPage({
   // biome-ignore lint/correctness/useExhaustiveDependencies: Refresh explicitly invalidates cached results after writes or retry.
   useEffect(() => {
     let active = true;
-    if (tab !== "consumption" && tab !== "recharge") return;
+    // 只负责充值记录；消费记录由下面带 debate 的 effect 负责（两者筛选维度不同，
+    // 合在一起会让「改一个筛选把另一个页签也重取一遍」）。
+    if (tab !== "recharge") return;
     setRecordsError("");
     setRecordsBusy(true);
     void credential()
       .then(async (auth) => {
-        if (tab === "recharge") {
-          const result = await customerListRechargeOrders(auth, {
-            limit: 20,
-            offset,
-          });
-          if (active) setOrderPage(result);
-        } else {
-          const result = await customerListWalletTransactions(auth, {
-            limit: 20,
-            offset,
-            filters: {
-              ...(filters.source.startsWith("token:")
-                ? { token_group_id: filters.source.slice(6) }
-                : filters.source
-                  ? { auth_source: filters.source }
-                  : {}),
-              ...(filters.type ? { transaction_type: filters.type } : {}),
-              ...(filters.business ? { business: filters.business } : {}),
-              ...(filters.start
-                ? {
-                    started_at: new Date(
-                      `${filters.start}T00:00:00+08:00`,
-                    ).toISOString(),
-                  }
-                : {}),
-              ...(filters.end
-                ? {
-                    ended_at: new Date(
-                      new Date(`${filters.end}T00:00:00+08:00`).getTime() +
-                        86400000,
-                    ).toISOString(),
-                  }
-                : {}),
-            },
-          });
-          if (active) setTransactionPage(result);
-        }
+        const result = await customerListRechargeOrders(auth, {
+          limit: 20,
+          offset,
+        });
+        if (active) setOrderPage(result);
       })
       .catch((cause) => {
         if (active) setRecordsError(message(cause));
@@ -431,7 +537,56 @@ export function CustomerCenterPage({
     return () => {
       active = false;
     };
-  }, [credential, tab, offset, refresh, filters]);
+  }, [credential, tab, offset, refresh]);
+  // P1#16：筛选/翻页不再一变就发请求——300ms 内的连续变更只发最后一次。
+  // 旧的实现是每次 updateFilter 立刻打一次，还会把已渲染的行清空。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Refresh explicitly invalidates cached results after writes or retry.
+  useEffect(() => {
+    if (tab !== "consumption") return;
+    setRecordsError("");
+    // 置位必须在 debounce **之前**：否则防抖窗口里页签显示空态（「暂无积分流水」）
+    // 而不是「正在读取记录…」，底部分页也一直可点。下面 finally 清的就是这个标志。
+    setRecordsBusy(true);
+    let active = true;
+    const timer = window.setTimeout(() => {
+      void credential()
+        .then(async (auth) => {
+          const result = await customerListWalletTransactions(auth, {
+            limit: 20,
+            offset,
+            filters: ledgerFilterParams(filters, { summarize }),
+          });
+          if (active) setTransactionPage(result);
+        })
+        .catch((cause) => {
+          if (active) setRecordsError(message(cause));
+        })
+        .finally(() => {
+          if (active) setRecordsBusy(false);
+        });
+    }, LEDGER_FILTER_DEBOUNCE_MS);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [credential, tab, offset, refresh, filters, summarize]);
+  // 子账号清单：母账号才需要它来筛选，读一次就够（失败静默——筛选是加分项，
+  // 不该因为它读不到就打断消费记录主路径）。
+  useEffect(() => {
+    if (tab !== "consumption" || subAccounts !== null) return;
+    let active = true;
+    void credential()
+      .then((auth) => customerListSubAccounts(auth))
+      .then((items) => {
+        if (active) setSubAccounts(items);
+      })
+      .catch(() => {
+        if (active) setSubAccounts([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [credential, tab, subAccounts]);
   function selectTab(value: Tab) {
     if (value !== tab) refreshData();
     setTab(value);
@@ -440,6 +595,33 @@ export function CustomerCenterPage({
   }
   function refreshData() {
     setRefresh((value) => value + 1);
+  }
+  async function exportLedger() {
+    if (isExporting) return;
+    setIsExporting(true);
+    setRecordsError("");
+    try {
+      // 与列表共用同一个参数函数：导出的必须是「我正在看的这一份」。
+      const { filename, text } = await customerExportWalletTransactionsCSV(
+        await credential(),
+        ledgerFilterParams(filters),
+      );
+      const url = URL.createObjectURL(
+        new Blob([text], { type: "text/csv;charset=utf-8" }),
+      );
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      setNotice(`已导出 ${filename}。`);
+    } catch (cause) {
+      setRecordsError(message(cause));
+    } finally {
+      setIsExporting(false);
+    }
   }
   async function act(event: FormEvent) {
     event.preventDefault();
@@ -523,7 +705,7 @@ export function CustomerCenterPage({
       account.onProfileUpdated(result);
       setNotice("个人资料已保存。");
     } catch (cause) {
-      setError(message(cause));
+      captureError(cause);
     } finally {
       busyRef.current = false;
       setBusy(false);
@@ -553,17 +735,14 @@ export function CustomerCenterPage({
     try {
       await account.onLogout();
     } catch (cause) {
-      setError(message(cause));
+      captureError(cause);
     } finally {
       busyRef.current = false;
       setBusy(false);
     }
   }
-  const retryButton = (
-    <button type="button" onClick={refreshData}>
-      重新加载
-    </button>
-  );
+  const retryButton = <RetryButton onClick={refreshData} />;
+  const tokenUsage = tokenUsageShares(tokens ?? []);
   const tokenPanel = (
     <section className="uc-card uc-tokens">
       <header>
@@ -597,80 +776,111 @@ export function CustomerCenterPage({
           {retryButton}
         </div>
       )}
-      <div className="uc-table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>名称</th>
-              <th>Token（已隐藏）</th>
-              <th>状态 / 最近使用</th>
-              <th>累计消费</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {tokens?.map((item) => (
-              <tr key={item.id}>
-                <td>
-                  <strong>{item.label}</strong>
-                  {item.is_default && <span className="uc-tag">自动生成</span>}
-                </td>
-                <td>
-                  <code>xsk_live_{item.key_prefix}_••••</code>
-                  <small>凭据版本 {item.credential_version}</small>
-                </td>
-                <td>
-                  <span className={item.revoked_at ? "uc-muted" : "uc-valid"}>
-                    {item.revoked_at ? "已撤销" : "有效"}
-                  </span>
-                  <small>{date(item.last_used_at)}</small>
-                </td>
-                <td>
-                  {item.total_consumed_credits.toLocaleString("zh-CN")} 积分
-                </td>
-                <td>
-                  <div className="uc-row-actions">
-                    <button
-                      type="button"
-                      disabled={!!item.revoked_at || busy}
-                      onClick={() => {
-                        setTokenError("");
-                        setMutation({ kind: "rotate", token: item });
-                      }}
-                    >
-                      <Icon name="refresh" />
-                      更新
-                    </button>
-                    <button
-                      type="button"
-                      className="uc-danger"
-                      disabled={!!item.revoked_at || busy}
-                      onClick={() => {
-                        setTokenError("");
-                        setMutation({ kind: "revoke", token: item });
-                      }}
-                    >
-                      <Icon name="close" />
-                      撤销
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-            {!tokens?.length && (
-              <tr>
-                <td colSpan={5}>
-                  {tokenError
-                    ? "Token 暂未读取成功"
-                    : tokens
-                      ? "暂无 Token"
-                      : "正在读取 Token…"}
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+      <ul className="uc-token-list">
+        {tokens?.map((item) => {
+          const usage = tokenUsage.get(item.id);
+          return (
+            <li
+              className={
+                item.revoked_at ? "uc-token uc-token--revoked" : "uc-token"
+              }
+              key={item.id}
+            >
+              <div className="uc-token__head">
+                <strong>{item.label}</strong>
+                {item.is_default ? (
+                  <span className="uc-tag">自动生成</span>
+                ) : null}
+                <span className={item.revoked_at ? "uc-muted" : "uc-valid"}>
+                  {item.revoked_at ? "已撤销" : "有效"}
+                </span>
+              </div>
+              <code>xsk_live_{item.key_prefix}_••••</code>
+              <p className="uc-token__meta">
+                第 {item.credential_version} 次更新 · 最近使用{" "}
+                {date(item.last_used_at)}
+              </p>
+              {/* 机会点 2：主力占比可视化——让客户一眼看出哪个 Token 在花钱。 */}
+              {(() => {
+                const idleDays = item.revoked_at ? null : tokenIdleDays(item);
+                return idleDays === null ? null : (
+                  <p className="uc-token__idle" role="status">
+                    {idleDays} 天未使用，可考虑撤销或更新
+                  </p>
+                );
+              })()}
+              <div className="uc-token__usage">
+                <span>
+                  累计消费 {item.total_consumed_credits.toLocaleString("zh-CN")}{" "}
+                  积分
+                </span>
+                <span
+                  className="uc-token__share"
+                  role="img"
+                  aria-label={`占账号累计消费 ${usage?.share ?? 0}%`}
+                >
+                  <i style={{ width: `${usage?.share ?? 0}%` }} />
+                </span>
+                <small>{usage?.share ?? 0}%</small>
+              </div>
+              <div className="uc-row-actions">
+                <button
+                  type="button"
+                  disabled={!!item.revoked_at || busy}
+                  onClick={() => {
+                    setTokenError("");
+                    setMutation({ kind: "rotate", token: item });
+                  }}
+                >
+                  <Icon name="refresh" />
+                  更新
+                </button>
+                <button
+                  type="button"
+                  className="uc-danger"
+                  disabled={!!item.revoked_at || busy}
+                  onClick={() => {
+                    setTokenError("");
+                    setMutation({ kind: "revoke", token: item });
+                  }}
+                >
+                  <Icon name="close" />
+                  撤销
+                </button>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      {!tokens?.length ? (
+        <div className="uc-token-empty" role="status">
+          {tokenError ? (
+            <p>Token 暂未读取成功：{tokenError}</p>
+          ) : tokens ? (
+            <>
+              {/* 机会点 2 的空态引导：不再只写「暂无 Token」，而是说清它是什么、下一步做什么。 */}
+              <h3>还没有 Token</h3>
+              <p>
+                Token
+                是给你的程序调用平台接口用的凭据；完整值只在创建时显示一次，请立即保存。
+              </p>
+              <button
+                className="uc-primary"
+                type="button"
+                onClick={() => {
+                  setTokenError("");
+                  setTokenName("");
+                  setMutation({ kind: "create" });
+                }}
+              >
+                创建第一个 Token
+              </button>
+            </>
+          ) : (
+            <p>正在读取 Token…</p>
+          )}
+        </div>
+      ) : null}
       <p className="uc-footnote">
         <Icon name="info" />
         完整 Token 仅在生成或更新时显示，请及时保存。更新会保留历史版本的消费。
@@ -733,6 +943,22 @@ export function CustomerCenterPage({
     <section className="uc-card">
       <header>
         <h2>消费与积分流水</h2>
+        {/* P1#6：待结算/累计消费原先挤在首屏 hero 里，与「充值」抢焦点；
+            它们是「看账」的信息，挪到看账的页签里更合适。 */}
+        <section className="uc-record-totals" aria-label="流水总额">
+          <TermHint
+            hint="任务开始时按预估用量预扣，结束后按实际用量结算，多扣的会退回。"
+            term="待结算"
+          />{" "}
+          <b>{summary?.reserved_credits.toLocaleString("zh-CN") ?? "—"}</b> 积分
+          <span>
+            累计消费{" "}
+            <b>
+              {summary?.total_consumed_credits.toLocaleString("zh-CN") ?? "—"}
+            </b>{" "}
+            积分
+          </span>
+        </section>
       </header>
       <div className="uc-record-filters">
         <label>
@@ -743,7 +969,7 @@ export function CustomerCenterPage({
           >
             <option value="">全部来源</option>
             <option value="session">软件操作</option>
-            <option value="historical">历史来源未记录</option>
+            <option value="historical">早期版本消费</option>
             {tokens?.map((token) => (
               <option
                 key={token.token_group_id}
@@ -775,20 +1001,35 @@ export function CustomerCenterPage({
             onChange={(event) => updateFilter("business", event.target.value)}
           >
             <option value="">全部业务</option>
-            <option value="video">视频生成</option>
-            <option value="oral">数字人口播</option>
-            <option value="character">人物形象及任务图片</option>
-            <option value="first_frame">首帧图片</option>
-            <option value="analysis">视频分析</option>
-            <option value="rewrite">文案改写</option>
-            <option value="asr">语音转写</option>
-            <option value="link_resolution">链接解析</option>
-            <option value="avatar_clone">口播分身创建</option>
-            <option value="voice_clone">声音克隆</option>
-            <option value="viral_data">爆款视频数据请求</option>
-            <option value="recharge">充值 / 赠送</option>
+            {BUSINESS_GROUPS.map(([group, keys]) => (
+              <optgroup key={group} label={group}>
+                {keys.map((key) => (
+                  <option key={key} value={key}>
+                    {BUSINESS_LABEL[key] ?? key}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
           </select>
         </label>
+        {subAccounts && subAccounts.length > 0 ? (
+          <label>
+            子账号
+            <select
+              value={filters.subAccount}
+              onChange={(event) =>
+                updateFilter("subAccount", event.target.value)
+              }
+            >
+              <option value="">全部子账号</option>
+              {subAccounts.map((sub) => (
+                <option key={sub.id} value={sub.id}>
+                  {sub.display_name || sub.username}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
         <label>
           开始日期
           <input
@@ -806,6 +1047,55 @@ export function CustomerCenterPage({
           />
         </label>
       </div>
+      <div className="uc-record-actions">
+        <label className="uc-record-actions__toggle">
+          <input
+            type="checkbox"
+            checked={summarize}
+            onChange={(event) => setSummarize(event.target.checked)}
+          />
+          按子账号汇总
+        </label>
+        <button
+          type="button"
+          disabled={isExporting}
+          onClick={() => void exportLedger()}
+        >
+          {isExporting ? "正在导出…" : "导出 CSV"}
+        </button>
+        {anyFilterActive ? (
+          <button type="button" onClick={clearFilters}>
+            清除筛选
+          </button>
+        ) : null}
+      </div>
+      {summarize && transactionPage?.sub_account_summary?.length ? (
+        <div className="uc-table-scroll">
+          <table className="uc-responsive-table uc-summary-table">
+            <caption className="uc-record-summary__caption">
+              当前筛选下的子账号汇总（消费＝结算掉的额度，退回＝返回名下的额度）
+            </caption>
+            <thead>
+              <tr>
+                <th>子账号</th>
+                <th>消费</th>
+                <th>退回</th>
+                <th>流水笔数</th>
+              </tr>
+            </thead>
+            <tbody>
+              {transactionPage.sub_account_summary.map((row) => (
+                <tr key={row.sub_account_id}>
+                  <td>{row.sub_account_name}</td>
+                  <td>{row.debit_total} 积分</td>
+                  <td>{row.credit_total} 积分</td>
+                  <td>{row.transaction_count}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
       {recordsError && (
         <div role="alert" className="uc-error">
           {recordsError}
@@ -813,7 +1103,7 @@ export function CustomerCenterPage({
         </div>
       )}
       <div className="uc-table-scroll">
-        <table>
+        <table className="uc-responsive-table uc-ledger-table">
           <thead>
             <tr>
               <th>时间（北京时间）</th>
@@ -900,6 +1190,10 @@ export function CustomerCenterPage({
             <Icon name="home" />
             返回主界面
           </button>
+          <button type="button" onClick={() => setHelp(true)}>
+            <Icon name="info" />
+            帮助
+          </button>
           <span className="uc-top-name">
             <span className="uc-avatar uc-avatar-small">
               {name.slice(0, 1)}
@@ -917,20 +1211,17 @@ export function CustomerCenterPage({
           <p>管理账号、积分与创作服务</p>
         </header>
         {(error || account.profileLoadError) && (
-          <div role="alert" className="uc-error">
-            {error || account.profileLoadError}
-            <button
-              type="button"
-              onClick={() => {
-                refreshData();
-                void account
-                  .onRefreshProfile()
-                  .catch((cause) => setError(message(cause)));
-              }}
-            >
-              重试加载账号
-            </button>
-          </div>
+          <ErrorNote
+            error={lastError}
+            message={error || account.profileLoadError}
+            onRetry={() => {
+              refreshData();
+              void account
+                .onRefreshProfile()
+                .catch((cause) => captureError(cause));
+            }}
+            retryLabel="重试加载账号"
+          />
         )}
         {notice && (
           <p className="uc-notice" role="status">
@@ -1039,19 +1330,6 @@ export function CustomerCenterPage({
                 充值积分
               </button>
             </div>
-            <p>
-              待结算{" "}
-              <b>{summary?.reserved_credits.toLocaleString("zh-CN") ?? "—"}</b>{" "}
-              积分{" "}
-              <span>
-                累计消费{" "}
-                <b>
-                  {summary?.total_consumed_credits.toLocaleString("zh-CN") ??
-                    "—"}
-                </b>{" "}
-                积分
-              </span>
-            </p>
           </div>
         </section>
         <div className="uc-tabs" role="tablist" aria-label="用户中心功能">
@@ -1066,6 +1344,21 @@ export function CustomerCenterPage({
               onClick={() => selectTab(id)}
               tabIndex={tab === id ? 0 : -1}
               onKeyDown={(event) => {
+                // P2#17：数字键直达页签（1..N）。键盘用户不必按方向键一路挪过去。
+                // 一律走 visibleTabs：数字键与方向键都只能在**可见**页签里移动，
+                // 否则会落到被过滤掉（web 端的设备管理 / 普通子账号的子账号管理）的页签上。
+                const digit = Number(event.key);
+                if (
+                  Number.isInteger(digit) &&
+                  digit >= 1 &&
+                  digit <= visibleTabs.length
+                ) {
+                  event.preventDefault();
+                  const target = visibleTabs[digit - 1][0];
+                  selectTab(target);
+                  document.getElementById(`uc-tab-${target}`)?.focus();
+                  return;
+                }
                 const index = visibleTabs.findIndex(([value]) => value === id);
                 const next =
                   event.key === "ArrowRight"
@@ -1109,7 +1402,7 @@ export function CustomerCenterPage({
                 </div>
               )}
               <div className="uc-table-scroll">
-                <table>
+                <table className="uc-responsive-table uc-orders-table">
                   <thead>
                     <tr>
                       <th>订单号 / 创建时间</th>
@@ -1181,8 +1474,39 @@ export function CustomerCenterPage({
           )}
           {tab === "publishing" && (
             <section className="uc-card">
+              {/* 审计 P1#11：这一页此前只有一行组件，客户不知道「绑了之后能干什么」。 */}
+              <header className="uc-publishing-head">
+                <h2>发布账号</h2>
+                <p>
+                  这里绑定的是各平台的登录状态（抖音 / 视频号 /
+                  小红书）。绑定后回到主界面的
+                  「发布」页，就能把做好的成片直接投递出去；解绑后对应平台需要重新扫码登录。
+                </p>
+                <button
+                  className="uc-primary"
+                  type="button"
+                  onClick={() => navigate("publishing")}
+                >
+                  去发布成片
+                </button>
+              </header>
               <PublishAccountsPanel notify={notify} />
             </section>
+          )}
+          {tab === "devices" && (
+            <DeviceSection
+              deviceError={account.deviceError}
+              devices={account.devices}
+              onApprovePairing={account.onApprovePairing}
+              onDismissPairing={account.onDismissPairing}
+              onManualHeartbeat={account.onManualHeartbeat}
+              onPairDevice={account.onPairDevice}
+              onRecharge={() => setRecharge(true)}
+              onRefreshDevices={account.onRefreshDevices}
+              onUnbind={account.onUnbind}
+              scope={account.profile?.user_id ?? "anonymous"}
+              sessionRuntime={account.sessionRuntime}
+            />
           )}
           {tab === "sub-accounts" && canManageSubAccounts && (
             <SubAccountManagementPage
@@ -1199,7 +1523,7 @@ export function CustomerCenterPage({
                   void credential()
                     .then(customerGetProfile)
                     .then(account.onProfileUpdated)
-                    .catch((cause) => setError(message(cause)));
+                    .catch((cause) => captureError(cause));
                 }}
               />
               <section className="uc-card">
@@ -1209,13 +1533,16 @@ export function CustomerCenterPage({
                   <input
                     id="uc-name"
                     value={displayName}
-                    maxLength={50}
+                    maxLength={NAME_MAX_LENGTH}
                     required
                     onChange={(event) => setDisplayName(event.target.value)}
                   />
                   <p>
                     用户名 {profile?.username ?? user.username} ·
                     昵称用于软件内展示
+                    <span className="uc-count">
+                      {displayName.length}/{NAME_MAX_LENGTH}
+                    </span>
                   </p>
                   <button
                     type="submit"
@@ -1340,12 +1667,20 @@ export function CustomerCenterPage({
                   <label htmlFor="uc-token-name">Token 名称</label>
                   <input
                     id="uc-token-name"
-                    maxLength={100}
+                    maxLength={TOKEN_NAME_MAX_LENGTH}
                     required
                     value={tokenName}
                     onChange={(event) => setTokenName(event.target.value)}
                     placeholder="例如：工作电脑、自动脚本"
                   />
+                  <p className="uc-count">
+                    {tokenName.length}/{TOKEN_NAME_MAX_LENGTH}
+                    {duplicateTokenLabel ? (
+                      <span role="status" className="uc-count__warning">
+                        ⚠️ 已有同名 Token，建议换个名字以便区分
+                      </span>
+                    ) : null}
+                  </p>
                 </>
               ) : (
                 <p>
@@ -1389,15 +1724,15 @@ export function CustomerCenterPage({
         </dialog>
       )}
       {confirmDialog}
+      {tour}
+      {help && <HelpDialog onClose={() => setHelp(false)} />}
       <CustomerRechargeDialog
         isOpen={recharge}
         onClose={() => setRecharge(false)}
         onOrderCreated={refreshData}
         onPaid={() => {
           refreshData();
-          void account
-            .onRefreshProfile()
-            .catch((cause) => setError(message(cause)));
+          void account.onRefreshProfile().catch((cause) => captureError(cause));
         }}
         onSessionExpired={account.onSessionExpired}
         store={account.store}

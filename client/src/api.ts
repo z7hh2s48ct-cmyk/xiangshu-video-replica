@@ -7209,8 +7209,8 @@ export async function customerListWalletTransactions(
     offset?: number;
     filters?: Record<string, string>;
   } = {},
-): Promise<WalletTransactionPage> {
-  const { body } = await customerJson<WalletTransactionPage>(
+): Promise<CustomerWalletTransactionPage> {
+  const { body } = await customerJson<CustomerWalletTransactionPage>(
     `/api/customer/wallet/transactions?${new URLSearchParams({
       limit: String(limit),
       offset: String(offset),
@@ -7219,6 +7219,74 @@ export async function customerListWalletTransactions(
     { credential },
   );
   return body;
+}
+
+/** B3：聚合模式下一行——按子账号汇总的消费与退回。 */
+export type CustomerSubAccountSummary = {
+  sub_account_id: string;
+  sub_account_name: string;
+  /** 该子账号 SETTLE 掉的额度 */
+  debit_total: number;
+  /** 退回到该子账号名下的额度（RELEASE） */
+  credit_total: number;
+  transaction_count: number;
+};
+
+/**
+ * 生成契约（`client/src/generated/api.ts`）尚未包含 B3 新增的 `sub_account_summary`，
+ * 这里按后端 `WalletTransactionPage` 的真实形状在客户端补齐。契约重生成后可以删掉
+ * 这个别名——它只是让「不该存在的字段」有一个明确的落点。
+ */
+export type CustomerWalletTransactionPage = WalletTransactionPage & {
+  sub_account_summary?: CustomerSubAccountSummary[] | null;
+};
+
+/**
+ * B3：把当前筛选下的流水导出成 CSV。
+ *
+ * 返回文件名与文本而不是直接落盘：调用方（页面）才知道该在什么时机触发下载。
+ * 这里刻意不走 `customerJson`——那个助手按 JSON 解析响应，而 CSV 是文本流。
+ */
+/** 近 N 天按业务汇总的消费构成（方案 F / P1#10）。 */
+export type CustomerConsumptionByBusiness = {
+  days: number;
+  total_credits: number;
+  items: { business: string; credits: number }[];
+};
+
+export async function customerGetConsumptionByBusiness(
+  credential: CustomerSessionCredential,
+  days = 30,
+): Promise<CustomerConsumptionByBusiness> {
+  const { body } = await customerJson<CustomerConsumptionByBusiness>(
+    `/api/customer/wallet/consumption-by-business?days=${days}`,
+    { credential },
+  );
+  return body;
+}
+
+export async function customerExportWalletTransactionsCSV(
+  credential: CustomerSessionCredential,
+  filters: Record<string, string> = {},
+): Promise<{ filename: string; text: string }> {
+  const { response, requestId } = await requestCustomer(
+    `/api/customer/wallet/transactions/export?${new URLSearchParams(filters)}`,
+    { credential },
+  );
+  if (!response.ok) {
+    const error = await customerErrorFromResponse(response, requestId);
+    const lifecycle = customerLifecycleEvent(error.kind);
+    if (lifecycle) window.dispatchEvent(new Event(lifecycle));
+    throw error;
+  }
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const match = /filename=([^;]+)/.exec(disposition);
+  return {
+    filename: match
+      ? match[1].trim().replace(/^"|"$/g, "")
+      : "wallet-transactions.csv",
+    text: await response.text(),
+  };
 }
 
 /** P2-3：账单行「费率 V{n}」回查当时对外价目（后端只回公开字段）。 */

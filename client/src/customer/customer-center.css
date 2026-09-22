@@ -587,6 +587,29 @@
   background: #dfaa43;
 }
 
+/* 个人中心「设备管理」页签（桌面端专属，审计方案 A）。卡片纵向堆叠：
+   本机连接 / 待确认配对 / 设备槽位 / 已解绑设备。设备卡自身的样式在
+   customer-access.css 的 .device-* 里，这里只管页签内的排布。 */
+.uc-devices {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+.uc-devices__slots-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.uc-devices__slots-head h2 {
+  margin: 0;
+}
+.uc-devices__deferred-toggle {
+  margin-top: 12px;
+  text-decoration: underline;
+}
+
 /* CW-062 B4 账号安全：卡片内三段式（改密表单 / 危险动作 / 最近登录）。
    本文件的类都只服务客户个人中心，故不写进 styles.css——那会被
    split_customer_styles 复制进生成的 customer-access.css，造成重复定义。
@@ -633,11 +656,13 @@
   padding-top: 18px;
   border-top: 1px solid var(--line);
 }
+.uc-devices__history ul,
 .uc-security__history ul {
   margin: 12px 0 0;
   padding: 0;
   list-style: none;
 }
+.uc-devices__history li,
 .uc-security__history li {
   display: flex;
   flex-wrap: wrap;
@@ -647,8 +672,118 @@
   color: var(--text-muted);
   font-size: var(--font-caption);
 }
+.uc-devices__history li span:first-child,
 .uc-security__history li span:first-child {
   color: var(--text);
+}
+
+/* B3 消费记录：筛选区下方的动作行（按子账号汇总 / 导出 CSV / 清除筛选）
+   与聚合摘要表的说明行。 */
+.uc-record-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 12px 0 4px;
+}
+.uc-record-actions__toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+.uc-record-actions__toggle input {
+  width: auto;
+  min-width: 0;
+}
+.uc-record-summary__caption {
+  caption-side: top;
+  text-align: left;
+  padding-bottom: 8px;
+  color: var(--text-muted);
+  font-size: var(--font-caption);
+}
+
+/* 字数提示（P2#19）：跟在输入框下方的说明文字右侧。 */
+.uc-count {
+  float: right;
+  color: var(--text-muted);
+  font-size: var(--font-caption);
+}
+.uc-count__warning {
+  display: block;
+  color: #e0b25e;
+}
+
+/* 发布账号页签的上下文说明段（P1#11）：说清「绑了之后能干什么」并给出跳转。 */
+.uc-publishing-head {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.uc-publishing-head > p {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+/* 消费记录页签顶部的两个总额（P1#6：从首屏 hero 挪过来的）。 */
+.uc-record-totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin: 8px 0 0;
+  color: var(--text-muted);
+  font-size: var(--font-caption);
+}
+
+/* 密码强度提示（P1#12）：三档颜色 + 一根短条，输入时实时变化。 */
+.uc-password-strength {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 0;
+  color: var(--text-muted);
+  font-size: var(--font-caption);
+}
+.uc-password-strength__meter {
+  display: inline-block;
+  width: 60px;
+  height: 4px;
+  border-radius: 2px;
+  background: #3a3a40;
+  overflow: hidden;
+}
+.uc-password-strength__meter i {
+  display: block;
+  height: 100%;
+  width: 33%;
+  background: currentColor;
+}
+.uc-password-strength--1 {
+  color: #ef9595;
+}
+.uc-password-strength--1 .uc-password-strength__meter i {
+  width: 33%;
+}
+.uc-password-strength--2 {
+  color: #e0b25e;
+}
+.uc-password-strength--2 .uc-password-strength__meter i {
+  width: 66%;
+}
+.uc-password-strength--3 {
+  color: #8bcca0;
+}
+.uc-password-strength--3 .uc-password-strength__meter i {
+  width: 100%;
+}
+.uc-password-strength--0 {
+  color: #ef9595;
+}
+.uc-password-strength--0 .uc-password-strength__meter i {
+  width: 15%;
 }
 /* 确认框的勾选行：要压过 .uc-center label / .uc-center input 的通用规则。 */
 .uc-confirm .uc-confirm__ack {
@@ -660,4 +795,304 @@
 .uc-confirm .uc-confirm__ack input {
   width: auto;
   min-width: 0;
+}
+
+/* Token 卡片化（机会点 2 / 方案 B）：一列卡片取代原来的 5 列表格，
+   每张卡自带状态、最近使用与「消费占比」条。 */
+.uc-token-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.uc-token {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #131416;
+}
+.uc-token--revoked {
+  opacity: 0.72;
+}
+.uc-token__head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.uc-token__head strong {
+  font-size: var(--font-body);
+}
+.uc-token__head .uc-muted,
+.uc-token__head .uc-valid {
+  margin-left: auto;
+}
+.uc-token code {
+  font-size: var(--font-caption);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.uc-token__meta {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--font-caption);
+}
+.uc-token__usage {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: var(--font-caption);
+  color: var(--text-muted);
+}
+.uc-token__share {
+  display: inline-block;
+  flex: 1;
+  min-width: 60px;
+  height: 6px;
+  border-radius: 3px;
+  background: #303036;
+  overflow: hidden;
+}
+.uc-token__share i {
+  display: block;
+  height: 100%;
+  background: #dfaa43;
+}
+.uc-token-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 20px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 10px;
+}
+.uc-token-empty h3 {
+  margin: 0;
+}
+.uc-token-empty p {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+/* 统一的重试按钮（P1#8）：此前 8 处各写各的、类名横跨三套。 */
+.uc-retry {
+  color: #dec079;
+  text-decoration: underline;
+  font-size: var(--font-caption);
+}
+
+/* 错误块里的分类提示行（P1#8）：先说「该做什么」，再说平台给的原因。 */
+.uc-error__hint {
+  font-weight: 500;
+}
+
+/* 接口价格页的近 30 天消费构成（P1#10 / 方案 F）。 */
+.uc-donut-block {
+  margin-bottom: 20px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+}
+.uc-donut-block h3 {
+  font-size: var(--font-label);
+  margin-bottom: 12px;
+}
+.uc-donut {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 24px;
+}
+.uc-donut svg {
+  width: 160px;
+  height: 160px;
+  flex-shrink: 0;
+  transform: rotate(-90deg);
+}
+.uc-donut__total {
+  transform: rotate(90deg);
+  transform-origin: 80px 80px;
+  fill: #f0c75f;
+  font-size: 20px;
+  font-weight: 650;
+}
+.uc-donut__unit {
+  transform: rotate(90deg);
+  transform-origin: 80px 80px;
+  fill: var(--text-muted);
+  font-size: 10px;
+}
+.uc-donut__empty {
+  color: var(--text-muted);
+}
+.uc-donut__legend {
+  flex: 1;
+  min-width: 200px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--font-caption);
+}
+.uc-donut__legend li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  color: var(--text-muted);
+}
+/* Top 3 高亮（审计原话：Top 3 业务高亮）。 */
+.uc-donut__legend-top {
+  color: var(--text);
+  font-weight: 600;
+}
+.uc-donut__legend b {
+  margin-left: auto;
+  font-weight: 600;
+}
+.uc-donut__legend small {
+  min-width: 48px;
+  text-align: right;
+}
+.uc-donut__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* 移动端表格改卡片流（审计 P1 清单 #7）。
+   纯 CSS 实现：每列的名字按列序写进 ::before，不动 20 多处 <td> 标记。
+   760px 以下每行变成一张卡（表头隐藏、单元格竖排、左侧带列名）。 */
+@media (max-width: 760px) {
+  .uc-responsive-table {
+    display: block;
+  }
+  .uc-responsive-table > thead {
+    display: none;
+  }
+  .uc-responsive-table > tbody,
+  .uc-responsive-table > tbody > tr {
+    display: block;
+    width: 100%;
+  }
+  .uc-responsive-table > tbody > tr {
+    margin-bottom: 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+  }
+  .uc-responsive-table > tbody > tr > td {
+    display: block;
+    width: 100%;
+    padding: 6px 0;
+    border: none;
+    white-space: normal;
+  }
+  .uc-responsive-table > tbody > tr > td::before {
+    display: block;
+    margin-bottom: 2px;
+    color: var(--text-muted);
+    font-size: var(--font-caption);
+  }
+  /* 触摸目标：原来 6px 的内边距在手机上太小（audit-35）。 */
+  .uc-responsive-table .uc-row-actions button {
+    padding: 12px;
+  }
+
+  .uc-ledger-table > tbody > tr > td:nth-of-type(1)::before {
+    content: "时间";
+  }
+  .uc-ledger-table > tbody > tr > td:nth-of-type(2)::before {
+    content: "业务";
+  }
+  .uc-ledger-table > tbody > tr > td:nth-of-type(3)::before {
+    content: "来源";
+  }
+  .uc-ledger-table > tbody > tr > td:nth-of-type(4)::before {
+    content: "可用积分变化";
+  }
+  .uc-ledger-table > tbody > tr > td:nth-of-type(5)::before {
+    content: "待结算变化";
+  }
+
+  .uc-orders-table > tbody > tr > td:nth-of-type(1)::before {
+    content: "订单号 / 创建时间";
+  }
+  .uc-orders-table > tbody > tr > td:nth-of-type(2)::before {
+    content: "支付金额";
+  }
+  .uc-orders-table > tbody > tr > td:nth-of-type(3)::before {
+    content: "订单积分";
+  }
+  .uc-orders-table > tbody > tr > td:nth-of-type(4)::before {
+    content: "状态";
+  }
+  .uc-orders-table > tbody > tr > td:nth-of-type(5)::before {
+    content: "操作";
+  }
+
+  .uc-summary-table > tbody > tr > td:nth-of-type(1)::before {
+    content: "子账号";
+  }
+  .uc-summary-table > tbody > tr > td:nth-of-type(2)::before {
+    content: "消费";
+  }
+  .uc-summary-table > tbody > tr > td:nth-of-type(3)::before {
+    content: "退回";
+  }
+  .uc-summary-table > tbody > tr > td:nth-of-type(4)::before {
+    content: "流水笔数";
+  }
+}
+
+/* 首访三步引导（方案 G / P2#14）。 */
+.uc-onboarding__progress {
+  color: var(--text-muted);
+  font-size: var(--font-caption);
+  margin-bottom: 6px;
+}
+.uc-onboarding p {
+  color: var(--text-muted);
+  line-height: 1.8;
+}
+
+/* 帮助中心（P2#21）：问答式清单，术语与界面用词对齐。 */
+.uc-help dl {
+  margin: 0;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.uc-help dt {
+  margin-top: 14px;
+  font-weight: 600;
+}
+.uc-help dd {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  line-height: 1.8;
+}
+/* 术语就地说明：虚线下划线表示「可以悬停看解释」。 */
+.uc-term {
+  border-bottom: 1px dashed var(--line-strong);
+  cursor: help;
+}
+
+/* 闲置提示（机会点 2 的「闲置自动禁用」——本批只提示、不禁用）。 */
+.uc-token__idle {
+  margin: 0;
+  color: #e0b25e;
+  font-size: var(--font-caption);
+}
+
+/* 错误块里的「复制错误信息」入口。 */
+.uc-error__feedback {
+  font-size: var(--font-caption);
+  color: var(--text-muted);
+  text-decoration: underline;
 }
