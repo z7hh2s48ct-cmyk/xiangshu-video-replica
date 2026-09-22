@@ -2,6 +2,15 @@
 
 version: "3.8"
 
+# P2-1 (BILLING-OBS) — same bounded json-file rotation as the customer
+# delivery compose (deploy/customer/compose.yaml); internal hosts must not
+# accumulate unbounded container logs either.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   loki:
     image: grafana/loki:2.9.0
@@ -15,6 +24,7 @@ services:
     networks:
       - logging-net
     restart: unless-stopped
+    logging: *default-logging
     
   promtail:
     image: grafana/promtail:2.9.0
@@ -28,6 +38,7 @@ services:
     networks:
       - logging-net
     restart: unless-stopped
+    logging: *default-logging
       
   grafana:
     image: grafana/grafana:10.2.0
@@ -39,6 +50,7 @@ services:
     networks:
       - logging-net
     restart: unless-stopped
+    logging: *default-logging
 
 networks:
   logging-net:

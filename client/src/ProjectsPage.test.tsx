@@ -40,6 +40,7 @@ describe("ProjectsPage analysis recovery", () => {
       error_code: null,
       error_message: null,
       failure_phase: null,
+      request_id: null,
       retryable: false,
       created_at: "2030-01-01T00:00:00Z",
       updated_at: "2030-01-01T00:00:00Z",

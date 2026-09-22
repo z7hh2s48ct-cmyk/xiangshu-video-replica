@@ -113,6 +113,10 @@ PG_ONLY_TABLES: frozenset[str] = frozenset(
         # 权限矩阵，无行 = 全允许），PG-only（守卫同 20260916T1400）。T07 导入源
         # 无此表，目标库为空属预期；非空即 divergent，仍 fail closed。
         "sub_account_permissions",
+        # 20260922T2000_analysis_task_attempts: 拆解失败按 attempt 留痕的重试
+        # 历史表，PG-only（守卫同 20260916T1400）。T07 导入源无此表，目标库为空
+        # 属预期；非空即 divergent，仍 fail closed。
+        "analysis_task_attempts",
     }
 )
 
@@ -203,6 +207,10 @@ PG_ONLY_COLUMNS: dict[str, frozenset[str]] = {
     # 20260920T0100_add_api_metadata_to_billing_ops: viral_data 的 API 类型
     # 元数据仅存在于 PG（SQLite lane 无计费运行时）。
     "billing_operations": frozenset({"api_metadata"}),
+    # 20260922T1200_analysis_task_failure_diagnostic: analysis_tasks 的上游结构化
+    # 诊断列仅存在于 PG（非 postgresql 方言 return，SQLite lane 不加此列）。
+    # 同链的 20260922T1600 request_id 两泳道都加，故不在此豁免。
+    "analysis_tasks": frozenset({"upstream_diagnostic_json"}),
 }
 DEFAULT_DIGEST_BATCH_SIZE = 1000
 _DIGEST_MODULUS = 1 << 256

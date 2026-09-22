@@ -400,6 +400,8 @@ export type AnalysisTask = {
   error_message: string | null;
   failure_phase: string | null;
   retryable: boolean;
+  /** 入队时发起的 API 请求编号（P1-4）；存量任务与未带请求头的调用为 null。 */
+  request_id: string | null;
   created_at: string;
   updated_at: string;
   started_at: string | null;
@@ -3083,7 +3085,15 @@ async function pollAnalysisTask(taskId: string): Promise<AnalysisTask> {
       return task;
     }
     if (task.status === "FAILED") {
-      throw new Error(task.error_message || "视频拆解失败，请重新提交。");
+      // P1-4：错误逐字段携带任务编号与入队请求编号，失败卡片直接展示给客服；
+      // 不再把两者丢掉、让对方先拿任务号去反查 API 日志。
+      const failure = new Error(
+        task.error_message || "视频拆解失败，请重新提交。",
+      ) as RequestError;
+      if (task.error_code) failure.code = task.error_code;
+      failure.taskId = task.id;
+      if (task.request_id) failure.requestId = task.request_id;
+      throw failure;
     }
     await waitForPoll(nextDelay());
   }
@@ -5635,6 +5645,8 @@ type RequestError = Error & {
   code?: string;
   retryable?: boolean;
   requestId?: string;
+  /** 失败任务编号（P1-4）：失败卡片上给用户的「任务编号」。 */
+  taskId?: string;
   staleReasons?: string[];
 };
 
@@ -5742,6 +5754,32 @@ export function customerVisibleErrorMessage(
   return requestId
     ? `${branded.message} 问题编号：${requestId}`
     : branded.message;
+}
+
+/**
+ * P1-4：失败卡片上的可直查编号串（任务编号 + 问题编号）。
+ *
+ * 两个编号都来自服务端落库的字段：任务编号定位拆解任务，问题编号（请求号）
+ * 定位发起这次拆解的那条 API 日志。任一侧缺失（存量任务 / 未带请求头的调用）
+ * 时只展示存在的那个；都缺失返回空串，调用方不要拼括号。
+ */
+export function analysisFailureReference(error: unknown): string {
+  let taskId = "";
+  let requestId = "";
+  if (error instanceof Error) {
+    const details = error as RequestError;
+    taskId = typeof details.taskId === "string" ? details.taskId.trim() : "";
+    requestId =
+      typeof details.requestId === "string" ? details.requestId.trim() : "";
+  } else if (isRecord(error)) {
+    taskId = typeof error.taskId === "string" ? error.taskId.trim() : "";
+    requestId =
+      typeof error.requestId === "string" ? error.requestId.trim() : "";
+  }
+  const parts: string[] = [];
+  if (taskId) parts.push(`任务编号：${taskId}`);
+  if (requestId) parts.push(`问题编号：${requestId}`);
+  return parts.join("；");
 }
 
 async function responseErrorDetails(
@@ -7150,6 +7188,37 @@ export async function customerListWalletTransactions(
       limit: String(limit),
       offset: String(offset),
       ...filters,
+    })}`,
+    { credential },
+  );
+  return body;
+}
+
+/** P2-3：账单行「费率 V{n}」回查当时对外价目（后端只回公开字段）。 */
+export type CustomerPriceVersion = {
+  service: string;
+  name: string;
+  unit: string;
+  version: number;
+  current_version: number;
+  found: boolean;
+  current: boolean;
+  enabled: boolean | null;
+  unit_credits: string | null;
+  unit_rounding: string | null;
+  effective_at: string | null;
+};
+
+/** The public price a settled charge was priced at (GET /api/customer/billing/price-version). */
+export async function customerGetPriceVersion(
+  credential: CustomerSessionCredential,
+  service: string,
+  version: number,
+): Promise<CustomerPriceVersion> {
+  const { body } = await customerJson<CustomerPriceVersion>(
+    `/api/customer/billing/price-version?${new URLSearchParams({
+      service,
+      version: String(version),
     })}`,
     { credential },
   );

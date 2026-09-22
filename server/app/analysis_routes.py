@@ -7,8 +7,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.analysis import (
@@ -22,6 +23,7 @@ from app.analysis import (
     ApilioGemini,
     FakeGemini,
     VideoAnalysisProvider,
+    analysis_task_context,
     analyze_video,
     create_analysis_version,
     create_or_recover_analysis_version,
@@ -45,6 +47,7 @@ from app.media import (
     is_reference_video_asset,
 )
 from app.media_routes import get_media_storage
+from app.ops_metrics import get_or_create_request_id
 from app.permissions import (
     remap_security_denial,
     require_asset_access,
@@ -198,6 +201,9 @@ class AnalysisTaskResponse(BaseModel):
     error_message: str | None
     failure_phase: str | None
     retryable: bool
+    # 入队时发起的 API 请求编号（P1-4）：失败卡片展示「任务编号 + 问题编号」，
+    # 客服不必先反查日志。存量任务与未带请求头的调用为 null。
+    request_id: str | None
     created_at: str
     updated_at: str
     started_at: str | None
@@ -213,6 +219,7 @@ class AnalysisTaskLease:
     duration_seconds: float
     worker_id: str
     attempt: int = 1
+    request_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -385,13 +392,18 @@ def create_project_analysis_task(
     project_id: str,
     request: CreateAnalysisRequest,
     db: BusinessDbDep,
+    http_request: Request,
 ) -> AnalysisTaskResponse:
     """Validate quickly and persist work for the generation worker.
 
     No provider or storage-network call is allowed in this request.  Customer
     session fencing therefore protects only the enqueue commit and can never
     block the heartbeat for the lifetime of a model request.
+
+    The request id (P0-1 correlation key) is stamped onto the task row so the
+    desktop failure card can show both numbers without a log lookup (P1-4).
     """
+    request_id = get_or_create_request_id(http_request)
     with db.write() as (conn, actor):
         asset, measured_duration = validate_analysis_enqueue(
             conn,
@@ -420,6 +432,7 @@ def create_project_analysis_task(
             asset_id=request.asset_id,
             created_by_user_id=actor.id,
             duration_seconds=measured_duration,
+            request_id=request_id,
         )
         if not created:
             return analysis_task_response(row)
@@ -434,6 +447,7 @@ def create_project_analysis_task(
                 "project_id": project_id,
                 "asset_id": request.asset_id,
                 "asset_sha256": str(asset["sha256"]),
+                "request_id": request_id,
             },
         )
         return analysis_task_response(row)
@@ -705,6 +719,56 @@ def analysis_duration_for_asset(
     return measured_duration
 
 
+def record_analysis_task_attempt(
+    conn: BusinessConnection,
+    *,
+    task_id: str,
+    attempt: int,
+    attempt_status: str,
+    error_code: str | None,
+    error_message: str | None,
+    failure_phase: str | None,
+    retryable: bool,
+    diagnostic: dict[str, Any] | None,
+    request_id: str | None,
+    completed_at: str,
+) -> None:
+    """P1-6：把一次尝试的结论写进 ``analysis_task_attempts``。
+
+    任务行只有一组 error_* 字段，回答的是「最后一次怎么样了」；这里按
+    ``(task_id, attempt)`` 逐次归档，重试多次后第一次的失败原因仍在。重复写入
+    （重放、迟到失败）不覆盖已归档的行：先到者是对该次尝试的系统裁决。
+    ``INSERT ... SELECT FROM analysis_tasks`` 让任务行已被删除时静默跳过。
+    """
+    conn.execute(
+        """
+        INSERT INTO analysis_task_attempts (
+            id, task_id, attempt, status, error_code, error_message_redacted,
+            failure_phase, retryable, upstream_diagnostic_json, request_id,
+            completed_at, created_at
+        )
+        SELECT %s, task.id, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+        FROM analysis_tasks AS task
+        WHERE task.id = %s
+        ON CONFLICT (task_id, attempt) DO NOTHING
+        """,
+        (
+            f"ata-{uuid4().hex}",
+            attempt,
+            attempt_status,
+            error_code,
+            error_message,
+            failure_phase,
+            1 if retryable else 0,
+            json.dumps(diagnostic, ensure_ascii=False) if diagnostic else None,
+            request_id,
+            completed_at,
+            completed_at,
+            task_id,
+        ),
+    )
+
+
 def acquire_analysis_task(
     conn: BusinessConnection,
     *,
@@ -717,7 +781,7 @@ def acquire_analysis_task(
         "%Y-%m-%d %H:%M:%S"
     )
     try:
-        conn.execute(
+        interrupted = conn.execute(
             """
             UPDATE analysis_tasks
             SET status = 'FAILED',
@@ -729,9 +793,65 @@ def acquire_analysis_task(
                 completed_at = %s,
                 updated_at = %s
             WHERE status = 'RUNNING' AND locked_until IS NOT NULL AND locked_until <= %s
+            RETURNING id, attempt, request_id
             """,
             (now_text, now_text, now_text),
-        )
+        ).fetchall()
+        # P1-6：被接管的中断尝试也要留痕，否则失败历史只剩用户重试后的记录。
+        for interrupted_row in interrupted:
+            record_analysis_task_attempt(
+                conn,
+                task_id=str(interrupted_row["id"]),
+                attempt=int(interrupted_row["attempt"]),
+                attempt_status="INTERRUPTED",
+                error_code="ANALYSIS_WORKER_INTERRUPTED",
+                error_message="拆解任务执行中断，请重新拆解。",
+                failure_phase=None,
+                retryable=True,
+                diagnostic=None,
+                request_id=(
+                    None
+                    if interrupted_row["request_id"] is None
+                    else str(interrupted_row["request_id"])
+                ),
+                completed_at=now_text,
+            )
+        # P1-6：认领不再静默清空——先把该行残留的旧失败字段归档成历史，再归零，
+        # 新尝试从干净状态开始。SELECT ... FOR UPDATE 与下面的认领同事务，
+        # 归档的必然是将被认领的那一行。
+        stale = conn.execute(
+            """
+            SELECT id, attempt, error_code, error_message_redacted, failure_phase,
+                   retryable, upstream_diagnostic_json, request_id
+            FROM analysis_tasks
+            WHERE status = 'PENDING'
+              AND (error_code IS NOT NULL OR failure_phase IS NOT NULL)
+            ORDER BY created_at, id
+            LIMIT 1
+            FOR UPDATE
+            """,
+        ).fetchone()
+        if stale is not None:
+            stale_diagnostic = stale["upstream_diagnostic_json"]
+            record_analysis_task_attempt(
+                conn,
+                task_id=str(stale["id"]),
+                attempt=int(stale["attempt"]),
+                attempt_status="SUPERSEDED",
+                error_code=None if stale["error_code"] is None else str(stale["error_code"]),
+                error_message=(
+                    None
+                    if stale["error_message_redacted"] is None
+                    else str(stale["error_message_redacted"])
+                ),
+                failure_phase=(
+                    None if stale["failure_phase"] is None else str(stale["failure_phase"])
+                ),
+                retryable=bool(stale["retryable"]),
+                diagnostic=stale_diagnostic if isinstance(stale_diagnostic, dict) else None,
+                request_id=None if stale["request_id"] is None else str(stale["request_id"]),
+                completed_at=now_text,
+            )
         row = conn.execute(
             """
             UPDATE analysis_tasks
@@ -769,6 +889,7 @@ def acquire_analysis_task(
         duration_seconds=float(row["duration_seconds"]),
         worker_id=worker_id,
         attempt=int(row["attempt"]),
+        request_id=None if row["request_id"] is None else str(row["request_id"]),
     )
 
 
@@ -857,6 +978,18 @@ def prepare_analysis_task(
 
 
 def perform_analysis_task(
+    work: AnalysisTaskWork, *, on_provider_result: Callable[[], None] | None = None
+) -> AnalysisResult:
+    """Run the paid provider analysis with the task reference bound for logs."""
+    with analysis_task_context(
+        task_id=work.lease.id,
+        project_id=work.lease.project_id,
+        asset_id=work.lease.asset_id,
+    ):
+        return _perform_analysis_task(work, on_provider_result=on_provider_result)
+
+
+def _perform_analysis_task(
     work: AnalysisTaskWork, *, on_provider_result: Callable[[], None] | None = None
 ) -> AnalysisResult:
     duration = work.lease.duration_seconds
@@ -1015,6 +1148,7 @@ def complete_analysis_task(
             "project_id": work.lease.project_id,
             "asset_id": work.lease.asset_id,
             "version_id": str(row["id"]),
+            "request_id": work.lease.request_id,
         },
         commit=False,
     )
@@ -1034,6 +1168,7 @@ def fail_analysis_task(
     message = "视频拆解失败，请稍后重新拆解。"
     retryable = True
     failure_phase: str | None = None
+    diagnostic: dict[str, Any] | None = None
     if isinstance(cause, AnalysisProviderFailed):
         mapped = analysis_provider_error(cause)
         detail: dict[str, Any] = mapped.detail if isinstance(mapped.detail, dict) else {}
@@ -1041,18 +1176,39 @@ def fail_analysis_task(
         message = str(detail.get("message") or message)
         retryable = bool(detail.get("retryable", cause.retryable))
         failure_phase = cause.failure_phase
+        diagnostic = cause.upstream_diagnostic
     elif isinstance(cause, HTTPException) and isinstance(cause.detail, dict):
         code = str(cause.detail.get("code") or code)
         message = str(cause.detail.get("message") or message)
         retryable = bool(cause.detail.get("retryable", True))
         failure_phase = cause.detail.get("failure_phase")
+    # 2026-09-20 事故：失败终态只写了状态码，日志一行不留，UI/DB/日志三处同时
+    # 丢失根因。每次失败都必须留一条带 task/project/asset 关联键的日志；预期内
+    # 的供应商/HTTP 失败不附堆栈，非预期异常附 exc_info——那通常是代码缺陷。
+    # exc_info 用 cause 实例而非 True：worker 在 except 块内调用本函数，但
+    # True 会重新读 sys.exc_info()，在本函数的调用栈里已是空值。
+    unexpected_failure = not isinstance(cause, (AnalysisProviderFailed, HTTPException))
+    logger.warning(
+        "analysis task failed: task=%s project=%s asset=%s attempt=%s request=%s code=%s "
+        "phase=%s retryable=%s",
+        lease.id,
+        lease.project_id,
+        lease.asset_id,
+        lease.attempt,
+        lease.request_id or "-",
+        code,
+        failure_phase or "-",
+        retryable,
+        exc_info=cause if unexpected_failure else None,
+    )
     now_text = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
     updated = conn.execute(
         """
         UPDATE analysis_tasks
         SET status = 'FAILED', error_code = %s,
             error_message_redacted = %s, failure_phase = %s,
-            retryable = %s, locked_by = NULL, locked_until = NULL,
+            retryable = %s, upstream_diagnostic_json = %s,
+            locked_by = NULL, locked_until = NULL,
             completed_at = %s, updated_at = %s
         WHERE id = %s AND status = 'RUNNING' AND locked_by = %s AND attempt = %s
         """,
@@ -1061,6 +1217,7 @@ def fail_analysis_task(
             message,
             failure_phase,
             1 if retryable else 0,
+            json.dumps(diagnostic, ensure_ascii=False) if diagnostic else None,
             now_text,
             now_text,
             lease.id,
@@ -1068,7 +1225,28 @@ def fail_analysis_task(
             lease.attempt,
         ),
     )
+    # P1-6：无论终态写入是否被丢弃，这次失败都要在 attempt 历史留一行。
+    record_analysis_task_attempt(
+        conn,
+        task_id=lease.id,
+        attempt=lease.attempt,
+        attempt_status="FAILED",
+        error_code=code,
+        error_message=message,
+        failure_phase=failure_phase,
+        retryable=retryable,
+        diagnostic=diagnostic,
+        request_id=lease.request_id,
+        completed_at=now_text,
+    )
     if updated.rowcount != 1:
+        # 租约被取代（重试/接管）时终态写入按设计丢弃，但失败尝试本身仍要留痕
+        # （P1-6：下面的历史写入不受终态丢弃影响）。
+        logger.warning(
+            "analysis task failure write was discarded: task=%s attempt=%s",
+            lease.id,
+            lease.attempt,
+        )
         conn.rollback()
         return
     write_audit(
@@ -1082,6 +1260,10 @@ def fail_analysis_task(
             "asset_id": lease.asset_id,
             "error_code": code,
             "retryable": retryable,
+            "request_id": lease.request_id,
+            "failure_phase": failure_phase,
+            "attempt": lease.attempt,
+            "error_message": message,
         },
     )
     from app.usage_billing import finish_source
@@ -1202,6 +1384,7 @@ def analysis_task_response(row: sqlite3.Row) -> AnalysisTaskResponse:
         ),
         failure_phase=None if row["failure_phase"] is None else str(row["failure_phase"]),
         retryable=bool(row["retryable"]),
+        request_id=None if row["request_id"] is None else str(row["request_id"]),
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
         started_at=None if row["started_at"] is None else str(row["started_at"]),

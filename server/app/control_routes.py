@@ -31,6 +31,7 @@ from app.billing_catalog import SERVICES
 from app.control_auth import ControlUser
 from app.csv_export import spreadsheet_safe_cell
 from app.db_portable import BusinessConnection
+from app.failure_runbook import failure_advice
 from app.ops_metrics import get_or_create_request_id
 from app.permissions import write_audit
 from app.security_rate_limit import (
@@ -55,6 +56,9 @@ router = APIRouter(prefix="/api/control", tags=["control"])
 logger = logging.getLogger(__name__)
 CUSTOMER_PRODUCTION_ENV = "VIDEO_REPLICA_CUSTOMER_PRODUCTION"
 _TRUTHY = {"1", "true", "yes", "on"}
+# 诊断是定点查询：任务编号/问题编号理论上唯一，命中上限只是「一个请求号关联到
+# 一批任务」时的安全阀，不做分页——检索无结果是常态而非异常。
+ANALYSIS_DIAGNOSTIC_MATCH_LIMIT = 20
 
 OrderStatus = Literal["PENDING", "PAID", "FAILED", "CLOSED"]
 TransactionType = Literal["CHARGE", "RESERVE", "SETTLE", "RELEASE", "CONVERSION"]
@@ -66,6 +70,7 @@ GenerationRecordType = Literal[
     "CHARACTER_VIEW_IMAGE",
     "SOURCE_FRAME_AI_SCORE",
     "SOURCE_FRAME_PROCESS",
+    "ANALYSIS",
 ]
 ProviderCostStatus = Literal["KNOWN", "ESTIMATED", "UNAVAILABLE", "NOT_APPLICABLE"]
 RecordDataStatus = Literal["VALID", "UNAVAILABLE", "CORRUPTED"]
@@ -180,6 +185,12 @@ class ControlGenerationRecord(BaseModel):
     error_message: str | None
     created_at: str
     completed_at: str | None
+    # 视频拆解专用：P0-2 落库的失败诊断。只有 analysis_tasks 有这些列，其他类型
+    # 保持 None——「失败阶段/可否重试/上游原话」过去只活在日志里，管理端看不见。
+    failure_phase: str | None = None
+    retryable: bool | None = None
+    upstream_status: int | None = None
+    upstream_reason: str | None = None
 
 
 class ControlGenerationRecordPage(BaseModel):
@@ -189,6 +200,92 @@ class ControlGenerationRecordPage(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class GenerationRecordCount(BaseModel):
+    """生成记录聚合的一格：某类型 × 某状态的条数（原始状态，不做语义归并）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    record_type: GenerationRecordType
+    status: str
+    count: int
+
+
+class AnalysisFailureReason(BaseModel):
+    """拆解失败原因聚合：回答「上游到底为什么拒绝」以及「能不能重试」。
+
+    ``advice`` 是 P2-2 runbook（``app.failure_runbook``）的译文：管理端聚合
+    列表直接展示，用户/客服不必拿内部错误码去别处搜索。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    error_code: str | None
+    failure_phase: str | None
+    reason: str | None
+    retryable: bool
+    count: int
+    advice: str | None = None
+
+
+class ControlGenerationRecordSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    total: int
+    counts: list[GenerationRecordCount]
+    failure_reasons: list[AnalysisFailureReason]
+
+
+class AnalysisDiagnosticAttempt(BaseModel):
+    """一次拆解尝试的结论：P1-6 按 attempt 归档进 ``analysis_task_attempts``。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    attempt: int
+    status: str
+    error_code: str | None
+    error_message: str | None
+    failure_phase: str | None
+    retryable: bool
+    upstream_status: int | None
+    upstream_reason: str | None
+    request_id: str | None
+    created_at: str
+    completed_at: str | None
+    advice: str | None = None
+
+
+class AnalysisDiagnosticRecord(BaseModel):
+    """一个拆解任务的诊断全貌：任务行回答「最后一次」，attempts 回答「每次」。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str
+    request_id: str | None
+    username: str
+    display_name: str
+    project_id: str | None
+    project_name: str | None
+    status: str
+    attempt: int
+    error_code: str | None
+    error_message: str | None
+    failure_phase: str | None
+    retryable: bool | None
+    upstream_status: int | None
+    upstream_reason: str | None
+    created_at: str
+    completed_at: str | None
+    advice: str | None = None
+    attempts: list[AnalysisDiagnosticAttempt]
+
+
+class AnalysisDiagnosticsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[AnalysisDiagnosticRecord]
+    total: int
 
 
 class ReconciliationSummary(BaseModel):
@@ -696,6 +793,7 @@ def list_generation_records(
     username: str | None = None,
     status: str | None = None,
     record_type: GenerationRecordType | None = None,
+    failure_phase: str | None = None,
     created_from: str | None = None,
     created_to: str | None = None,
     limit: int = Query(default=50, ge=1, le=100),
@@ -757,6 +855,15 @@ def list_generation_records(
         created_from=created_from,
         created_to=created_to,
     )
+    analysis_where, analysis_params = _analysis_record_filters(
+        postgres=conn.is_postgres,
+        username=username,
+        status=status,
+        record_type=record_type,
+        failure_phase=failure_phase,
+        created_from=created_from,
+        created_to=created_to,
+    )
     if record_type in {"SOURCE_FRAME_PROCESS", "SOURCE_FRAME_AI_SCORE"}:
         semantic_requested_sql = """
             (
@@ -798,6 +905,8 @@ def list_generation_records(
                  LEFT JOIN versions ON versions.id = task.result_version_id {source_where})
               + (SELECT COUNT(*) FROM oral_tasks task
                  JOIN users ON users.id = task.owner_user_id {oral_where})
+              + (SELECT COUNT(*) FROM analysis_tasks task
+                 JOIN users ON users.id = task.created_by_user_id {analysis_where})
                 AS total
             """,  # noqa: S608
             (
@@ -807,6 +916,7 @@ def list_generation_records(
                 *view_params,
                 *source_params,
                 *oral_params,
+                *analysis_params,
             ),
         ).fetchone()["total"]
     )
@@ -1151,6 +1261,72 @@ def list_generation_records(
             )
         )
 
+    analysis_rows = conn.execute(
+        f"""
+        SELECT task.*, users.username, users.display_name,
+               projects.name AS project_name, versions.payload_json
+        FROM analysis_tasks AS task
+        JOIN users ON users.id = task.created_by_user_id
+        LEFT JOIN projects ON projects.id = task.project_id
+        LEFT JOIN versions ON versions.id = task.result_version_id
+        {analysis_where}
+        ORDER BY task.created_at DESC, task.id DESC
+        LIMIT %s
+        """,  # noqa: S608
+        (*analysis_params, scan_limit),
+    ).fetchall()
+    for row in analysis_rows:
+        row_status = str(row["status"])
+        payload, payload_status = _json_object(
+            row["payload_json"],
+            record_id=str(row["id"]),
+            field_name="payload_json",
+        )
+        provider_ref = payload.get("provider_response_ref")
+        executed = provider_ref if isinstance(provider_ref, dict) else {}
+        diagnostic_status, diagnostic_reason = _upstream_diagnostic(
+            row["upstream_diagnostic_json"] if conn.is_postgres else None
+        )
+        charged_credits, provider_cost = analysis_task_billing(
+            conn, task_id=str(row["id"]), user_id=str(row["created_by_user_id"])
+        )
+        records.append(
+            ControlGenerationRecord(
+                record_id=str(row["id"]),
+                record_type="ANALYSIS",
+                operation="ANALYZE_VIDEO",
+                user_id=str(row["created_by_user_id"]),
+                username=str(row["username"]),
+                display_name=str(row["display_name"]),
+                project_id=str(row["project_id"]),
+                project_name=_optional_text(row["project_name"]),
+                status=row_status,
+                # 失败行没有结果版本，上游服务/模型无处可取；不编造 apilio_gemini。
+                provider=_optional_text(executed.get("provider")),
+                model=_optional_text(executed.get("model")),
+                provider_cost=provider_cost,
+                provider_cost_status=("ESTIMATED" if provider_cost is not None else "UNAVAILABLE"),
+                record_data_status=payload_status,
+                charged_credits=charged_credits,
+                result_reference=_optional_text(row["result_version_id"]),
+                provider_reference=_optional_text(executed.get("response_id")),
+                error_code=_optional_text(row["error_code"]),
+                error_message=_optional_text(row["error_message_redacted"]),
+                created_at=str(row["created_at"]),
+                completed_at=_optional_text(row["completed_at"]),
+                failure_phase=_optional_text(row["failure_phase"]),
+                # 该列在成功/进行中行上是默认 0——直接透出会把「不适用」说成
+                # 「不可重试」。只有失败行才谈「能不能重试」。
+                retryable=(
+                    None
+                    if row_status != "FAILED" or row["retryable"] is None
+                    else bool(row["retryable"])
+                ),
+                upstream_status=diagnostic_status,
+                upstream_reason=diagnostic_reason,
+            )
+        )
+
     records.sort(key=lambda item: (item.created_at, item.record_id), reverse=True)
     return ControlGenerationRecordPage(
         items=records[offset : offset + limit],
@@ -1158,6 +1334,256 @@ def list_generation_records(
         limit=limit,
         offset=offset,
     )
+
+
+@router.get("/generation-records/summary", response_model=ControlGenerationRecordSummary)
+def summarize_generation_records(
+    conn: Database,
+    _actor: ControlUser,
+    username: str | None = None,
+    status: str | None = None,
+    record_type: GenerationRecordType | None = None,
+    failure_phase: str | None = None,
+    created_from: str | None = None,
+    created_to: str | None = None,
+) -> ControlGenerationRecordSummary:
+    """与列表同筛选口径的聚合。
+
+    生成记录列表是分页的，管理端无法靠自己汇总，「筛选后 3 条失败」与「聚合里
+    还有 12 条」会互相打脸；因此聚合与列表共用同一批过滤器，并额外回答「拆解
+    为什么失败、能不能重试」——这正是 2026-09-20 事故里完全缺失的视角。
+    """
+    video_where, video_params = _generation_record_filters(
+        postgres=conn.is_postgres,
+        record_types=("VIDEO",),
+        username=username,
+        status=status,
+        record_type=record_type,
+        created_from=created_from,
+        created_to=created_to,
+    )
+    oral_where, oral_params = _generation_record_filters(
+        postgres=conn.is_postgres,
+        record_types=("ORAL_VIDEO",),
+        username=username,
+        status=status,
+        record_type=record_type,
+        created_from=created_from,
+        created_to=created_to,
+    )
+    first_where, first_params = _generation_record_filters(
+        postgres=conn.is_postgres,
+        record_types=("FIRST_FRAME_IMAGE",),
+        username=username,
+        status=status,
+        record_type=record_type,
+        created_from=created_from,
+        created_to=created_to,
+    )
+    sheet_where, sheet_params = _generation_record_filters(
+        postgres=conn.is_postgres,
+        record_types=("CHARACTER_SHEET_IMAGE",),
+        username=username,
+        status=status,
+        record_type=record_type,
+        created_from=created_from,
+        created_to=created_to,
+    )
+    view_where, view_params = _generation_record_filters(
+        postgres=conn.is_postgres,
+        record_types=("CHARACTER_VIEW_IMAGE",),
+        username=username,
+        status=status,
+        record_type=record_type,
+        created_from=created_from,
+        created_to=created_to,
+    )
+    source_where, source_params = _generation_record_filters(
+        postgres=conn.is_postgres,
+        record_types=("SOURCE_FRAME_PROCESS", "SOURCE_FRAME_AI_SCORE"),
+        username=username,
+        status=status,
+        record_type=record_type,
+        created_from=created_from,
+        created_to=created_to,
+    )
+    analysis_where, analysis_params = _analysis_record_filters(
+        postgres=conn.is_postgres,
+        username=username,
+        status=status,
+        record_type=record_type,
+        failure_phase=failure_phase,
+        created_from=created_from,
+        created_to=created_to,
+    )
+    # 源画面分支按审计留痕归类：列表里的 json_valid/json_extract 只有 SQLite 有，
+    # PG 上会直接报函数不存在。列表还会按 payload 的 semantic_quality_status 兜底，
+    # 所以极少数「只有 payload、没有审计」的历史行不在这份计数里。
+    semantic_requested_sql = """
+        EXISTS (
+            SELECT 1 FROM audit_logs quality_audit
+            WHERE quality_audit.action = 'source_frame.semantic_quality_started'
+              AND quality_audit.entity_id = task.id
+        )
+    """
+    rows = conn.execute(
+        f"""
+        SELECT record_type, status, COUNT(*) AS total FROM (
+            SELECT 'VIDEO' AS record_type, task.status AS status
+            FROM generation_tasks AS task
+            JOIN generation_batches AS batch ON batch.id = task.batch_id
+            JOIN users ON users.id = batch.created_by_user_id
+            {video_where}
+            UNION ALL
+            SELECT 'ORAL_VIDEO', task.status
+            FROM oral_tasks AS task
+            JOIN users ON users.id = task.owner_user_id
+            {oral_where}
+            UNION ALL
+            SELECT 'FIRST_FRAME_IMAGE', task.status
+            FROM first_frame_tasks AS task
+            JOIN users ON users.id = task.created_by_user_id
+            {first_where}
+            UNION ALL
+            SELECT 'CHARACTER_SHEET_IMAGE', task.status
+            FROM character_sheet_tasks AS task
+            JOIN users ON users.id = task.created_by_user_id
+            {sheet_where}
+            UNION ALL
+            SELECT 'CHARACTER_VIEW_IMAGE', task.status
+            FROM character_generation_tasks AS task
+            JOIN users ON users.id = task.created_by
+            {view_where}
+            UNION ALL
+            SELECT CASE WHEN {semantic_requested_sql}
+                        THEN 'SOURCE_FRAME_AI_SCORE' ELSE 'SOURCE_FRAME_PROCESS' END,
+                   task.status
+            FROM source_frame_tasks AS task
+            JOIN users ON users.id = task.created_by_user_id
+            {source_where}
+            UNION ALL
+            SELECT 'ANALYSIS', task.status
+            FROM analysis_tasks AS task
+            JOIN users ON users.id = task.created_by_user_id
+            {analysis_where}
+        ) AS record_groups
+        GROUP BY record_type, status
+        ORDER BY record_type, status
+        """,  # noqa: S608
+        (
+            *video_params,
+            *oral_params,
+            *first_params,
+            *sheet_params,
+            *view_params,
+            *source_params,
+            *analysis_params,
+        ),
+    ).fetchall()
+    counts = [
+        GenerationRecordCount(
+            record_type=cast(GenerationRecordType, str(row["record_type"])),
+            status=str(row["status"]),
+            count=int(row["total"]),
+        )
+        for row in rows
+    ]
+    return ControlGenerationRecordSummary(
+        total=sum(item.count for item in counts),
+        counts=counts,
+        failure_reasons=_analysis_failure_reasons(
+            conn,
+            username=username,
+            status=status,
+            record_type=record_type,
+            failure_phase=failure_phase,
+            created_from=created_from,
+            created_to=created_to,
+        ),
+    )
+
+
+@router.get("/analysis-diagnostics", response_model=AnalysisDiagnosticsResponse)
+def get_analysis_diagnostics(
+    conn: Database,
+    _actor: ControlUser,
+    task_id: str | None = None,
+    request_id: str | None = None,
+) -> AnalysisDiagnosticsResponse:
+    """任务诊断视图：按任务编号 / 问题编号直查失败历史与上游诊断。
+
+    报障入口只有卡片上的「任务编号 + 问题编号」；生成记录列表回答的是「最后一次
+    怎么样了」，重试前的结论只在 ``analysis_task_attempts`` 里逐次留痕。两个
+    条件都不给时拒绝——诊断是定点查询，不做全量日志浏览。
+    """
+    if not task_id and not request_id:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "ANALYSIS_DIAGNOSTICS_QUERY_REQUIRED",
+                "message": "Provide task_id or request_id to inspect one task.",
+            },
+        )
+    clauses: list[str] = []
+    params: list[str] = []
+    if task_id:
+        clauses.append("task.id = %s")
+        params.append(task_id)
+    if request_id:
+        if conn.is_postgres:
+            # 入队请求号落在任务行；失败当场的请求号只出现在尝试行——两者都要认。
+            clauses.append(
+                "(task.request_id = %s OR EXISTS ("
+                "SELECT 1 FROM analysis_task_attempts attempt_row"
+                " WHERE attempt_row.task_id = task.id"
+                " AND attempt_row.request_id = %s))"
+            )
+            params.extend((request_id, request_id))
+        else:
+            # attempts 是 PG-only 表；SQLite 档案只认任务行上的请求号。
+            clauses.append("task.request_id = %s")
+            params.append(request_id)
+    rows = conn.execute(
+        f"""
+        SELECT task.*, users.username, users.display_name,
+               projects.name AS project_name
+        FROM analysis_tasks AS task
+        JOIN users ON users.id = task.created_by_user_id
+        LEFT JOIN projects ON projects.id = task.project_id
+        WHERE {" AND ".join(clauses)}
+        ORDER BY task.created_at DESC, task.id DESC
+        LIMIT %s
+        """,  # noqa: S608
+        (*params, ANALYSIS_DIAGNOSTIC_MATCH_LIMIT),
+    ).fetchall()
+    task_ids = [str(row["id"]) for row in rows]
+    attempts_by_task: dict[str, list[sqlite3.Row]] = {}
+    # attempts 是 PG-only 表（迁移在 SQLite 档案里跳过）；开发环境降级为
+    # 「无重试历史」，生产 PG 走全量。
+    if task_ids and conn.is_postgres:
+        placeholders = ", ".join("%s" for _ in task_ids)
+        attempt_rows = conn.execute(
+            f"""
+            SELECT task_id, attempt, status, error_code, error_message_redacted,
+                   failure_phase, retryable, upstream_diagnostic_json, request_id,
+                   completed_at, created_at
+            FROM analysis_task_attempts
+            WHERE task_id IN ({placeholders})
+            ORDER BY task_id, attempt
+            """,  # noqa: S608
+            tuple(task_ids),
+        ).fetchall()
+        for attempt_row in attempt_rows:
+            attempts_by_task.setdefault(str(attempt_row["task_id"]), []).append(attempt_row)
+    items = [
+        _analysis_diagnostic_record(
+            row,
+            attempts=attempts_by_task.get(str(row["id"]), []),
+            postgres=conn.is_postgres,
+        )
+        for row in rows
+    ]
+    return AnalysisDiagnosticsResponse(items=items, total=len(items))
 
 
 @router.get("/billing-reconciliation", response_model=ReconciliationSummary)
@@ -1672,6 +2098,96 @@ def _generation_record_filters(
     return (f"WHERE {' AND '.join(clauses)}" if clauses else "", tuple(params))
 
 
+def _analysis_record_filters(
+    *,
+    postgres: bool = False,
+    username: str | None,
+    status: str | None,
+    record_type: GenerationRecordType | None,
+    failure_phase: str | None,
+    created_from: str | None,
+    created_to: str | None,
+) -> tuple[str, tuple[str, ...]]:
+    """拆解分支的过滤器。
+
+    ``failure_phase`` 只在这里拼接：只有 ``analysis_tasks`` 有该列，泄漏到其他
+    分支会变成 SQL 报错（500），而不是「查不到」。
+    """
+    where, params = _generation_record_filters(
+        postgres=postgres,
+        record_types=("ANALYSIS",),
+        username=username,
+        status=status,
+        record_type=record_type,
+        created_from=created_from,
+        created_to=created_to,
+    )
+    if failure_phase:
+        conjunction = "AND" if where else "WHERE"
+        where = f"{where} {conjunction} task.failure_phase = %s"
+        params = (*params, failure_phase)
+    return where, params
+
+
+def _analysis_failure_reasons(
+    conn: BusinessConnection,
+    *,
+    username: str | None,
+    status: str | None,
+    record_type: GenerationRecordType | None,
+    failure_phase: str | None,
+    created_from: str | None,
+    created_to: str | None,
+) -> list[AnalysisFailureReason]:
+    """按「为什么失败」聚合拆解失败行：错误码 × 失败阶段 × 上游原话 × 可否重试。
+
+    当前视图里根本没有失败行（状态过滤不是 FAILED）时返回空——不给一份与
+    列表无关的失败清单。原因取自 P0-2 落库的上游诊断（``->>`` 只有 PG 的
+    jsonb 支持；SQLite 开发库没有该列，自然也没有原因）。
+    """
+    if status and status != "FAILED":
+        return []
+    where, params = _analysis_record_filters(
+        postgres=conn.is_postgres,
+        username=username,
+        status="FAILED",
+        record_type=record_type,
+        failure_phase=failure_phase,
+        created_from=created_from,
+        created_to=created_to,
+    )
+    reason_expr = "(task.upstream_diagnostic_json ->> 'reason')" if conn.is_postgres else "NULL"
+    rows = conn.execute(
+        f"""
+        SELECT task.error_code AS error_code,
+               task.failure_phase AS failure_phase,
+               {reason_expr} AS reason,
+               task.retryable AS retryable,
+               COUNT(*) AS total
+        FROM analysis_tasks AS task
+        JOIN users ON users.id = task.created_by_user_id
+        {where}
+        GROUP BY task.error_code, task.failure_phase, {reason_expr}, task.retryable
+        ORDER BY total DESC, task.error_code ASC, task.failure_phase ASC
+        """,  # noqa: S608
+        params,
+    ).fetchall()
+    items: list[AnalysisFailureReason] = []
+    for row in rows:
+        error_code = _optional_text(row["error_code"])
+        items.append(
+            AnalysisFailureReason(
+                error_code=error_code,
+                failure_phase=_optional_text(row["failure_phase"]),
+                reason=_optional_text(row["reason"]),
+                retryable=bool(row["retryable"]),
+                count=int(row["total"]),
+                advice=failure_advice(error_code),
+            )
+        )
+    return items
+
+
 def _oral_admin_error_message(*, status: str, raw_message: str | None) -> str | None:
     messages = {
         "SUBMISSION_UNCERTAIN": "数字人服务提交结果未知，请人工核对供应商任务。",
@@ -1733,26 +2249,40 @@ def image_task_billing(
     *,
     task_id: str,
     user_id: str,
+    services: tuple[str, ...] = ("character", "first_frame"),
 ) -> tuple[int, float | None]:
     """Read settled points separately from attempts; retries must not multiply charges.
 
     Attempt costs use frozen configured prices, not a supplier invoice. If even
     one attempt lacks cost evidence the total remains unknown, rather than zero.
+    ``services`` scopes the ledger read: image tasks keep the default, video
+    analysis passes its own service name.
     """
+    placeholders = ", ".join("%s" for _ in services)
     row = conn.execute(
         "SELECT COALESCE(SUM(charged_credits),0) FROM billing_operations "
-        "WHERE source_id=%s AND user_id=%s AND service IN ('character','first_frame')",
-        (task_id, user_id),
+        f"WHERE source_id=%s AND user_id=%s AND service IN ({placeholders})",  # noqa: S608
+        (task_id, user_id, *services),
     ).fetchone()
     attempts = conn.execute(
         "SELECT COUNT(*), COUNT(a.cost_fen), SUM(a.cost_fen) FROM billing_attempts a "
         "JOIN billing_operations op ON op.id=a.operation_id "
         "WHERE op.source_id=%s AND op.user_id=%s "
-        "AND op.service IN ('character','first_frame')",
-        (task_id, user_id),
+        f"AND op.service IN ({placeholders})",  # noqa: S608
+        (task_id, user_id, *services),
     ).fetchone()
     cost = float(attempts[2]) / 100 if attempts[0] and attempts[0] == attempts[1] else None
     return int(row[0]), cost
+
+
+def analysis_task_billing(
+    conn: BusinessConnection,
+    *,
+    task_id: str,
+    user_id: str,
+) -> tuple[int, float | None]:
+    """视频拆解的结算证据：与图片任务共用账本口径，service 固定为 analysis。"""
+    return image_task_billing(conn, task_id=task_id, user_id=user_id, services=("analysis",))
 
 
 def _json_object(
@@ -1802,6 +2332,88 @@ def _optional_text(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _upstream_diagnostic(raw: object) -> tuple[int | None, str | None]:
+    """回读 P0-2 落在 ``analysis_tasks.upstream_diagnostic_json`` 的诊断。
+
+    psycopg 的 jsonb 回读是 dict，但文本形态（旧数据/其他驱动）也要认；
+    坏数据只降级为「无诊断」，不能让整个列表 500。
+    """
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None, None
+    if not isinstance(raw, dict):
+        return None, None
+    status = raw.get("http_status")
+    # bool 是 int 的子类：True 不能当 HTTP 状态码。
+    if isinstance(status, bool) or not isinstance(status, int):
+        status = None
+    return status, _optional_text(raw.get("reason"))
+
+
+def _analysis_diagnostic_record(
+    row: sqlite3.Row,
+    *,
+    attempts: list[sqlite3.Row],
+    postgres: bool,
+) -> AnalysisDiagnosticRecord:
+    """把任务行 + 尝试历史拼成诊断记录。
+
+    ``upstream_diagnostic_json`` 是 PG-only 列（SQLite 档案没有），降级为
+    「无诊断」而不是报错；attempt 三态（FAILED/INTERRUPTED/SUPERSEDED）原样
+    透出，管理端按状态标注语义。
+    """
+    row_status = str(row["status"])
+    diagnostic_status, diagnostic_reason = _upstream_diagnostic(
+        row["upstream_diagnostic_json"] if postgres else None
+    )
+    attempt_items: list[AnalysisDiagnosticAttempt] = []
+    for attempt in attempts:
+        attempt_status, attempt_reason = _upstream_diagnostic(attempt["upstream_diagnostic_json"])
+        attempt_code = _optional_text(attempt["error_code"])
+        attempt_items.append(
+            AnalysisDiagnosticAttempt(
+                attempt=int(attempt["attempt"]),
+                status=str(attempt["status"]),
+                error_code=attempt_code,
+                error_message=_optional_text(attempt["error_message_redacted"]),
+                failure_phase=_optional_text(attempt["failure_phase"]),
+                retryable=bool(attempt["retryable"]),
+                upstream_status=attempt_status,
+                upstream_reason=attempt_reason,
+                request_id=_optional_text(attempt["request_id"]),
+                created_at=str(attempt["created_at"]),
+                completed_at=_optional_text(attempt["completed_at"]),
+                advice=failure_advice(attempt_code),
+            )
+        )
+    record_code = _optional_text(row["error_code"])
+    return AnalysisDiagnosticRecord(
+        task_id=str(row["id"]),
+        request_id=_optional_text(row["request_id"]),
+        username=str(row["username"]),
+        display_name=str(row["display_name"]),
+        project_id=None if row["project_id"] is None else str(row["project_id"]),
+        project_name=_optional_text(row["project_name"]),
+        status=row_status,
+        attempt=int(row["attempt"]),
+        error_code=record_code,
+        error_message=_optional_text(row["error_message_redacted"]),
+        failure_phase=_optional_text(row["failure_phase"]),
+        # 与生成记录同款语义：非失败行不谈「能不能重试」，不用默认 0 冒充。
+        retryable=(
+            None if row_status != "FAILED" or row["retryable"] is None else bool(row["retryable"])
+        ),
+        upstream_status=diagnostic_status,
+        upstream_reason=diagnostic_reason,
+        created_at=str(row["created_at"]),
+        completed_at=_optional_text(row["completed_at"]),
+        advice=failure_advice(record_code),
+        attempts=attempt_items,
+    )
 
 
 def _csv_response(

@@ -20,6 +20,8 @@ class Service:
     provider: str
     module: str
     customer_charge_allowed: bool = True
+    # Pure platform plumbing: the supplier bills nothing per call, so only zero cost passes.
+    zero_cost_platform: bool = False
 
 
 SERVICES: dict[str, Service] = {
@@ -41,8 +43,8 @@ SERVICES: dict[str, Service] = {
     "analysis_repair_deepseek": Service(
         "分析结果修复 · DeepSeek", "call", "deepseek", "internal", False
     ),
-    "cos": Service("云存储", "call", "cos", "infrastructure", False),
-    "zpay": Service("支付通道", "call", "zpay", "infrastructure", False),
+    "cos": Service("云存储", "call", "cos", "infrastructure", False, True),
+    "zpay": Service("支付通道", "call", "zpay", "infrastructure", False, True),
 }
 
 # Existing cost hooks refer to these provider subjects; they share the same tariff.

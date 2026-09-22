@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20260922T1800_sub_account_permissions"
+      "20260922T2000_analysis_task_attempts"
     ],
     "parents": {
       "001_core": null,
@@ -127,10 +127,13 @@
         "20260920T0100_add_api_metadata_to_billing_ops"
       ],
       "20260921T1200_sub_account_quotas": "20260922T1200_recharge_packages",
+      "20260922T1200_analysis_task_failure_diagnostic": "20260922T1800_sub_account_permissions",
       "20260922T1200_recharge_packages": "20260921T0000_merge_wallet_actor_and_billing_metadata",
-      "20260922T1800_sub_account_permissions": "20260921T1200_sub_account_quotas"
+      "20260922T1600_analysis_task_request_id": "20260922T1200_analysis_task_failure_diagnostic",
+      "20260922T1800_sub_account_permissions": "20260921T1200_sub_account_quotas",
+      "20260922T2000_analysis_task_attempts": "20260922T1600_analysis_task_request_id"
     },
-    "revision_count": 112
+    "revision_count": 115
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -585,13 +588,25 @@
       "file": "versions/20260921T1200_sub_account_quotas.py",
       "sha256": "0cffd0f09c379004d42ad4af79618798455796cd44169673ee38cef94ed0c677"
     },
+    "20260922T1200_analysis_task_failure_diagnostic": {
+      "file": "versions/20260922T1200_analysis_task_failure_diagnostic.py",
+      "sha256": "d5013f5944dfc7e8577d93eb24ba8c3484b7d9b23696238e0d813aa3ff06d0de"
+    },
     "20260922T1200_recharge_packages": {
       "file": "versions/20260922T1200_recharge_packages.py",
       "sha256": "40203dc6a8529974447a15812c16c0071203c5f1ac8b5d3c2e8712aa9ad410e3"
     },
+    "20260922T1600_analysis_task_request_id": {
+      "file": "versions/20260922T1600_analysis_task_request_id.py",
+      "sha256": "5640fd928f2cce23aa63a8d8bd8ef7283132b15e95bdb75213320e527a66d89b"
+    },
     "20260922T1800_sub_account_permissions": {
       "file": "versions/20260922T1800_sub_account_permissions.py",
       "sha256": "07825f5942d643b6ad9ba18dc1f34b6d3bc5b340fa39ff63c05f80e37003eb7e"
+    },
+    "20260922T2000_analysis_task_attempts": {
+      "file": "versions/20260922T2000_analysis_task_attempts.py",
+      "sha256": "94660c279da2698e0d37d184699a20f5458f278beda5006aab2f6b5b316216b2"
     }
   },
   "task": "MIGRATION-GUARD-20260912"

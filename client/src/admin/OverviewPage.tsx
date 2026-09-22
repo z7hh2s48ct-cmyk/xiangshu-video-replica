@@ -45,17 +45,20 @@ function TodoRow({
   label,
   count,
   tone,
+  hint,
   onOpen,
 }: {
   label: string;
   count: number;
   tone: "warn" | "danger" | "info";
+  hint?: string;
   onOpen?: () => void;
 }) {
   return (
     <li>
       <span>{label}</span>
       <span className={`status-badge status-badge--${tone}`}>{count}</span>
+      {hint ? <small>{hint}</small> : null}
       {onOpen ? (
         <button type="button" onClick={onOpen}>
           去处理
@@ -122,12 +125,18 @@ export function OverviewPage({
       return `C ${middleX} ${previous.y}, ${middleX} ${point.y}, ${point.x} ${point.y}`;
     })
     .join(" ");
+  // 拆解失败中最集中的那条上游原因，直接摆在待办行上供定位。
+  const topAnalysisReason =
+    todos.analysis_failure_reasons?.[0]?.reason ??
+    todos.analysis_failure_reasons?.[0]?.error_code ??
+    undefined;
   const todoItems: Array<{
     key: string;
     label: string;
     count: number;
     tone: "warn" | "danger" | "info";
     tab: string;
+    hint?: string;
   }> = [
     {
       key: "failed",
@@ -135,6 +144,16 @@ export function OverviewPage({
       count: todos.failed_tasks_7d,
       tone: "danger",
       tab: "failedGenerationRecords",
+    },
+    {
+      // 拆解是付费上游调用：2026-09-20 那种「拆解全挂、总览全绿」不能再出现，
+      // 单列一行并把最集中的上游原因直接摆出来。
+      key: "analysis",
+      label: "拆解失败待排查",
+      count: todos.analysis_failures_7d ?? 0,
+      tone: "danger",
+      tab: "analysisFailures",
+      hint: topAnalysisReason,
     },
     {
       key: "recon",
@@ -302,6 +321,7 @@ export function OverviewPage({
               <TodoRow
                 key={item.key}
                 count={item.count}
+                hint={item.hint}
                 label={item.label}
                 tone={item.tone}
                 onOpen={

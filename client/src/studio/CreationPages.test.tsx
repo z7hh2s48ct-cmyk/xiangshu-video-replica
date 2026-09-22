@@ -3753,6 +3753,34 @@ describe("视频复刻（模块①）", () => {
     expect(value.openLive).not.toHaveBeenCalled();
   });
 
+  it("拆解失败卡片带「任务编号 + 问题编号」，客服可直查", async () => {
+    // P1-4：用户报障时只拿得出这两串号；卡片必须自带，不能让人先反查日志。
+    const value = replicaStudio();
+    replicaApi.startVideoAnalysis.mockResolvedValueOnce({
+      id: "task-ref",
+      status: "PENDING",
+    });
+    replicaApi.waitForAnalysisTask.mockRejectedValueOnce(
+      Object.assign(new Error("视频拆解失败，请稍后重新拆解。"), {
+        code: "ANALYSIS_PROVIDER_FAILED",
+        taskId: "task-ref",
+        requestId: "req-support-42",
+      }),
+    );
+    replicaApi.getAnalysisTask.mockResolvedValue({
+      id: "task-ref",
+      status: "FAILED",
+    });
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+    fireEvent.click(screen.getByRole("button", { name: "启动 AI 拆解" }));
+
+    const expected =
+      "视频拆解失败，请稍后重新拆解。（任务编号：task-ref；问题编号：req-support-42）";
+    await waitFor(() => expect(value.notify).toHaveBeenCalledWith(expected));
+    expect(screen.getByRole("alert")).toHaveTextContent(expected);
+  });
+
   it("拆解已完成但没有分镜时，重新拆解强制新建任务而不复用旧任务", async () => {
     // 回归：视频过短 / 无有效镜头时任务 SUCCEEDED 却不落分镜。旧逻辑把
     // 「重新拆解」判定为复用已完成的旧任务（getAnalysisTask），用户既拿不到

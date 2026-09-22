@@ -501,6 +501,59 @@ def test_rate_change_fields_are_whitelisted_without_exposing_other_metadata(
 
 
 @pytest.mark.pg
+def test_billing_tariff_update_exposes_subject_and_derived_change_detail(
+    client: TestClient, route_state: str
+) -> None:
+    """BILLING-OBS P1-2：费率审计行要能被审计页读懂，且不透出未白名单字段。"""
+    _admin_session(client)
+    first_id = str(uuid.uuid4())
+    second_id = str(uuid.uuid4())
+    with psycopg.connect(route_state, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO audit_logs "
+            "(id, actor_user_id, action, entity_type, entity_id, metadata_json) "
+            "VALUES (%s, 'admin_u', 'billing.tariff.update', 'billing_tariff', 'oral', %s)",
+            (
+                first_id,
+                '{"old":null,"new":{"enabled":true,"unit_credits":"0.25",'
+                '"unit_cost_fen":"0.000125","unit_rounding":"exact","version":1},'
+                '"reason":"首次配置","request_id":"req-tariff-1",'
+                '"internal_note":"must-not-leak"}',
+            ),
+        )
+        conn.execute(
+            "INSERT INTO audit_logs "
+            "(id, actor_user_id, action, entity_type, entity_id, metadata_json) "
+            "VALUES (%s, 'admin_u', 'billing.tariff.update', 'billing_tariff', 'oral', %s)",
+            (
+                second_id,
+                '{"old":{"enabled":true,"unit_credits":"0.25",'
+                '"unit_cost_fen":"0.000125","unit_rounding":"exact","version":1},'
+                '"new":{"enabled":true,"unit_credits":"0.5",'
+                '"unit_cost_fen":"0.00025","unit_rounding":"exact","version":2},'
+                '"reason":"供应商调价","request_id":"req-tariff-2"}',
+            ),
+        )
+
+    response = client.get(AUDIT_PATH, params={"event_type": "billing.tariff.update"})
+    assert response.status_code == 200, response.text
+    assert response.json()["total"] == 2
+    items = {item["event_id"]: item for item in response.json()["items"]}
+    created = items[first_id]
+    assert created["change_subject"] == "oral"
+    assert created["change_detail"]["old"] is None
+    assert created["change_detail"]["new"]["unit_credits"] == "0.25"
+    assert created["change_detail"]["new"]["unit_cost_fen"] == "0.000125"
+    modified = items[second_id]
+    assert modified["change_subject"] == "oral"
+    assert modified["change_detail"]["old"]["unit_credits"] == "0.25"
+    assert modified["change_detail"]["new"]["unit_credits"] == "0.5"
+    assert modified["change_detail"]["new"]["unit_cost_fen"] == "0.00025"
+    assert "must-not-leak" not in response.text
+    assert "internal_note" not in response.text
+
+
+@pytest.mark.pg
 def test_historical_price_event_without_old_value_keeps_it_unknown(
     client: TestClient, route_state: str
 ) -> None:

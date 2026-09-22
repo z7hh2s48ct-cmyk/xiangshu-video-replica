@@ -196,6 +196,18 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
         # 取消语义/计费释放/晚到结果拦截矩阵 (test_analysis_task_cancel.py),
         # migrated to alembic head and truncated per test.
         "analysis_cancel_test",
+        # BILLING-OBSERVABILITY-20260922 拆解失败诊断落库：dedicated database for
+        # the fail_analysis_task 终态诊断矩阵
+        # (test_analysis_failure_diagnostics_pg.py), migrated to alembic head.
+        "billing_obs_analysis_test",
+        # BILLING-OBSERVABILITY-20260922 管理端拆解可见：dedicated database for
+        # the 生成记录 ANALYSIS 分支 + 失败原因聚合矩阵
+        # (test_analysis_generation_records_pg.py), migrated to alembic head.
+        "billing_obs_records_test",
+        # BILLING-OBSERVABILITY-20260922 管理端任务诊断：dedicated database for
+        # the 按任务编号/问题编号直查失败历史矩阵
+        # (test_analysis_diagnostics_pg.py), migrated to alembic head.
+        "billing_obs_diag_test",
     }
 )
 

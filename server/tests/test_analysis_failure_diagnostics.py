@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 from collections.abc import Mapping
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -21,6 +22,7 @@ from app.analysis import (
     RESPONSE_FAILURE_PHASE,
     AnalysisProviderFailed,
     UrllibApilioChatTransport,
+    analysis_task_context,
 )
 from app.analysis_routes import analysis_provider_error
 
@@ -147,3 +149,82 @@ def test_rate_limited_and_network_failures_keep_their_actionable_wording() -> No
     assert isinstance(offline.detail, dict)
     assert "网络" in str(offline.detail["message"])
     assert offline.status_code == 503
+
+
+def test_http_rejection_exposes_a_structured_diagnostic_for_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """诊断要能落库：结构化字段随异常携带，而不是只活在日志文本里。"""
+    body = json.dumps({"error": {"message": "model gemini-3.8-flash is not available"}})
+    failure = _post_and_capture(monkeypatch, status=400, body=body)
+
+    diagnostic = failure.upstream_diagnostic
+    assert diagnostic is not None
+    assert diagnostic["http_status"] == 400
+    assert diagnostic["failure_phase"] == HTTP_FAILURE_PHASE
+    assert "gemini-3.8-flash is not available" in diagnostic["reason"]
+
+
+def test_http_rejection_diagnostic_is_redacted_and_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """落库的诊断同样不许带签名地址，也不能被上游回应撑爆。"""
+    body = json.dumps({"error": {"message": f"could not fetch {SIGNED_URL}"}})
+    failure = _post_and_capture(monkeypatch, status=403, body=body)
+
+    diagnostic = failure.upstream_diagnostic
+    assert diagnostic is not None
+    assert "deadbeefcafe" not in diagnostic["reason"]
+    assert len(diagnostic["reason"]) <= 320
+
+
+def test_network_failure_carries_the_network_phase_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """断网没有 HTTP 状态码，但仍要有结构化诊断（phase=network）。"""
+
+    def refusing(request: object, timeout: float) -> object:
+        raise URLError("connection refused")
+
+    monkeypatch.setattr("app.analysis.urlopen", refusing)
+    transport = UrllibApilioChatTransport()
+    with pytest.raises(AnalysisProviderFailed) as caught:
+        transport.post("https://api.apilio.ai/v1/chat/completions", headers={}, body=b"{}")
+
+    diagnostic = caught.value.upstream_diagnostic
+    assert diagnostic is not None
+    assert diagnostic["http_status"] is None
+    assert diagnostic["failure_phase"] == "network"
+    assert diagnostic["reason"] == "URLError"
+
+
+def test_provider_logs_carry_the_analysis_task_reference(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """provider 层日志必须带 task/project/asset，否则线上无从把失败归位。"""
+    body = json.dumps({"error": {"message": "nope"}})
+    monkeypatch.setattr("app.analysis.urlopen", _RefusingUrlopen(_http_error(400, body)))
+    transport = UrllibApilioChatTransport()
+
+    with caplog.at_level(logging.WARNING, logger="app.analysis"):
+        with analysis_task_context(task_id="t-1", project_id="p-1", asset_id="a-1"):
+            with pytest.raises(AnalysisProviderFailed):
+                transport.post("https://api.apilio.ai/v1/chat/completions", headers={}, body=b"{}")
+
+    assert "task=t-1 project=p-1 asset=a-1" in caplog.text
+    assert "HTTP status 400" in caplog.text
+
+
+def test_provider_logs_outside_a_task_context_stay_labelled(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """非任务路径（本地探测等）调用也不能丢日志——关联键退化为占位符。"""
+    body = json.dumps({"error": {"message": "nope"}})
+    monkeypatch.setattr("app.analysis.urlopen", _RefusingUrlopen(_http_error(400, body)))
+    transport = UrllibApilioChatTransport()
+
+    with caplog.at_level(logging.WARNING, logger="app.analysis"):
+        with pytest.raises(AnalysisProviderFailed):
+            transport.post("https://api.apilio.ai/v1/chat/completions", headers={}, body=b"{}")
+
+    assert "task=-" in caplog.text

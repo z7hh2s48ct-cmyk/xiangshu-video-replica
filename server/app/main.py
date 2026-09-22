@@ -51,6 +51,7 @@ from app.export_controller import router as export_router
 from app.first_frame_routes import router as first_frame_router
 from app.generation_routes import router as generation_router
 from app.independent_routes import router as independent_router
+from app.logging_setup import configure_logging
 from app.material_routes import router as material_router
 from app.media_routes import router as media_router
 from app.ops_metrics import (
@@ -80,6 +81,11 @@ from app.sub_account_routes import router as sub_account_router
 from app.viral_import_routes import router as viral_import_router
 from app.viral_routes import router as viral_router
 from app.wallet_routes import router as wallet_router
+
+# Configure application logging before the app serves traffic: uvicorn only
+# configures uvicorn.* loggers, so without this every app.* INFO record is
+# dropped and WARNING+ loses its timestamp format.
+configure_logging()
 
 # Non-loopback hosts that are still accepted: TestClient uses "testclient",
 # and "localhost" is a loopback alias but not parseable as an IP address.

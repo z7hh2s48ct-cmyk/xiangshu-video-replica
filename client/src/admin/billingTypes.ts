@@ -13,8 +13,21 @@ export type BillingService = {
   provider: string;
   module: string;
   customer_charge_allowed: boolean;
+  zero_cost_platform: boolean;
   configured: boolean;
+  /** 最近一次费率保存的作者与时间（仅管理端目录回显，未配置为 null）。 */
+  updated_at?: string | null;
+  updated_by?: string | null;
   tariff: BillingTariff;
 };
 
 export const billingUnit = { second: "秒", image: "张", call: "次" };
+
+export const billingStates: Record<string, string> = {
+  PENDING: "处理中 / 待核对",
+  SUCCEEDED: "已完成",
+  FAILED: "失败已退回",
+  CANCELLED: "取消已退回",
+  ACTUAL: "已确认",
+  UNKNOWN: "待核对",
+};

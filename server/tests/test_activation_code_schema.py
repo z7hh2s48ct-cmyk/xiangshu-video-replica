@@ -28,9 +28,9 @@ EXPORTS_TABLE = "activation_code_exports"
 ACTIVATIONS_TABLE = "activation_code_activations"
 EVENTS_TABLE = "activation_code_events"
 
-# 重挂后链尾：#188 recharge_packages 之后是 Phase 3a sub_account_quotas，
-# Phase 3b sub_account_permissions。
-_HEAD_REVISION = "20260922T1800_sub_account_permissions"
+# 重挂后链尾：#188 recharge_packages 之后是 Phase 3a sub_account_quotas、
+# Phase 3b sub_account_permissions，再叠加 BILLING-OBS-20260922 三个 analysis 迁移。
+_HEAD_REVISION = "20260922T2000_analysis_task_attempts"
 
 
 def _pg_dsn() -> str:

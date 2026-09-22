@@ -507,6 +507,7 @@ def persist_upload_completion(
     *,
     actor: CurrentUser,
     probed: ProbedUploadCompletion,
+    request_id: str | None = None,
 ) -> CompletedUpload:
     prepared = probed.prepared
     require_not_auditor(
@@ -612,6 +613,7 @@ def persist_upload_completion(
                 asset_id=prepared.asset_id,
                 created_by_user_id=actor.id,
                 duration_seconds=probed.metadata.duration_seconds,
+                request_id=request_id,
             )
             if created:
                 write_audit(
@@ -625,6 +627,7 @@ def persist_upload_completion(
                         "asset_id": prepared.asset_id,
                         "asset_sha256": probed.sha256,
                         "trigger": "asset.upload_complete",
+                        "request_id": request_id,
                     },
                     commit=False,
                 )
@@ -661,11 +664,12 @@ def complete_upload(
     storage: StorageAdapter,
     probe: VideoProbe,
     asset_id: str,
+    request_id: str | None = None,
 ) -> CompletedUpload:
     """Compatibility wrapper for non-route callers; external I/O stays outside writes."""
     prepared = prepare_upload_completion(conn, actor=actor, asset_id=asset_id)
     probed = probe_upload_completion(prepared, storage=storage, probe=probe)
-    return persist_upload_completion(conn, actor=actor, probed=probed)
+    return persist_upload_completion(conn, actor=actor, probed=probed, request_id=request_id)
 
 
 def _automatic_analysis_input_ready(conn: BusinessConnection, asset_uri: str) -> bool:

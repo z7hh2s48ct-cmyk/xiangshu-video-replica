@@ -37,9 +37,13 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 # （oral_soft_delete → merge_parallel_heads → add_api_metadata_to_billing_ops）
 # 两条并行链线性化，保持 alembic 单头；20260922T1200_recharge_packages（充值套餐）
 # 叠加在其上，20260921T1200_sub_account_quotas（Phase 3a 月度额度表）之后，
-# 20260922T1800_sub_account_permissions（Phase 3b 功能权限矩阵表）重挂为链尾。
+# 20260922T1800_sub_account_permissions（Phase 3b 功能权限矩阵表）；
+# BILLING-OBS-20260922 三个迁移重挂到 sub_account_permissions 之上：
+# 20260922T1200_analysis_task_failure_diagnostic 追加 analysis_tasks.upstream_diagnostic_json，
+# 20260922T1600_analysis_task_request_id 再追加 analysis_tasks.request_id，
+# 20260922T2000_analysis_task_attempts 新建失败历史表 analysis_task_attempts。
 # 迁移后 alembic 版本头即该值，9 处 assert version == HEAD_REVISION 依赖此值。
-HEAD_REVISION = "20260922T1800_sub_account_permissions"
+HEAD_REVISION = "20260922T2000_analysis_task_attempts"
 
 
 def test_viral_script_cache_migration_preserves_results_without_task_foreign_keys(

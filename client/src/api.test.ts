@@ -13,6 +13,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("@tauri-apps/api/event", () => ({ listen: nativeDownload.listen }));
 
 import {
+  analysisFailureReference,
   applySavedGenerationPrompt,
   archiveGenerationTask,
   attachCustomerSessionToken,
@@ -3437,6 +3438,63 @@ describe("startVideoAnalysis", () => {
     await expect(result).resolves.toEqual(succeeded);
     expect(observer).toHaveBeenNthCalledWith(1, running);
     expect(observer).toHaveBeenNthCalledWith(2, succeeded);
+  });
+
+  it("keeps the task and request numbers on a failed analysis poll (P1-4)", async () => {
+    // 失败卡片要能直接展示「任务编号 + 问题编号」：轮询抛出的错误必须逐字段
+    // 携带，而不是只剩一句 message。
+    const failed = {
+      id: "analysis-task-ref",
+      status: "FAILED",
+      error_code: "ANALYSIS_PROVIDER_FAILED",
+      error_message: "视频拆解失败，请稍后重新拆解。",
+      request_id: "req-support-42",
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: true, json: async () => failed }),
+    );
+
+    const failure = await waitForAnalysisTask("analysis-task-ref").catch(
+      (cause: unknown) => cause,
+    );
+
+    expect(failure).toMatchObject({
+      message: "视频拆解失败，请稍后重新拆解。",
+      code: "ANALYSIS_PROVIDER_FAILED",
+      taskId: "analysis-task-ref",
+      requestId: "req-support-42",
+    });
+    expect(analysisFailureReference(failure)).toBe(
+      "任务编号：analysis-task-ref；问题编号：req-support-42",
+    );
+  });
+
+  it("shows only the numbers that exist for a legacy failed task (P1-4)", async () => {
+    // 存量任务与未带请求头的调用没有 request_id：只展示任务编号，不拼空括号。
+    const failed = {
+      id: "analysis-task-legacy",
+      status: "FAILED",
+      error_code: null,
+      error_message: "视频拆解失败，请稍后重新拆解。",
+      request_id: null,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({ ok: true, json: async () => failed }),
+    );
+
+    const failure = await waitForAnalysisTask("analysis-task-legacy").catch(
+      (cause: unknown) => cause,
+    );
+
+    expect(failure).toMatchObject({ taskId: "analysis-task-legacy" });
+    expect((failure as { requestId?: string }).requestId).toBeUndefined();
+    expect(analysisFailureReference(failure)).toBe(
+      "任务编号：analysis-task-legacy",
+    );
+    // 两个编号都缺失时返回空串，调用方据此决定不加括号。
+    expect(analysisFailureReference(new Error("plain failure"))).toBe("");
   });
 
   it("enqueues source-frame extraction and shares its durable poller", async () => {

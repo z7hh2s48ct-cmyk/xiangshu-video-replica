@@ -39,6 +39,7 @@ from app.media import (
     probe_upload_completion,
     storage_key_from_uri,
 )
+from app.ops_metrics import get_or_create_request_id
 from app.permissions import (
     AuditedSecurityDenial,
     persist_security_denial,
@@ -661,7 +662,14 @@ def complete_asset_upload(
     db: BusinessDbDep,
     storage: MediaStorage,
     probe: InjectedVideoProbe,
+    http_request: Request,
 ) -> CompleteUploadResponse | JSONResponse:
+    """Finish an upload and let the auto-enqueued analysis task carry the request id.
+
+    The upload request id (P0-1 correlation key) is stamped onto the analysis task
+    persisted here, so the desktop failure card can show both numbers (P1-4).
+    """
+    request_id = get_or_create_request_id(http_request)
     with db.write() as (conn, actor):
         prepared = prepare_upload_completion(conn, actor=actor, asset_id=asset_id)
         is_customer = actor.role == "customer"
@@ -676,7 +684,9 @@ def complete_asset_upload(
             },
         ) from exc
     with db.write() as (conn, actor):
-        completed = persist_upload_completion(conn, actor=actor, probed=probed)
+        completed = persist_upload_completion(
+            conn, actor=actor, probed=probed, request_id=request_id
+        )
     result = CompleteUploadResponse(
         asset_id=completed.asset_id,
         project_id=completed.project_id,

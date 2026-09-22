@@ -158,6 +158,7 @@ const adminIntents = new Set([
   "codes",
   "customerAdjustments",
   "failedGenerationRecords",
+  "analysisFailures",
   "rates",
 ]);
 
@@ -763,6 +764,7 @@ export function AdminApp() {
                     customerAdjustments: "customersMgmt",
                     costDetails: "analytics",
                     failedGenerationRecords: "generationRecords",
+                    analysisFailures: "generationRecords",
                     rates: "systemSettings",
                   };
                   navigateAdmin(
@@ -801,9 +803,13 @@ export function AdminApp() {
             <GenerationRecordsPage
               key={`generationRecords:${navigationIntent}`}
               initialStatus={
-                navigationIntent === "failedGenerationRecords"
+                navigationIntent === "failedGenerationRecords" ||
+                navigationIntent === "analysisFailures"
                   ? "FAILED"
                   : undefined
+              }
+              initialRecordType={
+                navigationIntent === "analysisFailures" ? "ANALYSIS" : undefined
               }
             />
           ) : null}

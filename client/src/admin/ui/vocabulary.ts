@@ -80,6 +80,22 @@ export const GENERATION_RECORD_TYPE_LABELS: LabelMap = {
   CHARACTER_VIEW_IMAGE: "人物单视图",
   SOURCE_FRAME_AI_SCORE: "源画面 AI 评分",
   SOURCE_FRAME_PROCESS: "源画面处理",
+  ANALYSIS: "视频拆解",
+};
+
+/** 拆解失败的环节，与 analysis_tasks.failure_phase 取值一一对应。 */
+export const FAILURE_PHASE_LABELS: LabelMap = {
+  request: "请求准备",
+  network: "网络连接",
+  http: "上游拒绝（HTTP）",
+  response: "上游返回不可用",
+};
+
+/** 单次拆解尝试的终局，与 analysis_task_attempts.status 一一对应。 */
+export const ANALYSIS_ATTEMPT_STATUS_LABELS: LabelMap = {
+  FAILED: "失败",
+  INTERRUPTED: "执行中断",
+  SUPERSEDED: "已被重试取代",
 };
 
 export const GENERATION_STATUS_LABELS: LabelMap = {

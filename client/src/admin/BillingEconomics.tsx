@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { adminRead, downloadBillingCsv } from "../api.admin";
 import { BillingEvidenceForm } from "./BillingEvidenceForm";
-import { type BillingService, billingUnit } from "./billingTypes";
+import {
+  type BillingService,
+  billingStates,
+  billingUnit,
+} from "./billingTypes";
+import { SourceActionPanorama } from "./SourceActionPanorama";
 import { ViralCollectionBilling } from "./ViralCollectionBilling";
 
 type Metric = {
@@ -93,14 +98,6 @@ const modules: Record<string, string> = {
   platform: "平台后台",
   infrastructure: "基础服务",
 };
-const states: Record<string, string> = {
-  PENDING: "处理中 / 待核对",
-  SUCCEEDED: "已完成",
-  FAILED: "失败已退回",
-  CANCELLED: "取消已退回",
-  ACTUAL: "已确认",
-  UNKNOWN: "待核对",
-};
 function today() {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Shanghai",
@@ -148,6 +145,7 @@ export function BillingEconomics({
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [showCollections, setShowCollections] = useState(false);
+  const [showActions, setShowActions] = useState(false);
   const name = (key: string) =>
     catalog.find((item) => item.service === key)?.name ?? key;
   useEffect(() => {
@@ -245,6 +243,12 @@ export function BillingEconomics({
         {showCollections ? "收起采集账单" : "查看爆款采集账单"}
       </button>
       {showCollections && <ViralCollectionBilling key={query} query={query} />}
+      <button type="button" onClick={() => setShowActions((value) => !value)}>
+        {showActions ? "收起业务动作全景" : "查看业务动作全景"}
+      </button>
+      {showActions && (
+        <SourceActionPanorama key={query} query={query} name={name} />
+      )}
       <form
         className="billing-economics-filters"
         onSubmit={(event) => {
@@ -487,7 +491,7 @@ export function BillingEconomics({
                   <tr key={row.id}>
                     <td>{row.username}</td>
                     <td>{name(row.service)}</td>
-                    <td>{states[row.state]}</td>
+                    <td>{billingStates[row.state]}</td>
                     <td>
                       {usage(row.actual_units, "处理中")}{" "}
                       {billingUnit[row.unit]}
@@ -547,7 +551,7 @@ export function BillingEconomics({
             {name(detail.service)} · {detail.username}
           </h3>
           <p>
-            请求编号：{detail.id} · {states[detail.state]}
+            请求编号：{detail.id} · {billingStates[detail.state]}
           </p>
           {detail.collection_batch_id && (
             <p>
@@ -609,7 +613,7 @@ export function BillingEconomics({
                   <td>
                     {item.evidence_reference
                       ? "凭据已核对"
-                      : states[item.state]}
+                      : billingStates[item.state]}
                   </td>
                 </tr>
               ))}

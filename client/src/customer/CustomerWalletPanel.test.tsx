@@ -251,6 +251,171 @@ describe("CustomerWalletPanel", () => {
     );
   });
 
+  it("shows the frozen pricing basis of a consumption row in the ledger", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (url.endsWith("/api/customer/wallet")) return jsonResponse(wallet);
+        if (url.includes("/api/customer/wallet/transactions?")) {
+          return jsonResponse({
+            items: [
+              {
+                id: "tx-priced",
+                user_id: "user-1",
+                type: "SETTLE",
+                available_delta: 0,
+                reserved_delta: -3,
+                recharge_order_id: null,
+                task_id: "task-1",
+                billing_round: 2,
+                created_at: "2026-09-22 10:00:00",
+                service: "asr",
+                service_name: "语音转写",
+                actor_user_id: "sub-1",
+                actor_name: "剪辑助手",
+                credit_price_version: 3,
+                pricing: {
+                  service: "asr",
+                  version: 3,
+                  unit: "second",
+                  units: "3.000000",
+                  unit_credits: "2.000000",
+                  unit_rounding: "ceil",
+                  discount_basis_points: 9500,
+                  consumption_rounding: "floor",
+                  credits: 5,
+                  enabled: true,
+                  free_reason: null,
+                },
+              },
+              {
+                // 充值行没有计价快照：不得出现空的计费依据。
+                id: "tx-charge",
+                user_id: "user-1",
+                type: "CHARGE",
+                available_delta: 10,
+                reserved_delta: 0,
+                recharge_order_id: "order-1",
+                task_id: null,
+                billing_round: null,
+                created_at: "2026-09-22 09:00:00",
+                pricing: null,
+              },
+            ],
+            total: 2,
+            limit: 20,
+            offset: 0,
+          });
+        }
+        return jsonResponse({ items: [], total: 0, limit: 20, offset: 0 });
+      }),
+    );
+    render(
+      <CustomerWalletPanel store={fakeStore()} onSessionExpired={vi.fn()} />,
+    );
+
+    expect(await screen.findByText("语音转写")).toBeInTheDocument();
+    const summary = screen.getByText("计费依据 · 费率 V3");
+    expect(summary.tagName).toBe("SUMMARY");
+    expect(summary.closest("details")?.open).toBe(false);
+    expect(
+      screen.getByText("单价：2 积分/秒，不足 1 秒按 1 秒计"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("计费轮次：第 2 轮")).toBeInTheDocument();
+    expect(screen.getByText("操作人：剪辑助手")).toBeInTheDocument();
+    expect(screen.getAllByText(/计费依据/)).toHaveLength(1);
+  });
+
+  it("folds a settled billing cycle into one row with expandable detail", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (url.endsWith("/api/customer/wallet")) return jsonResponse(wallet);
+        if (url.includes("/api/customer/wallet/transactions?")) {
+          return jsonResponse({
+            items: [
+              {
+                id: "tx-release",
+                user_id: "user-1",
+                type: "RELEASE",
+                available_delta: 2,
+                reserved_delta: -2,
+                recharge_order_id: null,
+                task_id: "task-1",
+                billing_round: 1,
+                billing_operation_id: "op-1",
+                pair_state: "SETTLED",
+                created_at: "2026-09-22 10:00:01",
+                service: "asr",
+                service_name: "语音转写",
+              },
+              {
+                id: "tx-settle",
+                user_id: "user-1",
+                type: "SETTLE",
+                available_delta: 0,
+                reserved_delta: -3,
+                recharge_order_id: null,
+                task_id: "task-1",
+                billing_round: 1,
+                billing_operation_id: "op-1",
+                pair_state: "SETTLED",
+                created_at: "2026-09-22 10:00:01",
+                service: "asr",
+                service_name: "语音转写",
+              },
+              {
+                id: "tx-reserve",
+                user_id: "user-1",
+                type: "RESERVE",
+                available_delta: -5,
+                reserved_delta: 5,
+                recharge_order_id: null,
+                task_id: "task-1",
+                billing_round: 1,
+                billing_operation_id: "op-1",
+                pair_state: "SETTLED",
+                created_at: "2026-09-22 10:00:00",
+                service: "asr",
+                service_name: "语音转写",
+              },
+              {
+                id: "tx-charge",
+                user_id: "user-1",
+                type: "CHARGE",
+                available_delta: 10,
+                reserved_delta: 0,
+                recharge_order_id: "order-1",
+                task_id: null,
+                billing_round: null,
+                created_at: "2026-09-22 09:00:00",
+              },
+            ],
+            total: 4,
+            limit: 20,
+            offset: 0,
+          });
+        }
+        return jsonResponse({ items: [], total: 0, limit: 20, offset: 0 });
+      }),
+    );
+    render(
+      <CustomerWalletPanel store={fakeStore()} onSessionExpired={vi.fn()} />,
+    );
+
+    // 折叠：三笔只剩一行摘要，时间跟随组内最新的退回行。
+    expect(await screen.findByText("预扣 5 → 实扣 3 → 退回 2")).toBeVisible();
+    expect(screen.queryByText("任务冻结")).toBeNull();
+    expect(screen.queryByText("2026-09-22 10:00:00")).toBeNull();
+    expect(screen.getByText("-3 积分")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: /查看 3 笔明细/ }));
+    expect(await screen.findByText("任务冻结")).toBeVisible();
+    expect(screen.getByText("失败返还")).toBeVisible();
+    expect(screen.getByText("2026-09-22 10:00:00")).toBeVisible();
+    expect(screen.getByText("+2 积分")).toBeVisible();
+  });
+
   it("resumes polling an outstanding pending payment after a remount", async () => {
     const fetchMock = vi.fn((url: string) => {
       if (url.endsWith("/api/customer/recharge-packages")) {

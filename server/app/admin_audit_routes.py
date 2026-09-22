@@ -49,14 +49,14 @@ _UNION_SQL = """
     SELECT aa.id, 'ADMIN_ADJUSTMENT', aa.admin_user_id, u.username,
            aa.target_user_id, aa.source_document_type, aa.source_document_ref,
            aa.reason, aa.request_id, aa.created_at::timestamptz,
-           ''::text, NULL::integer, NULL::integer
+           ''::text, NULL::integer, NULL::integer, NULL::jsonb
     FROM admin_adjustments aa
     JOIN users u ON u.id = aa.admin_user_id
     UNION ALL
     SELECT de.id, 'ADMIN_DEVICE_' || de.event, de.admin_user_id, u.username,
            de.target_user_id, 'DEVICE', COALESCE(de.device_id, ''),
            de.reason, de.request_id, de.created_at::timestamptz,
-           ''::text, NULL::integer, NULL::integer
+           ''::text, NULL::integer, NULL::integer, NULL::jsonb
     FROM admin_device_events de
     JOIN users u ON u.id = de.admin_user_id
     UNION ALL
@@ -64,7 +64,7 @@ _UNION_SQL = """
            COALESCE(ae.actor_user_id, ''), COALESCE(u2.username, ''),
            COALESCE(code.bound_user_id, ''), 'ACTIVATION_CODE', ae.code_id,
            COALESCE(ae.reason, ''), COALESCE(ae.request_id, ''), ae.created_at::timestamptz,
-           ''::text, NULL::integer, NULL::integer
+           ''::text, NULL::integer, NULL::integer, NULL::jsonb
     FROM activation_code_events ae
     LEFT JOIN users u2 ON u2.id = ae.actor_user_id
     LEFT JOIN activation_codes code ON code.id = ae.code_id
@@ -73,7 +73,7 @@ _UNION_SQL = """
            COALESCE(code.bound_user_id, ''), 'ACTIVATION_CODE_DELIVERY',
            COALESCE(d.external_order_ref, ''), COALESCE(d.note, ''),
            '', d.delivered_at::timestamptz,
-           ''::text, NULL::integer, NULL::integer
+           ''::text, NULL::integer, NULL::integer, NULL::jsonb
     FROM activation_code_deliveries d
     JOIN users u3 ON u3.id = d.delivered_by_user_id
     LEFT JOIN activation_codes code ON code.id = d.code_id
@@ -91,6 +91,8 @@ _UNION_SQL = """
                    THEN COALESCE(al.metadata_json::jsonb ->> 'subject', al.entity_id)
                WHEN al.action IN ('customer_unit_price.update', 'customer_unit_price.reset')
                    THEN 'customer_unit_price'
+               WHEN al.action = 'billing.tariff.update'
+                   THEN al.entity_id
                ELSE ''
            END,
            CASE
@@ -109,6 +111,14 @@ _UNION_SQL = """
                    'customer_unit_price.reset'
                ) AND jsonb_typeof(al.metadata_json::jsonb -> 'new_unit_price_fen') = 'number'
                    THEN (al.metadata_json::jsonb ->> 'new_unit_price_fen')::integer
+               ELSE NULL
+           END,
+           CASE
+               WHEN al.action = 'billing.tariff.update'
+                   THEN jsonb_build_object(
+                       'old', al.metadata_json::jsonb -> 'old',
+                       'new', al.metadata_json::jsonb -> 'new'
+                   )
                ELSE NULL
            END
     FROM audit_logs al
@@ -173,14 +183,14 @@ def list_audit_log(
                        ev.source_document_type, ev.source_document_ref,
                        ev.reason, ev.request_id, ev.created_at,
                        ev.change_subject, ev.old_unit_price_fen,
-                       ev.new_unit_price_fen
+                       ev.new_unit_price_fen, ev.change_detail
                 FROM ({_UNION_SQL}) AS ev(event_id, event_type, actor_user_id,
                                           actor_username, target_user_id,
                                           source_document_type,
                                           source_document_ref, reason,
                                           request_id, created_at,
                                           change_subject, old_unit_price_fen,
-                                          new_unit_price_fen)
+                                          new_unit_price_fen, change_detail)
                 LEFT JOIN users tu ON tu.id = ev.target_user_id
                 {where}
                 ORDER BY ev.created_at DESC, ev.event_id
@@ -195,7 +205,7 @@ def list_audit_log(
                     event_id, event_type, actor_user_id, actor_username,
                     target_user_id, source_document_type, source_document_ref,
                     reason, request_id, created_at, change_subject,
-                    old_unit_price_fen, new_unit_price_fen)
+                    old_unit_price_fen, new_unit_price_fen, change_detail)
                 LEFT JOIN users tu ON tu.id = ev.target_user_id
                 {where}
                 """,
@@ -224,6 +234,7 @@ def list_audit_log(
             "change_subject": str(row[11]) if row[11] else None,
             "old_unit_price_fen": int(row[12]) if row[12] is not None else None,
             "new_unit_price_fen": int(row[13]) if row[13] is not None else None,
+            "change_detail": row[14] if row[14] is not None else None,
         }
         for row in rows
     ]

@@ -162,3 +162,35 @@ docker compose --env-file /etc/video-replica/compose.env \
 旧镜像若没有 Node，升级镜像构建会明确失败：先用本包 bootstrap 构建含 Node 的新基底，再通过 `VIDEO_REPLICA_BUILD_BASE_IMAGE` 指定它；不在运行容器里临时安装依赖。
 
 PITR 的物理复制连接有独立 TLS-only HBA 规则，备份账号仍须按数据库规范授予 REPLICATION 权限；`all` 数据库规则不能替代 replication 条目。
+
+## 8. 日志轮转与留存
+
+应用日志只写 stderr（`server/app/logging_setup.py` 不装文件 handler），容器内由
+docker json-file 驱动收集——它是唯一落盘路径。本包在 `compose.yaml` 顶部以
+`x-logging: &default-logging` 锚点为**全部 10 个服务**（db/migrate/api/worker 全量）
+统一约束轮转：
+
+- `max-size: "10m"`、`max-file: "5"`：每容器最多 5 份 × 10 MB（约 50 MB），
+  超限滚动丢弃最旧一份；全栈上限约 500 MB。
+- 当前与轮转文件位于宿主 `/var/lib/docker/containers/<id>/<id>-json.log*`。
+- 参数是契约：调整后 `server/tests/test_cw032_delivery_package.py` 的轮转断言会失败，
+  必须同步本节与测试。
+
+查看与排障（`--env-file` 同 §1）：
+
+```bash
+# 最近 30 分钟的 API 日志（服务名任选 api-1/api-2/worker-*/db）
+docker compose --env-file /etc/video-replica/compose.env \
+  -f deploy/customer/compose.yaml logs --since 30m api-1
+
+# 持续跟踪发布 worker
+docker compose --env-file /etc/video-replica/compose.env \
+  -f deploy/customer/compose.yaml logs -f worker-publish
+```
+
+应用日志行格式 `%(asctime)s %(levelname)s %(name)s %(message)s`；请求与任务日志带
+`request_id`/任务编号，可直接 `grep` 过滤。管理端「生成记录 → 任务诊断」按任务编号/
+问题编号查重试历史与上游诊断（P1-8），是不依赖日志文件的直接入口。
+
+留存边界：json-file 轮转只保留最近约 50 MB/容器，**不承担长期审计留存**；需要长期
+留存或集中检索时由宿主侧采集承担（journald 转发、对象存储归档或外部日志平台），本包不内置。

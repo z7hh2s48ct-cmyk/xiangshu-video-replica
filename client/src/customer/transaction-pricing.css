@@ -1,0 +1,52 @@
+/* 扣费依据明细：折叠在流水单元格里，两种主题下只借用当前文字色。 */
+.pricing-breakdown {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.7;
+  font-weight: 400;
+}
+
+.pricing-breakdown summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  color: var(--accent-strong, #e0a83f);
+  list-style: none;
+}
+
+.pricing-breakdown summary::-webkit-details-marker {
+  display: none;
+}
+
+.pricing-breakdown summary::before {
+  content: "▸";
+  font-size: 10px;
+  transition: transform 0.15s ease;
+}
+
+.pricing-breakdown[open] summary::before {
+  transform: rotate(90deg);
+}
+
+.pricing-breakdown summary:focus-visible {
+  outline: 2px solid var(--accent-strong, #e0a83f);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.pricing-breakdown ul {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  opacity: 0.82;
+}
+
+.pricing-breakdown li {
+  overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pricing-breakdown summary::before {
+    transition: none;
+  }
+}

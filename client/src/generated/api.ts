@@ -1781,6 +1781,54 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/control/generation-records/summary": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Summarize Generation Records
+     * @description 与列表同筛选口径的聚合。
+     *
+     *     生成记录列表是分页的，管理端无法靠自己汇总，「筛选后 3 条失败」与「聚合里
+     *     还有 12 条」会互相打脸；因此聚合与列表共用同一批过滤器，并额外回答「拆解
+     *     为什么失败、能不能重试」——这正是 2026-09-20 事故里完全缺失的视角。
+     */
+    get: operations["summarize_generation_records_api_control_generation_records_summary_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/analysis-diagnostics": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Analysis Diagnostics
+     * @description 任务诊断视图：按任务编号 / 问题编号直查失败历史与上游诊断。
+     *
+     *     报障入口只有卡片上的「任务编号 + 问题编号」；生成记录列表回答的是「最后一次
+     *     怎么样了」，重试前的结论只在 ``analysis_task_attempts`` 里逐次留痕。两个
+     *     条件都不给时拒绝——诊断是定点查询，不做全量日志浏览。
+     */
+    get: operations["get_analysis_diagnostics_api_control_analysis_diagnostics_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/control/billing-reconciliation": {
     parameters: {
       query?: never;
@@ -2364,6 +2412,66 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/control/billing/tariff-history": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Tariff History
+     * @description P2-3：单个科目的价目版本序列（审计重建 + 当前行兜底），供历史账单回查。
+     */
+    get: operations["tariff_history_api_control_billing_tariff_history_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/billing/pricing-history": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Pricing History
+     * @description P2-3：充值换算与折扣配置的版本序列，同样以审计为源。
+     */
+    get: operations["pricing_history_api_control_billing_pricing_history_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/billing/price-version": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Customer Price Version
+     * @description P2-3：账单上的「费率 V{n}」按科目回查当时对外价目，只回公开字段。
+     */
+    get: operations["customer_price_version_api_customer_billing_price_version_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/control/billing/operations": {
     parameters: {
       query?: never;
@@ -2407,6 +2515,46 @@ export interface paths {
     };
     /** Operation Detail */
     get: operations["operation_detail_api_control_billing_operations__operation_id__get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/billing/source-actions": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Source Actions
+     * @description P1-5：按业务动作（source_id）聚合的经营视图，仍受同一套筛选参数约束。
+     */
+    get: operations["source_actions_api_control_billing_source_actions_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/billing/source-actions/{source_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Source Action Panorama
+     * @description P1-5：一次业务动作的全部请求与供应商调用；作用域必须明确，避免混账。
+     */
+    get: operations["source_action_panorama_api_control_billing_source_actions__source_id__get"];
     put?: never;
     post?: never;
     delete?: never;
@@ -4283,7 +4431,13 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /** Complete Asset Upload */
+    /**
+     * Complete Asset Upload
+     * @description Finish an upload and let the auto-enqueued analysis task carry the request id.
+     *
+     *     The upload request id (P0-1 correlation key) is stamped onto the analysis task
+     *     persisted here, so the desktop failure card can show both numbers (P1-4).
+     */
     post: operations["complete_asset_upload_api_assets__asset_id__complete_post"];
     delete?: never;
     options?: never;
@@ -4379,6 +4533,9 @@ export interface paths {
      *     No provider or storage-network call is allowed in this request.  Customer
      *     session fencing therefore protects only the enqueue commit and can never
      *     block the heartbeat for the lifetime of a model request.
+     *
+     *     The request id (P0-1 correlation key) is stamped onto the task row so the
+     *     desktop failure card can show both numbers without a log lookup (P1-4).
      */
     post: operations["create_project_analysis_task_api_projects__project_id__analysis_tasks_post"];
     delete?: never;
@@ -5968,6 +6125,106 @@ export interface components {
        */
       reason: string;
     };
+    /**
+     * AnalysisDiagnosticAttempt
+     * @description 一次拆解尝试的结论：P1-6 按 attempt 归档进 ``analysis_task_attempts``。
+     */
+    AnalysisDiagnosticAttempt: {
+      /** Attempt */
+      attempt: number;
+      /** Status */
+      status: string;
+      /** Error Code */
+      error_code: string | null;
+      /** Error Message */
+      error_message: string | null;
+      /** Failure Phase */
+      failure_phase: string | null;
+      /** Retryable */
+      retryable: boolean;
+      /** Upstream Status */
+      upstream_status: number | null;
+      /** Upstream Reason */
+      upstream_reason: string | null;
+      /** Request Id */
+      request_id: string | null;
+      /** Created At */
+      created_at: string;
+      /** Completed At */
+      completed_at: string | null;
+      /** Advice */
+      advice?: string | null;
+    };
+    /**
+     * AnalysisDiagnosticRecord
+     * @description 一个拆解任务的诊断全貌：任务行回答「最后一次」，attempts 回答「每次」。
+     */
+    AnalysisDiagnosticRecord: {
+      /** Task Id */
+      task_id: string;
+      /** Request Id */
+      request_id: string | null;
+      /** Username */
+      username: string;
+      /** Display Name */
+      display_name: string;
+      /** Project Id */
+      project_id: string | null;
+      /** Project Name */
+      project_name: string | null;
+      /** Status */
+      status: string;
+      /** Attempt */
+      attempt: number;
+      /** Error Code */
+      error_code: string | null;
+      /** Error Message */
+      error_message: string | null;
+      /** Failure Phase */
+      failure_phase: string | null;
+      /** Retryable */
+      retryable: boolean | null;
+      /** Upstream Status */
+      upstream_status: number | null;
+      /** Upstream Reason */
+      upstream_reason: string | null;
+      /** Created At */
+      created_at: string;
+      /** Completed At */
+      completed_at: string | null;
+      /** Advice */
+      advice?: string | null;
+      /** Attempts */
+      attempts: components["schemas"]["AnalysisDiagnosticAttempt"][];
+    };
+    /** AnalysisDiagnosticsResponse */
+    AnalysisDiagnosticsResponse: {
+      /** Items */
+      items: components["schemas"]["AnalysisDiagnosticRecord"][];
+      /** Total */
+      total: number;
+    };
+    /**
+     * AnalysisFailureReason
+     * @description 拆解失败原因聚合：回答「上游到底为什么拒绝」以及「能不能重试」。
+     *
+     *     ``advice`` 是 P2-2 runbook（``app.failure_runbook``）的译文：管理端聚合
+     *     列表直接展示，用户/客服不必拿内部错误码去别处搜索。
+     */
+    AnalysisFailureReason: {
+      /** Error Code */
+      error_code: string | null;
+      /** Failure Phase */
+      failure_phase: string | null;
+      /** Reason */
+      reason: string | null;
+      /** Retryable */
+      retryable: boolean;
+      /** Count */
+      count: number;
+      /** Advice */
+      advice?: string | null;
+    };
     /** AnalysisTaskResponse */
     AnalysisTaskResponse: {
       /** Id */
@@ -5990,6 +6247,8 @@ export interface components {
       failure_phase: string | null;
       /** Retryable */
       retryable: boolean;
+      /** Request Id */
+      request_id: string | null;
       /** Created At */
       created_at: string;
       /** Updated At */
@@ -6997,7 +7256,8 @@ export interface components {
         | "CHARACTER_SHEET_IMAGE"
         | "CHARACTER_VIEW_IMAGE"
         | "SOURCE_FRAME_AI_SCORE"
-        | "SOURCE_FRAME_PROCESS";
+        | "SOURCE_FRAME_PROCESS"
+        | "ANALYSIS";
       /** Operation */
       operation: string;
       /** User Id */
@@ -7046,6 +7306,14 @@ export interface components {
       created_at: string;
       /** Completed At */
       completed_at: string | null;
+      /** Failure Phase */
+      failure_phase?: string | null;
+      /** Retryable */
+      retryable?: boolean | null;
+      /** Upstream Status */
+      upstream_status?: number | null;
+      /** Upstream Reason */
+      upstream_reason?: string | null;
     };
     /** ControlGenerationRecordPage */
     ControlGenerationRecordPage: {
@@ -7057,6 +7325,15 @@ export interface components {
       limit: number;
       /** Offset */
       offset: number;
+    };
+    /** ControlGenerationRecordSummary */
+    ControlGenerationRecordSummary: {
+      /** Total */
+      total: number;
+      /** Counts */
+      counts: components["schemas"]["GenerationRecordCount"][];
+      /** Failure Reasons */
+      failure_reasons: components["schemas"]["AnalysisFailureReason"][];
     };
     /** ControlProviderSettingsUpdate */
     ControlProviderSettingsUpdate: {
@@ -8107,6 +8384,29 @@ export interface components {
       started_at: string | null;
       /** Completed At */
       completed_at: string | null;
+    };
+    /**
+     * GenerationRecordCount
+     * @description 生成记录聚合的一格：某类型 × 某状态的条数（原始状态，不做语义归并）。
+     */
+    GenerationRecordCount: {
+      /**
+       * Record Type
+       * @enum {string}
+       */
+      record_type:
+        | "VIDEO"
+        | "ORAL_VIDEO"
+        | "FIRST_FRAME_IMAGE"
+        | "CHARACTER_SHEET_IMAGE"
+        | "CHARACTER_VIEW_IMAGE"
+        | "SOURCE_FRAME_AI_SCORE"
+        | "SOURCE_FRAME_PROCESS"
+        | "ANALYSIS";
+      /** Status */
+      status: string;
+      /** Count */
+      count: number;
     };
     /** GenerationRuntimeLimits */
     GenerationRuntimeLimits: {
@@ -11131,6 +11431,40 @@ export interface components {
       /** Offset */
       offset: number;
     };
+    /**
+     * WalletTransactionPricing
+     * @description One ledger row's pricing basis, projected for the customer lane (P0-3).
+     *
+     *     The frozen snapshot answers *how* a charge was priced — unit price, usage,
+     *     discount, rounding — without which a customer sees only the delta. Only its
+     *     retail side crosses this boundary: the cost side (``unit_cost_fen``,
+     *     funding lots, revenue) never does, so a snapshot that happens to carry such
+     *     keys is filtered field by field instead of being dumped.
+     */
+    WalletTransactionPricing: {
+      /** Service */
+      service?: string | null;
+      /** Version */
+      version?: number | null;
+      /** Unit */
+      unit?: string | null;
+      /** Units */
+      units?: string | null;
+      /** Unit Credits */
+      unit_credits?: string | null;
+      /** Unit Rounding */
+      unit_rounding?: ("ceil" | "exact") | null;
+      /** Discount Basis Points */
+      discount_basis_points?: number | null;
+      /** Consumption Rounding */
+      consumption_rounding?: ("ceil" | "floor") | null;
+      /** Credits */
+      credits?: number | null;
+      /** Enabled */
+      enabled?: boolean | null;
+      /** Free Reason */
+      free_reason?: string | null;
+    };
     /** WalletTransactionResponse */
     WalletTransactionResponse: {
       /** Id */
@@ -11182,6 +11516,9 @@ export interface components {
       actor_user_id?: string | null;
       /** Actor Name */
       actor_name?: string | null;
+      pricing?: components["schemas"]["WalletTransactionPricing"] | null;
+      /** Pair State */
+      pair_state?: ("PENDING" | "SETTLED" | "RELEASED") | null;
     };
     /** WeChatSettingsUpdate */
     WeChatSettingsUpdate: {
@@ -15173,8 +15510,10 @@ export interface operations {
               | "CHARACTER_VIEW_IMAGE"
               | "SOURCE_FRAME_AI_SCORE"
               | "SOURCE_FRAME_PROCESS"
+              | "ANALYSIS"
             )
           | null;
+        failure_phase?: string | null;
         created_from?: string | null;
         created_to?: string | null;
         limit?: number;
@@ -15195,6 +15534,89 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["ControlGenerationRecordPage"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  summarize_generation_records_api_control_generation_records_summary_get: {
+    parameters: {
+      query?: {
+        username?: string | null;
+        status?: string | null;
+        record_type?:
+          | (
+              | "VIDEO"
+              | "ORAL_VIDEO"
+              | "FIRST_FRAME_IMAGE"
+              | "CHARACTER_SHEET_IMAGE"
+              | "CHARACTER_VIEW_IMAGE"
+              | "SOURCE_FRAME_AI_SCORE"
+              | "SOURCE_FRAME_PROCESS"
+              | "ANALYSIS"
+            )
+          | null;
+        failure_phase?: string | null;
+        created_from?: string | null;
+        created_to?: string | null;
+      };
+      header?: {
+        "X-Control-Proxy-Token"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ControlGenerationRecordSummary"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  get_analysis_diagnostics_api_control_analysis_diagnostics_get: {
+    parameters: {
+      query?: {
+        task_id?: string | null;
+        request_id?: string | null;
+      };
+      header?: {
+        "X-Control-Proxy-Token"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AnalysisDiagnosticsResponse"];
         };
       };
       /** @description Validation Error */
@@ -16336,6 +16758,107 @@ export interface operations {
       };
     };
   };
+  tariff_history_api_control_billing_tariff_history_get: {
+    parameters: {
+      query: {
+        service: string;
+        limit?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  pricing_history_api_control_billing_pricing_history_get: {
+    parameters: {
+      query?: {
+        limit?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  customer_price_version_api_customer_billing_price_version_get: {
+    parameters: {
+      query: {
+        service: string;
+        version: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   operations_api_control_billing_operations_get: {
     parameters: {
       query: {
@@ -16421,6 +16944,83 @@ export interface operations {
       header?: never;
       path: {
         operation_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  source_actions_api_control_billing_source_actions_get: {
+    parameters: {
+      query: {
+        start: string;
+        end: string;
+        user_id?: string | null;
+        service?: string | null;
+        module?: string | null;
+        provider?: string | null;
+        platform?: boolean;
+        limit?: number;
+        offset?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  source_action_panorama_api_control_billing_source_actions__source_id__get: {
+    parameters: {
+      query?: {
+        user_id?: string | null;
+        platform?: boolean;
+      };
+      header?: never;
+      path: {
+        source_id: string;
       };
       cookie?: never;
     };

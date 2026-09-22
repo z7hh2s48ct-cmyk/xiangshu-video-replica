@@ -1,6 +1,7 @@
 """Customer price publication and audited administrator configuration."""
 
 import json
+from decimal import Decimal
 from uuid import uuid4
 
 import psycopg
@@ -9,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from app.admin_auth_routes import AdminReader, AdminWriter
 from app.admin_write_contract import AdminWriteContract, write_with_idempotency
+from app.billing_catalog import SERVICES, Tariff, read_tariff, retail_snapshot
 from app.customer_fence import customer_read_transaction
 from app.customer_pricing import PricingConfig, read_pricing
 from app.db_pg import pg_transaction
@@ -41,7 +43,6 @@ class PricingUpdate(AdminWriteContract):
 
 def pricing_response(conn: BusinessConnection, *, admin: bool = False) -> PricingResponse:
     version, config = read_pricing(conn)
-    from app.billing_catalog import SERVICES, retail_snapshot
 
     prices = []
     for subject, service in SERVICES.items():
@@ -103,9 +104,11 @@ def update_prices(
         )
         # Legacy administrator callers can still explicitly configure the three original subjects.
         # Exchange-only forms omit these fields and never publish a usage charge.
+        bridge = BusinessConnection.postgres(conn)
         for subject in ("video_768p", "video_2k", "oral"):
             value = getattr(payload.config, subject)
             if value is not None:
+                previous = read_tariff(bridge, subject)
                 conn.execute(
                     "INSERT INTO billing_tariffs(service,enabled,unit_credits,updated_by_user_id) "
                     "VALUES (%s,%s,%s,%s) ON CONFLICT(service) DO UPDATE SET "
@@ -114,6 +117,33 @@ def update_prices(
                     "updated_at=now(), "
                     "updated_by_user_id=excluded.updated_by_user_id",
                     (subject, value > 0, value, actor.user_id),
+                )
+                # BILLING-OBS P2-3：同一版本轴上的隐式上调同样要留科目审计，
+                # 否则版本序列断档，历史账单的「费率 V{n}」无法事后回查。
+                conn.execute(
+                    "INSERT INTO audit_logs (id, actor_user_id, action, entity_type, entity_id, "
+                    "metadata_json) VALUES (%s, %s, 'billing.tariff.update', 'billing_tariff', "
+                    "%s, %s)",
+                    (
+                        str(uuid4()),
+                        actor.user_id,
+                        subject,
+                        json.dumps(
+                            {
+                                "old": previous.model_dump(mode="json") if previous else None,
+                                "new": Tariff(
+                                    enabled=value > 0,
+                                    unit_credits=Decimal(value).quantize(Decimal("0.000001")),
+                                    unit_cost_fen=previous.unit_cost_fen if previous else None,
+                                    unit_rounding=previous.unit_rounding if previous else "ceil",
+                                    version=(previous.version if previous else 0) + 1,
+                                ).model_dump(mode="json"),
+                                "reason": payload.reason,
+                                "request_id": request_id,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ),
                 )
         conn.execute(
             "INSERT INTO audit_logs (id, actor_user_id, action, entity_type, entity_id, "

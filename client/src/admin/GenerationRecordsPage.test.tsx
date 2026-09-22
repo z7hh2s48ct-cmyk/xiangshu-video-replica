@@ -6,11 +6,26 @@ import { GenerationRecordsPage } from "./GenerationRecordsPage";
 
 vi.mock("../api.admin", () => ({
   getAdminGenerationRecords: vi.fn(),
+  getAdminGenerationRecordSummary: vi.fn(),
+  getAdminAnalysisDiagnostics: vi.fn(),
 }));
 
 describe("GenerationRecordsPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(adminApi.getAdminAnalysisDiagnostics).mockResolvedValue({
+      items: [],
+      total: 0,
+    });
+    vi.mocked(adminApi.getAdminGenerationRecordSummary).mockResolvedValue({
+      total: 3,
+      counts: [
+        { record_type: "VIDEO", status: "RUNNING", count: 1 },
+        { record_type: "FIRST_FRAME_IMAGE", status: "SUCCEEDED", count: 1 },
+        { record_type: "SOURCE_FRAME_AI_SCORE", status: "SUCCEEDED", count: 1 },
+      ],
+      failure_reasons: [],
+    });
     vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
       items: [
         {
@@ -140,6 +155,115 @@ describe("GenerationRecordsPage", () => {
       );
     });
     expect(screen.getByLabelText("生成状态")).toHaveValue("FAILED");
+    // 失败阶段只有拆解任务有，其他类型下不该出现这个筛选项。
+    expect(screen.queryByLabelText("失败阶段")).toBeNull();
+  });
+
+  it("filters analysis failures by phase and surfaces upstream detail", async () => {
+    const upstreamReason = "model gemini-3.8-flash is not available";
+    const fixAdvice = "稍后重试一次；持续失败核对接入商服务状态。";
+    vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
+      items: [
+        {
+          record_id: "analysis-1",
+          record_type: "ANALYSIS",
+          operation: "video_analysis",
+          user_id: "user-1",
+          username: "customer-1",
+          display_name: "客户一",
+          project_id: "project-1",
+          project_name: "演示项目",
+          status: "FAILED",
+          provider: "apilio",
+          model: "gemini-3.8-flash",
+          provider_cost: null,
+          provider_cost_status: "UNAVAILABLE",
+          record_data_status: "VALID",
+          charged_credits: 4,
+          result_reference: null,
+          provider_reference: null,
+          error_code: "ANALYSIS_PROVIDER_FAILED",
+          error_message: "视频拆解服务拒绝了请求（HTTP 400）",
+          created_at: "2026-09-21T10:00:00Z",
+          completed_at: "2026-09-21T10:00:05Z",
+          failure_phase: "http",
+          retryable: false,
+          upstream_status: 400,
+          upstream_reason: upstreamReason,
+        },
+      ],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+    vi.mocked(adminApi.getAdminGenerationRecordSummary).mockResolvedValue({
+      total: 1,
+      counts: [{ record_type: "ANALYSIS", status: "FAILED", count: 1 }],
+      failure_reasons: [
+        {
+          error_code: "ANALYSIS_PROVIDER_FAILED",
+          failure_phase: "http",
+          reason: upstreamReason,
+          retryable: false,
+          count: 1,
+          advice: fixAdvice,
+        },
+        // 旧数据没有错误码，runbook 也给不出建议：这一行不该凭空长出一句建议。
+        {
+          error_code: null,
+          failure_phase: null,
+          reason: null,
+          retryable: true,
+          count: 2,
+          advice: null,
+        },
+      ],
+    });
+
+    render(
+      <GenerationRecordsPage
+        initialStatus="FAILED"
+        initialRecordType="ANALYSIS"
+      />,
+    );
+
+    expect(screen.getByLabelText("生成类型")).toHaveValue("ANALYSIS");
+    fireEvent.change(screen.getByLabelText("失败阶段"), {
+      target: { value: "http" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
+
+    await waitFor(() => {
+      expect(adminApi.getAdminGenerationRecords).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          status: "FAILED",
+          recordType: "ANALYSIS",
+          failurePhase: "http",
+        }),
+      );
+    });
+    expect(adminApi.getAdminGenerationRecordSummary).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        recordType: "ANALYSIS",
+        failurePhase: "http",
+      }),
+    );
+    // 聚合块把「哪一步失败、能不能重试、上游怎么说」摆在列表之前。
+    expect(screen.getByText("视频拆解 失败 1")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "上游拒绝（HTTP） · ANALYSIS_PROVIDER_FAILED · 不可重试 · 1 条",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText(`上游说明：${upstreamReason}`)).toBeInTheDocument();
+    // P2-2：聚合行直接把错误码译成下一步动作；没有映射的旧行不多说一句。
+    expect(screen.getByText(`修复建议：${fixAdvice}`)).toBeInTheDocument();
+    expect(screen.getAllByText(/修复建议：/)).toHaveLength(1);
+
+    fireEvent.click(screen.getByText("查看详情"));
+    expect(screen.getByText("400")).toBeInTheDocument();
+    expect(screen.getByText("不可重试")).toBeInTheDocument();
+    expect(screen.getByText(upstreamReason)).toBeInTheDocument();
   });
 
   it("shows read-only oral failure details without a retry action", async () => {
@@ -267,5 +391,70 @@ describe("GenerationRecordsPage", () => {
     });
 
     await waitFor(() => expect(screen.queryByText("stale-user")).toBeNull());
+  });
+
+  it("switches to the task-diagnosis tab and hides the records view", async () => {
+    render(<GenerationRecordsPage />);
+    await screen.findByText("人物置换首帧");
+
+    fireEvent.click(screen.getByRole("tab", { name: "任务诊断" }));
+
+    expect(screen.getByLabelText("诊断任务编号")).toBeInTheDocument();
+    expect(screen.queryByLabelText("生成账号")).toBeNull();
+  });
+
+  it("opens the diagnosis for a failed analysis record", async () => {
+    vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
+      items: [
+        {
+          record_id: "analysis-1",
+          record_type: "ANALYSIS",
+          operation: "ANALYZE_VIDEO",
+          user_id: "user-1",
+          username: "customer-1",
+          display_name: "客户一",
+          project_id: "project-1",
+          project_name: "演示项目",
+          status: "FAILED",
+          provider: "apilio",
+          model: "gemini-3.8-flash",
+          provider_cost: null,
+          provider_cost_status: "UNAVAILABLE",
+          record_data_status: "VALID",
+          charged_credits: 0,
+          result_reference: null,
+          provider_reference: null,
+          error_code: "ANALYSIS_PROVIDER_FAILED",
+          error_message: "视频拆解服务拒绝了请求（HTTP 400）",
+          created_at: "2026-09-21T10:00:00Z",
+          completed_at: "2026-09-21T10:00:05Z",
+          failure_phase: "http",
+          retryable: true,
+          upstream_status: 400,
+          upstream_reason: "model not available",
+        },
+      ],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+
+    render(
+      <GenerationRecordsPage
+        initialStatus="FAILED"
+        initialRecordType="ANALYSIS"
+      />,
+    );
+
+    fireEvent.click(await screen.findByText("查看详情"));
+    fireEvent.click(screen.getByRole("button", { name: "查看诊断" }));
+
+    await waitFor(() =>
+      expect(adminApi.getAdminAnalysisDiagnostics).toHaveBeenCalledWith({
+        taskId: "analysis-1",
+        requestId: undefined,
+      }),
+    );
+    expect(screen.getByLabelText("诊断任务编号")).toHaveValue("analysis-1");
   });
 });

@@ -5,7 +5,9 @@ import logging
 import math
 import re
 import sqlite3
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
@@ -81,6 +83,27 @@ RESPONSE_FAILURE_PHASE = "response"
 TIMELINE_ROUNDING_TOLERANCE_SECONDS = 0.05
 
 logger = logging.getLogger(__name__)
+
+# Provider-call warnings are emitted deep inside the transport while the task
+# identity lives with the worker; a context variable carries the reference so
+# every line answers "which task/project/asset" without threading extra
+# parameters through the transport protocol.
+_analysis_task_ref: ContextVar[str | None] = ContextVar("analysis_task_ref", default=None)
+
+
+@contextmanager
+def analysis_task_context(*, task_id: str, project_id: str, asset_id: str) -> Iterator[None]:
+    """Bind the task reference for provider-call log lines in this scope."""
+    token = _analysis_task_ref.set(f"task={task_id} project={project_id} asset={asset_id}")
+    try:
+        yield
+    finally:
+        _analysis_task_ref.reset(token)
+
+
+def analysis_log_ref() -> str:
+    """Log-line prefix tying a provider call to its task, placeholder when unbound."""
+    return _analysis_task_ref.get() or "task=- project=- asset=-"
 
 
 class ShotMotion(BaseModel):
@@ -235,11 +258,16 @@ class AnalysisProviderFailed(RuntimeError):
         http_status: int | None = None,
         failure_phase: str = RESPONSE_FAILURE_PHASE,
         retryable: bool = False,
+        upstream_diagnostic: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.http_status = http_status
         self.failure_phase = failure_phase
         self.retryable = retryable
+        # Structured, already-redacted provider evidence (status / phase /
+        # bounded reason) so the FAILED terminal state can persist *why* the
+        # provider refused instead of only the status code.
+        self.upstream_diagnostic = upstream_diagnostic
 
 
 class ApilioChatTransport(Protocol):
@@ -298,7 +326,8 @@ class UrllibApilioChatTransport:
                 # never replace the failure it was meant to explain.
                 reason = ""
             logger.warning(
-                "Apilio video analysis request failed with HTTP status %s: %s",
+                "%s Apilio video analysis request failed with HTTP status %s: %s",
+                analysis_log_ref(),
                 exc.code,
                 reason or "(上游未返回可读原因)",
             )
@@ -308,16 +337,28 @@ class UrllibApilioChatTransport:
                 http_status=exc.code,
                 failure_phase=HTTP_FAILURE_PHASE,
                 retryable=exc.code == 429 or exc.code >= 500,
+                upstream_diagnostic={
+                    "http_status": exc.code,
+                    "failure_phase": HTTP_FAILURE_PHASE,
+                    "reason": reason or None,
+                },
             ) from exc
         except (TimeoutError, URLError, OSError) as exc:
             # Only the exception class name is carried forward: the original reason can
             # embed the signed video URL or the request headers.
             reason = type(exc).__name__
-            logger.warning("Apilio video analysis request failed: %s", reason)
+            logger.warning(
+                "%s Apilio video analysis request failed: %s", analysis_log_ref(), reason
+            )
             raise AnalysisProviderFailed(
                 f"Apilio video analysis request failed ({reason})",
                 failure_phase=NETWORK_FAILURE_PHASE,
                 retryable=True,
+                upstream_diagnostic={
+                    "http_status": None,
+                    "failure_phase": NETWORK_FAILURE_PHASE,
+                    "reason": reason,
+                },
             ) from exc
 
 
@@ -341,7 +382,10 @@ class ApilioGemini:
 
     def analyze(self, *, video_uri: str, duration_seconds: float) -> ProviderResponse:
         if not is_https_video_url(video_uri):
-            logger.warning("Video analysis refused: the reference video URL is not HTTPS")
+            logger.warning(
+                "%s Video analysis refused: the reference video URL is not HTTPS",
+                analysis_log_ref(),
+            )
             raise AnalysisProviderFailed(
                 "参考视频没有可用的 HTTPS 签名地址，无法送去拆解；请重新上传参考视频后再试。",
                 failure_phase=REQUEST_FAILURE_PHASE,
@@ -375,7 +419,10 @@ class ApilioGemini:
         from app.h3_prompts import RULES
 
         if not is_https_video_url(video_uri):
-            logger.warning("Video analysis refused: the reference video URL is not HTTPS")
+            logger.warning(
+                "%s Video analysis refused: the reference video URL is not HTTPS",
+                analysis_log_ref(),
+            )
             raise AnalysisProviderFailed(
                 "参考视频没有可用的 HTTPS 签名地址，无法送去拆解；请重新上传参考视频后再试。",
                 failure_phase=REQUEST_FAILURE_PHASE,
@@ -435,14 +482,30 @@ class ApilioGemini:
             content = response["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             logger.warning(
-                "Apilio Gemini response is not a readable completion: %s", type(exc).__name__
+                "%s Apilio Gemini response is not a readable completion: %s",
+                analysis_log_ref(),
+                type(exc).__name__,
             )
             raise AnalysisProviderFailed(
-                "视频拆解服务返回的数据结构无法识别；请重试或更换参考视频。"
+                "视频拆解服务返回的数据结构无法识别；请重试或更换参考视频。",
+                upstream_diagnostic={
+                    "http_status": None,
+                    "failure_phase": RESPONSE_FAILURE_PHASE,
+                    "reason": type(exc).__name__,
+                },
             ) from exc
         if not isinstance(content, str) or not content.strip():
-            logger.warning("Apilio Gemini completion carried no analysis content")
-            raise AnalysisProviderFailed("视频拆解服务返回了空结果；请重试或更换参考视频。")
+            logger.warning(
+                "%s Apilio Gemini completion carried no analysis content", analysis_log_ref()
+            )
+            raise AnalysisProviderFailed(
+                "视频拆解服务返回了空结果；请重试或更换参考视频。",
+                upstream_diagnostic={
+                    "http_status": None,
+                    "failure_phase": RESPONSE_FAILURE_PHASE,
+                    "reason": "empty_completion",
+                },
+            )
         return content, {
             "provider": "apilio_gemini",
             "model": self.model,
@@ -893,7 +956,15 @@ def enqueue_analysis_task(
     created_by_user_id: str,
     duration_seconds: float,
     generation_context: dict[str, Any] | None = None,
+    request_id: str | None = None,
 ) -> tuple[sqlite3.Row, bool]:
+    """Enqueue one analysis task, stamping the caller's request id.
+
+    ``request_id`` is the API request that asked for the analysis (P0-1
+    logging correlation key). It travels with the task row so the desktop
+    failure card and support can name both the task and the request that
+    created it, instead of grepping the API log first.
+    """
     if generation_context is None:
         from app.auth import CurrentUser, Role
         from app.h3_prompts import GenerationContext
@@ -950,8 +1021,8 @@ def enqueue_analysis_task(
         """
         INSERT INTO analysis_tasks (
             id, project_id, asset_id, created_by_user_id,
-            duration_seconds, status, generation_context_json
-        ) VALUES (%s, %s, %s, %s, %s, 'PENDING', %s)
+            duration_seconds, status, generation_context_json, request_id
+        ) VALUES (%s, %s, %s, %s, %s, 'PENDING', %s, %s)
         ON CONFLICT DO NOTHING
         """,
         (
@@ -961,6 +1032,7 @@ def enqueue_analysis_task(
             created_by_user_id,
             duration_seconds,
             json.dumps(generation_context) if generation_context is not None else None,
+            request_id,
         ),
     )
     inserted = conn.execute(

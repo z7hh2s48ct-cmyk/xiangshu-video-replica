@@ -28,6 +28,7 @@ function auditItem(partial: Partial<AuditLogItem> = {}): AuditLogItem {
     change_subject: null,
     old_unit_price_fen: null,
     new_unit_price_fen: null,
+    change_detail: null,
     ...partial,
   };
 }
@@ -101,6 +102,92 @@ describe("AuditEventsPage", () => {
     expect(screen.getByRole("navigation", { name: "分页" })).toBeVisible();
     expect(screen.getByRole("button", { name: "上一页" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "下一页" })).toBeEnabled();
+  });
+
+  it("renders billing tariff changes from the derived detail", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        jsonResponse({
+          items: [
+            auditItem({
+              event_id: "evt-tariff",
+              event_type: "billing.tariff.update",
+              change_subject: "oral",
+              change_detail: {
+                old: {
+                  unit_credits: "0.25",
+                  unit_cost_fen: "0.000125",
+                  enabled: true,
+                },
+                new: {
+                  unit_credits: "0.5",
+                  unit_cost_fen: "0.00025",
+                  enabled: true,
+                },
+              },
+            }),
+          ],
+          total: 1,
+          limit: PAGE_SIZE,
+          offset: 0,
+        }),
+      ),
+    );
+    render(<AuditEventsPage />);
+
+    expect(
+      await screen.findByText(
+        "oral：售价 0.25 → 0.5 积分 · 成本 0.000125 → 0.00025 分",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("describes first-time publication and enablement toggles", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        jsonResponse({
+          items: [
+            auditItem({
+              event_id: "evt-first",
+              event_type: "billing.tariff.update",
+              change_subject: "quality_inspection",
+              change_detail: {
+                old: null,
+                new: {
+                  unit_credits: null,
+                  unit_cost_fen: "0.5",
+                  enabled: false,
+                },
+              },
+            }),
+            auditItem({
+              event_id: "evt-toggle",
+              event_type: "billing.tariff.update",
+              change_subject: "oral",
+              change_detail: {
+                old: { unit_credits: "1", unit_cost_fen: "0.5", enabled: true },
+                new: {
+                  unit_credits: "1",
+                  unit_cost_fen: "0.5",
+                  enabled: false,
+                },
+              },
+            }),
+          ],
+          total: 2,
+          limit: PAGE_SIZE,
+          offset: 0,
+        }),
+      ),
+    );
+    render(<AuditEventsPage />);
+
+    expect(
+      await screen.findByText("quality_inspection：初始配置 · 成本 0.5 分"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("oral：停用用户扣费")).toBeInTheDocument();
   });
 
   it("requests offset=20 when moving to the next page", async () => {

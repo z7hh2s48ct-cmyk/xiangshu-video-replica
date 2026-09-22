@@ -1,5 +1,6 @@
 import {
   type FormEvent,
+  Fragment,
   useCallback,
   useEffect,
   useRef,
@@ -24,6 +25,7 @@ import {
   getStudioNotificationPreferences,
   type RechargeOrderPage,
   updateStudioNotificationPreferences,
+  type WalletTransaction,
   type WalletTransactionPage,
 } from "../api";
 import { BrandIdentity } from "../BrandIdentity";
@@ -34,6 +36,14 @@ import type { WorkspaceShellProps } from "../workspace-shell";
 import { AccountPasswordSetup } from "./AccountPasswordSetup";
 import { CustomerPricesPage } from "./CustomerPricesPage";
 import { CustomerRechargeDialog } from "./CustomerRechargeDialog";
+import { LedgerPairingSummary } from "./LedgerPairingSummary";
+import {
+  groupLedgerRows,
+  type LedgerPairState,
+  netAvailableDelta,
+  netReservedDelta,
+} from "./ledger-pairing";
+import { TransactionPricingBreakdown } from "./TransactionPricingBreakdown";
 import "./customer-center.css";
 
 const tabs = [
@@ -57,6 +67,64 @@ const date = (value: string | null) =>
     : "尚未使用";
 const message = (error: unknown) =>
   error instanceof Error ? error.message : "操作失败，请稍后重试。";
+
+const LEDGER_TYPE_LABEL: Record<WalletTransaction["type"], string> = {
+  CHARGE: "积分入账",
+  CONVERSION: "历史积分转换",
+  RESERVE: "任务预扣",
+  SETTLE: "任务消费",
+  RELEASE: "积分退回",
+};
+
+/** P1-7：折叠后的计费周期按最终态命名，而不是最后写入的那一笔。 */
+const PAIR_STATE_LABEL: Record<LedgerPairState, string> = {
+  PENDING: "任务预扣",
+  SETTLED: "任务消费",
+  RELEASED: "积分退回",
+};
+
+const CREDIT_SOURCE_LABEL: Record<string, string> = {
+  FREE_GRANT: "积分赠送",
+  CREDIT_COMPENSATION: "积分补偿",
+  zpay: "在线充值",
+  wechat_native: "微信充值",
+  activation_code: "账号激活",
+  FINANCE_RECEIPT: "后台入账",
+  COMPENSATION_APPROVAL: "后台调整",
+};
+
+function signedCredits(value: number): string {
+  return `${value > 0 ? "+" : ""}${value} 积分`;
+}
+
+/** 流水行的业务描述：优先具体服务名，退到任务类型。 */
+function businessDescription(item: WalletTransaction): string {
+  if (item.service_name) return item.service_name;
+  if (item.type === "CONVERSION") return "历史余额";
+  if (item.oral_task_id) return "数字人口播";
+  if (item.task_id) return "视频生成";
+  return "充值 / 赠送";
+}
+
+function ledgerSource(item: WalletTransaction) {
+  const label = item.credit_source
+    ? (CREDIT_SOURCE_LABEL[item.credit_source] ?? "后台入账")
+    : item.api_key_id
+      ? `${item.token_label || "Token"} · V${item.credential_version ?? 1}`
+      : item.auth_source === "session"
+        ? "软件操作"
+        : item.auth_source === "internal"
+          ? "内部操作"
+          : "历史来源未记录";
+  return (
+    <>
+      {label}
+      {item.credit_price_version != null && (
+        <small>价格 V{item.credit_price_version}</small>
+      )}
+    </>
+  );
+}
 
 export function CustomerCenterPage({
   account,
@@ -87,6 +155,10 @@ export function CustomerCenterPage({
   const [preferencesError, setPreferencesError] = useState("");
   const [transactionPage, setTransactionPage] =
     useState<WalletTransactionPage | null>(null);
+  // P1-7：同一计费周期的行折叠成一组，展开状态只属于当前页面。
+  const [expandedPairs, setExpandedPairs] = useState<ReadonlySet<string>>(
+    new Set(),
+  );
   const [orderPage, setOrderPage] = useState<RechargeOrderPage | null>(null);
   const [offset, setOffset] = useState(0);
   const [filters, setFilters] = useState({
@@ -499,6 +571,58 @@ export function CustomerCenterPage({
       </p>
     </section>
   );
+  const togglePair = (operationId: string) => {
+    setExpandedPairs((current) => {
+      const next = new Set(current);
+      if (next.has(operationId)) {
+        next.delete(operationId);
+      } else {
+        next.add(operationId);
+      }
+      return next;
+    });
+  };
+
+  const taskDetailButton = (item: WalletTransaction) =>
+    item.generation_batch_id || item.oral_task_id ? (
+      <button
+        type="button"
+        onClick={() =>
+          navigate("task-detail", {
+            selectedTaskId: item.oral_task_id
+              ? `oral-${item.oral_task_id}`
+              : item.generation_batch_id || undefined,
+            selectedTaskKind: item.oral_task_id
+              ? "oral_task"
+              : "generation_batch",
+            selectedTaskBackendId:
+              item.oral_task_id || item.generation_batch_id || undefined,
+            returnTo: "profile",
+          })
+        }
+      >
+        查看任务
+      </button>
+    ) : null;
+
+  const ledgerRowCells = (item: WalletTransaction) => (
+    <>
+      <td>{date(item.created_at)}</td>
+      <td>
+        {LEDGER_TYPE_LABEL[item.type]}
+        <small>{businessDescription(item)}</small>
+        <TransactionPricingBreakdown
+          credential={credential}
+          transaction={item}
+        />
+        {taskDetailButton(item)}
+      </td>
+      <td>{ledgerSource(item)}</td>
+      <td>{signedCredits(item.available_delta)}</td>
+      <td>{signedCredits(item.reserved_delta)}</td>
+    </>
+  );
+
   const recordPanel = (
     <section className="uc-card">
       <header>
@@ -594,87 +718,40 @@ export function CustomerCenterPage({
             </tr>
           </thead>
           <tbody>
-            {transactionPage?.items.map((item) => (
-              <tr key={item.id}>
-                <td>{date(item.created_at)}</td>
-                <td>
-                  {
-                    {
-                      CHARGE: "积分入账",
-                      CONVERSION: "历史积分转换",
-                      RESERVE: "任务预扣",
-                      SETTLE: "任务消费",
-                      RELEASE: "积分退回",
-                    }[item.type]
-                  }
-                  <small>
-                    {item.service_name
-                      ? item.service_name
-                      : item.type === "CONVERSION"
-                        ? "历史余额"
-                        : item.oral_task_id
-                          ? "数字人口播"
-                          : item.task_id
-                            ? "视频生成"
-                            : "充值 / 赠送"}
-                  </small>
-                  {(item.generation_batch_id || item.oral_task_id) && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        navigate("task-detail", {
-                          selectedTaskId: item.oral_task_id
-                            ? `oral-${item.oral_task_id}`
-                            : item.generation_batch_id || undefined,
-                          selectedTaskKind: item.oral_task_id
-                            ? "oral_task"
-                            : "generation_batch",
-                          selectedTaskBackendId:
-                            item.oral_task_id ||
-                            item.generation_batch_id ||
-                            undefined,
-                          returnTo: "profile",
-                        })
-                      }
-                    >
-                      查看任务
-                    </button>
-                  )}
-                </td>
-                <td>
-                  {item.credit_source
-                    ? ((
-                        {
-                          FREE_GRANT: "积分赠送",
-                          CREDIT_COMPENSATION: "积分补偿",
-                          zpay: "在线充值",
-                          wechat_native: "微信充值",
-                          activation_code: "账号激活",
-                          FINANCE_RECEIPT: "后台入账",
-                          COMPENSATION_APPROVAL: "后台调整",
-                        } as Record<string, string>
-                      )[item.credit_source] ?? "后台入账")
-                    : item.api_key_id
-                      ? `${item.token_label || "Token"} · V${item.credential_version ?? 1}`
-                      : item.auth_source === "session"
-                        ? "软件操作"
-                        : item.auth_source === "internal"
-                          ? "内部操作"
-                          : "历史来源未记录"}
-                  {item.credit_price_version != null && (
-                    <small>价格 V{item.credit_price_version}</small>
-                  )}
-                </td>
-                <td>
-                  {item.available_delta > 0 ? "+" : ""}
-                  {item.available_delta} 积分
-                </td>
-                <td>
-                  {item.reserved_delta > 0 ? "+" : ""}
-                  {item.reserved_delta} 积分
-                </td>
-              </tr>
-            ))}
+            {groupLedgerRows(transactionPage?.items ?? []).map((entry) => {
+              if (entry.kind === "row") {
+                return <tr key={entry.row.id}>{ledgerRowCells(entry.row)}</tr>;
+              }
+              const { pair } = entry;
+              // 摘要行落在组内最新一行的时间上，业务描述取自同一行。
+              const latest = pair.rows[pair.rows.length - 1];
+              const expanded = expandedPairs.has(pair.operationId);
+              return (
+                <Fragment key={`pair-${pair.operationId}`}>
+                  <tr className="ledger-pair-parent">
+                    <td>{date(latest.created_at)}</td>
+                    <td>
+                      {PAIR_STATE_LABEL[pair.state]}
+                      <small>{businessDescription(latest)}</small>
+                      <LedgerPairingSummary
+                        pair={pair}
+                        expanded={expanded}
+                        onToggle={() => togglePair(pair.operationId)}
+                      />
+                    </td>
+                    <td>{ledgerSource(latest)}</td>
+                    <td>{signedCredits(netAvailableDelta(pair.rows))}</td>
+                    <td>{signedCredits(netReservedDelta(pair.rows))}</td>
+                  </tr>
+                  {expanded &&
+                    pair.rows.map((row) => (
+                      <tr key={row.id} className="ledger-pair-child">
+                        {ledgerRowCells(row)}
+                      </tr>
+                    ))}
+                </Fragment>
+              );
+            })}
             {!transactionPage?.items.length && (
               <tr>
                 <td colSpan={5}>

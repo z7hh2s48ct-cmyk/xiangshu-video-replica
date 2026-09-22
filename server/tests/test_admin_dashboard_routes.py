@@ -6,6 +6,7 @@ PENDING 配对、5 天内过期的可激活码、今日 PAID 充值单。
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from datetime import UTC, timedelta
 from decimal import Decimal
@@ -563,3 +564,85 @@ def test_linked_compatibility_records_are_not_counted_twice_and_pending_is_not_z
         assert totals["unknown_cost_count"] == 0 and totals["pending_count"] == 1
         assert totals["cost_fen"] is totals["profit_fen"] is None
         assert totals["known_cost_fen"] == 2
+
+
+ANALYSIS_UPSTREAM_REASON = "model gemini-3.8-flash is not available"
+
+
+def test_dashboard_surfaces_analysis_failures_with_upstream_reasons(
+    admin_headers: dict[str, str], client: TestClient, dashboard_pg_dsn: str
+) -> None:
+    """2026-09-20 事故的另一半：拆解 100% 失败，总览待办里却什么都没有。
+
+    拆解不并入既有的 failed_tasks_7d（那是「生成 = 视频+口播」的口径，混进去
+    会让历史对比失真），而是单列一条带上游原因的待办——否则客服只看到「失败」
+    两个字，不知道是模型下架、限流还是断网。
+    """
+    before = client.get("/api/control/dashboard/summary", headers=admin_headers).json()
+    assert before["todos"]["analysis_failures_7d"] == 0
+
+    diagnostics = (
+        (
+            "dash-analysis-http-1",
+            30,
+            "ANALYSIS_PROVIDER_FAILED",
+            "http",
+            {"http_status": 400, "failure_phase": "http", "reason": ANALYSIS_UPSTREAM_REASON},
+        ),
+        (
+            "dash-analysis-http-2",
+            20,
+            "ANALYSIS_PROVIDER_FAILED",
+            "http",
+            {"http_status": 400, "failure_phase": "http", "reason": ANALYSIS_UPSTREAM_REASON},
+        ),
+        (
+            "dash-analysis-network",
+            10,
+            "ANALYSIS_PROVIDER_UNREACHABLE",
+            "network",
+            {"http_status": None, "failure_phase": "network", "reason": "URLError"},
+        ),
+    )
+    with psycopg.connect(dashboard_pg_dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO assets (id, project_id, kind, storage_uri, sha256, size_bytes, "
+            "created_by_user_id) VALUES ('dash-analysis-asset', 'p1', 'reference_video', "
+            "'cos://bucket/dash-analysis.mp4', %s, 1024, 'cust_1')",
+            ("b" * 64,),
+        )
+        for task_id, minutes_ago, code, phase, diagnostic in diagnostics:
+            conn.execute(
+                "INSERT INTO analysis_tasks (id, project_id, asset_id, created_by_user_id, "
+                "duration_seconds, status, attempt, error_code, failure_phase, retryable, "
+                "upstream_diagnostic_json, created_at, updated_at, completed_at) VALUES "
+                "(%s, 'p1', 'dash-analysis-asset', 'cust_1', 8, 'FAILED', 1, %s, %s, 1, %s, "
+                "to_char(now() AT TIME ZONE 'UTC' - make_interval(mins => %s), "
+                "'YYYY-MM-DD HH24:MI:SS'), "
+                "to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'), "
+                "to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'))",
+                (task_id, code, phase, json.dumps(diagnostic), minutes_ago),
+            )
+    try:
+        response = client.get("/api/control/dashboard/summary", headers=admin_headers)
+
+        assert response.status_code == 200, response.text
+        todos = response.json()["todos"]
+        assert todos["analysis_failures_7d"] == 3
+        # 旧口径不受影响：拆解不混入「生成」计数。
+        assert todos["failed_tasks_7d"] == before["todos"]["failed_tasks_7d"]
+        reasons = todos["analysis_failure_reasons"]
+        assert reasons[0] == {
+            "error_code": "ANALYSIS_PROVIDER_FAILED",
+            "failure_phase": "http",
+            "reason": ANALYSIS_UPSTREAM_REASON,
+            "count": 2,
+        }
+        assert reasons[1]["error_code"] == "ANALYSIS_PROVIDER_UNREACHABLE"
+        assert reasons[1]["failure_phase"] == "network"
+        assert reasons[1]["reason"] == "URLError"
+        assert reasons[1]["count"] == 1
+    finally:
+        with psycopg.connect(dashboard_pg_dsn, autocommit=True) as conn:
+            conn.execute("DELETE FROM analysis_tasks WHERE id LIKE 'dash-analysis-%'")
+            conn.execute("DELETE FROM assets WHERE id = 'dash-analysis-asset'")

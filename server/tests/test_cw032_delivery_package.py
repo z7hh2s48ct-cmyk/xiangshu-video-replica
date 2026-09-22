@@ -42,6 +42,7 @@ README = PACKAGE_DIR / "README.md"
 BOOTSTRAP = PACKAGE_DIR / "bootstrap-base-image.sh"
 ROLLOUT = REPO_ROOT / "deploy" / "customer-git-rollout.sh"
 NGINX = REPO_ROOT / "deploy" / "nginx" / "customer.conf.example"
+LOGGING_YAML = REPO_ROOT / "docker-compose.logging.yml"
 
 # The closed inventory of the formal delivery package.
 PACKAGE_FILES = ("compose.yaml", "README.md", "bootstrap-base-image.sh", "healthcheck.py")
@@ -306,3 +307,35 @@ def test_readiness_probe_headers_pass_production_boundary_without_bypassing_it(m
 
     monkeypatch.setattr(main_module, "check_customer_production_runtime_dependencies", unavailable)
     assert client.get("/ready", headers=headers).status_code == 503
+
+
+def test_compose_caps_container_logs_with_json_file_rotation() -> None:
+    # P2-1 (BILLING-OBS): the application installs no file handler
+    # (server/app/logging_setup.py keeps records on stderr), so container
+    # stdout/stderr collected by docker's json-file driver is the only place
+    # logs land on disk. An unbounded driver would let one busy worker fill
+    # the host disk, so the shared anchor must cover every declared service.
+    compose = _compose_text()
+    anchor = re.search(r"(?ms)^x-logging: &default-logging$\n(.*?)(?=^\S)", compose)
+    assert anchor is not None, "compose.yaml must define the shared x-logging anchor"
+    anchor_block = anchor.group(1)
+    assert "driver: json-file" in anchor_block
+    assert 'max-size: "10m"' in anchor_block
+    assert 'max-file: "5"' in anchor_block
+    for service in ("db", "migrate", *ROLLOUT_SERVICES):
+        assert "logging: *default-logging" in _service_block(service), (
+            f"{service} must opt into the shared log-rotation anchor"
+        )
+
+
+def test_readme_and_logging_stack_document_rotation_and_retention() -> None:
+    # The rotation parameters are only honest if the operator manual states
+    # where rotated files live, how to query recent lines, and what the
+    # retention boundary is (json-file keeps ~50 MB per container; long-term
+    # retention is explicitly out of package scope).
+    logging_yml = LOGGING_YAML.read_text(encoding="utf-8")
+    assert logging_yml.count("logging: *default-logging") == 3  # loki/promtail/grafana
+    readme = README.read_text(encoding="utf-8")
+    assert "max-size" in readme and "max-file" in readme
+    assert "/var/lib/docker/containers" in readme
+    assert "logs --since" in readme and "logs -f" in readme

@@ -121,6 +121,109 @@ def test_image_billing_and_customer_service_filter_share_settled_evidence(
     assert {row["billing_operation_id"] for row in admin_rows} == {op}
 
 
+def test_source_action_panorama_groups_operations_attempts_and_inspection_cost(
+    pricing_client, route_state
+):
+    """P1-5：业务动作全景 —— 同一 source_id 的请求、调用与质检成本聚合成一行。
+
+    客户看到的是「这一次动作被扣了多少」，管理员还要能同时看到背后的每个科目
+    请求、每次供应商调用与质检成本；成本证据不齐时整行成本保持 None，不允许
+    把缺证据当零成本（沿用 ``operation_rows`` 口径）。
+    """
+    from app.billing_reports import source_action_detail, source_action_rows
+    from app.billing_routes import router
+
+    pricing_client.app.include_router(router)
+    _, uid = account(pricing_client)
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        raw.execute("UPDATE wallets SET available_credits=100 WHERE user_id=%s", (uid,))
+        raw.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_credits,unit_cost_fen) "
+            "VALUES('first_frame',true,5,2),('quality_inspection',false,NULL,7),"
+            "('analysis_repair',false,NULL,3)"
+        )
+        primary = accept_operation(
+            conn, user_id=uid, service="first_frame", source_id="action-1", units=1
+        )
+        record_attempt(conn, operation_id=primary, attempt_key="primary", usage=1)
+        record_attempt(
+            conn,
+            operation_id=primary,
+            attempt_key="inspection",
+            usage=1,
+            service="quality_inspection",
+        )
+        finish_operation(conn, operation_id=primary, units=1, succeeded=True)
+        # 同一动作下的第二个科目请求（内部修复）也必须并进同一行。
+        repair = accept_operation(
+            conn, user_id=uid, service="analysis_repair", source_id="action-1", units=1
+        )
+        record_attempt(conn, operation_id=repair, attempt_key="repair", usage=1)
+        finish_operation(conn, operation_id=repair, units=1, succeeded=True)
+        filters = dict(start=date(2000, 1, 1), end=date(2099, 1, 1))
+        actions = [
+            row for row in source_action_rows(conn, **filters) if row["source_id"] == "action-1"
+        ]
+        assert len(actions) == 1, "same-source requests must fold into one action row"
+        action = actions[0]
+        assert action["user_id"] == uid
+        assert action["operation_count"] == 2
+        assert action["attempt_count"] == 3
+        # 只有 first_frame 是用户科目：应扣 5 积分；内部科目不向客户收费。
+        assert action["charged_credits"] == 5
+        assert Decimal(str(action["known_cost_fen"])) == Decimal(2 + 7 + 3)
+        assert Decimal(str(action["cost_fen"])) == Decimal(12)
+        assert Decimal(str(action["inspection_cost_fen"])) == Decimal(7)
+        assert action["inspection_attempt_count"] == 1
+        assert action["unknown_cost_count"] == 0
+        assert action["pending_count"] == 0
+        assert set(action["services"]) == {"first_frame", "analysis_repair"}
+        detail = source_action_detail(conn, source_id="action-1", user_id=uid)
+        assert detail is not None
+        assert {row["service"] for row in detail["operations"]} == {
+            "first_frame",
+            "analysis_repair",
+        }
+        primary_row = next(row for row in detail["operations"] if row["service"] == "first_frame")
+        assert {item["service"] for item in primary_row["attempts"]} == {
+            "first_frame",
+            "quality_inspection",
+        }
+        assert detail["action"]["source_id"] == "action-1"
+        assert source_action_detail(conn, source_id="missing", user_id=uid) is None
+    admin = admin_login(pricing_client, route_state)
+    listed = pricing_client.get(
+        "/api/control/billing/source-actions?start=2000-01-01&end=2099-01-01",
+        headers=admin,
+    )
+    assert listed.status_code == 200, listed.text
+    body = listed.json()
+    assert body["total"] >= 1
+    item = next(row for row in body["items"] if row["source_id"] == "action-1")
+    assert item["charged_credits"] == 5
+    assert Decimal(str(item["inspection_cost_fen"])) == Decimal(7)
+    fetched = pricing_client.get(
+        f"/api/control/billing/source-actions/action-1?user_id={uid}", headers=admin
+    )
+    assert fetched.status_code == 200, fetched.text
+    assert {row["service"] for row in fetched.json()["operations"]} == {
+        "first_frame",
+        "analysis_repair",
+    }
+    # 作用域必须明确：不指明用户或平台时拒绝，而不是悄悄跨账号合并。
+    assert (
+        pricing_client.get("/api/control/billing/source-actions/missing", headers=admin).status_code
+        == 422
+    )
+    assert (
+        pricing_client.get(
+            "/api/control/billing/source-actions/missing?platform=true", headers=admin
+        ).status_code
+        == 404
+    )
+
+
 def test_collection_meter_counts_actual_calls_and_preserves_batch(client, route_state):
     from app.billing_meter import collection_billing_context, meter_call
     from app.viral_collection_billing import create_collection_batch
@@ -370,6 +473,9 @@ def test_catalog_matches_business_units_and_separates_video_tiers():
     assert {key: SERVICES[key].unit for key in expected} == expected
     assert SERVICES["cos"].customer_charge_allowed is False
     assert SERVICES["zpay"].customer_charge_allowed is False
+    assert SERVICES["cos"].zero_cost_platform and SERVICES["zpay"].zero_cost_platform
+    # Quality inspection has real call sites, so its supplier cost stays editable.
+    assert not SERVICES["quality_inspection"].zero_cost_platform
 
 
 def test_collection_settlement_recovers_once_and_never_retries_insufficient_balance(
@@ -650,6 +756,102 @@ def test_customer_catalog_never_exposes_supplier_costs(client, route_state):
     assert response.status_code == 200, response.text
     assert response.json()["credits"] == 14
     assert client.get("/api/control/billing/catalog", headers=headers).status_code in {401, 403}
+
+
+def test_platform_subjects_accept_supplier_cost_but_never_customer_charges(
+    pricing_client, route_state
+):
+    from uuid import uuid4
+
+    from app.billing_routes import router
+
+    client = pricing_client
+    client.app.include_router(router)
+    admin = admin_login(client, route_state)
+    published = client.get("/api/control/billing/catalog", headers=admin)
+    assert published.status_code == 200, published.text
+    services = {item["service"]: item for item in published.json()["services"]}
+    assert services["quality_inspection"]["zero_cost_platform"] is False
+    assert services["cos"]["zero_cost_platform"] is True
+    assert services["zpay"]["zero_cost_platform"] is True
+    cost_only = {
+        "confirm": True,
+        "reason": "Quality inspection supplier cost per call",
+        "service": "quality_inspection",
+        "expected_version": 0,
+        "tariff": {"enabled": False, "unit_credits": None, "unit_cost_fen": "0.5"},
+    }
+    saved = client.put(
+        "/api/control/billing/tariff",
+        headers={**admin, "Idempotency-Key": str(uuid4())},
+        json=cost_only,
+    )
+    assert saved.status_code == 200, saved.text
+    saved_services = {item["service"]: item for item in saved.json()["services"]}
+    assert saved_services["quality_inspection"]["tariff"]["enabled"] is False
+    assert Decimal(saved_services["quality_inspection"]["tariff"]["unit_cost_fen"]) == Decimal(
+        "0.5"
+    )
+    with psycopg.connect(route_state) as raw:
+        assert raw.execute(
+            "SELECT enabled,unit_credits,unit_cost_fen FROM billing_tariffs "
+            "WHERE service='quality_inspection'"
+        ).fetchone() == (False, None, Decimal("0.5"))
+    charged = {
+        **cost_only,
+        "expected_version": 1,
+        "tariff": {"enabled": True, "unit_credits": "1", "unit_cost_fen": "0.5"},
+    }
+    rejected = client.put(
+        "/api/control/billing/tariff",
+        headers={**admin, "Idempotency-Key": str(uuid4())},
+        json=charged,
+    )
+    assert rejected.status_code == 422
+    assert "不允许启用用户收费" in rejected.text
+    storage = {
+        **cost_only,
+        "service": "cos",
+        "reason": "Storage must stay platform funded",
+        "tariff": {"enabled": False, "unit_credits": None, "unit_cost_fen": "0.01"},
+    }
+    blocked = client.put(
+        "/api/control/billing/tariff",
+        headers={**admin, "Idempotency-Key": str(uuid4())},
+        json=storage,
+    )
+    assert blocked.status_code == 422
+    assert "零费用核算" in blocked.text
+
+
+def test_admin_catalog_reports_last_tariff_editor(pricing_client, route_state):
+    from uuid import uuid4
+
+    from app.billing_routes import router
+
+    client = pricing_client
+    client.app.include_router(router)
+    admin = admin_login(client, route_state)
+    saved = client.put(
+        "/api/control/billing/tariff",
+        headers={**admin, "Idempotency-Key": str(uuid4())},
+        json={
+            "confirm": True,
+            "reason": "Per-call inspection cost",
+            "service": "quality_inspection",
+            "expected_version": 0,
+            "tariff": {"enabled": False, "unit_credits": None, "unit_cost_fen": "0.5"},
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    services = {item["service"]: item for item in saved.json()["services"]}
+    inspection = services["quality_inspection"]
+    assert inspection["updated_by"] == "price_admin"
+    assert inspection["updated_by_user_id"]
+    assert inspection["updated_at"]
+    untouched = services["oral"]
+    assert untouched["updated_by"] is None
+    assert untouched["updated_at"] is None
 
 
 def credit_lot(raw, user_id, *, key, credits, amount_fen, provider="zpay"):

@@ -25,6 +25,15 @@ const summaryPayload = {
   todos: {
     pending_pairings: 3,
     failed_tasks_7d: 5,
+    analysis_failures_7d: 3,
+    analysis_failure_reasons: [
+      {
+        error_code: "ANALYSIS_PROVIDER_FAILED",
+        failure_phase: "http",
+        reason: "model gemini-3.8-flash is not available",
+        count: 3,
+      },
+    ],
     reconciliation_problems: 2,
     expiring_codes_7d: 0,
     unconfigured_rates: 2,
@@ -106,6 +115,17 @@ describe("OverviewPage", () => {
     const failedTasks = screen.getByText("失败任务待处理").closest("li");
     fireEvent.click(within(failedTasks as HTMLElement).getByRole("button"));
     expect(onNavigate).toHaveBeenCalledWith("failedGenerationRecords");
+
+    // 拆解失败单列一行，并把最集中的上游原因摆在行上。
+    expect(screen.getByText("拆解失败待排查")).toBeInTheDocument();
+    expect(
+      screen.getByText("model gemini-3.8-flash is not available"),
+    ).toBeInTheDocument();
+    const analysisFailures = screen.getByText("拆解失败待排查").closest("li");
+    fireEvent.click(
+      within(analysisFailures as HTMLElement).getByRole("button"),
+    );
+    expect(onNavigate).toHaveBeenCalledWith("analysisFailures");
   });
 
   it("shows an error banner when the summary request fails", async () => {

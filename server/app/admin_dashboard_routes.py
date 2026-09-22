@@ -156,6 +156,43 @@ def dashboard_summary(_actor: AdminReader) -> dict[str, Any]:
                 """,
             )
         )
+        # 拆解是付费上游调用，却在总览里完全没有脉络（2026-09-20 事故）。
+        # 单列计数 + 上游原因，不并入 failed_tasks_7d：那是「生成 = 视频+口播」
+        # 的口径，混入拆解会让历史对比失真。
+        analysis_failures_7d = int(
+            _one(
+                conn,
+                f"""
+                SELECT count(*) FROM analysis_tasks
+                WHERE status = 'FAILED'
+                  AND {_day_expr("created_at")} >=
+                      (now() AT TIME ZONE 'Asia/Shanghai')::date - 6
+                """,
+            )
+        )
+        analysis_failure_reasons = [
+            {
+                "error_code": row[0],
+                "failure_phase": row[1],
+                "reason": row[2],
+                "count": int(row[3]),
+            }
+            for row in conn.execute(
+                f"""
+                SELECT error_code,
+                       failure_phase,
+                       upstream_diagnostic_json ->> 'reason' AS reason,
+                       count(*) AS total
+                FROM analysis_tasks
+                WHERE status = 'FAILED'
+                  AND {_day_expr("created_at")} >=
+                      (now() AT TIME ZONE 'Asia/Shanghai')::date - 6
+                GROUP BY 1, 2, 3
+                ORDER BY total DESC, error_code ASC, failure_phase ASC
+                LIMIT 3
+                """
+            ).fetchall()
+        ]
         reconciliation_problems = int(
             _one(
                 conn,
@@ -224,6 +261,8 @@ def dashboard_summary(_actor: AdminReader) -> dict[str, Any]:
         "trend": trend,
         "todos": {
             "failed_tasks_7d": failed_tasks_7d,
+            "analysis_failures_7d": analysis_failures_7d,
+            "analysis_failure_reasons": analysis_failure_reasons,
             "reconciliation_problems": reconciliation_problems,
             "unconfigured_rates": unconfigured_rates,
             "unknown_cost_records": today_financial.get("unknown_cost_count", 0),

@@ -115,6 +115,165 @@ def operation_rows(
     return result
 
 
+def source_action_rows(
+    conn: BusinessConnection,
+    *,
+    start: date,
+    end: date,
+    user_id: str | None = None,
+    service: str | None = None,
+    module: str | None = None,
+    provider: str | None = None,
+    source_id: str | None = None,
+    platform: bool = False,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """P1-5 业务动作全景：把一个 ``source_id`` 下的所有请求折成一行。
+
+    一次业务动作可能横跨多个科目（主科目 + 内部修复等）、多次重试，还会带着
+    质检这类辅助调用；逐条列出请求时管理员要自己心算，动作级账就对不上。
+    聚合口径与 ``operation_rows`` 一致：成本证据不齐（未结算 / 调用成本待核对 /
+    已交付却没有任何调用证据）时整行成本为 None，绝不把缺证据当零成本。
+
+    分组键是 ``(user_id, source_id)``：``user_id`` 为 NULL 的平台请求单独成行。
+    成本列里 ``inspection_cost_fen`` 是质检（``quality_inspection``）调用成本的
+    小计，已含在 ``known_cost_fen`` 内，便于核对质检花了多少钱。
+    """
+    lower, upper = date_bounds(start, end)
+    unmetered = UNMETERED_DELIVERED_CHARGE.format(calls="COALESCE(c.attempt_count,0)")
+    rows = conn.execute(
+        f"""
+        WITH scoped AS (
+          SELECT o.* FROM billing_operations o
+          WHERE COALESCE(o.completed_at,o.created_at)>=%s AND COALESCE(o.completed_at,
+            o.created_at)<%s
+            AND (%s::text IS NULL OR o.user_id=%s)
+            AND (NOT %s::boolean OR o.user_id IS NULL)
+            AND (%s::text IS NULL OR o.service=%s)
+            AND (%s::text IS NULL OR o.module=%s)
+            AND (%s::text IS NULL OR o.source_id=%s)
+            AND (%s::text IS NULL OR EXISTS(SELECT 1 FROM billing_attempts a
+              JOIN billing_operations parent ON parent.id=a.operation_id
+              WHERE (parent.id=o.id OR (o.collection_batch_id IS NOT NULL
+                AND parent.id=o.source_id AND parent.collection_batch_id=o.collection_batch_id))
+              AND a.provider=%s))
+        ), calls AS (
+          SELECT operation_id,count(*) AS attempt_count,
+            count(*) FILTER(WHERE effective_cost_fen IS NULL) AS unknown_attempt_count,
+            sum(effective_cost_fen) AS known_cost,
+            count(*) FILTER(WHERE service='quality_inspection') AS inspection_attempt_count,
+            count(*) FILTER(WHERE service='quality_inspection' AND effective_cost_fen IS NULL)
+              AS inspection_unknown_count,
+            sum(effective_cost_fen) FILTER(WHERE service='quality_inspection')
+              AS inspection_cost
+          FROM billing_effective_attempts GROUP BY operation_id
+        )
+        SELECT o.user_id,o.source_id,COALESCE(u.username,'平台后台') AS username,
+          count(*) AS operation_count,
+          count(*) FILTER(WHERE o.state='PENDING') AS pending_count,
+          count(*) FILTER(WHERE o.state IN ('FAILED','CANCELLED')) AS failed_count,
+          sum(o.reserved_credits) AS reserved_credits,sum(o.charged_credits) AS charged_credits,
+          sum(COALESCE(c.attempt_count,0)) AS attempt_count,
+          sum(COALESCE(c.unknown_attempt_count,0)) AS unknown_attempt_count,
+          sum(COALESCE(c.inspection_attempt_count,0)) AS inspection_attempt_count,
+          sum(COALESCE(c.inspection_unknown_count,0)) AS inspection_unknown_count,
+          sum(COALESCE(c.known_cost,0)) AS known_cost_fen,
+          sum(COALESCE(c.inspection_cost,0)) AS inspection_cost_fen,
+          count(*) FILTER(WHERE {unmetered})+sum(COALESCE(c.unknown_attempt_count,0))
+            AS unknown_cost_count,
+          array_agg(DISTINCT o.service ORDER BY o.service) AS services,
+          array_agg(DISTINCT o.module ORDER BY o.module) AS modules,
+          min(COALESCE(o.completed_at,o.created_at)) AS first_at,
+          max(COALESCE(o.completed_at,o.created_at)) AS last_at,
+          count(*) OVER() AS total_count
+        FROM scoped o LEFT JOIN users u ON u.id=o.user_id
+        LEFT JOIN calls c ON c.operation_id=o.id
+        GROUP BY o.user_id,o.source_id,u.username
+        ORDER BY max(COALESCE(o.completed_at,o.created_at)) DESC,o.source_id DESC
+        LIMIT %s OFFSET %s
+    """,
+        (
+            lower,
+            upper,
+            user_id,
+            user_id,
+            platform,
+            service,
+            service,
+            module,
+            module,
+            source_id,
+            source_id,
+            provider,
+            provider,
+            limit,
+            offset,
+        ),
+    ).fetchall()
+    result = []
+    for row in rows:
+        item = dict(row)
+        item["pending_count"] = int(item["pending_count"] or 0)
+        item["failed_count"] = int(item["failed_count"] or 0)
+        item["attempt_count"] = int(item["attempt_count"] or 0)
+        item["unknown_cost_count"] = int(item["unknown_cost_count"] or 0)
+        item["inspection_attempt_count"] = int(item["inspection_attempt_count"] or 0)
+        item["inspection_unknown_count"] = int(item["inspection_unknown_count"] or 0)
+        item["known_cost_fen"] = item["known_cost_fen"] or 0
+        item["inspection_cost_fen"] = item["inspection_cost_fen"] or 0
+        complete = not (item["pending_count"] or item["unknown_cost_count"])
+        item["cost_fen"] = item["known_cost_fen"] if complete else None
+        if item["inspection_unknown_count"]:
+            item["inspection_cost_fen"] = None
+        result.append(item)
+    return result
+
+
+def source_action_detail(
+    conn: BusinessConnection,
+    *,
+    source_id: str,
+    user_id: str | None = None,
+    platform: bool = False,
+) -> dict[str, Any] | None:
+    """P1-5：一个业务动作的全景 —— 动作汇总 + 每个科目请求及其供应商调用。
+
+    作用域必须明确（客户 ``user_id`` 或 ``platform``），否则同一动作编号在多个
+    用户名下会混成一份无法定责的明细。共享采集的公共成本记在平台请求行上，
+    客户行的 ``source_id`` 指向该请求编号，但不把平台成本并进客户行。
+    """
+    actions = source_action_rows(
+        conn,
+        start=date(2000, 1, 1),
+        end=date(9998, 12, 31),
+        user_id=user_id,
+        source_id=source_id,
+        platform=platform,
+    )
+    if not actions:
+        return None
+    operations = []
+    for row in conn.execute(
+        "SELECT o.*,COALESCE(u.username,'平台后台') AS username FROM billing_operations o "
+        "LEFT JOIN users u ON u.id=o.user_id WHERE o.source_id=%s "
+        "AND (%s::text IS NULL OR o.user_id=%s) AND (NOT %s::boolean OR o.user_id IS NULL)"
+        " ORDER BY o.created_at,o.id",
+        (source_id, user_id, user_id, platform),
+    ).fetchall():
+        item = dict(row)
+        item["attempts"] = [
+            dict(attempt)
+            for attempt in conn.execute(
+                "SELECT * FROM billing_effective_attempts WHERE operation_id=%s ORDER BY "
+                "created_at,id",
+                (item["id"],),
+            ).fetchall()
+        ]
+        operations.append(item)
+    return {"action": actions[0], "operations": operations, "scopes": actions}
+
+
 def statistics(
     conn: BusinessConnection,
     *,

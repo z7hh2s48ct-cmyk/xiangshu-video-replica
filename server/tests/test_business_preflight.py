@@ -49,6 +49,13 @@ class RequestDb:
         yield self.conn, self.actor
 
 
+def bare_http_request() -> object:
+    """Minimal Starlette request so route handlers can read the X-Request-Id header."""
+    from starlette.requests import Request as StarletteRequest
+
+    return StarletteRequest({"type": "http", "method": "POST", "path": "/", "headers": []})
+
+
 def test_first_frame_can_read_existing_local_reference_after_cloud_switch(tmp_path, monkeypatch):
     from app import first_frames
     from app.storage import FakeStorageAdapter, LocalStorageAdapter
@@ -121,7 +128,11 @@ def test_cloud_upload_completion_failure_is_retryable_and_cannot_queue_analysis(
     monkeypatch.setattr(media_routes, "persist_upload_completion", persist)
     with pytest.raises(HTTPException) as failure:
         media_routes.complete_asset_upload(
-            "asset-1", RequestDb(Mock(), SimpleNamespace(role="customer")), Mock(), Mock()
+            "asset-1",
+            RequestDb(Mock(), SimpleNamespace(role="customer")),
+            Mock(),
+            Mock(),
+            bare_http_request(),
         )
     assert failure.value.status_code == 503
     assert failure.value.detail["code"] == "STORAGE_PROVIDER_UNAVAILABLE"
@@ -242,7 +253,10 @@ def test_real_analysis_rejects_local_asset_before_creating_task(monkeypatch):
     monkeypatch.setattr(analysis_routes, "enqueue_analysis_task", enqueue)
     with pytest.raises(HTTPException) as failure:
         analysis_routes.create_project_analysis_task(
-            "project-1", analysis_routes.CreateAnalysisRequest(asset_id="asset-1"), Db()
+            "project-1",
+            analysis_routes.CreateAnalysisRequest(asset_id="asset-1"),
+            Db(),
+            bare_http_request(),
         )
     assert failure.value.detail["code"] == "ANALYSIS_VIDEO_URL_UNAVAILABLE"
     enqueue.assert_not_called()

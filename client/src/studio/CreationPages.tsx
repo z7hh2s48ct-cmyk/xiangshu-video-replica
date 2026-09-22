@@ -8,6 +8,7 @@ import {
 import {
   type AnalysisTask,
   type AnalysisVersion,
+  analysisFailureReference,
   type CharacterReferenceSelection,
   cancelAnalysisTask,
   capturePromptSession,
@@ -2119,8 +2120,11 @@ export function ReplicaPage() {
         cause,
         "AI 拆解失败，请稍后重试。",
       );
-      setAnalysisError(message);
-      notify(message);
+      // P1-4：失败卡片带「任务编号 + 问题编号」，用户截图报障即可直查。
+      const reference = analysisFailureReference(cause);
+      const failureText = reference ? `${message}（${reference}）` : message;
+      setAnalysisError(failureText);
+      notify(failureText);
       // 服务端已给出需要多少积分；把钱包侧栏一并打开，省掉用户自己找入口。
       if (isInsufficientCredits(cause)) openLive("wallet");
     } finally {

@@ -4,8 +4,9 @@ import base64
 import io
 import json
 import sqlite3
+from collections.abc import Sequence
 from datetime import datetime, timedelta
-from typing import Annotated, Literal, cast
+from typing import Annotated, Any, Literal, cast
 from uuid import uuid4
 
 import psycopg
@@ -58,7 +59,12 @@ from app.security_rate_limit import _server_now, client_ip_from_request
 from app.settings import SettingsRepository, effective_customer_billing_settings
 from app.sub_account_quota import read_quota_used
 from app.usage_billing import resolve_wallet_owner
-from app.wallet_routes import WalletResponse, WalletTransactionPage, WalletTransactionResponse
+from app.wallet_routes import (
+    WalletResponse,
+    WalletTransactionPage,
+    WalletTransactionResponse,
+    pricing_breakdown,
+)
 from app.wechat_native_client import (
     NATIVE_ORDER_MIN_REMAINING_SECONDS,
     NATIVE_ORDER_VALIDITY_SECONDS,
@@ -1214,7 +1220,25 @@ def list_customer_wallet_transactions(
                    END, wt.billing_operation_id,
                    (SELECT o.service FROM billing_operations o WHERE o.id=wt.billing_operation_id),
                    wt.actor_user_id,
-                   (SELECT u.display_name FROM users u WHERE u.id=wt.actor_user_id)
+                   (SELECT u.display_name FROM users u WHERE u.id=wt.actor_user_id),
+                   -- P1-7：配对态按全量账本算，组内每行同值。分页把 RESERVE 与
+                   -- 结算/退回切开、或按类型筛选后只剩一行时，界面仍知道它是
+                   -- 「已结算」还是「退回」；(billing_operation_id,type) 索引支撑
+                   -- 这两个 EXISTS。
+                   CASE
+                     WHEN wt.billing_operation_id IS NULL THEN NULL
+                     WHEN EXISTS (
+                       SELECT 1 FROM wallet_transactions settled
+                       WHERE settled.billing_operation_id = wt.billing_operation_id
+                         AND settled.type = 'SETTLE'
+                     ) THEN 'SETTLED'
+                     WHEN EXISTS (
+                       SELECT 1 FROM wallet_transactions released
+                       WHERE released.billing_operation_id = wt.billing_operation_id
+                         AND released.type = 'RELEASE'
+                     ) THEN 'RELEASED'
+                     ELSE 'PENDING'
+                   END
             """
             + from_sql
             + """
@@ -1225,38 +1249,51 @@ def list_customer_wallet_transactions(
             [*params, limit, offset],
         ).fetchall()
         return WalletTransactionPage(
-            items=[
-                WalletTransactionResponse(
-                    id=str(row[0]),
-                    user_id=str(row[1]),
-                    type=row[2],
-                    available_delta=int(row[3]),
-                    reserved_delta=int(row[4]),
-                    recharge_order_id=str(row[5]) if row[5] is not None else None,
-                    task_id=str(row[6]) if row[6] is not None else None,
-                    oral_task_id=str(row[7]) if row[7] is not None else None,
-                    billing_round=int(row[8]) if row[8] is not None else None,
-                    created_at=str(row[9]),
-                    api_key_id=row[10],
-                    token_group_id=row[11],
-                    token_label=row[12],
-                    credential_version=row[13],
-                    auth_source=row[14],
-                    credit_price_version=json.loads(row[15])["version"] if row[15] else None,
-                    generation_batch_id=row[16],
-                    credit_source=row[17],
-                    billing_operation_id=row[18],
-                    service=row[19],
-                    service_name=SERVICES[row[19]].name if row[19] in SERVICES else None,
-                    actor_user_id=str(row[20]) if row[20] is not None else None,
-                    actor_name=row[21],
-                )
-                for row in rows
-            ],
+            items=[_customer_ledger_entry(row) for row in rows],
             total=total,
             limit=limit,
             offset=offset,
         )
+
+
+def _customer_ledger_entry(row: Sequence[Any]) -> WalletTransactionResponse:
+    """One customer ledger row, priced by the retail side of its frozen snapshot.
+
+    P0-3: the customer must be able to check a delta against the unit price,
+    usage, discount and rounding it was priced with. The projection is a
+    whitelist — the snapshot's cost side never crosses this boundary.
+
+    P1-7: ``pair_state`` names the row's billing-cycle group state so the
+    client can fold RESERVE→SETTLE/RELEASE into one entry.
+    """
+    pricing = pricing_breakdown(json.loads(row[15]) if row[15] else None)
+    return WalletTransactionResponse(
+        id=str(row[0]),
+        user_id=str(row[1]),
+        type=row[2],
+        available_delta=int(row[3]),
+        reserved_delta=int(row[4]),
+        recharge_order_id=str(row[5]) if row[5] is not None else None,
+        task_id=str(row[6]) if row[6] is not None else None,
+        oral_task_id=str(row[7]) if row[7] is not None else None,
+        billing_round=int(row[8]) if row[8] is not None else None,
+        created_at=str(row[9]),
+        api_key_id=row[10],
+        token_group_id=row[11],
+        token_label=row[12],
+        credential_version=row[13],
+        auth_source=row[14],
+        credit_price_version=pricing.version if pricing else None,
+        generation_batch_id=row[16],
+        credit_source=row[17],
+        billing_operation_id=row[18],
+        service=row[19],
+        service_name=SERVICES[row[19]].name if row[19] in SERVICES else None,
+        actor_user_id=str(row[20]) if row[20] is not None else None,
+        actor_name=row[21],
+        pricing=pricing,
+        pair_state=row[22],
+    )
 
 
 @router.get("/customer/recharge-orders", response_model=RechargeOrderPage)

@@ -377,6 +377,39 @@ def test_admin_price_publication_drives_authenticated_api_billing(pricing_client
         )
 
 
+def test_admin_discount_and_rounding_drive_quotes(pricing_client, route_state):
+    """BILLING-OBS P1-3：全局折扣与消费取整保存后要真实进入报价口径。"""
+    from uuid import uuid4
+
+    client = pricing_client
+    headers, uid = account(client)
+    key = mutation(client, "", headers, {"label": "discount"}).json()
+    admin_headers = admin_login(client, route_state)
+    payload = {
+        "expected_version": 0,
+        "config": config(discount_basis_points=8500, consumption_rounding="floor").model_dump(),
+        "reason": "全科目 85 折并向下取整",
+        "confirm": True,
+    }
+    path = "/api/control/settings/customer-pricing"
+    result = client.put(
+        path, headers={**admin_headers, "Idempotency-Key": str(uuid4())}, json=payload
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["config"]["discount_basis_points"] == 8500
+    assert result.json()["config"]["consumption_rounding"] == "floor"
+    with psycopg.connect(route_state) as raw:
+        raw.execute("UPDATE wallets SET available_credits = 100 WHERE user_id = %s", (uid,))
+        raw.execute("UPDATE runtime_settings SET h3_extended_modes_enabled = true")
+    quote = client.get(
+        "/api/generation/price-quote?resolution=2K&duration_seconds=6&quantity=1",
+        headers=token_headers(key),
+    )
+    assert quote.status_code == 200, quote.text
+    # 2K 6 秒：7 × 6 = 42 积分，85 折后 35.7，向下取整为 35（默认配置下为 42）。
+    assert quote.json()["estimated_credits"] == 35
+
+
 def test_recharge_freezes_exchange_and_replays_without_granting_unpaid_points(
     pricing_client, route_state
 ):

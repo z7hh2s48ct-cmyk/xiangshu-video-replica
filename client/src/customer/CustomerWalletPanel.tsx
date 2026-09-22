@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { Pagination } from "../admin/ui/Pagination";
 import {
   type CreatedRechargeOrder,
@@ -27,6 +27,13 @@ import {
   packageBenefitLabel,
   packageBonusCredits,
 } from "../rechargePackageDisplay";
+import { LedgerPairingSummary } from "./LedgerPairingSummary";
+import {
+  groupLedgerRows,
+  type LedgerPairState,
+  netAvailableDelta,
+} from "./ledger-pairing";
+import { TransactionPricingBreakdown } from "./TransactionPricingBreakdown";
 import type { CustomerCredentialStore } from "./useCustomerSession";
 import "./customer-wallet.css";
 
@@ -77,6 +84,10 @@ export function CustomerWalletPanel({
   const [failedOrderHistoryOffset, setFailedOrderHistoryOffset] = useState<
     number | null
   >(null);
+  // P1-7：同一计费周期的行折叠成一组，展开状态只属于当前页面。
+  const [expandedPairs, setExpandedPairs] = useState<ReadonlySet<string>>(
+    new Set(),
+  );
   const summaryRequestIdRef = useRef(0);
   const transactionRequestIdRef = useRef(0);
   const orderHistoryRequestIdRef = useRef(0);
@@ -500,6 +511,33 @@ export function CustomerWalletPanel({
     ? `已享${discountZhe}${discountSource ? `（${discountSource}）` : ""}`
     : null;
 
+  const togglePair = (operationId: string) => {
+    setExpandedPairs((current) => {
+      const next = new Set(current);
+      if (next.has(operationId)) {
+        next.delete(operationId);
+      } else {
+        next.add(operationId);
+      }
+      return next;
+    });
+  };
+
+  const ledgerRowCells = (transaction: WalletTransaction) => (
+    <>
+      <td>{transaction.created_at}</td>
+      <td>{transactionTypeLabel(transaction.type)}</td>
+      <td>{signedNumber(transaction.available_delta)}</td>
+      <td>
+        {transactionDetail(transaction)}
+        <TransactionPricingBreakdown
+          credential={loadSession}
+          transaction={transaction}
+        />
+      </td>
+    </>
+  );
+
   return (
     <section className="wallet-page" aria-label="余额与充值">
       <div className="wallet-summary-grid">
@@ -775,14 +813,39 @@ export function CustomerWalletPanel({
             </thead>
             <tbody>
               {transactions.length ? (
-                transactions.map((transaction) => (
-                  <tr key={transaction.id}>
-                    <td>{transaction.created_at}</td>
-                    <td>{transactionTypeLabel(transaction.type)}</td>
-                    <td>{signedNumber(transaction.available_delta)}</td>
-                    <td>{transactionDetail(transaction)}</td>
-                  </tr>
-                ))
+                groupLedgerRows(transactions).map((entry) => {
+                  if (entry.kind === "row") {
+                    return (
+                      <tr key={entry.row.id}>{ledgerRowCells(entry.row)}</tr>
+                    );
+                  }
+                  const { pair } = entry;
+                  // 摘要行落在组内最新一行的时间上，符合时间倒序的列表观感。
+                  const latest = pair.rows[pair.rows.length - 1];
+                  const expanded = expandedPairs.has(pair.operationId);
+                  return (
+                    <Fragment key={`pair-${pair.operationId}`}>
+                      <tr className="ledger-pair-parent">
+                        <td>{latest.created_at}</td>
+                        <td>{PAIR_STATE_LABEL[pair.state]}</td>
+                        <td>{signedNumber(netAvailableDelta(pair.rows))}</td>
+                        <td>
+                          <LedgerPairingSummary
+                            pair={pair}
+                            expanded={expanded}
+                            onToggle={() => togglePair(pair.operationId)}
+                          />
+                        </td>
+                      </tr>
+                      {expanded &&
+                        pair.rows.map((row) => (
+                          <tr key={row.id} className="ledger-pair-child">
+                            {ledgerRowCells(row)}
+                          </tr>
+                        ))}
+                    </Fragment>
+                  );
+                })
               ) : (
                 <tr>
                   <td colSpan={4}>暂无额度流水</td>
@@ -873,6 +936,13 @@ function transactionTypeLabel(type: WalletTransaction["type"]): string {
     RELEASE: "失败返还",
   }[type];
 }
+
+/** P1-7：折叠后的计费周期按最终态命名，与逐笔类型标签保持同一套措辞。 */
+const PAIR_STATE_LABEL: Record<LedgerPairState, string> = {
+  PENDING: "任务冻结",
+  SETTLED: "成功结算",
+  RELEASED: "失败返还",
+};
 
 function errorMessage(error: unknown, fallback: string): string {
   if (error instanceof CustomerApiError && error.message.trim()) {

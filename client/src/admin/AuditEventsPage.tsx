@@ -12,7 +12,7 @@ const EVENT_OPTIONS = [
   ["ADMIN_ADJUSTMENT", "管理员调账"],
   ["operation_rate.update", "费率调整"],
   ["billing.tariff.update", "API 成本与售价调整"],
-  ["customer_pricing.update", "充值换算调整"],
+  ["customer_pricing.update", "客户报价调整"],
   ["h3.account.update", "视频账号配置"],
   ["payment.provider.update", "默认支付通道调整"],
   ["payment.wechat.update", "微信商户配置"],
@@ -71,7 +71,48 @@ function priceUnit(item: AuditLogItem) {
   }
 }
 
+function compactAmount(value?: string | null) {
+  if (value === null || value === undefined || value === "") return "未配置";
+  const [whole, fraction = ""] = String(value).split(".");
+  const trimmed = fraction.replace(/0+$/, "");
+  return trimmed ? `${whole}.${trimmed}` : whole;
+}
+
+/** 费率审计的派生明细：售价（积分）与成本（分）的前后值，启用状态变化单独提。 */
+function tariffChange(item: AuditLogItem) {
+  const detail = item.change_detail;
+  if (!detail) return null;
+  const before = detail.old ?? null;
+  const after = detail.new ?? null;
+  const parts: string[] = [];
+  if (!before) {
+    parts.push("初始配置");
+    if (after?.unit_credits)
+      parts.push(`售价 ${compactAmount(after.unit_credits)} 积分`);
+    if (after?.unit_cost_fen)
+      parts.push(`成本 ${compactAmount(after.unit_cost_fen)} 分`);
+  } else {
+    if ((before.unit_credits ?? null) !== (after?.unit_credits ?? null))
+      parts.push(
+        `售价 ${compactAmount(before.unit_credits)} → ${compactAmount(after?.unit_credits)} 积分`,
+      );
+    if ((before.unit_cost_fen ?? null) !== (after?.unit_cost_fen ?? null))
+      parts.push(
+        `成本 ${compactAmount(before.unit_cost_fen)} → ${compactAmount(after?.unit_cost_fen)} 分`,
+      );
+    if (Boolean(before.enabled) !== Boolean(after?.enabled))
+      parts.push(after?.enabled ? "启用用户扣费" : "停用用户扣费");
+  }
+  if (parts.length === 0) return "未变更";
+  const prefix = item.change_subject ? `${item.change_subject}：` : "";
+  return `${prefix}${parts.join(" · ")}`;
+}
+
 function priceChange(item: AuditLogItem) {
+  if (item.event_type === "billing.tariff.update") {
+    const change = tariffChange(item);
+    if (change) return change;
+  }
   const oldPrice = item.old_unit_price_fen;
   const newPrice = item.new_unit_price_fen;
   const unit = priceUnit(item);

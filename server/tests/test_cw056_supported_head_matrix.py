@@ -63,8 +63,18 @@ REPO_ROOT = SERVER_DIR.parent
 # + customer_discounts.source_recharge_order_id，并重写 credit_calculation 三支与
 # amount_price/amount_step 的套餐豁免支；
 # 20260921T1200_sub_account_quotas（Phase 3a 子账号月度额度表）之后，
-# 20260922T1800_sub_account_permissions（Phase 3b 功能权限矩阵表）重挂为链尾。
-HEAD_REVISION = "20260922T1800_sub_account_permissions"
+# 20260922T1800_sub_account_permissions（Phase 3b 功能权限矩阵表）。
+# BILLING-OBS-20260922 三个迁移重挂到 sub_account_permissions 之上（PR#192 合入后
+# 主链尾前移，未合并分支重挂 down_revision 是手册 §3 允许的动作）：
+# 20260922T1200_analysis_task_failure_diagnostic（P0-2）追加
+# analysis_tasks.upstream_diagnostic_json（jsonb）——columns +1、jsonb_columns +1；
+# 20260922T1600_analysis_task_request_id（P1-4）再追加 analysis_tasks.request_id（text）
+# ——columns +1；
+# 20260922T2000_analysis_task_attempts（P1-6）新建失败历史表 analysis_task_attempts
+# ——tables/primary_keys +1、columns +12、foreign_keys +1、unique_constraints +1
+# （task_id+attempt）、check_constraints +3（status/attempt/retryable）、jsonb_columns +1
+# （upstream_diagnostic_json）。
+HEAD_REVISION = "20260922T2000_analysis_task_attempts"
 
 # 最后一个已发布（受支持）起点。其后的 056…090 与本迁移尚未随任何受支持版本发布，
 # 故冻结范围止于此——把未发布 revision 也纳入哈希会让每次新增迁移都必须改常量，
@@ -108,18 +118,18 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # 例如 triggers 用 information_schema.triggers 的**行数**（BEFORE UPDATE 与
 # BEFORE DELETE 各算一行），故 18 行对应 10 个 distinct trigger，不是 10 行。
 HEAD_SCHEMA_COUNTS = {
-    "check_constraints": 319,
-    "columns": 1197,
-    "foreign_keys": 192,
+    "check_constraints": 322,
+    "columns": 1211,
+    "foreign_keys": 193,
     "identity_columns": 0,
-    "jsonb_columns": 4,
+    "jsonb_columns": 6,
     "partial_indexes": 37,
-    "primary_keys": 101,
+    "primary_keys": 102,
     "sequences": 4,
-    "tables": 101,
+    "tables": 102,
     "timestamptz_columns": 56,
     "triggers": 27,
-    "unique_constraints": 37,
+    "unique_constraints": 38,
 }
 
 # head 的表名全集。counts 只能证明「数量没漂」，证明不了「同一批表」：
@@ -152,6 +162,7 @@ HEAD_TABLE_NAMES = (
     "admin_sessions",
     "admin_write_idempotency",
     "alembic_version",
+    "analysis_task_attempts",
     "analysis_tasks",
     "assets",
     "audit_logs",
@@ -273,22 +284,21 @@ HEAD_TABLE_NAMES = (
 #   partial_indexes +2，无新表
 # - main 侧 browser_account_probe + oral_soft_delete + merge_parallel_heads +
 #   add_api_metadata_to_billing_ops（billing_operations.viral_data 补 api_metadata 列）
-# 合并后链尾由两段增量组成：
-# - RECHARGE-PACKAGES-20260922（20260922T1200）追加 recharge_packages 及订单两列/权益来源列：
-#   tables/primary_keys +1、columns +15（recharge_packages 12 + recharge_orders 2 +
-#   customer_discounts 1）、foreign_keys +3（package / source_order / created_by）、
-#   check_constraints +5（recharge_packages 五条）、timestamptz_columns +2；
-#   unique_constraints/partial_indexes/jsonb_columns 不变（唯一性用 unique index 表达，
-#   折扣接口范围维持 TEXT-JSON）。
-# - Phase 3a 链尾 20260921T1200_sub_account_quotas 追加 sub_account_quotas：
-#   tables/primary_keys +1、columns +4、foreign_keys +1（user_id→users CASCADE）、
-#   check_constraints +1（monthly_credits >= 0）。
-# - Phase 3b 链尾 20260922T1800_sub_account_permissions 追加 sub_account_permissions
+# 合并后链尾由多段增量组成：
+# - RECHARGE-PACKAGES-20260922（20260922T1200）追加 recharge_packages 及订单两列/权益来源列；
+# - Phase 3a 20260921T1200_sub_account_quotas 追加 sub_account_quotas；
+# - Phase 3b 20260922T1800_sub_account_permissions 追加 sub_account_permissions
 #   （子账号功能权限矩阵，无行=全允许）：tables/primary_keys +1、columns +6、
-#   foreign_keys +1（user_id→users CASCADE）；jsonb_columns 不变（权限集合/开关
-#   走 TEXT-JSON，与 Phase 3a 同口径）。
-# digest/counts 以 scripts/ci/migration_manifest.py --print-schema 于 postgres:16 重算。
-HEAD_SCHEMA_DIGEST = "4440cea9a3be74c31bf09dd1ec339e229d0a2da275dfefbcfc7f947af300244d"
+#   foreign_keys +1（user_id→users CASCADE）；jsonb_columns 不变（权限集合/开关走 TEXT-JSON）。
+# - BILLING-OBS-20260922 三个迁移重挂到 sub_account_permissions 之上：
+#   P0-2 analysis_task_failure_diagnostic（analysis_tasks.upstream_diagnostic_json jsonb）；
+#   P1-4 analysis_task_request_id（analysis_tasks.request_id text）；
+#   P1-6 analysis_task_attempts（新建表 analysis_task_attempts：tables/primary_keys +1、
+#   columns +12、foreign_keys +1、check_constraints +3、jsonb_columns +1；
+#   task_id+attempt 唯一性用 unique index 表达，unique_constraints 不变）。
+# digest/counts 以 scripts/ci/migration_manifest.py --print-schema 于 postgres:16 重算
+# （合并后新 head：sub_account_permissions + 三个 analysis 迁移叠加）。
+HEAD_SCHEMA_DIGEST = "00549d6b2ccffc8963ee7ca65d48529ef3863e3b190c2a538f746e3d1f871a46"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

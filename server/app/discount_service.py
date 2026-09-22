@@ -16,7 +16,10 @@
 
 PostgreSQL 是客户泳道唯一真源，且运行时**无 ORM**（db_pg.py：psycopg3 + psycopg_pool
 only），故每个 PG 入口都期望一条活的 ``psycopg.Connection``（沿 api_key_service 先例）。
-"""
+
+状态（BILLING-OBS P1-3，2026-09）：本模块仍无生产调用点——消耗侧客户折扣**未接入**
+reserve/finalize（CW-076）。当前唯一生效的折扣是 ``customer_credit_pricing.config_json``
+的全局 ``discount_basis_points``（管理端「客户报价配置」页可编辑，受理时冻结进快照）。"""
 
 from __future__ import annotations
 

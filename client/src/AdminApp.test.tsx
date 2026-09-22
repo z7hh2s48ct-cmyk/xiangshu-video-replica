@@ -244,6 +244,9 @@ function installFetch(options?: {
         offset: 0,
       });
     }
+    if (url.includes("/api/control/generation-records/summary")) {
+      return jsonResponse({ total: 1, counts: [], failure_reasons: [] });
+    }
     if (url.includes("/api/control/generation-records?")) {
       return jsonResponse({
         items: [
@@ -407,6 +410,25 @@ describe("AdminApp", () => {
       expect(adminRouteFromHash(`#admin/${tab}`).tab).toBe(tab);
     }
     expect(adminRouteFromHash("#admin/unknown").tab).toBe("overview");
+  });
+
+  it("恢复拆解失败意图时同时带上类型与状态筛选", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/admin#admin/generationRecords?intent=analysisFailures",
+    );
+    const fetchMock = installFetch({ session: "valid" });
+    render(<AdminApp />);
+
+    expect(await screen.findByLabelText("生成类型")).toHaveValue("ANALYSIS");
+    expect(screen.getByLabelText("生成状态")).toHaveValue("FAILED");
+    expect(screen.getByLabelText("失败阶段")).toHaveValue("");
+    expect(
+      fetchMock.mock.calls.some(([url]) =>
+        String(url).includes("record_type=ANALYSIS"),
+      ),
+    ).toBe(true);
   });
 
   it("刷新和前进后退恢复模块及失败记录筛选意图", async () => {

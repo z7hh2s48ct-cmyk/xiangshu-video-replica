@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { expect, test, vi } from "vitest";
 import { CustomerApiError } from "../api";
 import type { WorkspaceShellProps } from "../workspace-shell";
@@ -155,6 +161,113 @@ test("filters the actual image, transcription and link services shown in the led
       ),
     );
   }
+});
+
+test("opens the pricing basis of a settled row inside the records tab", async () => {
+  const account = setup();
+  mocks.transactions.mockResolvedValue({
+    items: [
+      {
+        id: "ledger-priced",
+        type: "SETTLE",
+        created_at: "2026-09-13T00:00:00Z",
+        available_delta: 0,
+        reserved_delta: -3,
+        billing_round: 1,
+        credit_price_version: 3,
+        service: "asr",
+        service_name: "语音转写",
+        pricing: {
+          service: "asr",
+          version: 3,
+          unit: "second",
+          units: "3.000000",
+          unit_credits: "2.000000",
+          unit_rounding: "ceil",
+          discount_basis_points: 9500,
+          consumption_rounding: "floor",
+          credits: 5,
+          enabled: true,
+        },
+      },
+    ],
+    total: 1,
+    limit: 20,
+    offset: 0,
+  });
+  render(<CustomerCenterPage account={account} />);
+  await screen.findByText("125");
+  fireEvent.click(screen.getByRole("tab", { name: "消费记录" }));
+
+  const summary = await screen.findByText("计费依据 · 费率 V3");
+  expect(summary.closest("details")?.open).toBe(false);
+  // 折叠态下 jest-dom 不认为内容可见，存在性由文档断言。
+  expect(
+    screen.getByText("单价：2 积分/秒，不足 1 秒按 1 秒计"),
+  ).toBeInTheDocument();
+  expect(screen.getByText("预扣上限：5 积分")).toBeInTheDocument();
+  expect(screen.getByText("价格 V3")).toBeVisible();
+});
+
+test("folds one billing cycle into a single expandable entry in the records table", async () => {
+  const account = setup();
+  mocks.transactions.mockResolvedValue({
+    items: [
+      {
+        id: "ledger-release",
+        type: "RELEASE",
+        created_at: "2026-09-13T00:00:02Z",
+        available_delta: 2,
+        reserved_delta: -2,
+        billing_operation_id: "op-1",
+        pair_state: "SETTLED",
+        service: "asr",
+        service_name: "语音转写",
+      },
+      {
+        id: "ledger-settle",
+        type: "SETTLE",
+        created_at: "2026-09-13T00:00:02Z",
+        available_delta: 0,
+        reserved_delta: -3,
+        billing_operation_id: "op-1",
+        pair_state: "SETTLED",
+        service: "asr",
+        service_name: "语音转写",
+      },
+      {
+        id: "ledger-reserve",
+        type: "RESERVE",
+        created_at: "2026-09-13T00:00:01Z",
+        available_delta: -5,
+        reserved_delta: 5,
+        billing_operation_id: "op-1",
+        pair_state: "SETTLED",
+        service: "asr",
+        service_name: "语音转写",
+      },
+    ],
+    total: 3,
+    limit: 20,
+    offset: 0,
+  });
+  render(<CustomerCenterPage account={account} />);
+  await screen.findByText("125");
+  fireEvent.click(screen.getByRole("tab", { name: "消费记录" }));
+
+  // 折叠：三笔只剩一行摘要，净变化是整组的合计。
+  const summary = await screen.findByText("预扣 5 → 实扣 3 → 退回 2");
+  expect(summary).toBeVisible();
+  // 「任务预扣」在筛选下拉里也有同名选项，断言限定在表格内。
+  const table = summary.closest("table") as HTMLElement;
+  expect(within(table).queryByText("任务预扣")).toBeNull();
+  expect(screen.getByText("-3 积分")).toBeVisible();
+  expect(screen.getByText("0 积分")).toBeVisible();
+
+  fireEvent.click(screen.getByRole("button", { name: /查看 3 笔明细/ }));
+  expect(await within(table).findByText("任务预扣")).toBeVisible();
+  expect(screen.getByText("+5 积分")).toBeVisible();
+  expect(screen.getByText("-2 积分")).toBeVisible();
 });
 
 test.each([

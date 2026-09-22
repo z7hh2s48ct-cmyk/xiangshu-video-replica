@@ -31,11 +31,13 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 USERS_TABLE = "users"
 WALLET_TX_TABLE = "wallet_transactions"
 
-# 重挂后链尾：#188 recharge_packages 之后是 Phase 3a sub_account_quotas，
-# Phase 3b sub_account_permissions。
-_HEAD_REVISION = "20260922T1800_sub_account_permissions"
+# 重挂后链尾：#188 recharge_packages 之后是 Phase 3a sub_account_quotas、
+# Phase 3b sub_account_permissions，再叠加 BILLING-OBS-20260922 三个 analysis 迁移。
+_HEAD_REVISION = "20260922T2000_analysis_task_attempts"
 # 1200 adds the sub-account columns; 1300 adds the wallet actor column;
-# 1500 + the 20260921T0000 merge revision sit on top of 1300.
+# 1500 + the 20260921T0000 merge revision sit on top of 1300, with the
+# BILLING-OBS revisions (failure diagnostic, request id, attempt history)
+# trailing the merge.
 # Downgrading below 1200 must fail-closed while sub-accounts still exist.
 _PRE_ACTOR_REVISION = "20260919T1200_sub_accounts"
 _PRIOR_REVISION = "20260919T1000_browser_account_probe"

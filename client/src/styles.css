@@ -4218,6 +4218,15 @@ button.activation-generator__submit {
   flex: 1;
 }
 
+.dashboard-todos li small {
+  color: var(--admin-muted, #a49e95);
+  font-size: 12px;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .dashboard-todos li button {
   border: 1px solid var(--admin-line, #2e2c29);
   border-radius: 8px;
@@ -4318,6 +4327,93 @@ button.activation-generator__submit {
 
 .admin-shell--control .admin-generation-records .admin-page-tabs {
   margin-bottom: 18px;
+}
+
+.admin-shell--control .admin-diagnostics {
+  display: grid;
+  gap: 18px;
+}
+
+.admin-shell--control .admin-diagnostics__card {
+  display: grid;
+  gap: 16px;
+  border: 1px solid var(--admin-line, #2e2c29);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.02);
+  padding: 20px;
+}
+
+.admin-shell--control .admin-diagnostics__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.admin-shell--control .admin-diagnostics__head h3 {
+  margin: 0 0 4px;
+}
+
+.admin-shell--control .admin-diagnostics__head small {
+  color: var(--admin-muted, #a49e95);
+}
+
+.admin-shell--control .admin-diagnostics__facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px 22px;
+  margin: 0;
+}
+
+.admin-shell--control .admin-diagnostics__facts dt {
+  color: var(--admin-muted, #a49e95);
+  font-size: var(--admin-font-caption);
+}
+
+.admin-shell--control .admin-diagnostics__facts dd {
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.admin-shell--control .admin-diagnostics__history h4 {
+  margin: 0 0 10px;
+  color: var(--admin-muted, #a49e95);
+  font-size: var(--admin-font-caption);
+  font-weight: 600;
+}
+
+.admin-shell--control .admin-diagnostics__attempts {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-shell--control .admin-diagnostics__attempt {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--admin-line, #2e2c29);
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.18);
+  padding: 14px 16px;
+}
+
+.admin-shell--control .admin-diagnostics__attempt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.admin-shell--control .admin-diagnostics__attempt-head h5 {
+  margin: 0;
+  font-size: var(--admin-font-body);
+  font-weight: 600;
+}
+
+.admin-shell--control .admin-diagnostics__jump {
+  margin-top: 12px;
 }
 
 .admin-shell--control .pagination {
@@ -4586,10 +4682,10 @@ button.activation-generator__submit {
 }
 
 .billing-rates-table :is(th, td):nth-child(1) {
-  width: 18%;
+  width: 16%;
 }
 .billing-rates-table :is(th, td):nth-child(2) {
-  width: 24%;
+  width: 18%;
 }
 .billing-rates-table :is(th, td):nth-child(3) {
   width: 6%;
@@ -4599,9 +4695,12 @@ button.activation-generator__submit {
   width: 12%;
 }
 .billing-rates-table :is(th, td):nth-child(6) {
-  width: 18%;
+  width: 14%;
 }
 .billing-rates-table :is(th, td):nth-child(7) {
+  width: 12%;
+}
+.billing-rates-table :is(th, td):nth-child(8) {
   width: 10%;
 }
 .billing-rates-table .billing-rates-editor td {
@@ -4984,20 +5083,34 @@ button.activation-generator__submit {
 }
 .admin-shell--control .admin-recharge-rate__form {
   display: flex;
+  flex-wrap: wrap;
   align-items: end;
   gap: 14px;
-  max-width: 540px;
+  max-width: 760px;
 }
 .admin-shell--control .admin-recharge-rate__form label {
-  flex: 1;
+  flex: 1 1 180px;
 }
-.admin-shell--control .admin-recharge-rate__form input {
+.admin-shell--control .admin-recharge-rate__form :is(input, select) {
   width: 100%;
 }
 .admin-shell--control .admin-recharge-rate__form button {
   flex: 0 0 auto;
   width: auto;
   min-height: 46px;
+}
+.admin-shell--control .admin-recharge-rate__hint {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--admin-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.admin-shell--control .admin-recharge-rate__note {
+  margin: 0;
+  color: var(--admin-muted);
+  font-size: 13px;
+  line-height: 1.6;
 }
 @media (max-width: 1100px) {
   .admin-shell--control .billing-economics-filters {

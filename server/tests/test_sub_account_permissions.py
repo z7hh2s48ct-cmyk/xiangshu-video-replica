@@ -65,7 +65,7 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 PERMISSIONS_TABLE = "sub_account_permissions"
 PERMISSIONS_DB = "t_sub_account_permission"
 
-_HEAD_REVISION = "20260922T1800_sub_account_permissions"
+_HEAD_REVISION = "20260922T2000_analysis_task_attempts"
 _PRIOR_REVISION = "20260921T1200_sub_account_quotas"
 
 

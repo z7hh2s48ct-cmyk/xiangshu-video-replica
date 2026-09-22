@@ -1527,6 +1527,14 @@ export async function revokeCustomerSession(
 
 export const AdminAuditError = AdminControlError;
 
+export interface AuditTariffSnapshot {
+  enabled?: boolean;
+  unit_credits?: string | null;
+  unit_cost_fen?: string | null;
+  unit_rounding?: string | null;
+  version?: number;
+}
+
 export interface AuditLogItem {
   event_id: string;
   event_type: string;
@@ -1542,6 +1550,11 @@ export interface AuditLogItem {
   change_subject?: string | null;
   old_unit_price_fen?: number | null;
   new_unit_price_fen?: number | null;
+  /** 仅 billing.tariff.update：服务端派生的费率变更前后快照（白名单字段）。 */
+  change_detail?: {
+    old?: AuditTariffSnapshot | null;
+    new?: AuditTariffSnapshot | null;
+  } | null;
 }
 
 export interface AuditLogResponse {
@@ -1607,6 +1620,8 @@ export type AdminGenerationRecord =
   components["schemas"]["ControlGenerationRecord"];
 export type AdminGenerationRecordPage =
   components["schemas"]["ControlGenerationRecordPage"];
+export type AdminGenerationRecordSummary =
+  components["schemas"]["ControlGenerationRecordSummary"];
 
 export async function getAdminGenerationRecords(
   options: {
@@ -1615,6 +1630,7 @@ export async function getAdminGenerationRecords(
     username?: string;
     status?: string;
     recordType?: string;
+    failurePhase?: string;
     createdFrom?: string;
     createdTo?: string;
   } = {},
@@ -1626,6 +1642,7 @@ export async function getAdminGenerationRecords(
   if (options.username) params.set("username", options.username);
   if (options.status) params.set("status", options.status);
   if (options.recordType) params.set("record_type", options.recordType);
+  if (options.failurePhase) params.set("failure_phase", options.failurePhase);
   if (options.createdFrom) params.set("created_from", options.createdFrom);
   if (options.createdTo) params.set("created_to", options.createdTo);
   const response = await requestControl(
@@ -1636,6 +1653,59 @@ export async function getAdminGenerationRecords(
     throw await parseActivationError(response, "读取生成记录失败");
   }
   return response.json() as Promise<AdminGenerationRecordPage>;
+}
+
+export async function getAdminGenerationRecordSummary(
+  options: {
+    username?: string;
+    status?: string;
+    recordType?: string;
+    failurePhase?: string;
+    createdFrom?: string;
+    createdTo?: string;
+  } = {},
+): Promise<AdminGenerationRecordSummary> {
+  const params = new URLSearchParams();
+  if (options.username) params.set("username", options.username);
+  if (options.status) params.set("status", options.status);
+  if (options.recordType) params.set("record_type", options.recordType);
+  if (options.failurePhase) params.set("failure_phase", options.failurePhase);
+  if (options.createdFrom) params.set("created_from", options.createdFrom);
+  if (options.createdTo) params.set("created_to", options.createdTo);
+  const query = params.toString();
+  const response = await requestControl(
+    `/api/control/generation-records/summary${query ? `?${query}` : ""}`,
+    { method: "GET" },
+  );
+  if (!response.ok) {
+    throw await parseActivationError(response, "读取生成记录聚合失败");
+  }
+  return response.json() as Promise<AdminGenerationRecordSummary>;
+}
+
+export type AdminAnalysisDiagnosticAttempt =
+  components["schemas"]["AnalysisDiagnosticAttempt"];
+export type AdminAnalysisDiagnosticRecord =
+  components["schemas"]["AnalysisDiagnosticRecord"];
+export type AdminAnalysisDiagnostics =
+  components["schemas"]["AnalysisDiagnosticsResponse"];
+
+/** P1-8 失败诊断：按任务编号或问题编号取单个拆解任务的重试历史。 */
+export async function getAdminAnalysisDiagnostics(
+  options: { taskId?: string; requestId?: string } = {},
+): Promise<AdminAnalysisDiagnostics> {
+  const params = new URLSearchParams();
+  if (options.taskId) params.set("task_id", options.taskId);
+  if (options.requestId) params.set("request_id", options.requestId);
+  const query = params.toString();
+  const response = await requestControl(
+    `/api/control/analysis-diagnostics${query ? `?${query}` : ""}`,
+    { method: "GET" },
+  );
+  if (!response.ok) {
+    throw await parseActivationError(response, "查询任务诊断失败");
+  }
+  return response.json() as Promise<AdminAnalysisDiagnostics>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1991,6 +2061,15 @@ export type DashboardSummary = {
   >;
   todos: {
     failed_tasks_7d: number;
+    /** 视频拆解失败（7 天）；与 failed_tasks_7d 分开统计：「生成」口径不含拆解。 */
+    analysis_failures_7d?: number;
+    /** 拆解失败原因聚合（最多 3 条），回答「上游为什么拒绝、能不能重试」。 */
+    analysis_failure_reasons?: Array<{
+      error_code: string | null;
+      failure_phase: string | null;
+      reason: string | null;
+      count: number;
+    }>;
     reconciliation_problems: number;
     unconfigured_rates?: number;
     unknown_cost_records?: number;

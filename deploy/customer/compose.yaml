@@ -24,10 +24,23 @@
 
 name: video-replica-customer
 
+# P2-1 (BILLING-OBS) — 容器日志轮转与留存. The application keeps records on
+# stderr only (server/app/logging_setup.py installs no file handler), so the
+# docker json-file driver is the single log sink on disk; without a bound one
+# busy worker could fill the host. Every service opts into this shared anchor.
+# Contract: server/tests/test_cw032_delivery_package.py (parameters) and
+# deploy/customer/README.md §8 (operator procedure + retention boundary).
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   db:
     image: postgres:16-alpine
     restart: unless-stopped
+    logging: *default-logging
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?/etc/video-replica/compose.env must define POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?/etc/video-replica/compose.env must define POSTGRES_PASSWORD}
@@ -69,6 +82,7 @@ services:
   migrate:
     image: ${APP_IMAGE:?/etc/video-replica/compose.env must define APP_IMAGE}
     restart: "no"
+    logging: *default-logging
     env_file:
       - ${CUSTOMER_ENV_FILE:-/etc/video-replica/customer.env}
     volumes: &app-files
@@ -102,6 +116,7 @@ services:
   api-1:
     image: ${APP_IMAGE:?/etc/video-replica/compose.env must define APP_IMAGE}
     restart: unless-stopped
+    logging: *default-logging
     env_file:
       - ${CUSTOMER_ENV_FILE:-/etc/video-replica/customer.env}
     volumes: *app-files
@@ -126,6 +141,7 @@ services:
   api-2:
     image: ${APP_IMAGE:?/etc/video-replica/compose.env must define APP_IMAGE}
     restart: unless-stopped
+    logging: *default-logging
     env_file:
       - ${CUSTOMER_ENV_FILE:-/etc/video-replica/customer.env}
     volumes: *app-files
@@ -150,6 +166,7 @@ services:
   worker-1:
     image: ${APP_IMAGE:?/etc/video-replica/compose.env must define APP_IMAGE}
     restart: unless-stopped
+    logging: *default-logging
     env_file:
       - ${CUSTOMER_ENV_FILE:-/etc/video-replica/customer.env}
     volumes: *app-files
@@ -166,6 +183,7 @@ services:
   worker-2:
     image: ${APP_IMAGE:?/etc/video-replica/compose.env must define APP_IMAGE}
     restart: unless-stopped
+    logging: *default-logging
     env_file:
       - ${CUSTOMER_ENV_FILE:-/etc/video-replica/customer.env}
     volumes: *app-files
@@ -182,6 +200,7 @@ services:
   worker-3:
     image: ${APP_IMAGE:?/etc/video-replica/compose.env must define APP_IMAGE}
     restart: unless-stopped
+    logging: *default-logging
     env_file:
       - ${CUSTOMER_ENV_FILE:-/etc/video-replica/customer.env}
     volumes: *app-files
@@ -198,6 +217,7 @@ services:
   worker-4:
     image: ${APP_IMAGE:?/etc/video-replica/compose.env must define APP_IMAGE}
     restart: unless-stopped
+    logging: *default-logging
     env_file:
       - ${CUSTOMER_ENV_FILE:-/etc/video-replica/customer.env}
     volumes: *app-files
@@ -217,6 +237,7 @@ services:
   worker-publish:
     image: ${APP_IMAGE:?/etc/video-replica/compose.env must define APP_IMAGE}
     restart: unless-stopped
+    logging: *default-logging
     env_file:
       - ${CUSTOMER_ENV_FILE:-/etc/video-replica/customer.env}
     volumes: *app-files
@@ -233,6 +254,7 @@ services:
   worker-viral:
     image: ${APP_IMAGE:?/etc/video-replica/compose.env must define APP_IMAGE}
     restart: unless-stopped
+    logging: *default-logging
     env_file:
       - ${CUSTOMER_ENV_FILE:-/etc/video-replica/customer.env}
     volumes: *app-files

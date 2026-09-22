@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Literal
+from decimal import Decimal
+from typing import Literal, cast
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict
@@ -9,6 +10,9 @@ from app.auth import AuthenticatedUser, Database
 from app.settings import DEFAULT_BILLING_SETTINGS
 
 router = APIRouter(prefix="/api/wallet", tags=["wallet"])
+
+UNIT_ROUNDING = Literal["ceil", "exact"]
+CONSUMPTION_ROUNDING = Literal["ceil", "floor"]
 
 
 class WalletResponse(BaseModel):
@@ -21,6 +25,33 @@ class WalletResponse(BaseModel):
     recharge_step_fen: int | None = None
     points_per_yuan: int | None = None
     credit_price_version: int | None = None
+
+
+class WalletTransactionPricing(BaseModel):
+    """One ledger row's pricing basis, projected for the customer lane (P0-3).
+
+    The frozen snapshot answers *how* a charge was priced — unit price, usage,
+    discount, rounding — without which a customer sees only the delta. Only its
+    retail side crosses this boundary: the cost side (``unit_cost_fen``,
+    funding lots, revenue) never does, so a snapshot that happens to carry such
+    keys is filtered field by field instead of being dumped.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    service: str | None = None
+    version: int | None = None
+    unit: str | None = None
+    units: str | None = None
+    unit_credits: str | None = None
+    unit_rounding: UNIT_ROUNDING | None = None
+    discount_basis_points: int | None = None
+    consumption_rounding: CONSUMPTION_ROUNDING | None = None
+    # The submitted budget's credits: the charge ceiling this row was frozen
+    # with, while the deltas on the same row are what actually moved.
+    credits: int | None = None
+    enabled: bool | None = None
+    free_reason: str | None = None
 
 
 class WalletTransactionResponse(BaseModel):
@@ -51,6 +82,12 @@ class WalletTransactionResponse(BaseModel):
     # the master's wallet; NULL on historical rows without actor evidence.
     actor_user_id: str | None = None
     actor_name: str | None = None
+    # P0-3: why this row moved — the retail side of the frozen snapshot.
+    pricing: WalletTransactionPricing | None = None
+    # P1-7: 同一计费周期的配对态（RESERVE→SETTLE/RELEASE 共享一个
+    # billing_operation_id）。组内每行取同一答案：有结算即 SETTLED、全额
+    # 退回为 RELEASED、仅预扣为 PENDING；充值/历史行无组为 None。
+    pair_state: Literal["PENDING", "SETTLED", "RELEASED"] | None = None
 
 
 class WalletTransactionPage(BaseModel):
@@ -60,6 +97,63 @@ class WalletTransactionPage(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+def _snapshot_text(value: object) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _snapshot_number_text(value: object) -> str | None:
+    """Snapshot amounts are frozen as text (``str(tariff.unit_credits)``)."""
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return None
+
+
+def _snapshot_int(value: object) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(str(value))
+    except ValueError:
+        return None
+
+
+def _snapshot_choice(value: object, allowed: tuple[str, ...]) -> str | None:
+    return value if isinstance(value, str) and value in allowed else None
+
+
+def pricing_breakdown(snapshot: object) -> WalletTransactionPricing | None:
+    """Whitelist projection of a frozen pricing snapshot (BILLING-OBS-20260922 P0-3).
+
+    ``snapshot`` is stored JSON: an unusable shape and any field that is not a
+    recognised retail value degrade to ``None`` individually, so one corrupt
+    historical row can never turn the whole ledger page into a 500.
+    """
+    if not isinstance(snapshot, dict) or not snapshot:
+        return None
+    return WalletTransactionPricing(
+        service=_snapshot_text(snapshot.get("service")),
+        version=_snapshot_int(snapshot.get("version")),
+        unit=_snapshot_text(snapshot.get("unit")),
+        units=_snapshot_number_text(snapshot.get("units")),
+        unit_credits=_snapshot_number_text(snapshot.get("unit_credits")),
+        unit_rounding=cast(
+            UNIT_ROUNDING | None, _snapshot_choice(snapshot.get("unit_rounding"), ("ceil", "exact"))
+        ),
+        discount_basis_points=_snapshot_int(snapshot.get("discount_basis_points")),
+        consumption_rounding=cast(
+            CONSUMPTION_ROUNDING | None,
+            _snapshot_choice(snapshot.get("consumption_rounding"), ("ceil", "floor")),
+        ),
+        credits=_snapshot_int(snapshot.get("credits")),
+        enabled=snapshot.get("enabled") if isinstance(snapshot.get("enabled"), bool) else None,
+        free_reason=_snapshot_text(snapshot.get("free_reason")),
+    )
 
 
 @router.get("", response_model=WalletResponse, response_model_exclude_none=True)

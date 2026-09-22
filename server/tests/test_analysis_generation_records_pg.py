@@ -1,0 +1,322 @@
+"""管理端要能看见视频拆解：生成记录 + 失败聚合 + 仪表盘待办。
+
+2026-09-20 事故复盘的另一半：拆解是付费上游调用，却在管理端「生成记录」里完全
+缺席——失败原因、失败阶段、可否重试、上游原话都无处可查，客服只能看到一个
+「失败」状态。P0-2 已把诊断落进 ``analysis_tasks``，本套件在真 PG 上证明它能
+被管理端读出来：
+
+- ``record_type=ANALYSIS`` 列出拆解任务，带失败阶段、可否重试、上游状态与原因，
+  以及来自账本的已结算积分与上游成本（不猜、不以 0 代替未知）；
+- ``failure_phase`` 只约束拆解分支，不会打到没有该列的表上；
+- summary 聚合按 record_type × status 计数，并回答「拆解为什么失败」。
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+from collections.abc import Iterator
+
+import psycopg
+import pytest
+from pg_test_kit import (
+    create_test_database,
+    drop_test_database,
+    require_pg_or_explicit_skip,
+    upgrade_test_database_to_head,
+)
+
+from app.auth import CurrentUser
+from app.db_portable import BusinessConnection
+from app.usage_billing import accept_operation, finish_operation, record_attempt
+
+DATABASE = "billing_obs_records_test"
+UPSTREAM_REASON = "model gemini-3.8-flash is not available"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _require_pg() -> None:
+    require_pg_or_explicit_skip()
+
+
+@pytest.fixture(scope="module")
+def records_dsn() -> Iterator[str]:
+    dsn = create_test_database(DATABASE)
+    upgrade_test_database_to_head(dsn)
+    try:
+        yield dsn
+    finally:
+        drop_test_database(DATABASE)
+
+
+@pytest.fixture(scope="module")
+def seeded(records_dsn: str) -> dict[str, str]:
+    return _seed(records_dsn)
+
+
+def _seed(dsn: str) -> dict[str, str]:
+    suffix = uuid.uuid4().hex[:12]
+    user_id = f"obs-cust-{suffix}"
+    project_id = f"obs-project-{suffix}"
+    asset_id = f"obs-asset-{suffix}"
+    version_id = f"obs-version-{suffix}"
+    ids = {
+        "user": user_id,
+        "https": f"obs-analysis-http-{suffix}",
+        "https_second": f"obs-analysis-http2-{suffix}",
+        "network": f"obs-analysis-network-{suffix}",
+        "ok": f"obs-analysis-ok-{suffix}",
+        "pending": f"obs-analysis-pending-{suffix}",
+    }
+    with psycopg.connect(dsn, autocommit=True) as raw:
+        raw.execute(
+            "INSERT INTO users (id, username, display_name, role, is_active) "
+            "VALUES (%s, %s, '观测客户', 'customer', 1)",
+            (user_id, user_id),
+        )
+        raw.execute(
+            "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, '拆解观测项目')",
+            (project_id, user_id),
+        )
+        raw.execute(
+            "INSERT INTO assets (id, project_id, kind, storage_uri, sha256, size_bytes, "
+            "content_type, created_by_user_id) VALUES (%s, %s, 'reference_video', %s, %s, "
+            "1024, 'video/mp4', %s)",
+            (asset_id, project_id, f"cos://bucket/{asset_id}.mp4", "a" * 64, user_id),
+        )
+        raw.execute(
+            "INSERT INTO versions (id, project_id, asset_id, kind, version_number, "
+            "payload_json, created_by_user_id) VALUES (%s, %s, %s, 'analysis', 1, %s, %s)",
+            (
+                version_id,
+                project_id,
+                asset_id,
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "provider_response_ref": {
+                            "provider": "apilio_gemini",
+                            "model": "gemini-3.8-flash",
+                            "response_id": "resp-obs-1",
+                        },
+                    }
+                ),
+                user_id,
+            ),
+        )
+        for task_id, status, created_at in (
+            (ids["https"], "FAILED", "2026-09-21 10:00:00"),
+            (ids["https_second"], "FAILED", "2026-09-21 11:00:00"),
+            (ids["network"], "FAILED", "2026-09-21 12:00:00"),
+            (ids["ok"], "SUCCEEDED", "2026-09-21 13:00:00"),
+            (ids["pending"], "PENDING", "2026-09-21 14:00:00"),
+        ):
+            raw.execute(
+                "INSERT INTO analysis_tasks (id, project_id, asset_id, created_by_user_id, "
+                "duration_seconds, status, attempt, created_at, updated_at) "
+                "VALUES (%s, %s, %s, %s, 8, %s, %s, %s, %s)",
+                (
+                    task_id,
+                    project_id,
+                    asset_id,
+                    user_id,
+                    status,
+                    1 if status != "PENDING" else 0,
+                    created_at,
+                    created_at,
+                ),
+            )
+        raw.execute(
+            "UPDATE analysis_tasks SET error_code = 'ANALYSIS_PROVIDER_FAILED', "
+            "error_message_redacted = %s, failure_phase = 'http', retryable = 1, "
+            "upstream_diagnostic_json = %s, completed_at = '2026-09-21 10:00:30' "
+            "WHERE id IN (%s, %s)",
+            (
+                f"视频拆解服务拒绝了请求（HTTP 400）：{UPSTREAM_REASON}",
+                json.dumps(
+                    {"http_status": 400, "failure_phase": "http", "reason": UPSTREAM_REASON}
+                ),
+                ids["https"],
+                ids["https_second"],
+            ),
+        )
+        raw.execute(
+            "UPDATE analysis_tasks SET error_code = 'ANALYSIS_PROVIDER_UNREACHABLE', "
+            "error_message_redacted = '无法连接视频拆解服务，请检查网络后重试。', "
+            "failure_phase = 'network', retryable = 1, upstream_diagnostic_json = %s, "
+            "completed_at = '2026-09-21 12:00:20' WHERE id = %s",
+            (
+                json.dumps({"http_status": None, "failure_phase": "network", "reason": "URLError"}),
+                ids["network"],
+            ),
+        )
+        raw.execute(
+            "UPDATE analysis_tasks SET result_version_id = %s, "
+            "completed_at = '2026-09-21 13:01:00' WHERE id = %s",
+            (version_id, ids["ok"]),
+        )
+        raw.execute(
+            "INSERT INTO billing_tariffs (service, enabled, unit_credits, unit_cost_fen) "
+            "VALUES ('analysis', TRUE, 4, 30)"
+        )
+        raw.execute(
+            "INSERT INTO wallets (user_id, available_credits, reserved_credits) "
+            "VALUES (%s, 100, 0)",
+            (user_id,),
+        )
+        # 走真实结算路径（accept → attempt → finish），积分与成本都由账本算出。
+        conn = BusinessConnection.postgres(raw)
+        operation = accept_operation(
+            conn, user_id=user_id, service="analysis", source_id=ids["ok"], units=1
+        )
+        record_attempt(conn, operation_id=operation, attempt_key="first", usage=1)
+        finish_operation(conn, operation_id=operation, units=1, succeeded=True)
+    ids["version"] = version_id
+    return ids
+
+
+@pytest.fixture()
+def owner() -> CurrentUser:
+    return CurrentUser(id="admin_u", username="admin_u", display_name="管理员", role="admin")
+
+
+def test_analysis_records_expose_failure_diagnostics_and_settled_evidence(
+    records_dsn: str, seeded: dict[str, str], owner: CurrentUser
+) -> None:
+    from app.control_routes import list_generation_records
+
+    with psycopg.connect(records_dsn) as raw:
+        page = list_generation_records(
+            BusinessConnection.postgres(raw), owner, record_type="ANALYSIS", limit=50, offset=0
+        )
+
+    assert page.total == len(page.items) == 5
+    rows = {item.record_id: item for item in page.items}
+    assert set(rows) == {
+        seeded["https"],
+        seeded["https_second"],
+        seeded["network"],
+        seeded["ok"],
+        seeded["pending"],
+    }
+    for item in page.items:
+        assert item.record_type == "ANALYSIS"
+        assert item.username == seeded["user"]
+        assert item.project_name == "拆解观测项目"
+
+    failed = rows[seeded["https"]]
+    assert failed.status == "FAILED"
+    assert failed.failure_phase == "http"
+    assert failed.retryable is True
+    assert failed.upstream_status == 400
+    assert failed.upstream_reason == UPSTREAM_REASON
+    assert failed.error_code == "ANALYSIS_PROVIDER_FAILED"
+    assert failed.charged_credits == 0
+    # 没有成本证据就说未知，不用 0 冒充。
+    assert failed.provider_cost is None
+    assert failed.provider_cost_status == "UNAVAILABLE"
+
+    network = rows[seeded["network"]]
+    assert network.failure_phase == "network"
+    assert network.retryable is True
+    assert network.upstream_status is None
+    assert network.upstream_reason == "URLError"
+
+    settled = rows[seeded["ok"]]
+    assert settled.status == "SUCCEEDED"
+    assert settled.result_reference == seeded["version"]
+    # 服务/模型来自结果版本的 provider_response_ref：上游调用的事实留痕。
+    assert settled.provider == "apilio_gemini"
+    assert settled.model == "gemini-3.8-flash"
+    assert settled.charged_credits == 4
+    assert settled.provider_cost == pytest.approx(0.3)
+    assert settled.provider_cost_status == "ESTIMATED"
+    assert settled.failure_phase is None
+    assert settled.retryable is None
+
+    pending = rows[seeded["pending"]]
+    assert pending.status == "PENDING"
+    assert pending.completed_at is None
+    # 还没失败就不谈「能不能重试」。
+    assert pending.retryable is None
+
+
+def test_failure_phase_filter_only_narrows_the_analysis_branch(
+    records_dsn: str, seeded: dict[str, str], owner: CurrentUser
+) -> None:
+    from app.control_routes import list_generation_records
+
+    with psycopg.connect(records_dsn) as raw:
+        conn = BusinessConnection.postgres(raw)
+        narrowed = list_generation_records(
+            conn,
+            owner,
+            record_type="ANALYSIS",
+            failure_phase="network",
+            limit=50,
+            offset=0,
+        )
+        other_branch = list_generation_records(
+            conn, owner, record_type="VIDEO", failure_phase="network", limit=50, offset=0
+        )
+
+    assert [item.record_id for item in narrowed.items] == [seeded["network"]]
+    assert narrowed.total == 1
+    # 其他类型没有 failure_phase 列：过滤器不得泄漏过去（否则 500）。
+    assert other_branch.total == 0
+
+
+def test_summary_aggregates_by_type_and_status_with_failure_reasons(
+    records_dsn: str, owner: CurrentUser
+) -> None:
+    from app.control_routes import summarize_generation_records
+
+    with psycopg.connect(records_dsn) as raw:
+        summary = summarize_generation_records(BusinessConnection.postgres(raw), owner)
+
+    assert summary.total == 5
+    counts = {(item.record_type, item.status): item.count for item in summary.counts}
+    assert counts[("ANALYSIS", "FAILED")] == 3
+    assert counts[("ANALYSIS", "SUCCEEDED")] == 1
+    assert counts[("ANALYSIS", "PENDING")] == 1
+
+    reasons = summary.failure_reasons
+    assert [item.count for item in reasons] == [2, 1]
+    assert reasons[0].failure_phase == "http"
+    assert reasons[0].error_code == "ANALYSIS_PROVIDER_FAILED"
+    assert reasons[0].reason == UPSTREAM_REASON
+    assert reasons[0].retryable is True
+    # P2-2：聚合行带 runbook 译文，错误码不再是终点。
+    assert reasons[0].advice is not None and "重试" in reasons[0].advice
+    assert reasons[1].failure_phase == "network"
+    assert reasons[1].advice is not None and "网络" in reasons[1].advice
+
+
+def test_summary_honours_the_same_filters_as_the_records_list(
+    records_dsn: str, owner: CurrentUser
+) -> None:
+    from app.control_routes import summarize_generation_records
+
+    with psycopg.connect(records_dsn) as raw:
+        conn = BusinessConnection.postgres(raw)
+        narrowed = summarize_generation_records(
+            conn, owner, record_type="ANALYSIS", failure_phase="network"
+        )
+        empty = summarize_generation_records(conn, owner, username="no-such-account")
+        succeeded_only = summarize_generation_records(
+            conn, owner, record_type="ANALYSIS", status="SUCCEEDED"
+        )
+
+    assert narrowed.total == 1
+    assert [(item.record_type, item.status, item.count) for item in narrowed.counts] == [
+        ("ANALYSIS", "FAILED", 1)
+    ]
+    assert [item.reason for item in narrowed.failure_reasons] == ["URLError"]
+
+    assert empty.total == 0
+    assert empty.counts == []
+    assert empty.failure_reasons == []
+
+    # 当前视图里没有失败行时不能凭空给失败原因。
+    assert succeeded_only.failure_reasons == []
+    assert succeeded_only.total == 1
