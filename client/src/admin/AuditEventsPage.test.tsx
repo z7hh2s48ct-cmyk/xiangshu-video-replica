@@ -59,7 +59,9 @@ function installFetch(options?: { status?: number }) {
         items: [
           auditItem({
             event_id: "evt-21",
-            event_type: "CODE_REVEAL",
+            // 真实事件名（audit_logs.action）；此前夹具用的是后端从不产生的
+            // CODE_REVEAL，掩盖了标签与实际事件名不匹配的问题。
+            event_type: "admin.activation_code.revealed",
             target_user_id: "customer-9",
             request_id: "req-audit-21",
           }),
@@ -407,5 +409,70 @@ describe("AuditEventsPage", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("加载失败：读取审计日志失败（500）");
+  });
+
+  it("offers the real activation-code, batch and session event types for filtering", async () => {
+    installFetch();
+    render(<AuditEventsPage />);
+    await screen.findByText("管理员调账");
+
+    // 下拉项的值必须是后端真实产生的 event_type。此前"查看激活码明文"
+    // 只存在于标签映射里（且键是后端从不产生的 CODE_REVEAL），运营选不到；
+    // 批次创建与管理员强制下线也没有任何入口。
+    const options = (name: string) => screen.getByRole("option", { name });
+    expect(options("查看激活码明文")).toHaveValue(
+      "admin.activation_code.revealed",
+    );
+    expect(options("归档激活码")).toHaveValue("admin.activation_code.archived");
+    expect(options("创建激活码批次")).toHaveValue(
+      "admin.activation_code_batch.created",
+    );
+    expect(options("管理员强制下线")).toHaveValue("ADMIN_SESSION_LOGOUT");
+  });
+
+  it("labels an administrator-forced session revoke as an administrator session action", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        jsonResponse({
+          items: [
+            auditItem({
+              event_id: "evt-session-1",
+              event_type: "ADMIN_SESSION_LOGOUT",
+              actor_username: "admin_op",
+              target_user_id: "customer-7",
+              source_document_type: "CUSTOMER_SESSION",
+              source_document_ref: "sess-7",
+              reason: "客服确认账号异常",
+              request_id: "req-audit-session",
+            }),
+            // 未列入下拉选项的会话事件走族回退标签。
+            auditItem({
+              event_id: "evt-session-2",
+              event_type: "ADMIN_SESSION_SWITCH",
+              actor_username: "admin_op",
+              target_user_id: "customer-7",
+              source_document_type: "CUSTOMER_SESSION",
+              source_document_ref: "sess-8",
+              reason: "换设备",
+              request_id: "req-audit-session-2",
+            }),
+          ],
+          total: 2,
+          limit: PAGE_SIZE,
+          offset: 0,
+        }),
+      ),
+    );
+
+    render(<AuditEventsPage />);
+
+    // 选项表里的具体标签优先于 ADMIN_SESSION_ 族回退。
+    expect(await screen.findByText("管理员强制下线")).toBeInTheDocument();
+    expect(screen.getByText("客服确认账号异常")).toBeInTheDocument();
+    // 来源单列渲染成"类型 / 引用"的组合串（超长会截断），故用正则。
+    expect(screen.getByText(/sess-7/)).toBeInTheDocument();
+    expect(screen.getByText("管理员会话操作")).toBeInTheDocument();
+    expect(screen.getByText(/sess-8/)).toBeInTheDocument();
   });
 });

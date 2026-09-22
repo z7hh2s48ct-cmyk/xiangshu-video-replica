@@ -19,6 +19,16 @@ const EVENT_OPTIONS = [
   ["customer_unit_price.update", "客户单价调整"],
   ["customer_unit_price.reset", "客户单价恢复默认"],
   ["runtime_settings.update", "运行参数调整"],
+  // 激活码类是 audit_logs 里的 admin.activation_code.* 动作（archive/reveal
+  // 走 audit_logs，suspend/resume/revoke 走 activation_code_events）。
+  // 此前这里只有标签映射里的一个 CODE_REVEAL 分支，而后端从不产生该值，
+  // 运营既选不到、reveal 行也只能显示成"系统操作"。
+  ["admin.activation_code.revealed", "查看激活码明文"],
+  ["admin.activation_code.revealed_replay", "查看激活码明文（幂等重放）"],
+  ["admin.activation_code.archived", "归档激活码"],
+  ["admin.activation_code_batch.created", "创建激活码批次"],
+  // 管理员强制下线：customer_session_events 中 actor 非会话属主的行。
+  ["ADMIN_SESSION_LOGOUT", "管理员强制下线"],
 ] as const;
 
 const EVENT_LABELS = new Map<string, string>(EVENT_OPTIONS);
@@ -27,8 +37,9 @@ function eventLabel(eventType: string) {
   if (EVENT_LABELS.has(eventType))
     return EVENT_LABELS.get(eventType) ?? "系统操作";
   if (eventType.startsWith("ADMIN_DEVICE_")) return "设备管理";
+  if (eventType.startsWith("ADMIN_SESSION_")) return "管理员会话操作";
   if (eventType.startsWith("ACTIVATION_CODE_")) return "激活码操作";
-  if (eventType === "CODE_REVEAL") return "查看激活码明文";
+  if (eventType.startsWith("admin.activation_code")) return "激活码操作";
   if (eventType.includes("reconciliation")) return "对账查询";
   return "系统操作";
 }

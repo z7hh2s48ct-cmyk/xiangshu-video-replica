@@ -296,6 +296,38 @@ def test_initial_grant_response_matches_frozen_price(
     assert row[0] > 0
 
 
+def test_batch_creation_writes_an_audit_row(
+    client: TestClient, admin_headers: dict[str, str], clean_state: str
+) -> None:
+    """批次铸造必须留审计行：只写业务表等于"凭空造码"无人可追溯.
+
+    与 archive / reveal 同口径（audit_logs 里的 admin.activation_code.* 动作），
+    审计中心因此能用统一查询回答"谁在什么时候按什么理由造了这一批码"。
+    批次行本身只回答"造了什么"。
+    """
+    response = _create_batch(client, admin_headers, quantity=7)
+    assert response.status_code == 201, response.text
+    batch_id = response.json()["batch_id"]
+
+    with psycopg.connect(clean_state) as conn:
+        rows = conn.execute(
+            "SELECT actor_user_id, metadata_json FROM audit_logs "
+            "WHERE action = 'admin.activation_code_batch.created' "
+            "AND entity_id = %s",
+            (batch_id,),
+        ).fetchall()
+
+    assert len(rows) == 1
+    actor_user_id, metadata_json = rows[0]
+    assert actor_user_id  # 真实 actor，不是机器行
+    metadata = json.loads(metadata_json)
+    assert metadata["reason"] == "渠道备货"
+    assert metadata["quantity"] == 7
+    assert metadata["face_value_fen"] == 1500
+    assert metadata["credits"] == 100
+    assert metadata["request_id"] == response.json()["request_id"]
+
+
 def test_write_rejects_missing_csrf_header(
     client: TestClient, admin_headers: dict[str, str]
 ) -> None:

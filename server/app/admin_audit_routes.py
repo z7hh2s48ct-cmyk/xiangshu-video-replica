@@ -7,10 +7,22 @@ question instead of one ledger slice:
 
 - ``admin_adjustments`` (039)      → ADMIN_ADJUSTMENT
 - ``admin_device_events`` (038)    → ADMIN_DEVICE_<EVENT>
+- ``customer_session_events`` (029) → ADMIN_SESSION_<EVENT> — only rows an
+  administrator acted on (see the branch predicate); see below.
 - ``activation_code_events`` (027) → ACTIVATION_CODE_<EVENT>
 - ``activation_code_deliveries`` (027) → ACTIVATION_CODE_DELIVERED
 - ``audit_logs`` (001)             → the action itself (runtime switches,
   control exports, payment syncs, security denials, …)
+
+``customer_session_events`` is a *domain* table: it records the customer's own
+session traffic too (LOGIN, LOGOUT, and a HEARTBEAT row per lease renewal). An
+audit trail must not drown in that, so the branch keeps only rows where the
+actor is **not** the session's owner — i.e. an administrator forcing the
+session down. Self-logout writes ``actor_user_id = user_id`` and system sweeps
+(TIMEOUT) write no actor at all, so both fall outside the predicate by
+construction. Reading the domain table (rather than only logging new revokes)
+is deliberate: revoked sessions are already on record, and this way they become
+auditable without a backfill.
 
 Filters: ``event_type`` (exact match on the unified type), ``actor_user_id``,
 ``target_user_id`` and a ``created_from``/``created_to`` ISO timestamp range.
@@ -59,6 +71,16 @@ _UNION_SQL = """
            ''::text, NULL::integer, NULL::integer, NULL::jsonb
     FROM admin_device_events de
     JOIN users u ON u.id = de.admin_user_id
+    UNION ALL
+    SELECT cse.id, 'ADMIN_SESSION_' || cse.event,
+           COALESCE(cse.actor_user_id, ''), COALESCE(u5.username, ''),
+           cse.user_id, 'CUSTOMER_SESSION', cse.session_id,
+           COALESCE(cse.reason, ''), COALESCE(cse.request_id, ''),
+           cse.created_at::timestamptz,
+           ''::text, NULL::integer, NULL::integer, NULL::jsonb
+    FROM customer_session_events cse
+    LEFT JOIN users u5 ON u5.id = cse.actor_user_id
+    WHERE cse.actor_user_id IS NOT NULL AND cse.actor_user_id <> cse.user_id
     UNION ALL
     SELECT ae.id, 'ACTIVATION_CODE_' || ae.event,
            COALESCE(ae.actor_user_id, ''), COALESCE(u2.username, ''),
@@ -126,6 +148,7 @@ _UNION_SQL = """
 """
 _UNION_SQL = _UNION_SQL.replace("aa.created_at::timestamptz", utc_timestamp_sql("aa.created_at"))
 _UNION_SQL = _UNION_SQL.replace("de.created_at::timestamptz", utc_timestamp_sql("de.created_at"))
+_UNION_SQL = _UNION_SQL.replace("cse.created_at::timestamptz", utc_timestamp_sql("cse.created_at"))
 _UNION_SQL = _UNION_SQL.replace("ae.created_at::timestamptz", utc_timestamp_sql("ae.created_at"))
 _UNION_SQL = _UNION_SQL.replace("d.delivered_at::timestamptz", utc_timestamp_sql("d.delivered_at"))
 _UNION_SQL = _UNION_SQL.replace("al.created_at::timestamptz", utc_timestamp_sql("al.created_at"))

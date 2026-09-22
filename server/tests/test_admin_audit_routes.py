@@ -390,6 +390,74 @@ def _insert_device_event(
     return event_id
 
 
+def _insert_session_event(
+    conn: psycopg.Connection,
+    *,
+    event: str,
+    actor: str | None,
+    owner: str,
+    session_id: str = "audit-session",
+) -> str:
+    """Seed one ``customer_session_events`` row.
+
+    ``actor`` is the acting user id: an administrator for a forced revoke, the
+    session owner for a self-logout, or ``None`` for a system sweep (TIMEOUT).
+
+    Reuses ``_insert_device_event``'s batch/code/device chain rather than
+    minting a second one: ``activation_codes`` carries a "one current code per
+    bound user" unique constraint, so two chains for the same owner collide.
+    The ``ON CONFLICT (id) DO NOTHING`` inserts make the two helpers
+    order-independent.
+    """
+    conn.execute(
+        "INSERT INTO activation_code_batches "
+        "(id, name, face_value_fen, unit_price_fen_snapshot, credits_snapshot, "
+        " quantity, activation_expires_at, status, created_by_user_id) "
+        "VALUES ('audit-batch', 'audit-batch', 1000, 1000, 1, 1, "
+        "'2099-01-01T00:00:00+00:00', 'OPEN', 'admin_u') "
+        "ON CONFLICT (id) DO NOTHING"
+    )
+    conn.execute(
+        "INSERT INTO activation_codes "
+        "(id, batch_id, code_digest, digest_key_version, masked_code, status, "
+        " issued_at, bound_user_id, activated_at) "
+        "VALUES ('audit-code', 'audit-batch', 'digest-audit', 1, 'XS04-****A', "
+        "'ACTIVE', '2026-01-01T00:00:00+00:00', %s, "
+        "'2026-01-01T00:00:00+00:00') "
+        "ON CONFLICT (id) DO NOTHING",
+        (owner,),
+    )
+    conn.execute(
+        "INSERT INTO customer_devices "
+        "(id, activation_code_id, user_id, slot_no, display_name, platform, "
+        " fingerprint_hmac, fingerprint_key_version, token_digest, "
+        " token_key_version, status, bound_at) "
+        "VALUES ('audit-device', 'audit-code', %s, 1, '审计设备', 'windows', "
+        "'audit-fp', 1, 'audit-token', 1, 'BOUND', "
+        "'2026-01-01T00:00:00+00:00') "
+        "ON CONFLICT (id) DO NOTHING",
+        (owner,),
+    )
+    event_id = str(uuid.uuid4())
+    conn.execute(
+        "INSERT INTO customer_session_events "
+        "(id, event, user_id, activation_code_id, device_id, session_id, "
+        " session_epoch, actor_user_id, reason, request_id) "
+        "VALUES (%s, %s, %s, 'audit-code', 'audit-device', %s, 3, %s, %s, %s)",
+        (
+            event_id,
+            event,
+            owner,
+            session_id,
+            actor,
+            "客服确认账号异常",
+            str(uuid.uuid4()),
+        ),
+    )
+    conn.commit()
+    return event_id
+
+
 @pytest.mark.pg
 def test_list_audit_log_unions_all_audited_surfaces(client: TestClient, route_state: str):
     """A10：一个查询看到调账、设备操作与通用审计行，不再只看一类."""
@@ -403,6 +471,13 @@ def test_list_audit_log_unions_all_audited_surfaces(client: TestClient, route_st
             reason="客户补偿",
         )
         _insert_device_event(conn, actor="admin_u", target="customer_u")
+        _insert_session_event(
+            conn,
+            event="LOGOUT",
+            actor="admin_u",
+            owner="customer_u",
+            session_id="audit-session-union",
+        )
         conn.execute(
             "INSERT INTO audit_logs "
             "(id, actor_user_id, action, entity_type, entity_id, metadata_json) "
@@ -421,6 +496,7 @@ def test_list_audit_log_unions_all_audited_surfaces(client: TestClient, route_st
     types = {item["event_type"] for item in data["items"]}
     assert "ADMIN_ADJUSTMENT" in types
     assert "ADMIN_DEVICE_DEVICE_ADMIN_UNBOUND" in types
+    assert "ADMIN_SESSION_LOGOUT" in types
     assert "runtime_settings.update" in types
 
     # 统一形状：每行都有操作者与 request id（可空的为空串）。
@@ -435,6 +511,64 @@ def test_list_audit_log_unions_all_audited_surfaces(client: TestClient, route_st
             "request_id",
             "created_at",
         }
+
+
+@pytest.mark.pg
+def test_session_audit_shows_admin_revokes_and_hides_customer_traffic(
+    client: TestClient, route_state: str
+):
+    """会话审计只收管理员动作：客户自注销与心跳不得进审计日志.
+
+    ``customer_session_events`` 同时记录客户自己的会话流量——每次续租写一行
+    HEARTBEAT。全量并入会让"查审计"淹没在心跳里，因此 UNION 分支只保留
+    actor 非会话属主的行，也就是管理员强制下线。判别的三条边界一次钉住：
+    管理员动作进入、自注销排除（actor == owner）、系统清扫排除（actor 为空）。
+    """
+    _admin_session(client, "admin_u")
+    with psycopg.connect(_t34_dsn(), autocommit=True) as conn:
+        _insert_session_event(
+            conn,
+            event="LOGOUT",
+            actor="admin_u",
+            owner="customer_u",
+            session_id="sess-forced",
+        )
+        _insert_session_event(
+            conn,
+            event="LOGOUT",
+            actor="customer_u",
+            owner="customer_u",
+            session_id="sess-self",
+        )
+        _insert_session_event(
+            conn,
+            event="HEARTBEAT",
+            actor=None,
+            owner="customer_u",
+            session_id="sess-self",
+        )
+        _insert_session_event(
+            conn,
+            event="TIMEOUT",
+            actor=None,
+            owner="customer_u",
+            session_id="sess-self",
+        )
+        conn.commit()
+
+    response = client.get(AUDIT_PATH, params={"event_type": "ADMIN_SESSION_LOGOUT"})
+    assert response.status_code == 200
+    items = response.json()["items"]
+
+    assert {item["source_document_ref"] for item in items} == {"sess-forced"}
+    forced = items[0]
+    assert forced["actor_user_id"] == "admin_u"
+    assert forced["actor_username"] == "admin_u"
+    assert forced["target_user_id"] == "customer_u"
+    assert forced["target_username"] == "customer_u"
+    assert forced["source_document_type"] == "CUSTOMER_SESSION"
+    assert forced["reason"] == "客服确认账号异常"
+    assert forced["request_id"] != ""
 
 
 @pytest.mark.pg

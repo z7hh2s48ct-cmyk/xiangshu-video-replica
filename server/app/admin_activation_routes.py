@@ -233,6 +233,31 @@ def create_activation_code_batch(
                 request_id,
             ),
         )
+        # 批次铸造是"凭空造码"的起点，与 archive/reveal 同属不能只留在业务表的
+        # 动作（031 download-audit 先例）。批次行本身只回答"造了什么"，这里回答
+        # "谁在什么时候按什么理由造的"，供审计中心统一 UNION 查询。
+        conn.execute(
+            "INSERT INTO audit_logs "
+            "(id, actor_user_id, action, entity_type, entity_id, metadata_json) "
+            "VALUES (%s, %s, 'admin.activation_code_batch.created', "
+            "'activation_code_batch', %s, %s)",
+            (
+                str(uuid.uuid4()),
+                actor.user_id,
+                batch_id,
+                json.dumps(
+                    {
+                        "request_id": request_id,
+                        "reason": body.reason.strip(),
+                        "quantity": body.quantity,
+                        "face_value_fen": body.face_value_fen,
+                        "credits": body.credits,
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
+            ),
+        )
         logger.info(
             "activation code batch created: batch=%s quantity=%d actor=%s request=%s",
             batch_id,
