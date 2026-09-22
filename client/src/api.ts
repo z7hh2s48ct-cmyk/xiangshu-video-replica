@@ -5166,6 +5166,33 @@ export async function updateProviderSettings(
   );
 }
 
+/**
+ * Reveal one stored provider secret in plaintext (audited server-side).
+ *
+ * Two things about this call look wrong and are not:
+ *
+ * 1. The `/api/admin/settings` prefix is CORRECT, not a leftover. The route
+ *    lives on the internal settings lane, whose guard is an
+ *    `AuthenticatedUser` with the `admin` role (`settings_routes.py:77-89`).
+ *    Pointing it at `/api/control` would 404 — the control plane has no such
+ *    route at all.
+ *
+ * 2. The control console never reaches it, and not by omission. `SettingsPanel`
+ *    is shared by both lanes, but the reveal handler is refused for the control
+ *    source (`SettingsPanel.tsx:224-229`: "控制台不支持显示已保存密钥") and is
+ *    only even handed to the panel when `source === "workspace"`
+ *    (`SettingsPanel.tsx:274`). So the admin console has no reveal affordance
+ *    at all — by design. The backend keeps the reveal audited
+ *    (`provider_settings.secret_reveal`) for the lane that does allow it.
+ *
+ * The 2026-09-18 gap analysis lists "provider 密钥 reveal 指向旧 /api/admin
+ * 前缀且管理端未接" as an open P1 item. That entry reads like a defect to
+ * repair; it is actually a policy to confirm. Reopening it means deciding
+ * whether the control-plane session (a *different* auth lane, with an
+ * `auditor` role that must stay read-only) should be able to read provider
+ * API keys — a security-posture call, so it is left as-is here rather than
+ * "fixed" by moving the prefix.
+ */
 export async function revealProviderSecret(
   provider: ProviderName,
   field: string,
