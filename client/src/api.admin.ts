@@ -133,12 +133,15 @@ export type WechatSelfCheckResult = {
 };
 /** 真实调一次微信 /v3/certificates 验证已保存的商户三件套（只读探测）。 */
 export async function selfCheckWechatNative(): Promise<WechatSelfCheckResult> {
-  const response = await requestControl(
+  // 无 body 的 POST 也要走 adminWrite：客户生产模式对写方法强制 CSRF 门禁，
+  // 裸 requestControl 不带 X-Admin-CSRF 会被服务端 403 ADMIN_CSRF_REQUIRED。
+  // 服务端不读 body，confirm/reason 仅随契约封装携带。
+  return adminWrite<WechatSelfCheckResult>(
     "/api/control/settings/customer-payments/wechat-native/self-check",
-    { method: "POST" },
+    {},
+    "商户凭据自检",
+    "凭据自检失败",
   );
-  if (!response.ok) throw await parseActivationError(response, "凭据自检失败");
-  return response.json();
 }
 export function updateCustomerPaymentBilling(
   input: Omit<BillingSettings, "charged_unit_price_fen">,
