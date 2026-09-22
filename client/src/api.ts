@@ -7000,6 +7000,15 @@ export async function customerUpdateProfile(
 
 /** CW-062 客户自助子账号（/api/customer/sub-accounts）：后端返回 dict，
  * 契约里是 unknown，故在此手写响应形状（与 admin lane 的先例一致）。 */
+/** Phase 3b 功能权限载荷：null = 全允许（无权限行）。与后端
+ * ``SetSubAccountPermissionsRequest`` 三字段一致（业务键见
+ * ``sub_account_permissions.BUSINESS_FEATURES``）。 */
+export type CustomerSubAccountPermissions = {
+  businesses: string[];
+  allow_api_keys: boolean;
+  allow_publish_accounts: boolean;
+};
+
 export type CustomerSubAccount = {
   id: string;
   username: string;
@@ -7016,6 +7025,8 @@ export type CustomerSubAccount = {
   quota_used_credits: number;
   /** 剩余额度（钳制到 0）；无额度行时为 null。 */
   quota_remaining_credits: number | null;
+  /** Phase 3b 功能权限：null = 全允许（无权限行，与额度对称）。 */
+  permissions: CustomerSubAccountPermissions | null;
 };
 
 export async function customerListSubAccounts(
@@ -7036,6 +7047,8 @@ export async function customerCreateSubAccount(
     password?: string;
     /** Phase 3a：可选的初始月度额度；缺省 = 不限。 */
     monthly_quota_credits?: number;
+    /** Phase 3b：可选的初始功能权限；缺省 = 全允许。 */
+    permissions?: CustomerSubAccountPermissions;
   },
 ): Promise<CustomerSubAccount> {
   const { body } = await customerJson<CustomerSubAccount>(
@@ -7048,7 +7061,12 @@ export async function customerCreateSubAccount(
 export async function customerUpdateSubAccount(
   credential: CustomerSessionCredential,
   subAccountId: string,
-  input: { display_name?: string; is_active?: boolean },
+  input: {
+    display_name?: string;
+    is_active?: boolean;
+    /** Phase 3b：角色变更（母账号限定）；SUB_ADMIN 可代母账号管理普通子账号。 */
+    account_type?: "SUB" | "SUB_ADMIN";
+  },
 ): Promise<CustomerSubAccount> {
   const { body } = await customerJson<CustomerSubAccount>(
     `/api/customer/sub-accounts/${encodeURIComponent(subAccountId)}`,
@@ -7082,6 +7100,19 @@ export async function customerSetSubAccountQuota(
       credential,
       body: { monthly_quota_credits: monthlyQuotaCredits },
     },
+  );
+  return body;
+}
+
+/** Phase 3b：设置功能权限；保存全开值 = 清除限制（后端删行，仅存受限态）。 */
+export async function customerSetSubAccountPermissions(
+  credential: CustomerSessionCredential,
+  subAccountId: string,
+  permissions: CustomerSubAccountPermissions,
+): Promise<CustomerSubAccount> {
+  const { body } = await customerJson<CustomerSubAccount>(
+    `/api/customer/sub-accounts/${encodeURIComponent(subAccountId)}/permissions`,
+    { method: "PUT", credential, body: permissions },
   );
   return body;
 }

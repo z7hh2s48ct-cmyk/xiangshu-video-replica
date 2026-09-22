@@ -45,6 +45,7 @@ from app.customer_fence import (
     customer_session_snapshot,
     fenced_pg_transaction,
 )
+from app.sub_account_permissions import enforce_sub_account_api_keys
 
 router = APIRouter(prefix="/api/customer/api-keys", tags=["customer-api-keys"])
 
@@ -181,6 +182,9 @@ def _mutate_key(
     try:
         with fenced_pg_transaction(snapshot) as (conn, ctx):
             _lock_customer(conn, ctx.user_id)
+            # Token admission (Phase 3b): create/default/rotate are one gate,
+            # replays included, so re-enabling the switch is the only way back.
+            enforce_sub_account_api_keys(conn, actor_id=ctx.user_id)
             now_row = conn.execute("SELECT clock_timestamp()").fetchone()
             assert now_row is not None
             now = now_row[0]

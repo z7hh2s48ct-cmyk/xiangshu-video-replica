@@ -44,6 +44,8 @@ const subAccount = {
   monthly_quota_credits: null,
   quota_used_credits: 0,
   quota_remaining_credits: null,
+  // Phase 3b 功能权限：缺省 = 全允许（null 无权限行）。
+  permissions: null,
 };
 
 function jsonResponse(payload: unknown, status = 200) {
@@ -609,6 +611,328 @@ describe("SubAccountManagementPage", () => {
     expect(screen.getByText("额度已用尽")).toBeInTheDocument();
     expect(
       screen.getByText("额度已用尽；调高月度额度或等下月 1 日重置后恢复消费。"),
+    ).toBeInTheDocument();
+  });
+
+  // 批次2：权限摘要行与徽章——受限显示禁用明细，不受限显示「全部开放」。
+  it("surfaces the feature-permission state on the card", async () => {
+    const restricted = {
+      ...subAccount,
+      permissions: {
+        businesses: ["video", "oral"],
+        allow_api_keys: false,
+        allow_publish_accounts: false,
+      },
+    };
+    const free = {
+      ...subAccount,
+      id: "sub-2",
+      username: "sub_2",
+      display_name: "李四",
+      permissions: null,
+    };
+    stubFetch(() =>
+      jsonResponse({ sub_accounts: [restricted, free], total_count: 2 }),
+    );
+    render(
+      <SubAccountManagementPage
+        store={storeWithSession(sessionToken)}
+        onSessionExpired={vi.fn()}
+      />,
+    );
+    await screen.findByText("张三", { selector: "strong" });
+
+    expect(screen.getByText("权限受限")).toBeInTheDocument();
+    expect(
+      screen.getByText("权限：2/12 类业务 · Token 禁用 · 发布账号禁用"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("权限：全部开放")).toBeInTheDocument();
+  });
+
+  // 批次2：管理员角色徽章与「取消管理员」入口（account_type=SUB_ADMIN）。
+  it("marks an admin sub-account and offers the demotion entry", async () => {
+    const admin = { ...subAccount, account_type: "SUB_ADMIN" as const };
+    stubFetch(() => jsonResponse({ sub_accounts: [admin], total_count: 1 }));
+    render(
+      <SubAccountManagementPage
+        store={storeWithSession(sessionToken)}
+        onSessionExpired={vi.fn()}
+      />,
+    );
+    await screen.findByText("张三", { selector: "strong" });
+
+    expect(screen.getByText("管理员")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "取消管理员" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "设为管理员" }),
+    ).not.toBeInTheDocument();
+  });
+
+  // 批次2：Modal 打开时回显服务端权限，保存经 PUT 三字段提交（规范化序）。
+  it("edits the permission matrix in the modal and saves it", async () => {
+    const restricted = {
+      ...subAccount,
+      permissions: {
+        businesses: ["oral", "video"],
+        allow_api_keys: false,
+        allow_publish_accounts: true,
+      },
+    };
+    const fetchMock = stubFetch((_url, init) => {
+      if (init?.method === "PUT") {
+        return jsonResponse(restricted);
+      }
+      return jsonResponse({ sub_accounts: [restricted], total_count: 1 });
+    });
+    render(
+      <SubAccountManagementPage
+        store={storeWithSession(sessionToken)}
+        onSessionExpired={vi.fn()}
+      />,
+    );
+    await screen.findByText("张三", { selector: "strong" });
+
+    fireEvent.click(screen.getByRole("button", { name: "设置权限" }));
+    const dialog = screen.getByRole("dialog", { name: /功能权限 张三/ });
+
+    expect(
+      within(dialog).getByRole("checkbox", { name: "视频生成" }),
+    ).toBeChecked();
+    expect(
+      within(dialog).getByRole("checkbox", { name: "数字人口播" }),
+    ).toBeChecked();
+    expect(
+      within(dialog).getByRole("checkbox", { name: "视频拆解" }),
+    ).not.toBeChecked();
+    expect(
+      within(dialog).getByRole("checkbox", { name: "允许创建 API Token" }),
+    ).not.toBeChecked();
+    expect(
+      within(dialog).getByRole("checkbox", {
+        name: "允许使用发布账号（导入 / 扫码）",
+      }),
+    ).toBeChecked();
+
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: "视频拆解" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存权限" }));
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([, init]) => init?.method === "PUT"),
+      ).toBe(true),
+    );
+    const putCall = fetchMock.mock.calls.find(
+      ([, init]) => init?.method === "PUT",
+    );
+    expect(String(putCall?.[0])).toContain(
+      "/api/customer/sub-accounts/sub-1/permissions",
+    );
+    expect(JSON.parse(String(putCall?.[1]?.body))).toEqual({
+      businesses: ["video", "oral", "analysis"],
+      allow_api_keys: false,
+      allow_publish_accounts: true,
+    });
+    expect(
+      await screen.findByText("已更新「张三」的功能权限。"),
+    ).toBeInTheDocument();
+    // 保存成功后 Modal 关闭，不会滞留遮罩。
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  // 批次2：全开保存 = 恢复默认（后端折叠为删行），前端给出恢复提示。
+  it("saves the full grant to restore the default permissions", async () => {
+    const elevenKeys = [
+      "video",
+      "oral",
+      "character",
+      "first_frame",
+      "analysis",
+      "rewrite",
+      "asr",
+      "link_resolution",
+      "prompt_optimize",
+      "avatar_clone",
+      "voice_clone",
+    ];
+    const restricted = {
+      ...subAccount,
+      permissions: {
+        businesses: elevenKeys,
+        allow_api_keys: true,
+        allow_publish_accounts: false,
+      },
+    };
+    const fetchMock = stubFetch((_url, init) => {
+      if (init?.method === "PUT") {
+        return jsonResponse({ ...subAccount, permissions: null });
+      }
+      return jsonResponse({ sub_accounts: [restricted], total_count: 1 });
+    });
+    render(
+      <SubAccountManagementPage
+        store={storeWithSession(sessionToken)}
+        onSessionExpired={vi.fn()}
+      />,
+    );
+    await screen.findByText("张三", { selector: "strong" });
+
+    fireEvent.click(screen.getByRole("button", { name: "设置权限" }));
+    const dialog = screen.getByRole("dialog", { name: /功能权限 张三/ });
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: "爆款数据" }));
+    fireEvent.click(
+      within(dialog).getByRole("checkbox", {
+        name: "允许使用发布账号（导入 / 扫码）",
+      }),
+    );
+    expect(
+      within(dialog).getByText("当前为全部开放：保存后该子账号恢复默认权限。"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存权限" }));
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([, init]) => init?.method === "PUT"),
+      ).toBe(true),
+    );
+    const putCall = fetchMock.mock.calls.find(
+      ([, init]) => init?.method === "PUT",
+    );
+    expect(JSON.parse(String(putCall?.[1]?.body))).toEqual({
+      businesses: [...elevenKeys, "viral_data"],
+      allow_api_keys: true,
+      allow_publish_accounts: true,
+    });
+    expect(
+      await screen.findByText("已恢复「张三」的全部权限。"),
+    ).toBeInTheDocument();
+  });
+
+  // 批次2：保存失败（422 未知业务键）在 Modal 内展示，不关闭。
+  it("keeps the modal open with the backend error when saving fails", async () => {
+    const restricted = {
+      ...subAccount,
+      permissions: {
+        businesses: ["video"],
+        allow_api_keys: true,
+        allow_publish_accounts: true,
+      },
+    };
+    stubFetch((_url, init) => {
+      if (init?.method === "PUT") {
+        return jsonResponse(
+          {
+            detail: {
+              code: "INVALID_BUSINESS_PERMISSIONS",
+              message: "未知业务权限键：wat。",
+            },
+          },
+          422,
+        );
+      }
+      return jsonResponse({ sub_accounts: [restricted], total_count: 1 });
+    });
+    render(
+      <SubAccountManagementPage
+        store={storeWithSession(sessionToken)}
+        onSessionExpired={vi.fn()}
+      />,
+    );
+    await screen.findByText("张三", { selector: "strong" });
+
+    fireEvent.click(screen.getByRole("button", { name: "设置权限" }));
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "保存权限",
+      }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "未知业务权限键：wat。",
+    );
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  // 批次2：设为管理员（PATCH account_type=SUB_ADMIN），confirm 确认后提交。
+  it("promotes a plain sub-account to SUB_ADMIN after confirmation", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const fetchMock = stubFetch((_url, init) => {
+      if (init?.method === "PATCH") {
+        return jsonResponse({ ...subAccount, account_type: "SUB_ADMIN" });
+      }
+      return jsonResponse({ sub_accounts: [subAccount], total_count: 1 });
+    });
+    render(
+      <SubAccountManagementPage
+        store={storeWithSession(sessionToken)}
+        onSessionExpired={vi.fn()}
+      />,
+    );
+    await screen.findByText("张三", { selector: "strong" });
+
+    fireEvent.click(screen.getByRole("button", { name: "设为管理员" }));
+
+    expect(confirmSpy).toHaveBeenCalled();
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH"),
+      ).toBe(true),
+    );
+    const patchCall = fetchMock.mock.calls.find(
+      ([, init]) => init?.method === "PATCH",
+    );
+    expect(String(patchCall?.[0])).toContain(
+      "/api/customer/sub-accounts/sub-1",
+    );
+    expect(JSON.parse(String(patchCall?.[1]?.body))).toEqual({
+      account_type: "SUB_ADMIN",
+    });
+    expect(
+      await screen.findByText("已将「张三」设为管理员。"),
+    ).toBeInTheDocument();
+  });
+
+  // 批次2：取消管理员——拒绝确认不发请求，确认后 PATCH 回 SUB。
+  it("demotes an admin only after the confirmation is accepted", async () => {
+    const admin = { ...subAccount, account_type: "SUB_ADMIN" as const };
+    vi.spyOn(window, "confirm")
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
+    const fetchMock = stubFetch((_url, init) => {
+      if (init?.method === "PATCH") {
+        return jsonResponse({ ...subAccount, account_type: "SUB" });
+      }
+      return jsonResponse({ sub_accounts: [admin], total_count: 1 });
+    });
+    render(
+      <SubAccountManagementPage
+        store={storeWithSession(sessionToken)}
+        onSessionExpired={vi.fn()}
+      />,
+    );
+    await screen.findByText("张三", { selector: "strong" });
+
+    fireEvent.click(screen.getByRole("button", { name: "取消管理员" }));
+    expect(
+      fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH"),
+    ).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "取消管理员" }));
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH"),
+      ).toBe(true),
+    );
+    const patchCall = fetchMock.mock.calls.find(
+      ([, init]) => init?.method === "PATCH",
+    );
+    expect(JSON.parse(String(patchCall?.[1]?.body))).toEqual({
+      account_type: "SUB",
+    });
+    expect(
+      await screen.findByText("已取消「张三」的管理员身份。"),
     ).toBeInTheDocument();
   });
 });

@@ -238,3 +238,90 @@
   border-color: #713944;
   color: #ffc0c8;
 }
+/* 批次2 功能权限矩阵：卡片权限摘要行 / 管理员徽章 / 权限 Modal。
+   沿本文件既有直写色值风格（金 #e0a83f / 危险 #b06060 / 次要 #aaa297）。 */
+
+.sub-account-card__permissions {
+  color: #cfc8bd;
+}
+.sub-account-badge.is-admin {
+  border-color: #806226;
+  color: #e0a83f;
+}
+.sub-account-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(0 0 0 / 60%);
+}
+.sub-account-modal__panel {
+  display: grid;
+  gap: 14px;
+  width: min(640px, 100%);
+  max-height: 80vh;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 22px 24px;
+  background: var(--panel);
+}
+.sub-account-modal__header h4 {
+  margin: 0 0 4px;
+  color: #f4efe7;
+}
+.sub-account-modal__header p {
+  margin: 0;
+  color: #aaa297;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: var(--font-caption);
+}
+.sub-account-modal__hint {
+  margin: 0;
+  color: #8d867c;
+  font-size: var(--font-caption);
+}
+.sub-account-permission-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 14px;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+.sub-account-permission-grid legend,
+.sub-account-permission-switches legend {
+  padding: 0 6px;
+  color: #cfc8bd;
+  font-size: var(--font-label);
+}
+.sub-account-permission-grid label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #cfc8bd;
+  font-size: var(--font-caption);
+}
+.sub-account-permission-switches {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+.sub-account-permission-switches label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #cfc8bd;
+  font-size: var(--font-caption);
+}
+.sub-account-modal__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}

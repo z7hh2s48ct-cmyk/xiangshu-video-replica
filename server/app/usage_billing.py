@@ -18,6 +18,7 @@ from app.billing_catalog import (
     snapshot_discount_rate,
 )
 from app.db_portable import BusinessConnection
+from app.sub_account_permissions import enforce_sub_account_feature
 from app.sub_account_quota import enforce_sub_account_quota
 
 
@@ -76,6 +77,10 @@ def accept_operation(
     # discount is read from the wallet owner (a sub-account spends the
     # master's wallet and rides the master's discounts, T2.10).
     wallet_owner_id = resolve_wallet_owner(conn, user_id)
+    # Feature admission (Phase 3b): restricted sub-accounts cannot use the
+    # features their master disabled. Enforced before pricing and
+    # independently of `credits`, so free operations are covered too.
+    enforce_sub_account_feature(conn, actor_id=user_id, service=service)
     snapshot = (
         dict(pricing_snapshot)
         if pricing_snapshot is not None

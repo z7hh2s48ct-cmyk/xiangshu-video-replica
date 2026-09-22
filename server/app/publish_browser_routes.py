@@ -32,6 +32,7 @@ from app.publish_browser import (
 from app.publish_browser_engine import login_events
 from app.settings import fernet_from_environment
 from app.storage import StorageAdapter
+from app.sub_account_permissions import enforce_sub_account_publish_accounts
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,9 @@ def import_account(
             entity_type="publish_account",
             entity_id="import",
         )
+        # Account-binding admission (Phase 3b): restricted sub-accounts
+        # without the publish switch cannot bind imported accounts.
+        enforce_sub_account_publish_accounts(conn, actor_id=actor.id)
         return import_browser_account(conn, actor.id, request, fernet, storage)
 
 
@@ -134,6 +138,9 @@ def login(request: BrowserLoginRequest, db: BusinessDbDep) -> StreamingResponse:
             entity_type="publish_login",
             entity_id="new",
         )
+        # Account-binding admission (Phase 3b): same gate as import; covers
+        # first-time binds and re-logins of existing accounts alike.
+        enforce_sub_account_publish_accounts(conn, actor_id=actor.id)
         storage = existing_storage(conn, actor.id, request.account_id, fernet)
         login_id = start_login(conn, actor.id, request)
         owner = actor.id

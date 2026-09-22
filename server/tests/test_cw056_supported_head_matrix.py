@@ -62,8 +62,9 @@ REPO_ROOT = SERVER_DIR.parent
 # + recharge_orders.package_id/package_snapshot_json
 # + customer_discounts.source_recharge_order_id，并重写 credit_calculation 三支与
 # amount_price/amount_step 的套餐豁免支；
-# 20260921T1200_sub_account_quotas（Phase 3a 子账号月度额度表）重挂为链尾。
-HEAD_REVISION = "20260921T1200_sub_account_quotas"
+# 20260921T1200_sub_account_quotas（Phase 3a 子账号月度额度表）之后，
+# 20260922T1800_sub_account_permissions（Phase 3b 功能权限矩阵表）重挂为链尾。
+HEAD_REVISION = "20260922T1800_sub_account_permissions"
 
 # 最后一个已发布（受支持）起点。其后的 056…090 与本迁移尚未随任何受支持版本发布，
 # 故冻结范围止于此——把未发布 revision 也纳入哈希会让每次新增迁移都必须改常量，
@@ -108,14 +109,14 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # BEFORE DELETE 各算一行），故 18 行对应 10 个 distinct trigger，不是 10 行。
 HEAD_SCHEMA_COUNTS = {
     "check_constraints": 319,
-    "columns": 1191,
-    "foreign_keys": 191,
+    "columns": 1197,
+    "foreign_keys": 192,
     "identity_columns": 0,
     "jsonb_columns": 4,
     "partial_indexes": 37,
-    "primary_keys": 100,
+    "primary_keys": 101,
     "sequences": 4,
-    "tables": 100,
+    "tables": 101,
     "timestamptz_columns": 56,
     "triggers": 27,
     "unique_constraints": 37,
@@ -219,6 +220,7 @@ HEAD_TABLE_NAMES = (
     "studio_material_preferences",
     "studio_notification_preferences",
     "studio_saved_scripts",
+    "sub_account_permissions",
     "sub_account_quotas",
     "user_queue_cursors",
     "users",
@@ -281,8 +283,12 @@ HEAD_TABLE_NAMES = (
 # - Phase 3a 链尾 20260921T1200_sub_account_quotas 追加 sub_account_quotas：
 #   tables/primary_keys +1、columns +4、foreign_keys +1（user_id→users CASCADE）、
 #   check_constraints +1（monthly_credits >= 0）。
+# - Phase 3b 链尾 20260922T1800_sub_account_permissions 追加 sub_account_permissions
+#   （子账号功能权限矩阵，无行=全允许）：tables/primary_keys +1、columns +6、
+#   foreign_keys +1（user_id→users CASCADE）；jsonb_columns 不变（权限集合/开关
+#   走 TEXT-JSON，与 Phase 3a 同口径）。
 # digest/counts 以 scripts/ci/migration_manifest.py --print-schema 于 postgres:16 重算。
-HEAD_SCHEMA_DIGEST = "931ff9f503a01511015782e80ed65f68d9a0377e21c28e9d4505dbb44f72b766"
+HEAD_SCHEMA_DIGEST = "4440cea9a3be74c31bf09dd1ec339e229d0a2da275dfefbcfc7f947af300244d"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

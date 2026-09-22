@@ -2,9 +2,20 @@
 
 ``/api/customer/sub-accounts`` lets a **master** customer run the sub-account
 lifecycle of its own organisation without the admin lane. Management rides the
-customer session fence — a sub-account session is answered 403 — and every row
-touched is scoped by ``parent_user_id = caller``: a foreign or unknown id gets
-the single 404 ``SUB_ACCOUNT_NOT_FOUND`` (no IDOR oracle).
+customer session fence and splits in two scopes (Phase 3b):
+
+- **Master only** — create, delete, password reset, rename, activation and
+  role changes: only the organisation owner alters the organisation's shape.
+- **Master or granted SUB_ADMIN** — listing, quota and feature-permission
+  configuration. A SUB_ADMIN may only touch plain ``SUB`` rows (never another
+  admin, never itself); queries scope by the organisation's
+  ``parent_user_id`` either way, so a foreign or unknown id gets the single
+  404 ``SUB_ACCOUNT_NOT_FOUND`` (no IDOR oracle).
+
+Feature permissions (Phase 3b) follow the quota row's shape: no row means
+unrestricted, and saving the full grant deletes the row — 'unrestricted' has
+exactly one spelling. ``permissions`` on the payload is ``None`` for an
+unrestricted sub-account.
 
 Lifecycle rules (mirroring the admin lane, plus the customer-lane safety rails):
 
@@ -31,6 +42,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from typing import Literal
 
 import psycopg
 from fastapi import APIRouter, Request
@@ -52,6 +64,7 @@ from app.customer_session_service import (
     revoke_session,
 )
 from app.password_hashing import PasswordPolicyError, hash_password
+from app.sub_account_permissions import is_all_permissions, normalize_businesses
 from app.sub_account_quota import (
     MAX_MONTHLY_QUOTA_CREDITS,
     read_quota_used,
@@ -63,6 +76,17 @@ router = APIRouter(prefix="/api/customer/sub-accounts", tags=["customer-sub-acco
 # A display name is a human label, not an identity: bound it so a careless
 # paste cannot store a megabyte per sub-account.
 MAX_DISPLAY_NAME_LENGTH = 64
+
+
+class SetSubAccountPermissionsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # All three keys are required on purpose so a partial body never widens
+    # access by omission; the full grant (12 businesses + both switches) is
+    # the canonical "unrestricted" spelling and deletes the row.
+    businesses: list[StrictStr]
+    allow_api_keys: bool
+    allow_publish_accounts: bool
 
 
 class CreateSubAccountRequest(BaseModel):
@@ -77,6 +101,11 @@ class CreateSubAccountRequest(BaseModel):
     # Optional monthly spend cap in credits; omitted = unlimited, matching
     # every pre-quota sub-account (the ``sub_account_quotas`` row is the cap).
     monthly_quota_credits: int | None = Field(default=None, ge=0, le=MAX_MONTHLY_QUOTA_CREDITS)
+    # Optional initial feature permissions; omitted = unrestricted. Accepted
+    # at creation so the account never exists (even briefly) with broader
+    # rights than its creator granted — one atomic transaction, no follow-up
+    # PUT that could fail on its own.
+    permissions: SetSubAccountPermissionsRequest | None = None
 
 
 class UpdateSubAccountRequest(BaseModel):
@@ -84,6 +113,9 @@ class UpdateSubAccountRequest(BaseModel):
 
     display_name: StrictStr | None = None
     is_active: bool | None = None
+    # Role change (Phase 3b): promote a plain SUB to SUB_ADMIN or demote it
+    # back. Master only — this endpoint already is.
+    account_type: Literal["SUB", "SUB_ADMIN"] | None = None
 
 
 class SetSubAccountPasswordRequest(BaseModel):
@@ -141,8 +173,9 @@ def _hash_password_boundary(password: str) -> str:
 def _lock_master(conn: psycopg.Connection, user_id: str) -> None:
     """Lock the caller's row and enforce the master-only contract.
 
-    A sub-account session is deliberately refused here: sub-accounts never
-    manage sub-accounts (only the master owns the organisation).
+    Structural changes (create/delete/password/rename/activation/role) stay
+    with the organisation owner: a SUB_ADMIN is deliberately refused here —
+    its grant covers configuring plain SUB rows, never the org's shape.
     """
     row = conn.execute(
         "SELECT is_active, role, account_type, parent_user_id FROM users WHERE id = %s FOR UPDATE",
@@ -154,17 +187,50 @@ def _lock_master(conn: psycopg.Connection, user_id: str) -> None:
         raise _http(403, "MASTER_ACCOUNT_REQUIRED", "该操作仅限母账号执行。")
 
 
+def _lock_org_admin(conn: psycopg.Connection, user_id: str) -> tuple[str, str]:
+    """Lock the caller's row; master or a granted SUB_ADMIN pass, others 403.
+
+    Returns ``(account_type, organisation_id)``: a SUB_ADMIN's organisation
+    is its own parent, so every org-scoped query keeps one owner column.
+    Plain SUB sessions are refused with the same stable code the master-only
+    lane has always answered — the caller needs its master (or an admin).
+    """
+    row = conn.execute(
+        "SELECT is_active, role, account_type, parent_user_id FROM users WHERE id = %s FOR UPDATE",
+        (user_id,),
+    ).fetchone()
+    if row is None or not row[0] or row[1] != "customer":
+        raise _http(401, "ACCOUNT_UNAVAILABLE", "账号已停用，请联系管理员。")
+    if row[2] == "MASTER" and row[3] is None:
+        return "MASTER", user_id
+    if row[2] == "SUB_ADMIN" and row[3] is not None:
+        return "SUB_ADMIN", str(row[3])
+    raise _http(403, "MASTER_ACCOUNT_REQUIRED", "该操作仅限母账号执行。")
+
+
+def _require_plain_sub_scope(caller_type: str, current: tuple[object, ...]) -> None:
+    """A SUB_ADMIN may only configure plain SUB rows — admins are master-only."""
+    if caller_type != "MASTER" and str(current[3]) != "SUB":
+        raise _http(403, "MASTER_ACCOUNT_REQUIRED", "该操作仅限母账号执行。")
+
+
 # SELECT column order: (id, username, display_name, account_type,
 # parent_user_id, is_active, has_password, created_at, updated_at,
-# monthly_quota_credits).
+# monthly_quota_credits, allowed_businesses, allow_api_keys,
+# allow_publish_accounts).
 #
-# The quota rides as a correlated scalar subquery rather than a LEFT JOIN so
-# ``_lock_owned_sub``'s bare ``FOR UPDATE`` keeps locking exactly the intended
-# ``users`` row; the cap row is only ever written under that same row lock.
+# The quota and permission rows ride as correlated scalar subqueries rather
+# than LEFT JOINs so ``_lock_owned_sub``'s bare ``FOR UPDATE`` keeps locking
+# exactly the intended ``users`` row (a join's NULL-extended side cannot be
+# row-locked in PG); both side rows are only ever written under that same
+# ``users`` row lock.
 _SUB_COLUMNS = (
     "id, username, display_name, account_type, parent_user_id, is_active, "
     "(password_hash IS NOT NULL), created_at, updated_at, "
-    "(SELECT q.monthly_credits FROM sub_account_quotas q WHERE q.user_id = users.id)"
+    "(SELECT q.monthly_credits FROM sub_account_quotas q WHERE q.user_id = users.id), "
+    "(SELECT p.allowed_businesses FROM sub_account_permissions p WHERE p.user_id = users.id), "
+    "(SELECT p.allow_api_keys FROM sub_account_permissions p WHERE p.user_id = users.id), "
+    "(SELECT p.allow_publish_accounts FROM sub_account_permissions p WHERE p.user_id = users.id)"
 )
 _SUB_SELECT = (
     f"SELECT {_SUB_COLUMNS} FROM users WHERE id = %s AND parent_user_id = %s "
@@ -182,11 +248,72 @@ def _lock_owned_sub(
     return row
 
 
+def _validated_businesses(values: list[str]) -> list[str]:
+    """Business keys are a closed vocabulary: an unknown key is the stable 422."""
+    try:
+        return normalize_businesses(values)
+    except ValueError as exc:
+        raise _http(422, "INVALID_BUSINESS_PERMISSIONS", str(exc)) from exc
+
+
+def _write_permissions(
+    conn: psycopg.Connection,
+    *,
+    sub_account_id: str,
+    businesses: list[str],
+    allow_api_keys: bool,
+    allow_publish_accounts: bool,
+) -> None:
+    """Persist feature permissions with one canonical 'unrestricted' spelling.
+
+    The full grant deletes the row (no row == unrestricted); anything
+    narrower upserts. Keeps 'no row' and 'all granted' from drifting apart.
+    """
+    if is_all_permissions(
+        businesses=businesses,
+        allow_api_keys=allow_api_keys,
+        allow_publish_accounts=allow_publish_accounts,
+    ):
+        conn.execute("DELETE FROM sub_account_permissions WHERE user_id = %s", (sub_account_id,))
+        return
+    conn.execute(
+        "INSERT INTO sub_account_permissions "
+        "(user_id, allowed_businesses, allow_api_keys, allow_publish_accounts) "
+        "VALUES (%s, %s, %s, %s) "
+        "ON CONFLICT (user_id) DO UPDATE SET "
+        "allowed_businesses = EXCLUDED.allowed_businesses, "
+        "allow_api_keys = EXCLUDED.allow_api_keys, "
+        "allow_publish_accounts = EXCLUDED.allow_publish_accounts, "
+        "updated_at = NOW()",
+        (
+            sub_account_id,
+            json.dumps(businesses, ensure_ascii=True),
+            allow_api_keys,
+            allow_publish_accounts,
+        ),
+    )
+
+
 def _sub_payload(row: tuple[object, ...], *, used_credits: int = 0) -> dict[str, object]:
     # ``monthly_quota_credits`` = None means unlimited (no quota row). The
     # remaining figure is clamped so a cap lowered below the month's usage
     # renders as "0 left" instead of a negative number.
     quota = None if row[9] is None else int(str(row[9]))
+    # ``permissions`` = None means unrestricted (no permission row), the same
+    # shape contract as the quota above.
+    permissions = None
+    if row[10] is not None:
+        raw_businesses = row[10]
+        if isinstance(raw_businesses, str):  # TEXT-JSON column (JSON lives in TEXT)
+            raw_businesses = json.loads(raw_businesses)
+        # ``permissions`` stores a JSON array; narrow to list so mypy sees an
+        # iterable and a malformed payload degrades to empty instead of raising.
+        businesses_list = raw_businesses if isinstance(raw_businesses, list) else []
+        permissions = {
+            "businesses": [str(key) for key in businesses_list],
+            "allow_api_keys": bool(row[11]),
+            "allow_publish_accounts": bool(row[12]),
+        }
     return {
         "id": str(row[0]),
         "username": str(row[1]),
@@ -200,6 +327,7 @@ def _sub_payload(row: tuple[object, ...], *, used_credits: int = 0) -> dict[str,
         "monthly_quota_credits": quota,
         "quota_used_credits": used_credits,
         "quota_remaining_credits": None if quota is None else max(0, quota - used_credits),
+        "permissions": permissions,
     }
 
 
@@ -231,14 +359,14 @@ def list_sub_accounts(request: Request) -> dict[str, object]:
     """List the sub-accounts of the caller's own organisation."""
     snapshot = _require_snapshot(request)
     with fenced_pg_transaction(snapshot) as (conn, ctx):
-        _lock_master(conn, ctx.user_id)
+        _, org_id = _lock_org_admin(conn, ctx.user_id)
         # ``_SUB_SELECT`` hard-codes the id filter; the list variant needs the
         # parent filter only, so run the dedicated statement instead.
         rows = conn.execute(
             f"SELECT {_SUB_COLUMNS} FROM users WHERE parent_user_id = %s "
             "AND account_type IN ('SUB', 'SUB_ADMIN') "
             "ORDER BY created_at DESC",
-            (ctx.user_id,),
+            (org_id,),
         ).fetchall()
         used = read_quota_used_map(conn, [str(row[0]) for row in rows])
         items = [_sub_payload(row, used_credits=used.get(str(row[0]), 0)) for row in rows]
@@ -261,6 +389,10 @@ def create_sub_account(body: CreateSubAccountRequest, request: Request) -> dict[
         registration_source = "admin_create"
 
     sub_account_id = f"sub-{uuid.uuid4().hex[:12]}"
+    # Validated outside the transaction: an unknown key is a 422 long before
+    # any row is touched. Omitted = unrestricted (no permission row).
+    permissions = body.permissions
+    businesses = _validated_businesses(permissions.businesses) if permissions else []
     try:
         with fenced_pg_transaction(snapshot) as (conn, ctx):
             _lock_master(conn, ctx.user_id)
@@ -285,6 +417,16 @@ def create_sub_account(body: CreateSubAccountRequest, request: Request) -> dict[
                     "INSERT INTO sub_account_quotas (user_id, monthly_credits) VALUES (%s, %s)",
                     (sub_account_id, body.monthly_quota_credits),
                 )
+            if permissions is not None:
+                # Written in the same transaction as the account: it never
+                # exists with broader rights than its creator granted.
+                _write_permissions(
+                    conn,
+                    sub_account_id=sub_account_id,
+                    businesses=businesses,
+                    allow_api_keys=permissions.allow_api_keys,
+                    allow_publish_accounts=permissions.allow_publish_accounts,
+                )
             row = conn.execute(_SUB_SELECT, (sub_account_id, ctx.user_id)).fetchone()
             _write_audit(
                 conn,
@@ -295,6 +437,13 @@ def create_sub_account(body: CreateSubAccountRequest, request: Request) -> dict[
                     "username": username,
                     "has_password": password_hash is not None,
                     "monthly_quota_credits": body.monthly_quota_credits,
+                    "permissions": None
+                    if permissions is None
+                    else {
+                        "businesses": businesses,
+                        "allow_api_keys": permissions.allow_api_keys,
+                        "allow_publish_accounts": permissions.allow_publish_accounts,
+                    },
                 },
             )
     except UniqueViolation as exc:
@@ -313,9 +462,9 @@ def create_sub_account(body: CreateSubAccountRequest, request: Request) -> dict[
 def update_sub_account(
     sub_account_id: str, body: UpdateSubAccountRequest, request: Request
 ) -> dict[str, object]:
-    """Update display_name / is_active; deactivation revokes the live session."""
+    """Update display_name / is_active / account_type; deactivation revokes the session."""
     snapshot = _require_snapshot(request)
-    if body.display_name is None and body.is_active is None:
+    if body.display_name is None and body.is_active is None and body.account_type is None:
         raise _http(400, "EMPTY_UPDATE", "请提供要修改的字段。")
     display_name = (
         _normalize_display_name(body.display_name) if body.display_name is not None else None
@@ -334,6 +483,9 @@ def update_sub_account(
         if body.is_active is not None:
             updates.append("is_active = %s")
             params.append(1 if body.is_active else 0)
+        if body.account_type is not None:
+            updates.append("account_type = %s")
+            params.append(body.account_type)
         params.append(sub_account_id)
         conn.execute(
             f"UPDATE users SET {', '.join(updates)}, updated_at = NOW() WHERE id = %s",
@@ -357,7 +509,11 @@ def update_sub_account(
             actor_user_id=ctx.user_id,
             action="customer.sub_account.update",
             entity_id=sub_account_id,
-            metadata={"display_name": display_name, "is_active": body.is_active},
+            metadata={
+                "display_name": display_name,
+                "is_active": body.is_active,
+                "account_type": body.account_type,
+            },
         )
     if row is None:  # pragma: no cover - the row lock above just found it
         raise _http(404, "SUB_ACCOUNT_NOT_FOUND", "子账号不存在。")
@@ -416,11 +572,13 @@ def set_sub_account_quota(
     owns the configuration row only. The billing lock does not span this
     transaction: at most one already-accepted, still in-flight operation can
     land under the previous cap; every later one re-reads the new value.
+    A SUB_ADMIN caller may set plain SUB caps only (its grant's scope).
     """
     snapshot = _require_snapshot(request)
     with fenced_pg_transaction(snapshot) as (conn, ctx):
-        _lock_master(conn, ctx.user_id)
-        _lock_owned_sub(conn, master_id=ctx.user_id, sub_account_id=sub_account_id)
+        caller_type, org_id = _lock_org_admin(conn, ctx.user_id)
+        current = _lock_owned_sub(conn, master_id=org_id, sub_account_id=sub_account_id)
+        _require_plain_sub_scope(caller_type, current)
         if body.monthly_quota_credits is None:
             conn.execute("DELETE FROM sub_account_quotas WHERE user_id = %s", (sub_account_id,))
         else:
@@ -430,7 +588,7 @@ def set_sub_account_quota(
                 "monthly_credits = EXCLUDED.monthly_credits, updated_at = NOW()",
                 (sub_account_id, body.monthly_quota_credits),
             )
-        row = conn.execute(_SUB_SELECT, (sub_account_id, ctx.user_id)).fetchone()
+        row = conn.execute(_SUB_SELECT, (sub_account_id, org_id)).fetchone()
         used = read_quota_used(conn, sub_account_id)
         _write_audit(
             conn,
@@ -438,6 +596,50 @@ def set_sub_account_quota(
             action="customer.sub_account.quota.set",
             entity_id=sub_account_id,
             metadata={"monthly_quota_credits": body.monthly_quota_credits},
+        )
+    if row is None:  # pragma: no cover - the row lock above just found it
+        raise _http(404, "SUB_ACCOUNT_NOT_FOUND", "子账号不存在。")
+    return _sub_payload(row, used_credits=used)
+
+
+@router.put("/{sub_account_id}/permissions")
+def set_sub_account_permissions(
+    sub_account_id: str, body: SetSubAccountPermissionsRequest, request: Request
+) -> dict[str, object]:
+    """Set (or, with the full grant, clear) the sub-account's feature permissions.
+
+    Saving the unrestricted value deletes the row — 'unrestricted' has
+    exactly one spelling. Enforcement lives at the feature doors themselves
+    (``accept_operation``, the Token lane, publish-account binding); this
+    endpoint owns the configuration row only. A SUB_ADMIN caller may
+    configure plain SUB rows only — the admin grant itself stays
+    master-only business.
+    """
+    snapshot = _require_snapshot(request)
+    businesses = _validated_businesses(body.businesses)
+    with fenced_pg_transaction(snapshot) as (conn, ctx):
+        caller_type, org_id = _lock_org_admin(conn, ctx.user_id)
+        current = _lock_owned_sub(conn, master_id=org_id, sub_account_id=sub_account_id)
+        _require_plain_sub_scope(caller_type, current)
+        _write_permissions(
+            conn,
+            sub_account_id=sub_account_id,
+            businesses=businesses,
+            allow_api_keys=body.allow_api_keys,
+            allow_publish_accounts=body.allow_publish_accounts,
+        )
+        row = conn.execute(_SUB_SELECT, (sub_account_id, org_id)).fetchone()
+        used = read_quota_used(conn, sub_account_id)
+        _write_audit(
+            conn,
+            actor_user_id=ctx.user_id,
+            action="customer.sub_account.permissions.set",
+            entity_id=sub_account_id,
+            metadata={
+                "businesses": businesses,
+                "allow_api_keys": body.allow_api_keys,
+                "allow_publish_accounts": body.allow_publish_accounts,
+            },
         )
     if row is None:  # pragma: no cover - the row lock above just found it
         raise _http(404, "SUB_ACCOUNT_NOT_FOUND", "子账号不存在。")

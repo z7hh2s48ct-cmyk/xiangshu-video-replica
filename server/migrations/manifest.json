@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20260921T1200_sub_account_quotas"
+      "20260922T1800_sub_account_permissions"
     ],
     "parents": {
       "001_core": null,
@@ -127,9 +127,10 @@
         "20260920T0100_add_api_metadata_to_billing_ops"
       ],
       "20260921T1200_sub_account_quotas": "20260922T1200_recharge_packages",
-      "20260922T1200_recharge_packages": "20260921T0000_merge_wallet_actor_and_billing_metadata"
+      "20260922T1200_recharge_packages": "20260921T0000_merge_wallet_actor_and_billing_metadata",
+      "20260922T1800_sub_account_permissions": "20260921T1200_sub_account_quotas"
     },
-    "revision_count": 111
+    "revision_count": 112
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -587,6 +588,10 @@
     "20260922T1200_recharge_packages": {
       "file": "versions/20260922T1200_recharge_packages.py",
       "sha256": "40203dc6a8529974447a15812c16c0071203c5f1ac8b5d3c2e8712aa9ad410e3"
+    },
+    "20260922T1800_sub_account_permissions": {
+      "file": "versions/20260922T1800_sub_account_permissions.py",
+      "sha256": "07825f5942d643b6ad9ba18dc1f34b6d3bc5b340fa39ff63c05f80e37003eb7e"
     }
   },
   "task": "MIGRATION-GUARD-20260912"

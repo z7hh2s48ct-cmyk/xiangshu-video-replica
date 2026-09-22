@@ -109,6 +109,10 @@ PG_ONLY_TABLES: frozenset[str] = frozenset(
         # 折扣权益）仅在 PG 落地（非 postgresql 方言 return）。T07 导入源无此表，
         # 目标库为空属预期；非空即 divergent，仍 fail closed。
         "recharge_packages",
+        # 20260922T1800_sub_account_permissions: 子账号功能权限配置（Phase 3b
+        # 权限矩阵，无行 = 全允许），PG-only（守卫同 20260916T1400）。T07 导入源
+        # 无此表，目标库为空属预期；非空即 divergent，仍 fail closed。
+        "sub_account_permissions",
     }
 )
 

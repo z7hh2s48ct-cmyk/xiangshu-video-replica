@@ -6,9 +6,20 @@ import {
   customerDeleteSubAccount,
   customerListSubAccounts,
   customerSetSubAccountPassword,
+  customerSetSubAccountPermissions,
   customerSetSubAccountQuota,
   customerUpdateSubAccount,
 } from "../api";
+import {
+  BUSINESS_FEATURES,
+  isAllGranted,
+  isPermissionRestricted,
+  type PermissionDraft,
+  permissionDraft,
+  permissionSummary,
+  permissionsPayload,
+  toggleBusiness,
+} from "./permissionViz";
 import {
   type QuotaState,
   quotaBarData,
@@ -52,6 +63,13 @@ export function SubAccountManagementPage({
   const [busyId, setBusyId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDisplayName, setEditDisplayName] = useState("");
+  // 批次2 功能权限矩阵：Modal 目标子账号 + 受控草稿（关闭时目标为 null）。
+  const [permissionTarget, setPermissionTarget] =
+    useState<CustomerSubAccount | null>(null);
+  const [permissionDraftState, setPermissionDraftState] =
+    useState<PermissionDraft>(() => permissionDraft(null));
+  const [permissionError, setPermissionError] = useState("");
+  const [isSavingPermissions, setIsSavingPermissions] = useState(false);
   const [form, setForm] = useState({
     username: "",
     display_name: "",
@@ -319,6 +337,93 @@ export function SubAccountManagementPage({
     }
   }
 
+  /** 打开权限 Modal：草稿从服务端现值展开（null = 全允许 → 全部勾选）。 */
+  function openPermissions(subAccount: CustomerSubAccount) {
+    setPermissionTarget(subAccount);
+    setPermissionDraftState(permissionDraft(subAccount.permissions));
+    setPermissionError("");
+    setError("");
+    setNotice("");
+  }
+
+  /** 保存功能权限：PUT 三字段（全必填）；全开值由后端折叠为删行。 */
+  async function savePermissions() {
+    if (permissionTarget === null || isSavingPermissions) {
+      return;
+    }
+    const target = permissionTarget;
+    const draft = permissionDraftState;
+    setIsSavingPermissions(true);
+    setPermissionError("");
+    try {
+      const credential = await loadSession();
+      if (credential === null) {
+        return;
+      }
+      await customerSetSubAccountPermissions(
+        credential,
+        target.id,
+        permissionsPayload(draft),
+      );
+      setNotice(
+        isAllGranted(draft)
+          ? `已恢复「${target.display_name}」的全部权限。`
+          : `已更新「${target.display_name}」的功能权限。`,
+      );
+      setPermissionTarget(null);
+      await reload();
+    } catch (cause) {
+      if (isSessionFailure(cause)) {
+        onSessionExpired();
+        return;
+      }
+      setPermissionError(errorMessage(cause, "保存功能权限失败，请稍后重试。"));
+    } finally {
+      setIsSavingPermissions(false);
+    }
+  }
+
+  /** 设为/取消管理员（母账号限定的角色变更，PATCH account_type）。 */
+  async function toggleAdminRole(subAccount: CustomerSubAccount) {
+    const nextType =
+      subAccount.account_type === "SUB_ADMIN" ? "SUB" : "SUB_ADMIN";
+    if (
+      !window.confirm(
+        nextType === "SUB_ADMIN"
+          ? `确认将「${subAccount.display_name}」设为管理员？管理员可以管理本机构的其他子账号（仍不能管理母账号）。`
+          : `确认取消「${subAccount.display_name}」的管理员身份？`,
+      )
+    ) {
+      return;
+    }
+    setBusyId(subAccount.id);
+    setError("");
+    setNotice("");
+    try {
+      const credential = await loadSession();
+      if (credential === null) {
+        return;
+      }
+      await customerUpdateSubAccount(credential, subAccount.id, {
+        account_type: nextType,
+      });
+      setNotice(
+        nextType === "SUB_ADMIN"
+          ? `已将「${subAccount.display_name}」设为管理员。`
+          : `已取消「${subAccount.display_name}」的管理员身份。`,
+      );
+      await reload();
+    } catch (cause) {
+      if (isSessionFailure(cause)) {
+        onSessionExpired();
+        return;
+      }
+      setError(errorMessage(cause, "更新子账号角色失败，请稍后重试。"));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   const items = subAccounts ?? [];
 
   // 批次1 额度可视化：月度进度与聚合只依赖列表数据，渲染期一次算好（纯函数）。
@@ -547,6 +652,9 @@ export function SubAccountManagementPage({
                       />
                     </>
                   )}
+                  <span className="sub-account-card__permissions">
+                    {`权限：${permissionSummary(subAccount.permissions) || "全部开放"}`}
+                  </span>
                   {quotaMessage ? (
                     <small
                       className={
@@ -578,6 +686,14 @@ export function SubAccountManagementPage({
                   >
                     {subAccount.has_password ? "已设密码" : "未设密码"}
                   </span>
+                  {subAccount.account_type === "SUB_ADMIN" ? (
+                    <span className="sub-account-badge is-admin">管理员</span>
+                  ) : null}
+                  {isPermissionRestricted(subAccount.permissions) ? (
+                    <span className="sub-account-badge is-warning">
+                      权限受限
+                    </span>
+                  ) : null}
                   {quotaVizState === "warning" ? (
                     <span className="sub-account-badge is-warning">
                       额度接近上限
@@ -635,6 +751,22 @@ export function SubAccountManagementPage({
                       </button>
                       <button
                         disabled={busy}
+                        onClick={() => openPermissions(subAccount)}
+                        type="button"
+                      >
+                        设置权限
+                      </button>
+                      <button
+                        disabled={busy}
+                        onClick={() => void toggleAdminRole(subAccount)}
+                        type="button"
+                      >
+                        {subAccount.account_type === "SUB_ADMIN"
+                          ? "取消管理员"
+                          : "设为管理员"}
+                      </button>
+                      <button
+                        disabled={busy}
                         onClick={() => void toggleActive(subAccount)}
                         type="button"
                       >
@@ -656,6 +788,104 @@ export function SubAccountManagementPage({
           })}
         </ul>
       )}
+
+      {permissionTarget !== null ? (
+        <div className="sub-account-modal">
+          <section
+            aria-label={`功能权限 ${permissionTarget.display_name}`}
+            aria-modal="true"
+            className="sub-account-modal__panel"
+            role="dialog"
+          >
+            <header className="sub-account-modal__header">
+              <h4>功能权限</h4>
+              <p>
+                {permissionTarget.display_name}（{permissionTarget.username}）
+              </p>
+            </header>
+            <p className="sub-account-modal__hint">
+              未勾选的业务对该子账号不可用；全部开放即恢复默认（不存储限制）。
+            </p>
+            <fieldset className="sub-account-permission-grid">
+              <legend>业务权限</legend>
+              {BUSINESS_FEATURES.map((feature) => (
+                <label key={feature.key}>
+                  <input
+                    checked={permissionDraftState.businesses.includes(
+                      feature.key,
+                    )}
+                    disabled={isSavingPermissions}
+                    onChange={() =>
+                      setPermissionDraftState((current) =>
+                        toggleBusiness(current, feature.key),
+                      )
+                    }
+                    type="checkbox"
+                  />
+                  {feature.label}
+                </label>
+              ))}
+            </fieldset>
+            <fieldset className="sub-account-permission-switches">
+              <legend>系统权限</legend>
+              <label>
+                <input
+                  checked={permissionDraftState.allowApiKeys}
+                  disabled={isSavingPermissions}
+                  onChange={(event) =>
+                    setPermissionDraftState((current) => ({
+                      ...current,
+                      allowApiKeys: event.target.checked,
+                    }))
+                  }
+                  type="checkbox"
+                />
+                允许创建 API Token
+              </label>
+              <label>
+                <input
+                  checked={permissionDraftState.allowPublishAccounts}
+                  disabled={isSavingPermissions}
+                  onChange={(event) =>
+                    setPermissionDraftState((current) => ({
+                      ...current,
+                      allowPublishAccounts: event.target.checked,
+                    }))
+                  }
+                  type="checkbox"
+                />
+                允许使用发布账号（导入 / 扫码）
+              </label>
+            </fieldset>
+            {isAllGranted(permissionDraftState) ? (
+              <p className="sub-account-modal__hint">
+                当前为全部开放：保存后该子账号恢复默认权限。
+              </p>
+            ) : null}
+            {permissionError ? (
+              <p className="settings-error" role="alert">
+                {permissionError}
+              </p>
+            ) : null}
+            <div className="sub-account-modal__actions">
+              <button
+                disabled={isSavingPermissions}
+                onClick={() => void savePermissions()}
+                type="button"
+              >
+                {isSavingPermissions ? "正在保存" : "保存权限"}
+              </button>
+              <button
+                disabled={isSavingPermissions}
+                onClick={() => setPermissionTarget(null)}
+                type="button"
+              >
+                取消
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </section>
   );
 }
