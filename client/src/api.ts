@@ -5754,6 +5754,24 @@ const BRANDED_SERVICE_ERRORS: ReadonlyArray<{
     pattern: /deepseek/i,
     message: "文案优化服务暂时不可用，请稍后重试；如持续失败，请联系客服。",
   },
+  // 上线前检查 P2-4：hifly/tikhub/dashscope/douyidou 是既有缺口——服务端
+  // 文案当前全中性，这四条是第二道防线，拦未来任何一处漏改的供应商名。
+  {
+    pattern: /hifly|飞影/i,
+    message: "数字人口播服务暂时不可用，请稍后重试；如持续失败，请联系客服。",
+  },
+  {
+    pattern: /tikhub/i,
+    message: "爆款数据服务暂时不可用，请稍后重试；如持续失败，请联系客服。",
+  },
+  {
+    pattern: /dashscope/i,
+    message: "音频转写服务暂时不可用，请稍后重试；如持续失败，请联系客服。",
+  },
+  {
+    pattern: /douyidou/i,
+    message: "链接解析服务暂时不可用，请稍后重试；如持续失败，请联系客服。",
+  },
   {
     pattern: /zpay/i,
     message:
