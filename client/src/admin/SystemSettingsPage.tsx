@@ -6,6 +6,7 @@ import {
   updateControlProviderSettings,
   updateControlRuntimeSettings,
 } from "../api";
+import { paidTestControlProvider } from "../api.admin";
 import { type SettingsBackend, SettingsPanel } from "../SettingsPanel";
 import { AdminEnvironmentSwitch } from "./AdminEnvironmentSwitch";
 import { BillingRatesManager } from "./BillingRatesManager";
@@ -35,6 +36,10 @@ const controlBackend: SettingsBackend = {
   saveRuntime: updateControlRuntimeSettings,
   saveBilling: updateControlBillingSettings,
   testProvider: testControlProviderConnection,
+  // 付费探针：与免费连接测试并列挂在每个服务卡上。它可能真实扣费，服务端按
+  // 「敏感写」受理，所以走 `api.admin` 的 adminWrite（confirm + reason + 幂等键
+  // + 审计），而不是 api.ts 那条不带写契约的封装。
+  testPaidProvider: paidTestControlProvider,
 };
 
 /**

@@ -206,6 +206,11 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
         # the 按任务编号/问题编号直查失败历史矩阵
         # (test_analysis_diagnostics_pg.py), migrated to alembic head.
         "billing_obs_diag_test",
+        # ADMIN-PROVIDER-PROBES-20260922 管理端付费探针入口：dedicated database
+        # for the /api/control/settings/providers/{provider}/paid-test 写契约 /
+        # 幂等重放 / 审计矩阵 (test_admin_provider_paid_probe.py), migrated to
+        # alembic head and truncated per test.
+        "t04_provider_probe_test",
     }
 )
 

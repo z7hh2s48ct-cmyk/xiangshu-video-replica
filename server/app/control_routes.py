@@ -367,6 +367,16 @@ class ControlProviderSettingsUpdate(AdminWriteContract):
     config: dict[str, str] = Field(default_factory=dict)
 
 
+class ControlProviderPaidTestRequest(AdminWriteContract):
+    """付费探针的写契约信封（confirm + reason；幂等键走 header）。
+
+    与同段的免费 `connection-test`（普通 POST）不同：付费探针可能真实扣费，
+    因此按「敏感写」处理，走 `_run_control_settings_write` 的同一套信封。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class ControlSettingsSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1701,6 +1711,61 @@ def test_control_provider_connection(
     provider_name = require_supported_provider(provider)
     config = SettingsRepository(conn).load_provider_config(provider_name)
     return tester.connection_test(provider_name, config)
+
+
+@router.post(
+    "/settings/providers/{provider}/paid-test",
+    response_model=ProviderTestResult,
+    response_model_exclude_none=True,
+)
+def paid_test_control_provider(
+    provider: str,
+    payload: ControlProviderPaidTestRequest,
+    conn: Database,
+    actor: ControlUser,
+    request: Request,
+    response: Response,
+    tester: ProviderTester = Depends(get_provider_tester),
+) -> ProviderTestResult:
+    """付费探针（管理端入口）：验证供应商账号能否真正跑通一次**计费**调用。
+
+    与紧邻的免费 `connection-test` 是**同构但不同级**的一对：免费探针只读、
+    普通 POST；付费探针可能真实扣费，因此按敏感写走既有管理写契约
+    （`Idempotency-Key` + `confirm` + 非空 `reason`），并在同一事务里落一条
+    `provider_settings.paid_test` 审计——旧 `/api/admin` 版不写审计，而
+    同文件的 `diagnostic-test` 写，这条不对称在此处补齐。
+
+    幂等键不是仪式：一次网络歧义重试若变成第二次付费调用就是真实的重复扣费，
+    快照层让重放直接回放首次结果（`X-Idempotent-Replay: true`）。
+
+    审计写在探针**成功返回之后**：探针抛错（含当前真实供应商客户端尚未接入的
+    501 存根）时没有任何付费动作发生，也就没有可 attest 的事实；而且写契约的
+    事务语义会让抛错前的写入回滚，提前写审计反而会得到「开发态留下、生产态被
+    回滚」的不一致。
+    """
+    provider_name = require_supported_provider(provider)
+
+    def business(current_conn: BusinessConnection, request_id: str) -> dict[str, object]:
+        config = SettingsRepository(current_conn).load_provider_config(provider_name)
+        result = tester.paid_test(provider_name, config)
+        write_audit(
+            current_conn,
+            actor=actor,
+            action="provider_settings.paid_test",
+            entity_type="provider_settings",
+            entity_id=provider_name,
+            metadata={
+                "provider": provider_name,
+                "reason": payload.reason.strip(),
+                "request_id": request_id,
+                "test_kind": result.test_kind,
+                "status": result.status,
+            },
+        )
+        return result.model_dump(exclude_none=True)
+
+    written = _run_control_settings_write(request, response, actor, payload, conn, business)
+    return ProviderTestResult.model_validate(written)
 
 
 @router.patch("/settings/runtime", response_model=RuntimeSettingsSnapshot)

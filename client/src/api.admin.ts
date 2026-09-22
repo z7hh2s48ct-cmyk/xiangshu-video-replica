@@ -106,7 +106,13 @@ export function updateRechargePackage(
   );
 }
 
-import type { BillingSettings, ControlSettings, CustomerApiKey } from "./api";
+import type {
+  BillingSettings,
+  ControlSettings,
+  CustomerApiKey,
+  ProviderName,
+  ProviderTestResult,
+} from "./api";
 import type { components } from "./generated/api";
 
 export type CustomerPaymentSettings = Pick<ControlSettings, "billing" | "zpay">;
@@ -2141,6 +2147,38 @@ export function applyLegacyCreditConversion(
     reason,
     "历史积分转换失败",
     key,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 付费探针（管理端入口）—— POST /api/control/settings/providers/{provider}/paid-test
+// ---------------------------------------------------------------------------
+
+/**
+ * 向供应商发起一次**计费**探针调用，验证该服务的账号能否真正跑通。
+ *
+ * 与免费的 `connection-test` 不同，付费探针可能真实扣费，所以服务端按「敏感写」
+ * 受理：必须带 `Idempotency-Key` + `confirm: true` + 非空 `reason`，并在同一
+ * 事务里写一条 `provider_settings.paid_test` 审计。因此本封装走 `adminWrite`：
+ * `requestControl` 不会自动补 `X-Admin-CSRF`，而控制面上的 POST 是 CSRF 门
+ * （缺头即 403 `ADMIN_CSRF_REQUIRED`——reconcileFirstFrameTask 的同类教训）。
+ *
+ * 幂等键在这里不是仪式而是防重复扣费：一次网络歧义重试只会回放首次结果
+ * （服务端回 `X-Idempotent-Replay: true`），不会第二次真的调用供应商。
+ *
+ * 现状（真实供应商客户端尚未接入）：服务端默认测试器对 `paid_test` 恒抛
+ * 501 `PROVIDER_TEST_NOT_IMPLEMENTED`，不会创建供应商任务、不会产生任何费用。
+ * 调用方必须如实呈现这一点，不得提示「会产生真实费用」。
+ */
+export function paidTestControlProvider(
+  provider: ProviderName,
+  reason: string,
+): Promise<ProviderTestResult> {
+  return adminWrite<ProviderTestResult>(
+    `/api/control/settings/providers/${encodeURIComponent(provider)}/paid-test`,
+    {},
+    reason,
+    "付费探针执行失败",
   );
 }
 

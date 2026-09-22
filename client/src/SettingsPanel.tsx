@@ -46,6 +46,16 @@ export type SettingsBackend = {
     recharge_step_fen: number;
   }) => Promise<BillingSettings>;
   testProvider: (provider: ProviderName) => Promise<ProviderTestResult>;
+  /**
+   * 付费探针（可选注入）。只有管理端控制面注入：它可能真实扣费，服务端按
+   * 「敏感写」受理（`confirm` + 非空 `reason` + 幂等键 + 审计），所以这里多一个
+   * `reason` 参数。工作台面后端不注入它——付费探针是运维动作，不该出现在客户
+   * 构建制品里（与 `/api/control/` 零命中的同一道边界）。
+   */
+  testPaidProvider?: (
+    provider: ProviderName,
+    reason: string,
+  ) => Promise<ProviderTestResult>;
 };
 
 const workspaceBackend: SettingsBackend = {
@@ -274,6 +284,7 @@ export function SettingsPanel(props: SettingsPanelProps) {
                   source === "workspace" ? revealSavedSecret : undefined
                 }
                 onTest={backend.testProvider}
+                onPaidTest={backend.testPaidProvider}
               />
             );
           })}
@@ -371,6 +382,7 @@ function ProviderForm({
   onSave,
   onReveal,
   onTest,
+  onPaidTest,
 }: {
   provider: ProviderName;
   readOnly: boolean;
@@ -381,6 +393,14 @@ function ProviderForm({
   ) => Promise<void>;
   onReveal?: (provider: ProviderName, field: string) => Promise<string>;
   onTest: (provider: ProviderName) => Promise<ProviderTestResult>;
+  /**
+   * 付费探针。只有管理端注入时才会渲染入口——工作台面（客户构建）没有它，
+   * 免费连接测试与付费探针因此只在管理端「真正并列」。
+   */
+  onPaidTest?: (
+    provider: ProviderName,
+    reason: string,
+  ) => Promise<ProviderTestResult>;
 }) {
   const form = PROVIDER_FORMS[provider];
   const [values, setValues] = useState<Record<string, string>>(() =>
@@ -399,6 +419,9 @@ function ProviderForm({
   const [statusTone, setStatusTone] = useState<"ok" | "error">("ok");
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
+  const [paidProbeOpen, setPaidProbeOpen] = useState(false);
+  const [paidProbeReason, setPaidProbeReason] = useState("");
+  const [isPaidProbing, setIsPaidProbing] = useState(false);
   const previousConfigRef = useRef(settings.config);
 
   useEffect(() => {
@@ -482,6 +505,39 @@ function ProviderForm({
       setStatusTone("error");
     } finally {
       setIsTesting(false);
+    }
+  }
+
+  function openPaidProbe() {
+    // 每次打开都是一次新的确认：不留下上一次的原因或结果。
+    setPaidProbeReason("");
+    setStatus("");
+    setPaidProbeOpen(true);
+  }
+
+  async function runPaidProbe() {
+    if (!onPaidTest || isPaidProbing) {
+      return;
+    }
+    const reason = paidProbeReason.trim();
+    if (!reason) {
+      setStatus("请填写付费探针的操作原因（会写入审计）");
+      setStatusTone("error");
+      return;
+    }
+    setIsPaidProbing(true);
+    setStatus("");
+    try {
+      const result = await onPaidTest(provider, reason);
+      setStatus(paidProbeResultLabel(result));
+      setStatusTone(testResultSucceeded(result) ? "ok" : "error");
+      setPaidProbeOpen(false);
+      setPaidProbeReason("");
+    } catch (error) {
+      setStatus(paidProbeErrorMessage(error));
+      setStatusTone("error");
+    } finally {
+      setIsPaidProbing(false);
     }
   }
 
@@ -589,6 +645,16 @@ function ProviderForm({
               ? "只读检查"
               : "测试连接"}
         </button>
+        {onPaidTest ? (
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={openPaidProbe}
+            disabled={readOnly || isSaving || isTesting || isPaidProbing}
+          >
+            付费探针
+          </button>
+        ) : null}
         {status ? (
           <span
             role={statusTone === "error" ? "alert" : "status"}
@@ -600,6 +666,42 @@ function ProviderForm({
           </span>
         ) : null}
       </div>
+      {onPaidTest && paidProbeOpen ? (
+        <div className="paid-probe-confirm field-stack">
+          <p className="paid-probe-confirm__hint">
+            付费探针：验证该服务的账号能否真正跑通一次计费调用。它可能产生供应商
+            侧费用，因此服务端按敏感写受理，需要操作原因并写入审计。
+          </p>
+          <p className="paid-probe-confirm__status">
+            现状：真实供应商客户端尚未接入，执行后服务端只会返回 501「未实现」，
+            不会创建供应商任务，也不会产生任何费用。
+          </p>
+          <label>
+            操作原因（必填，写入审计）
+            <input
+              value={paidProbeReason}
+              onChange={(event) => setPaidProbeReason(event.target.value)}
+            />
+          </label>
+          <div className="form-actions">
+            <button
+              type="button"
+              onClick={() => void runPaidProbe()}
+              disabled={isPaidProbing}
+            >
+              {isPaidProbing ? "正在执行" : "确认执行付费探针"}
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => setPaidProbeOpen(false)}
+              disabled={isPaidProbing}
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      ) : null}
     </form>
   );
 }
@@ -742,6 +844,39 @@ function testResultLabel(result: ProviderTestResult) {
     default:
       return "尚未保存该服务的必要参数";
   }
+}
+
+function paidProbeResultLabel(result: ProviderTestResult) {
+  switch (result.status) {
+    case "ok":
+      return "付费探针通过：供应商账号可完成一次计费调用";
+    case "configured_only":
+      return "参数已保存；本次未发起计费调用";
+    default:
+      return "尚未保存该服务的必要参数，本次未发起计费调用";
+  }
+}
+
+/**
+ * 付费探针的失败文案。
+ *
+ * `PROVIDER_TEST_NOT_IMPLEMENTED` 是当前版本的**真实状态**：真实供应商客户端
+ * 尚未接入，服务端恒返回 501，且没有创建任何供应商任务、没有产生任何费用。
+ * 因此这里如实说明"未执行、未计费"，不得改写成"测试失败请重试"或任何暗示
+ * 已经花了钱的措辞——操作者据此才会（或不会）去核对账单。
+ *
+ * 错误码的结构化读取刻意不 import 管理端错误类：本组件被客户入口静态复用，
+ * 静态引用 `api.admin` 会把管理域代码拖进客户构建制品（CW-019 / entryContract）。
+ */
+function paidProbeErrorMessage(error: unknown) {
+  const code =
+    typeof error === "object" && error !== null && "code" in error
+      ? (error as { code?: unknown }).code
+      : undefined;
+  if (code === "PROVIDER_TEST_NOT_IMPLEMENTED") {
+    return "付费探针未执行：当前版本尚未接入真实供应商客户端（服务端 501 未实现），未产生任何费用。";
+  }
+  return visibleErrorMessage(error, "付费探针执行失败，请稍后重试。");
 }
 
 function hasValidHiflyCredit(result: ProviderTestResult) {

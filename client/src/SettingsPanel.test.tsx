@@ -568,6 +568,107 @@ describe("SettingsPanel", () => {
     },
   );
 
+  it("does not offer a paid probe on the workspace backend", async () => {
+    installFetch();
+    render(<SettingsPanel />);
+
+    await screen.findByText("视频生成");
+    // 付费探针只由管理端注入：客户/工作台面后端没有它，入口因此不出现。
+    expect(screen.queryByRole("button", { name: "付费探针" })).toBeNull();
+  });
+
+  it("runs the paid probe through the injected write-contract backend", async () => {
+    const testPaidProvider = vi.fn().mockResolvedValue({
+      status: "ok",
+      provider: "metaso",
+      test_kind: "paid_probe",
+    });
+    const { container } = render(
+      <SettingsPanel
+        controlBackend={{
+          ...controlTestBackend,
+          load: vi.fn().mockResolvedValue(settingsSnapshot),
+          testPaidProvider,
+        }}
+        section="providers"
+        source="control"
+      />,
+    );
+
+    await screen.findByText("视频生成");
+    const metaso = providerCard(container, "metaso");
+    // 免费连接测试与付费探针在每个服务卡上并列。
+    expect(
+      metaso.getByRole("button", { name: "测试连接" }),
+    ).toBeInTheDocument();
+    fireEvent.click(metaso.getByRole("button", { name: "付费探针" }));
+
+    // 现状必须如实说明：供应商客户端未接入，执行不会产生费用。
+    expect(metaso.getByText(/真实供应商客户端尚未接入/)).toBeInTheDocument();
+    expect(metaso.getByText(/也不会产生任何费用/)).toBeInTheDocument();
+
+    // 服务端要求非空 reason：空原因不得发起调用。
+    fireEvent.click(metaso.getByRole("button", { name: "确认执行付费探针" }));
+    expect(testPaidProvider).not.toHaveBeenCalled();
+    expect(metaso.getByRole("alert")).toHaveTextContent(
+      "请填写付费探针的操作原因（会写入审计）",
+    );
+
+    fireEvent.change(metaso.getByLabelText("操作原因（必填，写入审计）"), {
+      target: { value: "  上线前核对付费通道  " },
+    });
+    fireEvent.click(metaso.getByRole("button", { name: "确认执行付费探针" }));
+
+    await waitFor(() =>
+      expect(testPaidProvider).toHaveBeenCalledWith(
+        "metaso",
+        "上线前核对付费通道",
+      ),
+    );
+    expect(
+      await metaso.findByText("付费探针通过：供应商账号可完成一次计费调用"),
+    ).toBeInTheDocument();
+    // 成功后确认面板收起（原因输入框随面板一起消失）。
+    expect(metaso.queryByLabelText("操作原因（必填，写入审计）")).toBeNull();
+  });
+
+  it("states that nothing was charged while the provider client is unwired", async () => {
+    const notImplemented = Object.assign(
+      new Error(
+        "付费探针执行失败：A real provider client is required before paid tests can run.（501）",
+      ),
+      { code: "PROVIDER_TEST_NOT_IMPLEMENTED" },
+    );
+    const testPaidProvider = vi.fn().mockRejectedValue(notImplemented);
+    const { container } = render(
+      <SettingsPanel
+        controlBackend={{
+          ...controlTestBackend,
+          load: vi.fn().mockResolvedValue(settingsSnapshot),
+          testPaidProvider,
+        }}
+        section="providers"
+        source="control"
+      />,
+    );
+
+    await screen.findByText("视频生成");
+    const metaso = providerCard(container, "metaso");
+    fireEvent.click(metaso.getByRole("button", { name: "付费探针" }));
+    fireEvent.change(metaso.getByLabelText("操作原因（必填，写入审计）"), {
+      target: { value: "上线前核对付费通道" },
+    });
+    fireEvent.click(metaso.getByRole("button", { name: "确认执行付费探针" }));
+
+    const alert = await metaso.findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "付费探针未执行：当前版本尚未接入真实供应商客户端（服务端 501 未实现），未产生任何费用。",
+    );
+    // 现状下不得出现「会产生真实费用」这类不成立的提示。
+    expect(alert).not.toHaveTextContent(/已产生费用/);
+    expect(alert).not.toHaveTextContent(/已发起计费/);
+  });
+
   it("keeps provider settings and checks disabled for read-only operators", async () => {
     installFetch();
     const { container } = render(<SettingsPanel readOnly />);
