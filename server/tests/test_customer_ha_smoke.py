@@ -751,16 +751,16 @@ def test_customer_desktop_build_is_the_sole_default_target() -> None:
     assert "url.port" in origin_guard
 
     # --- version chain (single source: the base config) ---
-    assert base_config["version"] == "2.0.5"
+    assert base_config["version"] == "2.2.0"
     assert root_package["version"] == base_config["version"]
     assert client_package["version"] == base_config["version"]
     assert package_lock["version"] == base_config["version"]
     assert package_lock["packages"][""]["version"] == base_config["version"]
     assert package_lock["packages"]["client"]["version"] == base_config["version"]
-    assert 'name = "video-replica-desktop"\nversion = "2.0.5"' in cargo_lock
-    assert 'version = "2.0.5"' in cargo_toml.split("[lib]", maxsplit=1)[0]
-    assert 'version = "2.0.5"' in server_package.split("[project]", maxsplit=1)[1]
-    assert 'version="2.0.5"' in server_main
+    assert 'name = "video-replica-desktop"\nversion = "2.2.0"' in cargo_lock
+    assert 'version = "2.2.0"' in cargo_toml.split("[lib]", maxsplit=1)[0]
+    assert 'version = "2.2.0"' in server_package.split("[project]", maxsplit=1)[1]
+    assert 'version="2.2.0"' in server_main
 
     # --- installer hook content (unchanged) ---
     assert "$LOCALAPPDATA\\短视频复刻工作台\\uninstall.exe" in customer_installer_hooks

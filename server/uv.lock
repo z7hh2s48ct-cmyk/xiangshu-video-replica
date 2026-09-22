@@ -1512,7 +1512,7 @@ wheels = [
 
 [[package]]
 name = "video-replica-api"
-version = "2.0.5"
+version = "2.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
