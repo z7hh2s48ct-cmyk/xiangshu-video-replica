@@ -7905,6 +7905,72 @@ export async function customerRevokeApiKey(
     { credential, method: "DELETE" },
   );
 }
+export async function customerRevokeAllApiKeys(
+  credential: CustomerSessionCredential,
+): Promise<{ revoked: number }> {
+  return (
+    await customerJson<{ revoked: number }>("/api/customer/api-keys", {
+      credential,
+      method: "DELETE",
+    })
+  ).body;
+}
+
+// CW-062 B4 账号安全：自助改密 / 退出所有设备 / 最近登录记录。
+export type CustomerPasswordChangeResult = {
+  changed: boolean;
+  sessions_revoked: number;
+};
+export async function customerChangePassword(
+  credential: CustomerSessionCredential,
+  input: { currentPassword: string; newPassword: string },
+  idempotencyKey: string,
+): Promise<CustomerPasswordChangeResult> {
+  // 服务端不为此接口保留重放信封（改密本身就是一次性的），idempotencyKey 只作为
+  // 事件与审计的追踪号，和兄弟接口保持同一调用形状。
+  return (
+    await customerJson<CustomerPasswordChangeResult>(
+      "/api/customer/account/password/change",
+      {
+        credential,
+        method: "POST",
+        body: {
+          current_password: input.currentPassword,
+          new_password: input.newPassword,
+        },
+        idempotencyKey,
+      },
+    )
+  ).body;
+}
+export async function customerRevokeAllSessions(
+  credential: CustomerSessionCredential,
+): Promise<{ revoked_sessions: number }> {
+  return (
+    await customerJson<{ revoked_sessions: number }>(
+      "/api/customer/sessions/revoke-all",
+      { credential, method: "POST", body: {} },
+    )
+  ).body;
+}
+export type CustomerSessionEvent = {
+  occurred_at: string;
+  event: string;
+  device_name: string | null;
+  platform: string | null;
+  reason: string | null;
+};
+export async function customerListLoginHistory(
+  credential: CustomerSessionCredential,
+  limit: number,
+): Promise<{ items: CustomerSessionEvent[]; total: number }> {
+  return (
+    await customerJson<{ items: CustomerSessionEvent[]; total: number }>(
+      `/api/customer/sessions/history?limit=${encodeURIComponent(String(limit))}`,
+      { credential },
+    )
+  ).body;
+}
 
 // ---------------------------------------------------------------------------
 // PUBLISH-DELIVERY-20260917 第二阶段：发布记录（/api/studio/publish/records）

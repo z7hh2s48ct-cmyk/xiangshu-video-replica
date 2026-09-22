@@ -66,6 +66,13 @@ function stubFetch(
   return fetchMock;
 }
 
+/** 走完一次产品级确认框：勾选「我已知晓」→ 点确认按钮（P0 清单 #2 起的高危交互）。 */
+async function acknowledgeAndConfirm(dialogName: string, confirmLabel: string) {
+  const dialog = await screen.findByRole("dialog", { name: dialogName });
+  fireEvent.click(within(dialog).getByRole("checkbox"));
+  fireEvent.click(within(dialog).getByRole("button", { name: confirmLabel }));
+}
+
 describe("SubAccountManagementPage", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -189,7 +196,6 @@ describe("SubAccountManagementPage", () => {
   });
 
   it("deactivation asks for confirmation first and then patches is_active", async () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     const fetchMock = stubFetch((_url, init) => {
       if (init?.method === "PATCH") {
         return jsonResponse({ ...subAccount, is_active: false });
@@ -206,7 +212,12 @@ describe("SubAccountManagementPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "停用" }));
 
-    expect(confirmSpy).toHaveBeenCalled();
+    // 未确认之前不发请求。
+    expect(
+      fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH"),
+    ).toBe(false);
+    await acknowledgeAndConfirm("停用「张三」？", "停用子账号");
+
     await waitFor(() =>
       expect(
         fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH"),
@@ -240,7 +251,6 @@ describe("SubAccountManagementPage", () => {
   });
 
   it("delete degrades to deactivation with an explicit notice when history pins the row", async () => {
-    vi.spyOn(window, "confirm").mockReturnValue(true);
     stubFetch((_url, init) => {
       if (init?.method === "DELETE") {
         return jsonResponse({ id: "sub-1", deleted: false, is_active: false });
@@ -256,6 +266,7 @@ describe("SubAccountManagementPage", () => {
     await screen.findByText("张三", { selector: "strong" });
 
     fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    await acknowledgeAndConfirm("删除子账号「张三」？", "删除子账号");
 
     expect(
       await screen.findByText("该子账号已有消费记录，已转为停用保留。"),
@@ -857,7 +868,6 @@ describe("SubAccountManagementPage", () => {
 
   // 批次2：设为管理员（PATCH account_type=SUB_ADMIN），confirm 确认后提交。
   it("promotes a plain sub-account to SUB_ADMIN after confirmation", async () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     const fetchMock = stubFetch((_url, init) => {
       if (init?.method === "PATCH") {
         return jsonResponse({ ...subAccount, account_type: "SUB_ADMIN" });
@@ -873,8 +883,8 @@ describe("SubAccountManagementPage", () => {
     await screen.findByText("张三", { selector: "strong" });
 
     fireEvent.click(screen.getByRole("button", { name: "设为管理员" }));
+    await acknowledgeAndConfirm("设为管理员：「张三」？", "设为管理员");
 
-    expect(confirmSpy).toHaveBeenCalled();
     await waitFor(() =>
       expect(
         fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH"),
@@ -897,9 +907,6 @@ describe("SubAccountManagementPage", () => {
   // 批次2：取消管理员——拒绝确认不发请求，确认后 PATCH 回 SUB。
   it("demotes an admin only after the confirmation is accepted", async () => {
     const admin = { ...subAccount, account_type: "SUB_ADMIN" as const };
-    vi.spyOn(window, "confirm")
-      .mockReturnValueOnce(false)
-      .mockReturnValueOnce(true);
     const fetchMock = stubFetch((_url, init) => {
       if (init?.method === "PATCH") {
         return jsonResponse({ ...subAccount, account_type: "SUB" });
@@ -915,11 +922,17 @@ describe("SubAccountManagementPage", () => {
     await screen.findByText("张三", { selector: "strong" });
 
     fireEvent.click(screen.getByRole("button", { name: "取消管理员" }));
+    const cancelled = await screen.findByRole("dialog", {
+      name: "取消管理员：「张三」？",
+    });
+    fireEvent.click(within(cancelled).getByRole("button", { name: "取消" }));
+    // 取消不落任何写操作。
     expect(
       fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH"),
     ).toBe(false);
 
     fireEvent.click(screen.getByRole("button", { name: "取消管理员" }));
+    await acknowledgeAndConfirm("取消管理员：「张三」？", "取消管理员");
     await waitFor(() =>
       expect(
         fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH"),

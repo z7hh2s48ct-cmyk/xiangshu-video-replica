@@ -38,6 +38,7 @@ from app.api_key_service import (
     ApiKeyRecord,
     create_api_key,
     list_api_keys,
+    revoke_all_api_keys,
     revoke_api_key,
 )
 from app.customer_fence import (
@@ -90,6 +91,14 @@ class ApiKeyListResponse(BaseModel):
     total: int
 
 
+class BulkRevokeResponse(BaseModel):
+    """How many live keys the bulk revoke actually retired (0 = nothing to do)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    revoked: int
+
+
 def _require_customer_snapshot(request: Request) -> CustomerSessionSnapshot:
     """Management is session-fenced: no session token, no key management."""
     snapshot = customer_session_snapshot(request)
@@ -111,8 +120,14 @@ def _insert_customer_audit(
     action: str,
     entity_id: str,
     metadata: dict[str, object] | None = None,
+    entity_type: str = "api_key",
 ) -> None:
-    """Append one key-lifecycle audit row (prefix/scopes only, never secrets)."""
+    """Append one key-lifecycle audit row (prefix/scopes only, never secrets).
+
+    ``entity_type`` stays a keyword with the historical default so the
+    single-key callers are unchanged; the bulk revoke names the *account* as
+    the entity (one row summarizes N keys) and passes ``"user"``.
+    """
     conn.execute(
         "INSERT INTO audit_logs "
         "(id, actor_user_id, action, entity_type, entity_id, metadata_json) "
@@ -121,7 +136,7 @@ def _insert_customer_audit(
             str(uuid4()),
             user_id,
             action,
-            "api_key",
+            entity_type,
             entity_id,
             json.dumps(metadata or {}, ensure_ascii=True, sort_keys=True),
         ),
@@ -399,3 +414,29 @@ def revoke_customer_api_key(key_id: str, request: Request) -> Response:
                 entity_id=key_id,
             )
     return Response(status_code=status.HTTP_204_NO_CONTENT, headers={"Cache-Control": "no-store"})
+
+
+@router.delete("", response_model=BulkRevokeResponse)
+def revoke_all_customer_api_keys(request: Request, response: Response) -> BulkRevokeResponse:
+    """Soft-revoke every live key of this customer; idempotent (0 on a re-run).
+
+    The "my account may be compromised" self-service lever: revoking one key at
+    a time leaves the rest live if the caller stops halfway, so the whole set is
+    revoked in a single statement. Rows are kept (``revoked_at`` stamped) — the
+    ledger and the audit trail read history, they never rewrite it.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    snapshot = _require_customer_snapshot(request)
+    with fenced_pg_transaction(snapshot) as (conn, ctx):
+        _lock_customer(conn, ctx.user_id)
+        revoked = revoke_all_api_keys(conn, user_id=ctx.user_id)
+        if revoked:
+            _insert_customer_audit(
+                conn,
+                user_id=ctx.user_id,
+                action="customer.api_keys.revoked_all",
+                entity_id=ctx.user_id,
+                metadata={"revoked": revoked},
+                entity_type="user",
+            )
+    return BulkRevokeResponse(revoked=revoked)

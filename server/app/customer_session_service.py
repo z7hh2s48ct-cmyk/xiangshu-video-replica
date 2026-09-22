@@ -583,6 +583,15 @@ REASON_CODE_REVOKED = "code_revoked"
 REASON_SUB_ACCOUNT_DEACTIVATED = "sub_account_deactivated"
 REASON_SUB_ACCOUNT_PASSWORD_RESET = "sub_account_password_reset"
 
+# The reason recorded when an account rotates its *own* password from the
+# personal center: the rotation is the self-service leak response, so the
+# live session it kills must say so in the audit trail.
+REASON_PASSWORD_CHANGED = "password_changed"
+
+# The reason recorded when an account pulls the "log me out of every device"
+# lever on its own, without rotating the credential.
+REASON_ALL_DEVICES_REVOKED = "all_devices_revoked"
+
 # The session/device rows that must be purged before a customer row can be
 # physically deleted: their ``user_id`` FKs carry no CASCADE. Order matters —
 # the session state references the device, so it goes first. The session-event

@@ -10,6 +10,7 @@ import {
   customerSetSubAccountQuota,
   customerUpdateSubAccount,
 } from "../api";
+import { useCustomerConfirm } from "./CustomerConfirmDialog";
 import {
   BUSINESS_FEATURES,
   isAllGranted,
@@ -70,6 +71,7 @@ export function SubAccountManagementPage({
     useState<PermissionDraft>(() => permissionDraft(null));
   const [permissionError, setPermissionError] = useState("");
   const [isSavingPermissions, setIsSavingPermissions] = useState(false);
+  const { confirm, dialog: confirmDialog } = useCustomerConfirm();
   const [form, setForm] = useState({
     username: "",
     display_name: "",
@@ -195,16 +197,11 @@ export function SubAccountManagementPage({
     }
   }
 
-  async function toggleActive(subAccount: CustomerSubAccount) {
-    const nextActive = !subAccount.is_active;
-    if (
-      !nextActive &&
-      !window.confirm(
-        `确认停用「${subAccount.display_name}」？该子账号当前登录会立即失效。`,
-      )
-    ) {
-      return;
-    }
+  /** 停用/启用共用的写路径。失败时抛出：确认框里的失败要留在框内，直接执行的分支自己接住。 */
+  async function applyActiveChange(
+    subAccount: CustomerSubAccount,
+    nextActive: boolean,
+  ) {
     setBusyId(subAccount.id);
     setError("");
     setNotice("");
@@ -223,10 +220,30 @@ export function SubAccountManagementPage({
         onSessionExpired();
         return;
       }
-      setError(errorMessage(cause, "更新子账号状态失败，请稍后重试。"));
+      throw new Error(errorMessage(cause, "更新子账号状态失败，请稍后重试。"));
     } finally {
       setBusyId(null);
     }
+  }
+
+  function toggleActive(subAccount: CustomerSubAccount) {
+    const nextActive = !subAccount.is_active;
+    if (nextActive) {
+      void applyActiveChange(subAccount, true).catch((cause: unknown) =>
+        setError(
+          cause instanceof Error ? cause.message : "更新子账号状态失败。",
+        ),
+      );
+      return;
+    }
+    // 停用会让该子账号当场掉线，属不可逆操作，走产品级确认框（P0 清单 #2）。
+    confirm({
+      title: `停用「${subAccount.display_name}」？`,
+      description: "该子账号当前登录会立即失效，已创建的项目与 Token 保留。",
+      level: "acknowledge",
+      confirmLabel: "停用子账号",
+      onConfirm: () => applyActiveChange(subAccount, false),
+    });
   }
 
   async function resetPassword(subAccount: CustomerSubAccount) {
@@ -303,38 +320,44 @@ export function SubAccountManagementPage({
     }
   }
 
-  async function removeSubAccount(subAccount: CustomerSubAccount) {
-    if (
-      !window.confirm(
-        `确认删除子账号「${subAccount.display_name}」？\n\n该账号的设备与登录会一并清理；若已有消费记录将转为停用保留。`,
-      )
-    ) {
-      return;
-    }
-    setBusyId(subAccount.id);
-    setError("");
-    setNotice("");
-    try {
-      const credential = await loadSession();
-      if (credential === null) {
-        return;
-      }
-      const result = await customerDeleteSubAccount(credential, subAccount.id);
-      setNotice(
-        result.deleted
-          ? "子账号已删除。"
-          : "该子账号已有消费记录，已转为停用保留。",
-      );
-      await reload();
-    } catch (cause) {
-      if (isSessionFailure(cause)) {
-        onSessionExpired();
-        return;
-      }
-      setError(errorMessage(cause, "删除子账号失败，请稍后重试。"));
-    } finally {
-      setBusyId(null);
-    }
+  function removeSubAccount(subAccount: CustomerSubAccount) {
+    // 删号不可撤销，走产品级确认框（P0 清单 #2）。
+    confirm({
+      title: `删除子账号「${subAccount.display_name}」？`,
+      description:
+        "该账号的设备与登录会一并清理；若已有消费记录将转为停用保留，历史不会被改写。",
+      level: "acknowledge",
+      confirmLabel: "删除子账号",
+      onConfirm: async () => {
+        setBusyId(subAccount.id);
+        setError("");
+        setNotice("");
+        try {
+          const credential = await loadSession();
+          if (credential === null) {
+            return;
+          }
+          const result = await customerDeleteSubAccount(
+            credential,
+            subAccount.id,
+          );
+          setNotice(
+            result.deleted
+              ? "子账号已删除。"
+              : "该子账号已有消费记录，已转为停用保留。",
+          );
+          await reload();
+        } catch (cause) {
+          if (isSessionFailure(cause)) {
+            onSessionExpired();
+            return;
+          }
+          throw new Error(errorMessage(cause, "删除子账号失败，请稍后重试。"));
+        } finally {
+          setBusyId(null);
+        }
+      },
+    });
   }
 
   /** 打开权限 Modal：草稿从服务端现值展开（null = 全允许 → 全部勾选）。 */
@@ -384,44 +407,51 @@ export function SubAccountManagementPage({
   }
 
   /** 设为/取消管理员（母账号限定的角色变更，PATCH account_type）。 */
-  async function toggleAdminRole(subAccount: CustomerSubAccount) {
+  function toggleAdminRole(subAccount: CustomerSubAccount) {
     const nextType =
       subAccount.account_type === "SUB_ADMIN" ? "SUB" : "SUB_ADMIN";
-    if (
-      !window.confirm(
-        nextType === "SUB_ADMIN"
-          ? `确认将「${subAccount.display_name}」设为管理员？管理员可以管理本机构的其他子账号（仍不能管理母账号）。`
-          : `确认取消「${subAccount.display_name}」的管理员身份？`,
-      )
-    ) {
-      return;
-    }
-    setBusyId(subAccount.id);
-    setError("");
-    setNotice("");
-    try {
-      const credential = await loadSession();
-      if (credential === null) {
-        return;
-      }
-      await customerUpdateSubAccount(credential, subAccount.id, {
-        account_type: nextType,
-      });
-      setNotice(
-        nextType === "SUB_ADMIN"
-          ? `已将「${subAccount.display_name}」设为管理员。`
-          : `已取消「${subAccount.display_name}」的管理员身份。`,
-      );
-      await reload();
-    } catch (cause) {
-      if (isSessionFailure(cause)) {
-        onSessionExpired();
-        return;
-      }
-      setError(errorMessage(cause, "更新子账号角色失败，请稍后重试。"));
-    } finally {
-      setBusyId(null);
-    }
+    const promoting = nextType === "SUB_ADMIN";
+    // 角色变更扩大或收回他人的管理面，属不可逆操作，走产品级确认框。
+    confirm({
+      title: promoting
+        ? `设为管理员：「${subAccount.display_name}」？`
+        : `取消管理员：「${subAccount.display_name}」？`,
+      description: promoting
+        ? "管理员可以管理本机构的其他子账号（仍不能管理母账号）。"
+        : "取消后该子账号只能使用分配给它的功能与额度。",
+      level: "acknowledge",
+      confirmLabel: promoting ? "设为管理员" : "取消管理员",
+      onConfirm: async () => {
+        setBusyId(subAccount.id);
+        setError("");
+        setNotice("");
+        try {
+          const credential = await loadSession();
+          if (credential === null) {
+            return;
+          }
+          await customerUpdateSubAccount(credential, subAccount.id, {
+            account_type: nextType,
+          });
+          setNotice(
+            promoting
+              ? `已将「${subAccount.display_name}」设为管理员。`
+              : `已取消「${subAccount.display_name}」的管理员身份。`,
+          );
+          await reload();
+        } catch (cause) {
+          if (isSessionFailure(cause)) {
+            onSessionExpired();
+            return;
+          }
+          throw new Error(
+            errorMessage(cause, "更新子账号角色失败，请稍后重试。"),
+          );
+        } finally {
+          setBusyId(null);
+        }
+      },
+    });
   }
 
   const items = subAccounts ?? [];
@@ -433,6 +463,7 @@ export function SubAccountManagementPage({
 
   return (
     <section className="sub-accounts-page" aria-label="子账号管理">
+      {confirmDialog}
       <header className="sub-accounts-page__header">
         <div>
           <p className="eyebrow">子账号管理</p>

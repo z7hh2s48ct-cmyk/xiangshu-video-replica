@@ -300,6 +300,22 @@ REVOKE_OUTCOME_NOT_FOUND = "not_found"
 REVOKE_OUTCOME_ALREADY_REVOKED = "already_revoked"
 
 
+def revoke_all_api_keys(conn: psycopg.Connection, *, user_id: str) -> int:
+    """吊销调用方名下**全部**未吊销的 key，返回真正被吊销的条数。
+
+    「账号可能已泄漏」的一键自救：逐枚吊销需要 N 次请求，中途失败会留下仍然
+    有效的 key；这里一次 UPDATE 完成，且天然幂等（第二次返回 0）。行一律保留
+    （``revoked_at`` 置时刻），账务与审计都靠历史行说话，不硬删。
+    """
+    rows = conn.execute(
+        "UPDATE customer_api_keys SET revoked_at = %s "
+        "WHERE user_id = %s AND revoked_at IS NULL "
+        "RETURNING id",
+        (_now_iso(), user_id),
+    ).fetchall()
+    return len(rows)
+
+
 def revoke_api_key(conn: psycopg.Connection, *, user_id: str, key_id: str) -> str:
     """软吊销一枚 key（``revoked_at`` 置时刻，行保留作审计，不硬删）。
 

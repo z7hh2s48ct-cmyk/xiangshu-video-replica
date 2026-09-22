@@ -19,6 +19,7 @@ import {
 } from "../api";
 import { clearAccountResidue } from "../studio/draftResidue";
 import { StudioWorkspace } from "../studio/StudioWorkspace";
+import { useCustomerConfirm } from "./CustomerConfirmDialog";
 import { customerToCurrentUser } from "./customerToCurrentUser";
 import type {
   CustomerCredentialStore,
@@ -58,6 +59,7 @@ export function CustomerWorkspace({
   const [profileLoadError, setProfileLoadError] = useState("");
   const [deviceError, setDeviceError] = useState("");
   const [deviceLoadError, setDeviceLoadError] = useState("");
+  const { confirm, dialog: confirmDialog } = useCustomerConfirm();
   // CW-062：个人中心身份徽章/子账号入口的身份来源。会话用户自带首次登录
   // 时的身份；重启恢复阶段 user 可能未知（null），此时从凭据库补读缓存。
   const [storedIdentity, setStoredIdentity] =
@@ -227,39 +229,44 @@ export function CustomerWorkspace({
     if (!hasActiveLease()) {
       return;
     }
-    if (
-      !window.confirm("确认下线并解绑这台设备？当前设备解绑后需要重新激活。")
-    ) {
-      return;
-    }
-    if (!hasActiveLease()) {
-      return;
-    }
-    const token = await store.loadDeviceCredentialToken();
-    if (!hasActiveLease()) {
-      return;
-    }
-    if (token === null) {
-      onSessionExpired();
-      return;
-    }
-    try {
-      await customerUnbindDevice({ kind: "device", token }, deviceId, {
-        idempotencyKey: crypto.randomUUID(),
-      });
-      setDeviceError("");
-      await loadDevices();
-    } catch (cause) {
-      if (cause instanceof CustomerApiError && cause.status === 401) {
-        onSessionExpired();
-        return;
-      }
-      setDeviceError(
-        cause instanceof Error && cause.message
-          ? cause.message
-          : "解绑设备失败",
-      );
-    }
+    // 解绑不可撤销，走产品级确认框（audit-25 / P0 清单 #2）。
+    confirm({
+      title: "下线并解绑这台设备？",
+      description: "这台设备解绑后需要重新激活才能继续使用。",
+      level: "acknowledge",
+      confirmLabel: "下线并解绑",
+      onConfirm: async () => {
+        // 确认框是异步的：动作前把租约与凭据再核一次，别拿旧状态去改服务端。
+        // 这里的失败必须抛出去（失败留在框内）——静默 return 会被确认框当成
+        // 「回调正常结束」而关掉弹窗，用户会以为解绑成功了。
+        if (!hasActiveLease()) {
+          throw new Error("会话租约已过期，请重新登录后再解绑设备。");
+        }
+        const token = await store.loadDeviceCredentialToken();
+        if (!hasActiveLease()) {
+          throw new Error("会话租约已过期，请重新登录后再解绑设备。");
+        }
+        if (token === null) {
+          onSessionExpired();
+          return;
+        }
+        try {
+          await customerUnbindDevice({ kind: "device", token }, deviceId, {
+            idempotencyKey: crypto.randomUUID(),
+          });
+          setDeviceError("");
+          await loadDevices();
+        } catch (cause) {
+          if (cause instanceof CustomerApiError && cause.status === 401) {
+            onSessionExpired();
+            return;
+          }
+          throw cause instanceof Error && cause.message
+            ? cause
+            : new Error("解绑设备失败");
+        }
+      },
+    });
   }
 
   async function handleApprovePairing(pairingId: string) {
@@ -286,29 +293,35 @@ export function CustomerWorkspace({
   }
 
   async function handleDismissPairing(pairingId: string) {
-    if (!window.confirm("确认删除这个无效的设备绑定请求？")) {
-      return;
-    }
-    const token = await store.loadDeviceCredentialToken();
-    if (token === null) {
-      onSessionExpired();
-      return;
-    }
-    try {
-      await customerDismissDevicePairing({ kind: "device", token }, pairingId);
-      setDeviceError("");
-      await loadDevices();
-    } catch (cause) {
-      if (cause instanceof CustomerApiError && cause.status === 401) {
-        onSessionExpired();
-        return;
-      }
-      setDeviceError(
-        cause instanceof Error && cause.message
-          ? cause.message
-          : "删除设备绑定请求失败",
-      );
-    }
+    confirm({
+      title: "删除这个无效的设备绑定请求？",
+      description: "被删除的请求不会被批准，对方需要重新发起配对。",
+      level: "standard",
+      confirmLabel: "删除请求",
+      onConfirm: async () => {
+        const token = await store.loadDeviceCredentialToken();
+        if (token === null) {
+          onSessionExpired();
+          return;
+        }
+        try {
+          await customerDismissDevicePairing(
+            { kind: "device", token },
+            pairingId,
+          );
+          setDeviceError("");
+          await loadDevices();
+        } catch (cause) {
+          if (cause instanceof CustomerApiError && cause.status === 401) {
+            onSessionExpired();
+            return;
+          }
+          throw cause instanceof Error && cause.message
+            ? cause
+            : new Error("删除设备绑定请求失败");
+        }
+      },
+    });
   }
 
   async function handleUpdateProfile(
@@ -344,6 +357,7 @@ export function CustomerWorkspace({
 
   return (
     <div className="customer-workspace">
+      {confirmDialog}
       {currentCredential ? (
         <StudioWorkspace
           currentUser={customerToCurrentUser(user, profile)}

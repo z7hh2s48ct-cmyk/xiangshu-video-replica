@@ -27,6 +27,7 @@ import {
   packageBenefitLabel,
   packageBonusCredits,
 } from "../rechargePackageDisplay";
+import { useCustomerConfirm } from "./CustomerConfirmDialog";
 import { LedgerPairingSummary } from "./LedgerPairingSummary";
 import {
   groupLedgerRows,
@@ -72,6 +73,7 @@ export function CustomerWalletPanel({
   const [isLoading, setIsLoading] = useState(true);
   const [isCreating, setIsCreating] = useState(false);
   const [closingOrderNo, setClosingOrderNo] = useState<string | null>(null);
+  const { confirm, dialog: confirmDialog } = useCustomerConfirm();
   const [priceQuotes, setPriceQuotes] = useState<GenerationPriceQuote[]>([]);
   const [quoteError, setQuoteError] = useState("");
   const [isTransactionLoading, setIsTransactionLoading] = useState(false);
@@ -437,46 +439,51 @@ export function CustomerWalletPanel({
     void startCustomRecharge(Number(customAmount));
   }
 
-  async function closePendingOrder(orderNo: string) {
-    if (
-      closingOrderNo ||
-      !window.confirm(
-        "确认删除这个待支付订单？如果已经扫码付款，请不要删除，先等待到账。",
-      )
-    ) {
+  function closePendingOrder(orderNo: string) {
+    if (closingOrderNo) {
       return;
     }
-    const credential = await loadSession();
-    if (credential === null) {
-      return;
-    }
-    setClosingOrderNo(orderNo);
-    setError("");
-    try {
-      await customerCloseRechargeOrder(credential, orderNo);
-      setOrders((current) =>
-        current.filter((order) => order.order_no !== orderNo),
-      );
-      setOrderHistoryPage((current) =>
-        current
-          ? {
-              ...current,
-              items: current.items.map((order) =>
-                order.order_no === orderNo
-                  ? { ...order, status: "CLOSED" }
-                  : order,
-              ),
-            }
-          : current,
-      );
-      setPendingOrderNo((current) => (current === orderNo ? null : current));
-      setNotice("待支付订单已删除。");
-      refreshOrderViews();
-    } catch (cause) {
-      setError(errorMessage(cause, "删除待支付订单失败，请稍后重试。"));
-    } finally {
-      setClosingOrderNo(null);
-    }
+    // 删单不可撤销，走产品级确认框（audit-10 / P0 清单 #2）；失败信息留在框内。
+    confirm({
+      title: "删除这个待支付订单？",
+      description:
+        "如果已经扫码付款，请不要删除，先等待到账。删除后订单不可恢复。",
+      level: "acknowledge",
+      confirmLabel: "删除订单",
+      onConfirm: async () => {
+        const credential = await loadSession();
+        if (credential === null) {
+          return;
+        }
+        setClosingOrderNo(orderNo);
+        setError("");
+        try {
+          await customerCloseRechargeOrder(credential, orderNo);
+          setOrders((current) =>
+            current.filter((order) => order.order_no !== orderNo),
+          );
+          setOrderHistoryPage((current) =>
+            current
+              ? {
+                  ...current,
+                  items: current.items.map((order) =>
+                    order.order_no === orderNo
+                      ? { ...order, status: "CLOSED" }
+                      : order,
+                  ),
+                }
+              : current,
+          );
+          setPendingOrderNo((current) =>
+            current === orderNo ? null : current,
+          );
+          setNotice("待支付订单已删除。");
+          refreshOrderViews();
+        } finally {
+          setClosingOrderNo(null);
+        }
+      },
+    });
   }
 
   if (isLoading && !wallet) {
@@ -540,6 +547,7 @@ export function CustomerWalletPanel({
 
   return (
     <section className="wallet-page" aria-label="余额与充值">
+      {confirmDialog}
       <div className="wallet-summary-grid">
         <article className="wallet-summary-card">
           <span>可用额度</span>

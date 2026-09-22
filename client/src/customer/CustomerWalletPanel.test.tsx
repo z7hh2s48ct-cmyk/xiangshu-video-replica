@@ -81,6 +81,13 @@ function fakeStore(): CustomerCredentialStore {
   };
 }
 
+/** 走完一次产品级确认框：勾选「我已知晓」→ 点确认按钮（P0 清单 #2 起的高危交互）。 */
+async function acknowledgeAndConfirm(dialogName: string, confirmLabel: string) {
+  const dialog = await screen.findByRole("dialog", { name: dialogName });
+  fireEvent.click(within(dialog).getByRole("checkbox"));
+  fireEvent.click(within(dialog).getByRole("button", { name: confirmLabel }));
+}
+
 describe("CustomerWalletPanel", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -502,7 +509,6 @@ describe("CustomerWalletPanel", () => {
   });
 
   it("deletes an unpaid order from the visible list after closing it", async () => {
-    vi.spyOn(window, "confirm").mockReturnValue(true);
     let closed = false;
     const fetchMock = vi.fn((url: string, options?: RequestInit) => {
       if (url.endsWith("/api/customer/recharge-packages")) {
@@ -560,6 +566,7 @@ describe("CustomerWalletPanel", () => {
 
     expect(await screen.findByText("order-pending")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "删除待支付订单" }));
+    await acknowledgeAndConfirm("删除这个待支付订单？", "删除订单");
 
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
@@ -963,7 +970,6 @@ describe("CustomerWalletPanel", () => {
         return jsonResponse({});
       });
       vi.stubGlobal("fetch", fetchMock);
-      vi.spyOn(window, "confirm").mockReturnValue(true);
       render(
         <CustomerWalletPanel store={fakeStore()} onSessionExpired={vi.fn()} />,
       );
@@ -978,8 +984,16 @@ describe("CustomerWalletPanel", () => {
         ),
       );
       fireEvent.click(screen.getByRole("button", { name: "删除待支付订单" }));
+      await acknowledgeAndConfirm("删除这个待支付订单？", "删除订单");
+      // 订单动作的错误留在确认框内（P0 清单 #2：失败可就地重试），
+      // 不再走页面的错误条。
+      const orderDialog = await screen.findByRole("dialog", {
+        name: "删除这个待支付订单？",
+      });
       await waitFor(() => {
-        expect(screen.getByText("关闭订单失败")).toBeInTheDocument();
+        expect(within(orderDialog).getByRole("alert")).toHaveTextContent(
+          "关闭订单失败",
+        );
       });
 
       await act(async () => {
@@ -1005,7 +1019,9 @@ describe("CustomerWalletPanel", () => {
         );
       });
       expect(await screen.findByText("+37 积分")).toBeInTheDocument();
-      expect(screen.getByText("关闭订单失败")).toBeInTheDocument();
+      expect(within(orderDialog).getByRole("alert")).toHaveTextContent(
+        "关闭订单失败",
+      );
 
       // Deliver the real polling result after the user operation and ledger.
       // No sleep or transient DOM node can accidentally satisfy this ordering.
@@ -1016,8 +1032,13 @@ describe("CustomerWalletPanel", () => {
           rejectPoll(new Error("查询订单失败"));
         }
       });
-      expect(screen.getByText("关闭订单失败")).toBeInTheDocument();
-      expect(screen.queryByText("查询订单失败")).not.toBeInTheDocument();
+      // 用户动作的结论不被后台轮询的迟到结果改写——这条保证现在落在确认框里。
+      expect(within(orderDialog).getByRole("alert")).toHaveTextContent(
+        "关闭订单失败",
+      );
+      expect(within(orderDialog).getByRole("alert")).not.toHaveTextContent(
+        "查询订单失败",
+      );
     },
   );
 

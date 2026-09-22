@@ -552,3 +552,78 @@
   color: #1c160d;
   background: #dfaa43;
 }
+
+/* CW-062 B4 账号安全：卡片内三段式（改密表单 / 危险动作 / 最近登录）。
+   本文件的类都只服务客户个人中心，故不写进 styles.css——那会被
+   split_customer_styles 复制进生成的 customer-access.css，造成重复定义。
+   危险按钮刻意不叫 .uc-danger：那个名字在本文件里已经是「危险文字色」，
+   复用它会被 0,2,0 的旧规则盖掉按钮配色。 */
+.uc-security > p {
+  color: var(--text-muted);
+}
+.uc-security__action {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+.uc-security__action strong {
+  display: block;
+}
+.uc-security__action p {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+  font-size: var(--font-caption);
+}
+.uc-security__danger {
+  border: 1px solid #804b45;
+  border-radius: 7px;
+  padding: 10px 16px;
+  font: inherit;
+  color: #fac1b8;
+  background: #311e1d;
+  white-space: nowrap;
+}
+.uc-security__danger:hover {
+  border-color: #a25d55;
+}
+.uc-security__danger:disabled {
+  opacity: 0.6;
+}
+.uc-security__history {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+.uc-security__history ul {
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.uc-security__history li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--line);
+  color: var(--text-muted);
+  font-size: var(--font-caption);
+}
+.uc-security__history li span:first-child {
+  color: var(--text);
+}
+/* 确认框的勾选行：要压过 .uc-center label / .uc-center input 的通用规则。 */
+.uc-confirm .uc-confirm__ack {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 16px 0 0;
+}
+.uc-confirm .uc-confirm__ack input {
+  width: auto;
+  min-width: 0;
+}

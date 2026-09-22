@@ -16,11 +16,15 @@ const mocks = vi.hoisted(() => ({
   create: vi.fn(),
   rotate: vi.fn(),
   revoke: vi.fn(),
+  revokeAll: vi.fn(),
+  revokeAllSessions: vi.fn(),
   summary: vi.fn(),
   navigate: vi.fn(),
   notice: vi.fn(),
   transactions: vi.fn(),
   orders: vi.fn(),
+  history: vi.fn(),
+  passwordState: vi.fn(),
 }));
 vi.mock("../studio/context", () => ({
   useStudio: () => ({
@@ -40,9 +44,14 @@ vi.mock("../api", async (original) => ({
   customerCreateApiKey: mocks.create,
   customerRotateApiKey: mocks.rotate,
   customerRevokeApiKey: mocks.revoke,
+  customerRevokeAllApiKeys: mocks.revokeAll,
+  customerRevokeAllSessions: mocks.revokeAllSessions,
   customerGetCenterSummary: mocks.summary,
   customerListWalletTransactions: mocks.transactions,
   customerListRechargeOrders: mocks.orders,
+  customerListLoginHistory: mocks.history,
+  // 账号设置里的「账号登录」卡片会读密码状态；不 mock 就会打真实网络。
+  customerPasswordState: mocks.passwordState,
   getStudioNotificationPreferences: async () => ({ enabled: true }),
 }));
 
@@ -76,6 +85,13 @@ function setup() {
     offset: 0,
   });
   mocks.orders.mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0 });
+  mocks.history.mockResolvedValue({ items: [], total: 0 });
+  mocks.revokeAllSessions.mockResolvedValue({ revoked_sessions: 1 });
+  mocks.passwordState.mockResolvedValue({
+    user_id: "alice-id",
+    username: "alice",
+    has_password: true,
+  });
   const account = {
     profile: {
       user_id: "alice-id",
@@ -364,7 +380,7 @@ test("a revoked default is not re-created and order errors are not shown as empt
   expect(screen.queryByText("暂无充值记录")).toBeNull();
 });
 
-test("each function has one destination and account settings contain no device section", async () => {
+test("each function has one destination and account settings contain no device management", async () => {
   render(<CustomerCenterPage account={setup()} />);
   expect(await screen.findByText("125")).toBeVisible();
   expect(screen.queryByRole("tab", { name: "账号概览" })).toBeNull();
@@ -374,9 +390,89 @@ test("each function has one destination and account settings contain no device s
   );
   fireEvent.click(screen.getByRole("tab", { name: "账号设置" }));
   expect(screen.queryByRole("button", { name: "新建 Token" })).toBeNull();
+  // 设备管理（槽位列表、解绑）不在这里；「退出所有设备」是会话自救动作，不是
+  // 设备管理，所以断言按能力而不是按「设备」这两个字（CW-062 B4）。
   expect(screen.queryByText("登录设备")).toBeNull();
-  expect(screen.queryByRole("button", { name: /设备/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: /解绑/ })).toBeNull();
   expect(screen.getByRole("switch", { name: "任务通知" })).toBeVisible();
+  expect(screen.getByRole("heading", { name: /账号安全/ })).toBeVisible();
+});
+
+test("security card offers the three self-rescue levers and the login history", async () => {
+  const account = setup();
+  mocks.history.mockResolvedValue({
+    items: [
+      {
+        occurred_at: "2026-09-22T08:00:00+00:00",
+        event: "LOGIN",
+        device_name: "办公室台式机",
+        platform: "windows",
+        reason: null,
+      },
+    ],
+    total: 3,
+  });
+  render(<CustomerCenterPage account={account} />);
+  await screen.findByText("125");
+  fireEvent.click(screen.getByRole("tab", { name: "账号设置" }));
+
+  expect(await screen.findByText(/办公室台式机/)).toBeVisible();
+  expect(screen.getByText(/共 3 条记录/)).toBeVisible();
+  expect(screen.getByRole("button", { name: "修改密码" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "退出所有设备" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "撤销全部 Token" })).toBeVisible();
+});
+
+test("撤销全部 Token needs the acknowledgement and then reports the count", async () => {
+  const account = setup();
+  mocks.revokeAll.mockResolvedValue({ revoked: 1 });
+  render(<CustomerCenterPage account={account} />);
+  await screen.findByText("125");
+  fireEvent.click(screen.getByRole("tab", { name: "账号设置" }));
+
+  fireEvent.click(screen.getByRole("button", { name: "撤销全部 Token" }));
+  const dialog = await screen.findByRole("dialog", {
+    name: "撤销全部 Token？",
+  });
+  // 没勾「我已知晓」之前，确认按钮不产生任何调用。
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: "撤销全部 Token" }),
+  );
+  expect(mocks.revokeAll).not.toHaveBeenCalled();
+  expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+    "请先勾选确认操作",
+  );
+  fireEvent.click(screen.getByRole("checkbox"));
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: "撤销全部 Token" }),
+  );
+  await waitFor(() => expect(mocks.revokeAll).toHaveBeenCalledTimes(1));
+  expect(await screen.findByText("已撤销 1 枚 Token。")).toBeVisible();
+});
+
+test("Token 列表没读到时，撤销全部 Token 不报数字（不拿 0 冒充）", async () => {
+  const account = setup();
+  mocks.list.mockRejectedValue(new Error("Token 列表暂不可用"));
+  render(<CustomerCenterPage account={account} />);
+  await screen.findByText("125");
+  fireEvent.click(screen.getByRole("tab", { name: "账号设置" }));
+
+  expect(
+    await screen.findByText("已发出的 Token 会立即失效，程序调用会被拒绝。"),
+  ).toBeVisible();
+});
+
+test("退出所有设备 logs the user out once the server confirms", async () => {
+  const account = setup();
+  render(<CustomerCenterPage account={account} />);
+  await screen.findByText("125");
+  fireEvent.click(screen.getByRole("tab", { name: "账号设置" }));
+
+  fireEvent.click(screen.getByRole("button", { name: "退出所有设备" }));
+  const dialog = await screen.findByRole("dialog", { name: "退出所有设备？" });
+  fireEvent.click(screen.getByRole("checkbox"));
+  fireEvent.click(within(dialog).getByRole("button", { name: "退出所有设备" }));
+  await waitFor(() => expect(account.onLogout).toHaveBeenCalledTimes(1));
 });
 
 test("expired default recovery reloads existing credentials instead of looping on the expired key", async () => {

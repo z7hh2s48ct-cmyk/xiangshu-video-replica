@@ -34,6 +34,7 @@ import { PublishAccountsPanel } from "../studio/MainPages";
 import { Icon } from "../studio/ui";
 import type { WorkspaceShellProps } from "../workspace-shell";
 import { AccountPasswordSetup } from "./AccountPasswordSetup";
+import { useCustomerConfirm } from "./CustomerConfirmDialog";
 import { CustomerPricesPage } from "./CustomerPricesPage";
 import { CustomerRechargeDialog } from "./CustomerRechargeDialog";
 import { LedgerPairingSummary } from "./LedgerPairingSummary";
@@ -43,6 +44,7 @@ import {
   netAvailableDelta,
   netReservedDelta,
 } from "./ledger-pairing";
+import { SecuritySection } from "./SecuritySection";
 import { TransactionPricingBreakdown } from "./TransactionPricingBreakdown";
 import "./customer-center.css";
 
@@ -132,6 +134,8 @@ export function CustomerCenterPage({
   account: NonNullable<WorkspaceShellProps["customerAccount"]>;
 }) {
   const { navigate, notify, user } = useStudio();
+  const { confirm: confirmAction, dialog: confirmDialog } =
+    useCustomerConfirm();
   const [tab, setTab] = useState<Tab>("tokens");
   const [summary, setSummary] = useState<CustomerCenterSummary | null>(null);
   const [tokens, setTokens] = useState<CustomerApiKey[] | null>(null);
@@ -386,25 +390,30 @@ export function CustomerCenterPage({
       setBusy(false);
     }
   }
-  async function closeOrder(orderNo: string) {
-    if (
-      busyRef.current ||
-      !window.confirm("关闭这个待支付订单？如已扫码付款，请先等待到账。")
-    )
-      return;
-    busyRef.current = true;
-    setBusy(true);
-    setRecordsError("");
-    try {
-      await customerCloseRechargeOrder(await credential(), orderNo);
-      setNotice("待支付订单已关闭，历史记录已保留。");
-      refreshData();
-    } catch (cause) {
-      setRecordsError(message(cause));
-    } finally {
-      busyRef.current = false;
-      setBusy(false);
-    }
+  function closeOrder(orderNo: string) {
+    if (busyRef.current) return;
+    // 关单不可撤销，所以走产品级确认框（audit-10 / P0 清单 #2）：失败信息留在
+    // 框内，用户能就地重试，而不是把错误甩到页面另一处。
+    confirmAction({
+      title: "关闭这个待支付订单？",
+      description:
+        "如已扫码付款，请先等待到账。关闭后订单不可恢复，历史记录会保留。",
+      level: "acknowledge",
+      confirmLabel: "关闭订单",
+      onConfirm: async () => {
+        busyRef.current = true;
+        setBusy(true);
+        setRecordsError("");
+        try {
+          await customerCloseRechargeOrder(await credential(), orderNo);
+          setNotice("待支付订单已关闭，历史记录已保留。");
+          refreshData();
+        } finally {
+          busyRef.current = false;
+          setBusy(false);
+        }
+      },
+    });
   }
   async function saveProfile(event: FormEvent) {
     event.preventDefault();
@@ -1090,6 +1099,22 @@ export function CustomerCenterPage({
                   </div>
                 )}
               </section>
+              <SecuritySection
+                activeTokenCount={
+                  // 列表没读到就不要报「0 枚」——那会和实际撤销掉的枚数对不上。
+                  tokens === null
+                    ? null
+                    : tokens.filter((item) => !item.revoked_at).length
+                }
+                credential={credential}
+                onSessionsEnded={async (reason) => {
+                  // 改密/下线以后当前会话已经死了：先留一句说明，再走正常登出
+                  // 流程回登录页（本地凭据由会话钩子清理）。
+                  setNotice(reason);
+                  await account.onLogout();
+                }}
+                onTokensRevoked={refreshData}
+              />
             </div>
           )}
         </div>
@@ -1209,6 +1234,7 @@ export function CustomerCenterPage({
           )}
         </dialog>
       )}
+      {confirmDialog}
       <CustomerRechargeDialog
         isOpen={recharge}
         onClose={() => setRecharge(false)}

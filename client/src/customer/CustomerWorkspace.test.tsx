@@ -453,7 +453,10 @@ describe("CustomerWorkspace (T31)", () => {
     await screen.findByRole("heading", { name: "用户中心" });
     fireEvent.click(screen.getByRole("tab", { name: "账号设置" }));
     expect(screen.queryByText("登录设备")).toBeNull();
-    expect(screen.queryByRole("button", { name: /设备|绑定/ })).toBeNull();
+    // 断言的是「没有设备/配对管理」这项能力（绑定、解绑、配对审批），不是「设备」
+    // 这两个字：账号安全里的「退出所有设备」是会话自救动作，CW-062 B4 起就在这个
+    // 页签里，它不读设备接口、也不管设备槽位。
+    expect(screen.queryByRole("button", { name: /绑定|解绑|配对/ })).toBeNull();
     expect(
       fetchMock.mock.calls.some(([url]) =>
         url.endsWith("/api/customer/devices"),

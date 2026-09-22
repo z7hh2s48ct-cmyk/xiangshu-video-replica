@@ -45,10 +45,17 @@ test("customer wallet creates a recharge order under the customer session", asyn
   await page.getByRole("tab", { name: "充值记录", exact: true }).click();
   await expect(page.getByText("待支付", { exact: true })).toBeVisible();
   expect(await balance.textContent()).toBe(creditsBefore);
-  page.once("dialog", (dialog) => dialog.accept());
   await page
     .getByRole("button", { name: "关闭待支付订单", exact: true })
     .click();
+  // 关单是不可逆动作，走产品级确认框（审计 P0 清单 #2：客户泳道的 window.confirm
+  // 已被替换），因此这里要勾选「我已知晓」再确认——不再是原生 dialog 自动接受。
+  const closeDialog = page.getByRole("dialog", {
+    name: "关闭这个待支付订单？",
+  });
+  await expect(closeDialog).toBeVisible();
+  await closeDialog.getByRole("checkbox").check();
+  await closeDialog.getByRole("button", { name: "关闭订单" }).click();
   await expect(page.getByText("已关闭", { exact: true })).toBeVisible();
   expect(await balance.textContent()).toBe(creditsBefore);
 });
