@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from datetime import datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -288,6 +289,34 @@ def test_retail_snapshot_applies_package_discount(pg_dsn: str, pg_conn: Business
     assert snapshot["discount_basis_points"] == 9_000
     assert snapshot["discount_rate"] == "0.9000"
     assert snapshot["discount_source"] == "recharge_package"
+    assert snapshot["credits"] == 720
+
+
+def test_retail_snapshot_reads_discount_validity_at_db_clock(
+    pg_dsn: str,
+    pg_conn: BusinessConnection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """折扣生效判断必须用 DB 时钟（SES-01），不能用应用墙钟（上线评审 H-1）。
+
+    ``valid_from`` 由 DB 侧 ``clock_timestamp()`` 写入。若读取端用应用进程时钟，
+    进程时钟落后时刚授予的套餐权益会被判为未生效，客户按原价被预扣——
+    「充值后立即消费」正是最常见的触发场景。
+    """
+    user_id = _new_user("clock")
+    _seed_customer(pg_dsn, user_id)
+    _seed_package_with_discount(pg_conn, user_id=user_id, rate="0.9")
+
+    class _LaggingAppClock:
+        """应用墙钟恒落后 DB 60 秒。"""
+
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            return datetime.now(tz) - timedelta(seconds=60)
+
+    monkeypatch.setattr("app.discount_service.datetime", _LaggingAppClock)
+    snapshot = retail_snapshot(pg_conn, TARIFF_SERVICE, 8, user_id=user_id)
+    assert snapshot["discount_rate"] == "0.9000"
     assert snapshot["credits"] == 720
 
 
