@@ -40,6 +40,17 @@ interface CustomersPageProps {
   embedded?: boolean;
   operatorId?: string;
   readOnly?: boolean;
+  /**
+   * 导航意图（AdminApp 从 hash `?intent=` 解析后透传）。总览快捷入口跳转到
+   * 客户管理后必须"有下文"，否则管理员只看到一个与上下文无关的客户列表：
+   * - customerAdjustments（后台加款 / 发放赠送积分）：引导到客户详情内的
+   *   「赠送积分」表单，并在展开客户时自动定位到该区块；
+   * - 其余 intent 与空值：维持原有客户列表行为。
+   *
+   * （issueCodes / codes 两个 intent 已随本批删除：它们自 #102 下线「快速发码」
+   *   后就没有任何产出方，保留只会留下无来源的死常量。）
+   */
+  initialIntent?: string;
 }
 
 type PendingGrantIntent = {
@@ -135,6 +146,7 @@ export function CustomersPage({
   embedded = false,
   operatorId = "standalone-admin",
   readOnly = false,
+  initialIntent = "",
 }: CustomersPageProps = {}) {
   const [customers, setCustomers] = useState<CustomerListItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -158,6 +170,18 @@ export function CustomersPage({
     balanceMax: "",
   });
   const requestId = useRef(0);
+  const usernameFilterRef = useRef<HTMLInputElement>(null);
+  // 加款意图只在可写角色下引导：auditor 的详情页没有发放表单。
+  const adjustmentsIntent =
+    initialIntent === "customerAdjustments" && !readOnly;
+
+  // 总览「后台加款 / 发放赠送积分」跳进来后直接落在用户名筛选上，
+  // 管理员可以立刻输入客户名，而不是先自己找筛选框。
+  useEffect(() => {
+    if (adjustmentsIntent) {
+      usernameFilterRef.current?.focus();
+    }
+  }, [adjustmentsIntent]);
 
   const loadCustomers = useCallback(async () => {
     const sequence = ++requestId.current;
@@ -241,6 +265,7 @@ export function CustomersPage({
     return (
       <CustomerDetailView
         customer={focusedCustomer}
+        focusGrantSection={adjustmentsIntent}
         operatorId={operatorId}
         onChanged={() => void loadCustomers()}
         onGranted={(result) => {
@@ -274,6 +299,12 @@ export function CustomersPage({
         </header>
       ) : null}
 
+      {adjustmentsIntent ? (
+        <PageBanner tone="notice">
+          后台加款与赠送积分在客户详情内完成：先筛选并展开目标客户，页面会自动定位到「赠送积分」区块。
+        </PageBanner>
+      ) : null}
+
       <form
         className="admin-toolbar customer-list-filters"
         onSubmit={handleFilterSubmit}
@@ -282,6 +313,7 @@ export function CustomersPage({
           <span>用户名筛选</span>
           <input
             placeholder="按用户名筛选"
+            ref={usernameFilterRef}
             type="text"
             value={usernameDraft}
             onChange={(e) => setUsernameDraft(e.target.value)}
@@ -570,6 +602,7 @@ function Customer360Empty() {
 
 function CustomerDetailView({
   customer,
+  focusGrantSection,
   operatorId,
   onChanged,
   onGranted,
@@ -578,6 +611,7 @@ function CustomerDetailView({
   onBack,
 }: {
   customer: CustomerListItem;
+  focusGrantSection: boolean;
   operatorId: string;
   onChanged: () => void;
   onGranted: (result: AdjustmentWriteResult) => void;
@@ -585,6 +619,15 @@ function CustomerDetailView({
   refreshError: string;
   onBack: () => void;
 }) {
+  // 带加款意图进入时，展开客户即直达「赠送积分」表单，省掉再点一次
+  // 「后台加款」滚动按钮；jsdom 没有 scrollIntoView，必须走可选调用。
+  useEffect(() => {
+    if (!focusGrantSection) return;
+    document
+      .getElementById("customer-free-grant")
+      ?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  }, [focusGrantSection]);
+
   return (
     <div
       className="customers-page customer-focused-detail"

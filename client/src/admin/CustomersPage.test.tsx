@@ -1035,4 +1035,70 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       expect(screen.getByText("已暂停")).toBeInTheDocument();
     });
   });
+
+  // 总览快捷入口（customerAdjustments）落到本页的接入验证：
+  // intent 必须产生"下文"，否则入口只是换了个页签。
+  describe("导航意图落地", () => {
+    const oneCustomer = {
+      items: [
+        {
+          user_id: "user-1",
+          username: "customer-1",
+          created_at: "2026-08-24T10:00:00Z",
+          activation_code: "ABC-123",
+          status: "active",
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    };
+
+    it("guides the adjustment intent to the filter and the grant form", async () => {
+      vi.mocked(adminApi.listCustomers).mockResolvedValue(oneCustomer);
+      const scrollIntoView = vi.fn();
+      Element.prototype.scrollIntoView = scrollIntoView;
+
+      render(<CustomersPage initialIntent="customerAdjustments" />);
+
+      expect(
+        await screen.findByText(
+          /后台加款与赠送积分在客户详情内完成.*赠送积分.*区块/,
+        ),
+      ).toBeInTheDocument();
+      expect(screen.getByPlaceholderText("按用户名筛选")).toHaveFocus();
+
+      fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+      expect(
+        screen.getByRole("button", { name: "发放赠送积分" }),
+      ).toBeInTheDocument();
+      await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+    });
+
+    it("keeps the adjustment guidance out of the auditor view", async () => {
+      vi.mocked(adminApi.listCustomers).mockResolvedValue(oneCustomer);
+
+      render(<CustomersPage initialIntent="customerAdjustments" readOnly />);
+
+      await screen.findByText("customer-1");
+      expect(
+        screen.queryByText(/后台加款与赠送积分在客户详情内完成/),
+      ).not.toBeInTheDocument();
+    });
+
+    it("adds no guidance banner without an intent", async () => {
+      vi.mocked(adminApi.listCustomers).mockResolvedValue(oneCustomer);
+
+      render(<CustomersPage />);
+
+      await screen.findByText("customer-1");
+      expect(
+        screen.queryByText(/后台加款与赠送积分在客户详情内完成/),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByText(/激活码发放与查询不在客户管理页/),
+      ).not.toBeInTheDocument();
+      expect(screen.getByPlaceholderText("按用户名筛选")).not.toHaveFocus();
+    });
+  });
 });

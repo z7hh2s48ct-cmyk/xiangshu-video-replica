@@ -163,8 +163,6 @@ const navigationIcons: Record<AdminTab, string> = {
 const adminTabs = new Set<AdminTab>(Object.keys(tabPageTitles) as AdminTab[]);
 const adminIntents = new Set([
   "costDetails",
-  "issueCodes",
-  "codes",
   "customerAdjustments",
   "failedGenerationRecords",
   "analysisFailures",
@@ -768,8 +766,6 @@ export function AdminApp() {
                 readOnly={readOnly}
                 onNavigate={(destination) => {
                   const routes: Record<string, AdminTab> = {
-                    issueCodes: "customersMgmt",
-                    codes: "customersMgmt",
                     customerAdjustments: "customersMgmt",
                     costDetails: "analytics",
                     failedGenerationRecords: "generationRecords",
@@ -794,7 +790,11 @@ export function AdminApp() {
           ) : null}
           {activeTab === "funds" ? <FundsPage readOnly={readOnly} /> : null}
           {activeTab === "customersMgmt" ? (
+            /* 总览快捷入口（后台加款 / 发放赠送积分 / 历史激活码入口）都落在
+               本页：把 intent 透传下去，客户管理页才能给出对应表单或说明，
+               否则点完只是换了个页签、没有下文。 */
             <CustomersManagementPage
+              initialIntent={navigationIntent}
               operatorId={actor.user_id}
               readOnly={readOnly}
             />

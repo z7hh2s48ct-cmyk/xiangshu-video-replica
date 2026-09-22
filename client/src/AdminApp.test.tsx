@@ -431,6 +431,57 @@ describe("AdminApp", () => {
     ).toBe(true);
   });
 
+  it("恢复总览加款意图时带到客户管理页的加款引导", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/admin#admin/customersMgmt?intent=customerAdjustments",
+    );
+    const fetchMock = installFetch({ session: "valid" });
+    render(<AdminApp />);
+
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "客户管理" }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText(/后台加款与赠送积分在客户详情内完成/),
+    ).toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(([url]) =>
+        String(url).includes("/api/control/customers?"),
+      ),
+    ).toBe(true);
+  });
+
+  it("同一客户管理模块切换意图时同步收起加款引导", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/admin#admin/customersMgmt?intent=customerAdjustments",
+    );
+    installFetch({ session: "valid" });
+    render(<AdminApp />);
+
+    expect(
+      await screen.findByText(/后台加款与赠送积分在客户详情内完成/),
+    ).toBeInTheDocument();
+
+    // 从侧栏点回「客户管理」= 不带 intent，引导必须跟着 intent 一起消失。
+    fireEvent.click(screen.getByRole("button", { name: "客户管理" }));
+    expect(window.location.hash).toBe("#admin/customersMgmt");
+    await waitFor(() =>
+      expect(
+        screen.queryByText(/后台加款与赠送积分在客户详情内完成/),
+      ).toBeNull(),
+    );
+
+    await act(async () => window.history.back());
+    await waitFor(() => expect(window.location.hash).toContain("intent="));
+    expect(
+      await screen.findByText(/后台加款与赠送积分在客户详情内完成/),
+    ).toBeInTheDocument();
+  });
+
   it("刷新和前进后退恢复模块及失败记录筛选意图", async () => {
     window.history.replaceState(
       null,
