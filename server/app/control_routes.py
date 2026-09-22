@@ -877,19 +877,15 @@ def list_generation_records(
         created_to=created_to,
     )
     if record_type in {"SOURCE_FRAME_PROCESS", "SOURCE_FRAME_AI_SCORE"}:
+        # 与 summary 聚合同口径：按审计留痕归类。json_valid/json_extract 只有
+        # SQLite 有，PG 上直接报函数不存在；行渲染侧仍有 payload 兜底
+        # （semantic_status in {...} or audit），极少数「只有 payload、没有审计」
+        # 的历史行在筛选里不计入 AI 评分类，与 summary 计数一致。
         semantic_requested_sql = """
-            (
-              CASE WHEN json_valid(versions.payload_json)
-                THEN json_extract(
-                  versions.payload_json, '$.semantic_quality_status'
-                ) IN ('VERIFIED', 'UNAVAILABLE')
-                ELSE 0
-              END
-              OR EXISTS (
+            EXISTS (
                 SELECT 1 FROM audit_logs quality_audit
                 WHERE quality_audit.action = 'source_frame.semantic_quality_started'
                   AND quality_audit.entity_id = task.id
-              )
             )
         """
         source_type_clause = (
