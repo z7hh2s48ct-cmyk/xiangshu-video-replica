@@ -6,7 +6,7 @@ import {
   within,
 } from "@testing-library/react";
 import { expect, test, vi } from "vitest";
-import { CustomerApiError } from "../api";
+import { CustomerApiError, type CustomerProfile } from "../api";
 import type { WorkspaceShellProps } from "../workspace-shell";
 import { CustomerCenterPage } from "./CustomerCenterPage";
 
@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   orders: vi.fn(),
   history: vi.fn(),
   passwordState: vi.fn(),
+  subAccounts: vi.fn(),
 }));
 vi.mock("../studio/context", () => ({
   useStudio: () => ({
@@ -50,6 +51,7 @@ vi.mock("../api", async (original) => ({
   customerListWalletTransactions: mocks.transactions,
   customerListRechargeOrders: mocks.orders,
   customerListLoginHistory: mocks.history,
+  customerListSubAccounts: mocks.subAccounts,
   // 账号设置里的「账号登录」卡片会读密码状态；不 mock 就会打真实网络。
   customerPasswordState: mocks.passwordState,
   getStudioNotificationPreferences: async () => ({ enabled: true }),
@@ -68,7 +70,51 @@ const token = {
   is_default: true,
   total_consumed_credits: 0,
 };
-function setup() {
+/** 母账号的账号资料：`/api/customer/profile` 对母账号的权威回答。 */
+const masterProfile: CustomerProfile = {
+  user_id: "alice-id",
+  username: "alice",
+  display_name: "Alice",
+  joined_at: "2026-09-12T12:00:00Z",
+  activation_code_masked: null,
+  activation_status: null,
+  activated_at: null,
+  device_slots_used: 1,
+  device_slots_total: null,
+  account_type: "MASTER",
+  parent_user_id: null,
+  parent_display_name: null,
+  monthly_quota_credits: null,
+  quota_used_credits: null,
+};
+
+/** 子账号的账号资料：身份/母账号名/月度额度都在这一份响应里。 */
+function subProfile(overrides: Partial<CustomerProfile> = {}): CustomerProfile {
+  return {
+    ...masterProfile,
+    user_id: "bob-id",
+    username: "bob",
+    display_name: "Bob",
+    account_type: "SUB",
+    parent_user_id: "alice-id",
+    parent_display_name: "总部机构",
+    ...overrides,
+  };
+}
+
+const subIdentity = {
+  accountType: "SUB" as const,
+  parentUserId: "alice-id",
+  parentDisplayName: "总部机构",
+};
+
+function setup(
+  overrides: {
+    /** 显式传 null 表示「资料还没读到」；不传就是母账号资料。 */
+    profile?: CustomerProfile | null;
+    identity?: typeof subIdentity | null;
+  } = {},
+) {
   vi.clearAllMocks();
   mocks.list.mockResolvedValue({ items: [token], total: 1 });
   mocks.summary.mockResolvedValue({
@@ -87,23 +133,15 @@ function setup() {
   mocks.orders.mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0 });
   mocks.history.mockResolvedValue({ items: [], total: 0 });
   mocks.revokeAllSessions.mockResolvedValue({ revoked_sessions: 1 });
+  mocks.subAccounts.mockResolvedValue([]);
   mocks.passwordState.mockResolvedValue({
     user_id: "alice-id",
     username: "alice",
     has_password: true,
   });
   const account = {
-    profile: {
-      user_id: "alice-id",
-      username: "alice",
-      display_name: "Alice",
-      joined_at: "2026-09-12T12:00:00Z",
-      activation_code_masked: null,
-      activation_status: null,
-      activated_at: null,
-      device_slots_used: 1,
-      device_slots_total: null,
-    },
+    profile:
+      overrides.profile === undefined ? masterProfile : overrides.profile,
     profileLoadError: "",
     devices: { slots: [], pending_pairings: [] },
     deviceError: "",
@@ -115,19 +153,155 @@ function setup() {
     onUpdateProfile: vi.fn(),
     onProfileUpdated: vi.fn(),
     onUnbind: vi.fn(),
+    identity: overrides.identity ?? null,
+    loadIdentity: async () => overrides.identity ?? null,
   } as unknown as NonNullable<WorkspaceShellProps["customerAccount"]>;
   return account;
 }
 
-test("renders real account points and six focused tabs without reissuing an existing default", async () => {
+/** 身份卡里的 dl 行：按 dt 取 dd。不靠 DOM 顺序，行序变化不会误伤断言。 */
+function identityValue(root: HTMLElement, label: string): HTMLElement {
+  const term = within(root).getByText(label);
+  const value = term.parentElement?.querySelector("dd");
+  if (!value) throw new Error(`身份卡没有「${label}」这一行的取值`);
+  return value as HTMLElement;
+}
+
+test("renders real account points and seven focused tabs without reissuing an existing default", async () => {
   render(<CustomerCenterPage account={setup()} />);
   expect(await screen.findByText("125")).toBeVisible();
-  expect(screen.getAllByRole("tab")).toHaveLength(6);
+  // 七 = 原六项 + 子账号管理（母账号可见）；计数变化是本轮新增能力的直接后果。
+  expect(screen.getAllByRole("tab")).toHaveLength(7);
   expect(screen.getByRole("tab", { name: "接口价格" })).toBeVisible();
   expect(screen.getByText("alice-id")).toBeVisible();
   expect(mocks.initialize).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "返回主界面" }));
   expect(mocks.navigate).toHaveBeenCalledWith("workbench");
+});
+
+test("母账号能进入子账号管理页签，读到的是真实子账号接口", async () => {
+  render(<CustomerCenterPage account={setup()} />);
+  expect(await screen.findByText("125")).toBeVisible();
+  fireEvent.click(screen.getByRole("tab", { name: "子账号管理" }));
+  expect(
+    await screen.findByRole("region", { name: "子账号管理" }),
+  ).toBeVisible();
+  expect(mocks.subAccounts).toHaveBeenCalled();
+});
+
+test("子账号看不到子账号管理页签（服务端对 SUB 一律 403）", async () => {
+  render(<CustomerCenterPage account={setup({ profile: subProfile() })} />);
+  expect(await screen.findByText("125")).toBeVisible();
+  expect(screen.queryByRole("tab", { name: "子账号管理" })).toBeNull();
+  expect(mocks.subAccounts).not.toHaveBeenCalled();
+});
+
+test("SUB_ADMIN 仍能看到子账号管理页签（服务端放行，且它自己算子账号）", async () => {
+  render(
+    <CustomerCenterPage
+      account={setup({ profile: subProfile({ account_type: "SUB_ADMIN" }) })}
+    />,
+  );
+  expect(await screen.findByText("125")).toBeVisible();
+  // 判定按「是不是普通 SUB」，不是「是不是 MASTER」：SUB_ADMIN 有母账号，
+  // 但服务端确实放行它的子账号管理接口，藏掉入口才是丢能力。
+  expect(screen.getByRole("tab", { name: "子账号管理" })).toBeVisible();
+  const card = screen.getByRole("region", { name: "账号身份" });
+  expect(within(card).getByText("子账号")).toBeVisible();
+  expect(identityValue(card, "本月额度")).toBeVisible();
+});
+
+test("身份徽章区分母/子账号并给出所属母账号", async () => {
+  const master = render(<CustomerCenterPage account={setup()} />);
+  expect(await screen.findByText("125")).toBeVisible();
+  const masterCard = screen.getByRole("region", { name: "账号身份" });
+  expect(within(masterCard).getByText("母账号")).toBeVisible();
+  expect(within(masterCard).queryByText(/所属母账号/)).toBeNull();
+  master.unmount();
+
+  render(<CustomerCenterPage account={setup({ profile: subProfile() })} />);
+  expect(await screen.findByText("125")).toBeVisible();
+  const subCard = screen.getByRole("region", { name: "账号身份" });
+  expect(within(subCard).getByText("子账号")).toBeVisible();
+  expect(within(subCard).getByText(/所属母账号：总部机构/)).toBeVisible();
+});
+
+test("身份未知时不冒充母账号：profile 未到时用缓存身份兜底", async () => {
+  render(
+    <CustomerCenterPage
+      account={setup({ profile: null, identity: subIdentity })}
+    />,
+  );
+  expect(await screen.findByText("125")).toBeVisible();
+  const card = screen.getByRole("region", { name: "账号身份" });
+  expect(within(card).getByText("子账号")).toBeVisible();
+  // 资料没到：额度、设备都显示读取中，不拿 0 台 / 0 积分顶替。
+  expect(identityValue(card, "本月额度")).toHaveTextContent("读取中");
+  expect(identityValue(card, "本月已用")).toHaveTextContent("读取中");
+  expect(identityValue(card, "本月剩余")).toHaveTextContent("读取中");
+  expect(identityValue(card, "已绑定设备")).toHaveTextContent("读取中");
+});
+
+test("子账号的月度额度读数面覆盖设限 / 不限 / 已用尽三态", async () => {
+  const capped = render(
+    <CustomerCenterPage
+      account={setup({
+        profile: subProfile({
+          monthly_quota_credits: 5000,
+          quota_used_credits: 1800,
+        }),
+      })}
+    />,
+  );
+  expect(await screen.findByText("125")).toBeVisible();
+  let card = screen.getByRole("region", { name: "账号身份" });
+  expect(identityValue(card, "本月额度")).toHaveTextContent("5,000 积分");
+  expect(identityValue(card, "本月已用")).toHaveTextContent("1,800 积分");
+  expect(identityValue(card, "本月剩余")).toHaveTextContent("3,200 积分");
+  expect(identityValue(card, "本月剩余")).toHaveTextContent("36%");
+  capped.unmount();
+
+  // 上限为 null = 不限（服务端对没有额度行的子账号就回 null）。
+  render(
+    <CustomerCenterPage
+      account={setup({
+        profile: subProfile({
+          monthly_quota_credits: null,
+          quota_used_credits: 320,
+        }),
+      })}
+    />,
+  );
+  expect(await screen.findByText("125")).toBeVisible();
+  card = screen.getByRole("region", { name: "账号身份" });
+  expect(identityValue(card, "本月额度")).toHaveTextContent("不限");
+  expect(identityValue(card, "本月已用")).toHaveTextContent("320 积分");
+  expect(identityValue(card, "本月剩余")).toHaveTextContent("不限");
+});
+
+test("额度超限时剩余钳到 0 并标出已用尽，不给出负数", async () => {
+  render(
+    <CustomerCenterPage
+      account={setup({
+        profile: subProfile({
+          monthly_quota_credits: 1000,
+          quota_used_credits: 1200,
+        }),
+      })}
+    />,
+  );
+  expect(await screen.findByText("125")).toBeVisible();
+  const card = screen.getByRole("region", { name: "账号身份" });
+  expect(identityValue(card, "本月剩余")).toHaveTextContent("0 积分");
+  expect(identityValue(card, "本月剩余")).toHaveTextContent("已用尽");
+});
+
+test("母账号不出现额度读数（自己持有钱包，永不被限额）", async () => {
+  render(<CustomerCenterPage account={setup()} />);
+  expect(await screen.findByText("125")).toBeVisible();
+  const card = screen.getByRole("region", { name: "账号身份" });
+  expect(within(card).queryByText("本月额度")).toBeNull();
+  expect(identityValue(card, "已绑定设备")).toHaveTextContent("1 台");
 });
 
 test("uses the same gold logo and brand names as the studio", async () => {

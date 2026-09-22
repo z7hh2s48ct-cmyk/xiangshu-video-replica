@@ -44,19 +44,25 @@ import {
   netAvailableDelta,
   netReservedDelta,
 } from "./ledger-pairing";
+import { quotaPercentUsed, quotaState } from "./quotaViz";
 import { SecuritySection } from "./SecuritySection";
+import { SubAccountManagementPage } from "./SubAccountManagementPage";
 import { TransactionPricingBreakdown } from "./TransactionPricingBreakdown";
+import type { CustomerStoredIdentity } from "./useCustomerSession";
 import "./customer-center.css";
 
-const tabs = [
+/** 页签全集。子账号管理对普通子账号不可见（见 `visibleTabs`），
+ * 所以这里保留全集、渲染前再过滤，键盘导航才和可见页签一致。 */
+const ALL_TABS = [
   ["tokens", "Token 管理"],
   ["consumption", "消费记录"],
   ["recharge", "充值记录"],
   ["prices", "接口价格"],
   ["publishing", "发布账号"],
+  ["sub-accounts", "子账号管理"],
   ["settings", "账号设置"],
 ] as const;
-type Tab = (typeof tabs)[number][0];
+type Tab = (typeof ALL_TABS)[number][0];
 type Mutation =
   | { kind: "create" }
   | { kind: "rotate" | "revoke"; token: CustomerApiKey };
@@ -69,6 +75,23 @@ const date = (value: string | null) =>
     : "尚未使用";
 const message = (error: unknown) =>
   error instanceof Error ? error.message : "操作失败，请稍后重试。";
+
+/** 服务端把账号身份收敛为 MASTER/SUB/SUB_ADMIN。 */
+type AccountType = "MASTER" | "SUB" | "SUB_ADMIN";
+
+/**
+ * 身份解析：`profile.account_type` 是权威副本（服务端必返、默认 MASTER），
+ * 凭据库里的缓存身份只在 profile 到达前兜底——重启恢复的先头帧可能拿不到身份。
+ * 两者都没有时返回 null，界面保持沉默，而不是替用户猜一个「母账号」。
+ */
+function resolveAccountType(
+  profileType: string | null | undefined,
+  identity: CustomerStoredIdentity | null,
+): AccountType | null {
+  const raw = profileType ?? identity?.accountType ?? null;
+  if (!raw) return null;
+  return raw === "SUB" || raw === "SUB_ADMIN" ? raw : "MASTER";
+}
 
 const LEDGER_TYPE_LABEL: Record<WalletTransaction["type"], string> = {
   CHARGE: "积分入账",
@@ -155,6 +178,9 @@ export function CustomerCenterPage({
   const [displayName, setDisplayName] = useState(
     account.profile?.display_name ?? user.display_name,
   );
+  // CW-062：缓存身份只作为 profile 到达前的兜底，读失败就保持未知（徽章不出现）。
+  const [cachedIdentity, setCachedIdentity] =
+    useState<CustomerStoredIdentity | null>(account.identity ?? null);
   const [notifications, setNotifications] = useState<boolean | null>(null);
   const [preferencesError, setPreferencesError] = useState("");
   const [transactionPage, setTransactionPage] =
@@ -182,6 +208,55 @@ export function CustomerCenterPage({
   const dialog = useRef<HTMLDialogElement>(null);
   const profile = account.profile;
   const name = profile?.display_name || user.display_name || user.username;
+  const accountType = resolveAccountType(profile?.account_type, cachedIdentity);
+  const isMasterAccount = accountType === "MASTER";
+  // SUB_ADMIN 也归子账号：它有母账号、受额度约束，只是额外获授权管子账号。
+  const isSubAccount = accountType === "SUB" || accountType === "SUB_ADMIN";
+  // 子账号管理页签：服务端只放行母账号与获授权的 SUB_ADMIN，普通 SUB 一律 403，
+  // 所以只对「确认是 SUB」的会话隐藏（产品判断：组织管理，Web 与桌面都出现——
+  // 它跟 devices 那种端专属能力不同，没有设备依赖；要改成端专属只需动这一行）。
+  const canManageSubAccounts = accountType !== "SUB";
+  const visibleTabs = ALL_TABS.filter(
+    ([id]) => id !== "sub-accounts" || canManageSubAccounts,
+  );
+  const parentDisplayName =
+    profile?.parent_display_name ?? cachedIdentity?.parentDisplayName ?? null;
+  // 额度读数：母账号自己持有钱包、服务端恒返 null/null，所以只对子账号出现。
+  const quotaCap = profile?.monthly_quota_credits ?? null;
+  const rawQuotaUsed = profile?.quota_used_credits;
+  const quotaUsed = rawQuotaUsed == null ? null : Math.max(0, rawQuotaUsed);
+  const quotaRemaining =
+    quotaCap === null || quotaUsed === null
+      ? null
+      : Math.max(0, quotaCap - quotaUsed);
+  const quotaPercent =
+    quotaUsed === null ? null : quotaPercentUsed(quotaUsed, quotaCap);
+  const quotaLevel =
+    quotaUsed === null ? null : quotaState(quotaUsed, quotaCap);
+  // 读数三态：资料未到 / 读取失败 / 就绪。就绪前不拿 0 顶替真实数字。
+  const quotaPending =
+    profile === null
+      ? account.profileLoadError
+        ? "读取失败"
+        : "读取中"
+      : null;
+  const quotaCapText =
+    quotaPending ??
+    (quotaCap === null ? "不限" : `${quotaCap.toLocaleString("zh-CN")} 积分`);
+  const quotaUsedText =
+    quotaPending ??
+    (quotaUsed === null ? "—" : `${quotaUsed.toLocaleString("zh-CN")} 积分`);
+  const quotaRemainingText =
+    quotaPending ??
+    (quotaRemaining === null
+      ? "不限"
+      : `${quotaRemaining.toLocaleString("zh-CN")} 积分`);
+  const deviceSlotsText =
+    profile === null
+      ? account.profileLoadError
+        ? "读取失败"
+        : "读取中"
+      : `${profile.device_slots_used} 台`;
   const credential = useCallback(async () => {
     const token = await account.store.loadSessionToken();
     if (!token) {
@@ -193,6 +268,28 @@ export function CustomerCenterPage({
   useEffect(() => {
     setDisplayName(profile?.display_name ?? user.display_name);
   }, [profile?.display_name, user.display_name]);
+  useEffect(() => {
+    if (account.identity) {
+      setCachedIdentity(account.identity);
+      return;
+    }
+    const load = account.loadIdentity;
+    if (!load) return;
+    let active = true;
+    void load()
+      .then((next) => {
+        if (active && next) setCachedIdentity(next);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [account.identity, account.loadIdentity]);
+  // 身份后到时若正站在子账号管理页签（恢复路径），退回 Token 页签：
+  // 否则面板会带着 aria-labelledby 指向一个已经不存在的页签。
+  useEffect(() => {
+    if (!canManageSubAccounts && tab === "sub-accounts") setTab("tokens");
+  }, [canManageSubAccounts, tab]);
   useEffect(() => {
     if (!mutation && !secret) return;
     const element = dialog.current;
@@ -843,7 +940,7 @@ export function CustomerCenterPage({
             </button>
           </p>
         )}
-        <section className="uc-identity uc-card">
+        <section className="uc-identity uc-card" aria-label="账号身份">
           <div className="uc-person">
             <span className="uc-avatar">{name.slice(0, 1)}</span>
             <div>
@@ -854,6 +951,22 @@ export function CustomerCenterPage({
                   编辑资料
                 </button>
               </h2>
+              {accountType && (
+                <p className="uc-identity-badge">
+                  <span
+                    className={isMasterAccount ? "uc-tag" : "uc-tag uc-tag-sub"}
+                  >
+                    {isMasterAccount ? "母账号" : "子账号"}
+                  </span>
+                  {!isMasterAccount && (
+                    <small>
+                      所属母账号：
+                      {parentDisplayName ??
+                        (profile === null ? "读取中" : "未记录")}
+                    </small>
+                  )}
+                </p>
+              )}
               <dl>
                 <div>
                   <dt>用户名</dt>
@@ -871,6 +984,39 @@ export function CustomerCenterPage({
                       : "读取中"}
                   </dd>
                 </div>
+                {/* 设备数取 profile.device_slots_used：本页不读设备接口，
+                    所以不出现槽位列表/解绑那类设备管理能力。 */}
+                <div>
+                  <dt>已绑定设备</dt>
+                  <dd>{deviceSlotsText}</dd>
+                </div>
+                {/* 子账号的月度额度：没有这一面，用户只能等生成失败才知道上限。 */}
+                {isSubAccount && (
+                  <>
+                    <div>
+                      <dt>本月额度</dt>
+                      <dd>{quotaCapText}</dd>
+                    </div>
+                    <div>
+                      <dt>本月已用</dt>
+                      <dd>{quotaUsedText}</dd>
+                    </div>
+                    <div>
+                      <dt>本月剩余</dt>
+                      <dd>
+                        {quotaRemainingText}
+                        {quotaPending === null &&
+                          quotaPercent !== null &&
+                          quotaLevel && (
+                            <small className={`uc-quota-${quotaLevel}`}>
+                              {quotaPercent}%
+                              {quotaLevel === "exhausted" ? " · 已用尽" : ""}
+                            </small>
+                          )}
+                      </dd>
+                    </div>
+                  </>
+                )}
               </dl>
             </div>
           </div>
@@ -909,7 +1055,7 @@ export function CustomerCenterPage({
           </div>
         </section>
         <div className="uc-tabs" role="tablist" aria-label="用户中心功能">
-          {tabs.map(([id, label]) => (
+          {visibleTabs.map(([id, label]) => (
             <button
               type="button"
               role="tab"
@@ -920,21 +1066,23 @@ export function CustomerCenterPage({
               onClick={() => selectTab(id)}
               tabIndex={tab === id ? 0 : -1}
               onKeyDown={(event) => {
-                const index = tabs.findIndex(([value]) => value === id);
+                const index = visibleTabs.findIndex(([value]) => value === id);
                 const next =
                   event.key === "ArrowRight"
-                    ? (index + 1) % tabs.length
+                    ? (index + 1) % visibleTabs.length
                     : event.key === "ArrowLeft"
-                      ? (index + tabs.length - 1) % tabs.length
+                      ? (index + visibleTabs.length - 1) % visibleTabs.length
                       : event.key === "Home"
                         ? 0
                         : event.key === "End"
-                          ? tabs.length - 1
+                          ? visibleTabs.length - 1
                           : null;
                 if (next === null) return;
                 event.preventDefault();
-                selectTab(tabs[next][0]);
-                document.getElementById(`uc-tab-${tabs[next][0]}`)?.focus();
+                selectTab(visibleTabs[next][0]);
+                document
+                  .getElementById(`uc-tab-${visibleTabs[next][0]}`)
+                  ?.focus();
               }}
             >
               {label}
@@ -1035,6 +1183,12 @@ export function CustomerCenterPage({
             <section className="uc-card">
               <PublishAccountsPanel notify={notify} />
             </section>
+          )}
+          {tab === "sub-accounts" && canManageSubAccounts && (
+            <SubAccountManagementPage
+              store={account.store}
+              onSessionExpired={account.onSessionExpired}
+            />
           )}
           {tab === "settings" && (
             <div className="uc-settings">

@@ -189,6 +189,34 @@
   margin: 0;
   overflow-wrap: anywhere;
 }
+.uc-person dd small {
+  margin-left: 8px;
+}
+/* 身份徽章：母账号沿用金色 .uc-tag，子账号换冷色，一眼能分清自己在哪一侧。
+   母账号名沿用次要文字色（由这里继承给 <small>）。 */
+.uc-identity-badge {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 8px 0 0;
+  font-size: var(--font-caption);
+  color: var(--uc-muted);
+}
+.uc-identity-badge .uc-tag {
+  margin-top: 0;
+}
+/* 额度读数按余额告警色分级：正常/不限保持安静，预警与用尽才抢注意力。 */
+.uc-quota-normal,
+.uc-quota-unlimited {
+  color: var(--uc-muted);
+}
+.uc-quota-warning {
+  color: #edc262;
+}
+.uc-quota-exhausted {
+  color: #ef9595;
+}
 .uc-balance {
   padding-left: 32px;
   border-left: 1px solid #393429;
@@ -307,6 +335,12 @@
   padding: 0 5px;
   font-size: var(--font-caption);
   margin-top: 4px;
+}
+/* 子账号的身份徽章换冷色：和母账号的金色放在一起才分得清。写在 .uc-tag 之后
+   ——同权重，靠顺序取胜。 */
+.uc-tag-sub {
+  color: #9fc4e8;
+  border-color: #3f5c78;
 }
 .uc-valid {
   color: #8bcca0;
