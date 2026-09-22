@@ -1,11 +1,18 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
-import { expect, test, vi } from "vitest";
-import { adminRead } from "../api.admin";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import { beforeEach, describe, expect, test, vi } from "vitest";
+import { adminRead, exportBillingReportCsv } from "../api.admin";
 import { AnalyticsPage } from "./AnalyticsPage";
 
 vi.mock("../api.admin", () => ({
   adminRead: vi.fn(),
   downloadBillingCsv: vi.fn(),
+  exportBillingReportCsv: vi.fn(),
 }));
 
 test.each([
@@ -180,4 +187,88 @@ test("switches profit and cost columns while retaining filters and loaded data",
   ).toBeInTheDocument();
   expect(screen.getByLabelText("用户 ID")).toHaveValue("test-customer");
   expect(adminRead).toHaveBeenCalledTimes(calls);
+});
+
+describe("billing report export", () => {
+  const exportPanel = () =>
+    within(screen.getByRole("region", { name: "计费报表导出" }));
+
+  beforeEach(() => {
+    vi.mocked(adminRead).mockReset();
+    vi.mocked(exportBillingReportCsv).mockReset();
+    vi.mocked(adminRead).mockImplementation(
+      async () =>
+        ({
+          services: [],
+          totals: {},
+          periods: [],
+          basis: "",
+          items: [],
+          total: 0,
+        }) as never,
+    );
+  });
+
+  test("exports the chosen window as a gzipped report and reports the file name", async () => {
+    vi.mocked(exportBillingReportCsv).mockResolvedValue({
+      filename: "billing_export_20260922_101530.csv.gz",
+      bytes: 2048,
+    });
+    render(<AnalyticsPage />);
+
+    fireEvent.change(screen.getByLabelText("导出开始日期"), {
+      target: { value: "2026-08-01" },
+    });
+    fireEvent.change(screen.getByLabelText("导出结束日期"), {
+      target: { value: "2026-09-22" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "导出计费报表" }));
+
+    await waitFor(() =>
+      expect(exportBillingReportCsv).toHaveBeenCalledWith({
+        start_date: "2026-08-01",
+        end_date: "2026-09-22",
+      }),
+    );
+    expect(await exportPanel().findByRole("status")).toHaveTextContent(
+      "billing_export_20260922_101530.csv.gz",
+    );
+  });
+
+  test("blocks a window beyond the server's 90-day cap before any request", async () => {
+    render(<AnalyticsPage />);
+
+    fireEvent.change(screen.getByLabelText("导出开始日期"), {
+      target: { value: "2026-01-01" },
+    });
+    fireEvent.change(screen.getByLabelText("导出结束日期"), {
+      target: { value: "2026-09-22" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "导出计费报表" }));
+
+    expect(await exportPanel().findByRole("alert")).toHaveTextContent(
+      "不能超过 90 天",
+    );
+    expect(exportBillingReportCsv).not.toHaveBeenCalled();
+  });
+
+  test("surfaces the server rejection when an export fails", async () => {
+    vi.mocked(exportBillingReportCsv).mockRejectedValue(
+      new Error("导出计费报表失败：Date range cannot exceed 90 days（400）"),
+    );
+    render(<AnalyticsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "导出计费报表" }));
+
+    expect(await exportPanel().findByRole("alert")).toHaveTextContent(
+      "Date range cannot exceed 90 days",
+    );
+  });
+
+  test("hides the export entry from auditor sessions", async () => {
+    render(<AnalyticsPage readOnly />);
+
+    await screen.findByRole("table", { name: "请求明细" });
+    expect(screen.queryByRole("region", { name: "计费报表导出" })).toBeNull();
+  });
 });

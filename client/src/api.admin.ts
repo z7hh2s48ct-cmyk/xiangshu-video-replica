@@ -2161,3 +2161,71 @@ export async function downloadBillingCsv(query: string): Promise<string> {
     ? "已导出前 5000 条；请缩小日期范围后分批导出。"
     : "明细已导出。";
 }
+
+/** 一次报表导出请求要看清的上下文：默认「本月至今」之外的窗口由调用方给出。 */
+export type BillingReportExportInput = {
+  start_date: string;
+  end_date: string;
+};
+
+export type BillingReportExport = {
+  /** 服务端 Content-Disposition 给出的带时间戳文件名。 */
+  filename: string;
+  bytes: number;
+};
+
+/** 90 天窗口的报表要跑完整计费明细，5 秒默认等待不够（对齐 api.ts 的长任务口径）。 */
+const REPORT_EXPORT_TIMEOUT_MS = 120_000;
+const REPORT_EXPORT_PATH = "/api/control/reports/export";
+
+function exportFilename(response: Response, fallback: string): string {
+  const header = response.headers.get("Content-Disposition") ?? "";
+  const match = /filename="?([^";]+)"?/i.exec(header);
+  return match?.[1]?.trim() || fallback;
+}
+
+/**
+ * 导出计费统计报表（`POST /api/control/reports/export`，CSV + gzip）。
+ *
+ * 该端点是 POST 却返回二进制流，所以走不了 `adminWrite`（它按 JSON 解析响应），
+ * 但鉴权口径相同：AdminWriter + X-Admin-CSRF，必须经写通道取 CSRF 令牌。
+ * 请求体只发 `ExportRequest` 契约字段——服务端既不接收也不消费 `reason`，
+ * 补一个被丢弃的原因只会制造「已经留痕」的错觉（同 GenerationRecordsPage
+ * 对账入口的既有裁决），因此这里不放开原因输入。
+ * 窗口 ≤90 天由服务端校验；页面侧另有同样的前置拦截。
+ */
+export async function exportBillingReportCsv(
+  input: BillingReportExportInput,
+  idempotencyKey?: string,
+): Promise<BillingReportExport> {
+  const csrf = requireCsrfToken();
+  const response = await requestControl(
+    REPORT_EXPORT_PATH,
+    {
+      method: "POST",
+      headers: {
+        [CSRF_HEADER]: csrf,
+        [IDEMPOTENCY_KEY_HEADER]: idempotencyKey ?? newIdempotencyKey(),
+      },
+      body: JSON.stringify({
+        format: "csv",
+        start_date: input.start_date,
+        end_date: input.end_date,
+        service_types: ["all"],
+      }),
+    },
+    REPORT_EXPORT_TIMEOUT_MS,
+  );
+  if (!response.ok) {
+    throw await parseActivationError(response, "导出计费报表失败");
+  }
+  const blob = await response.blob();
+  const filename = exportFilename(response, "计费报表.csv.gz");
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return { filename, bytes: blob.size };
+}

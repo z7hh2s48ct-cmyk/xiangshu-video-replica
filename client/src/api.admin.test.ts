@@ -15,6 +15,7 @@ import {
   deliverActivationCode,
   downloadActivationCodeExport,
   exchangeAdminSession,
+  exportBillingReportCsv,
   fetchAdminSession,
   fetchCustomerUnitPrice,
   generateActivationCodes,
@@ -865,5 +866,163 @@ describe("admin activation API adapter", () => {
         }),
       }),
     );
+  });
+});
+
+describe("billing report export", () => {
+  /**
+   * The export is a POST (so it must ride the CSRF write channel) whose body
+   * is a binary gzip stream — it cannot go through `adminWrite`, which parses
+   * JSON. `reason` is deliberately absent: `ExportRequest` neither accepts nor
+   * consumes it, and a reason the server discards would only fake an audit
+   * trail (see the GenerationRecordsPage reconciliation precedent).
+   */
+  function stubDownload() {
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(
+      () => undefined,
+    );
+    const createObjectURL = vi.fn(() => "blob:report-export");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
+    return { createObjectURL, revokeObjectURL };
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    clearAdminActivationSession();
+  });
+
+  it("posts the window on the CSRF write channel and keeps the server file name", async () => {
+    const { createObjectURL } = stubDownload();
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(() => jsonResponse(exchangePayload));
+    vi.stubGlobal("fetch", fetchMock);
+    await exchangeAdminSession("ASX1.body.signature");
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({
+        "Content-Disposition":
+          'attachment; filename="billing_export_20260922_101530.csv.gz"',
+      }),
+      blob: async () => new Blob(["gz"], { type: "application/gzip" }),
+    });
+
+    const result = await exportBillingReportCsv(
+      { start_date: "2026-07-01", end_date: "2026-09-22" },
+      "report-key",
+    );
+
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "http://127.0.0.1:8000/api/control/reports/export",
+      expect.objectContaining({
+        method: "POST",
+        credentials: "include",
+        headers: expect.objectContaining({
+          "X-Admin-CSRF": CSRF_TOKEN_TEXT,
+          "Idempotency-Key": "report-key",
+          "Content-Type": "application/json",
+        }),
+        body: JSON.stringify({
+          format: "csv",
+          start_date: "2026-07-01",
+          end_date: "2026-09-22",
+          service_types: ["all"],
+        }),
+      }),
+    );
+    expect(result).toEqual({
+      filename: "billing_export_20260922_101530.csv.gz",
+      bytes: 2,
+    });
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to a stable file name when the proxy drops Content-Disposition", async () => {
+    stubDownload();
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(() => jsonResponse(exchangePayload));
+    vi.stubGlobal("fetch", fetchMock);
+    await exchangeAdminSession("ASX1.body.signature");
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      blob: async () => new Blob(["gz"]),
+    });
+
+    const result = await exportBillingReportCsv({
+      start_date: "2026-09-01",
+      end_date: "2026-09-22",
+    });
+
+    expect(result.filename).toBe("计费报表.csv.gz");
+  });
+
+  it("surfaces the server window rejection without touching the download", async () => {
+    const { createObjectURL } = stubDownload();
+    const fetchMock = vi
+      .fn()
+      .mockImplementationOnce(() => jsonResponse(exchangePayload));
+    vi.stubGlobal("fetch", fetchMock);
+    await exchangeAdminSession("ASX1.body.signature");
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: async () => ({ detail: "Date range cannot exceed 90 days" }),
+    });
+
+    await expect(
+      exportBillingReportCsv(
+        { start_date: "2026-01-01", end_date: "2026-09-22" },
+        "report-key",
+      ),
+    ).rejects.toThrow("Date range cannot exceed 90 days");
+    expect(createObjectURL).not.toHaveBeenCalled();
+  });
+
+  it("waits past the five-second default for a full-quarter export", async () => {
+    stubDownload();
+    vi.useFakeTimers();
+    setAdminCsrfToken(CSRF_TOKEN_TEXT);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise((resolve, reject) => {
+            init.signal?.addEventListener("abort", () =>
+              reject(new DOMException("aborted", "AbortError")),
+            );
+            setTimeout(
+              () =>
+                resolve({
+                  ok: true,
+                  status: 200,
+                  headers: new Headers(),
+                  blob: async () => new Blob(["gz"]),
+                }),
+              30_000,
+            );
+          }),
+      ),
+    );
+    try {
+      const pending = exportBillingReportCsv(
+        { start_date: "2026-06-24", end_date: "2026-09-22" },
+        "report-key",
+      ).then(
+        (value) => ({ ok: true, value }),
+        () => ({ ok: false }),
+      );
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(await pending).toMatchObject({ ok: true, value: { bytes: 2 } });
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      setAdminCsrfToken("");
+    }
   });
 });
