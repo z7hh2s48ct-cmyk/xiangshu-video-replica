@@ -9,6 +9,15 @@ import {
   customerSetSubAccountQuota,
   customerUpdateSubAccount,
 } from "../api";
+import {
+  type QuotaState,
+  quotaBarData,
+  quotaPercentUsed,
+  quotaState,
+  quotaVizMessage,
+  shanghaiMonthProgress,
+  summarizeSubAccountQuotas,
+} from "./quotaViz";
 import type { CustomerCredentialStore } from "./useCustomerSession";
 import "./customer-subaccounts.css";
 
@@ -26,9 +35,12 @@ const MAX_MONTHLY_QUOTA_CREDITS = 1_000_000_000;
 export function SubAccountManagementPage({
   store,
   onSessionExpired,
+  now,
 }: {
   store: CustomerCredentialStore;
   onSessionExpired: () => void;
+  /** 测试注入固定时刻；缺省取渲染时当前时间（月度进度按上海自然月折算）。 */
+  now?: Date;
 }) {
   const [subAccounts, setSubAccounts] = useState<CustomerSubAccount[] | null>(
     null,
@@ -309,6 +321,11 @@ export function SubAccountManagementPage({
 
   const items = subAccounts ?? [];
 
+  // 批次1 额度可视化：月度进度与聚合只依赖列表数据，渲染期一次算好（纯函数）。
+  const progress = shanghaiMonthProgress(now ?? new Date());
+  const overview = summarizeSubAccountQuotas(items);
+  const bars = quotaBarData(items);
+
   return (
     <section className="sub-accounts-page" aria-label="子账号管理">
       <header className="sub-accounts-page__header">
@@ -400,6 +417,74 @@ export function SubAccountManagementPage({
         </p>
       ) : null}
 
+      {!isLoading && items.length > 0 ? (
+        <>
+          <section className="sub-accounts-kpis" aria-label="子账号额度概览">
+            <article>
+              <span>子账号数</span>
+              <strong>{overview.count}</strong>
+              <small>
+                {overview.cappedCount > 0
+                  ? `${overview.cappedCount} 个已设月度额度`
+                  : "均未设置月度额度"}
+              </small>
+            </article>
+            <article>
+              <span>本月总消费</span>
+              <strong>{overview.totalUsed} 积分</strong>
+              <small>所有子账号合计</small>
+            </article>
+            <article>
+              <span>剩余额度总和</span>
+              <strong>{overview.remainingTotal} 积分</strong>
+              <small>{overview.cappedCount} 个设限子账号合计</small>
+            </article>
+            <article
+              className={overview.exhaustedCount > 0 ? "is-danger" : undefined}
+            >
+              <span>额度超限</span>
+              <strong>{overview.exhaustedCount}</strong>
+              <small>
+                {overview.exhaustedCount > 0
+                  ? "调高额度或等下月 1 日重置"
+                  : "暂无额度超限的子账号"}
+              </small>
+            </article>
+          </section>
+
+          <section className="sub-accounts-chart" aria-label="本月消费占比">
+            <div className="sub-accounts-chart__header">
+              <span>本月消费占比</span>
+              <small>
+                {progress.year} 年 {progress.month} 月 · 按子账号聚合
+              </small>
+            </div>
+            {bars.map((bar) => (
+              <div
+                className={
+                  bar.state === "exhausted"
+                    ? "sub-account-bar-row is-exhausted"
+                    : "sub-account-bar-row"
+                }
+                key={bar.id}
+              >
+                <span className="sub-account-bar-row__name">{bar.label}</span>
+                <span aria-hidden="true" className="sub-account-bar-row__track">
+                  <span
+                    className="sub-account-bar-row__fill"
+                    style={{ width: `${bar.percent}%` }}
+                  />
+                </span>
+                <span className="sub-account-bar-row__amount">
+                  <strong>{bar.used}</strong>
+                  <small>{bar.percent}%</small>
+                </span>
+              </div>
+            ))}
+          </section>
+        </>
+      ) : null}
+
       {isLoading ? (
         <p className="status-note">正在读取子账号…</p>
       ) : items.length === 0 ? (
@@ -413,6 +498,23 @@ export function SubAccountManagementPage({
             const editing = editingId === subAccount.id;
             // 负数已用量（历史跨月退回遗留）显示前钳到 0，进度条不接受负值。
             const quotaUsed = Math.max(0, subAccount.quota_used_credits);
+            const quotaVizState = quotaState(
+              quotaUsed,
+              subAccount.monthly_quota_credits,
+            );
+            // 评审 P2：上限为 0（不允许消费）时按满条渲染——HTML 的 max=0
+            // 会回退为 1，照搬会渲染成空条，与「额度已用尽」状态自相矛盾。
+            const quotaCap = subAccount.monthly_quota_credits;
+            const barMax = quotaCap !== null && quotaCap > 0 ? quotaCap : 1;
+            const barValue =
+              quotaCap !== null && quotaCap > 0
+                ? Math.min(quotaUsed, quotaCap)
+                : barMax;
+            const quotaMessage = quotaVizMessage(
+              quotaUsed,
+              subAccount.monthly_quota_credits,
+              progress,
+            );
             return (
               <li className="sub-account-card" key={subAccount.id}>
                 <div className="sub-account-card__identity">
@@ -436,23 +538,26 @@ export function SubAccountManagementPage({
                   ) : (
                     <>
                       <span>
-                        本月已用 {quotaUsed} /{" "}
-                        {subAccount.monthly_quota_credits} 积分
+                        {`本月已用 ${quotaUsed} / ${subAccount.monthly_quota_credits} 积分（${quotaPercentUsed(quotaUsed, subAccount.monthly_quota_credits)}%）`}
                       </span>
                       <progress
-                        className={
-                          quotaUsed >= subAccount.monthly_quota_credits
-                            ? "sub-account-quota-bar is-exhausted"
-                            : "sub-account-quota-bar"
-                        }
-                        max={subAccount.monthly_quota_credits}
-                        value={Math.min(
-                          quotaUsed,
-                          subAccount.monthly_quota_credits,
-                        )}
+                        className={quotaBarClassName(quotaVizState)}
+                        max={barMax}
+                        value={barValue}
                       />
                     </>
                   )}
+                  {quotaMessage ? (
+                    <small
+                      className={
+                        quotaVizState === "exhausted"
+                          ? "sub-account-card__forecast is-danger"
+                          : "sub-account-card__forecast"
+                      }
+                    >
+                      {quotaMessage}
+                    </small>
+                  ) : null}
                 </div>
                 <div className="sub-account-card__badges">
                   <span
@@ -473,6 +578,16 @@ export function SubAccountManagementPage({
                   >
                     {subAccount.has_password ? "已设密码" : "未设密码"}
                   </span>
+                  {quotaVizState === "warning" ? (
+                    <span className="sub-account-badge is-warning">
+                      额度接近上限
+                    </span>
+                  ) : null}
+                  {quotaVizState === "exhausted" ? (
+                    <span className="sub-account-badge is-danger">
+                      额度已用尽
+                    </span>
+                  ) : null}
                 </div>
                 <div className="sub-account-card__actions">
                   {editing ? (
@@ -543,6 +658,17 @@ export function SubAccountManagementPage({
       )}
     </section>
   );
+}
+
+/** 三态进度条的 className 映射（unlimited 不渲染进度条，只处理有上限者）。 */
+function quotaBarClassName(state: QuotaState): string {
+  if (state === "exhausted") {
+    return "sub-account-quota-bar is-exhausted";
+  }
+  if (state === "warning") {
+    return "sub-account-quota-bar is-warning";
+  }
+  return "sub-account-quota-bar";
 }
 
 /** 解析额度输入："" → null（不限）；非法或超上限 → undefined（调用方报错）。 */

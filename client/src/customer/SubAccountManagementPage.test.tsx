@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { SubAccountManagementPage } from "./SubAccountManagementPage";
@@ -78,7 +84,9 @@ describe("SubAccountManagementPage", () => {
       />,
     );
 
-    expect(await screen.findByText("张三")).toBeInTheDocument();
+    expect(
+      await screen.findByText("张三", { selector: "strong" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("employee_001")).toBeInTheDocument();
     expect(screen.getByText("已设密码")).toBeInTheDocument();
     expect(screen.getByText("正常")).toBeInTheDocument();
@@ -192,7 +200,7 @@ describe("SubAccountManagementPage", () => {
         onSessionExpired={vi.fn()}
       />,
     );
-    await screen.findByText("张三");
+    await screen.findByText("张三", { selector: "strong" });
 
     fireEvent.click(screen.getByRole("button", { name: "停用" }));
 
@@ -243,7 +251,7 @@ describe("SubAccountManagementPage", () => {
         onSessionExpired={vi.fn()}
       />,
     );
-    await screen.findByText("张三");
+    await screen.findByText("张三", { selector: "strong" });
 
     fireEvent.click(screen.getByRole("button", { name: "删除" }));
 
@@ -267,9 +275,11 @@ describe("SubAccountManagementPage", () => {
         onSessionExpired={vi.fn()}
       />,
     );
-    await screen.findByText("张三");
+    await screen.findByText("张三", { selector: "strong" });
 
-    expect(screen.getByText("本月已用 2000 / 2000 积分")).toBeInTheDocument();
+    expect(
+      screen.getByText("本月已用 2000 / 2000 积分（100%）"),
+    ).toBeInTheDocument();
     const bar = screen.getByRole("progressbar");
     expect(bar).toHaveAttribute("max", "2000");
     expect(bar).toHaveAttribute("value", "2000");
@@ -291,12 +301,40 @@ describe("SubAccountManagementPage", () => {
         onSessionExpired={vi.fn()}
       />,
     );
-    await screen.findByText("张三");
+    await screen.findByText("张三", { selector: "strong" });
 
-    expect(screen.getByText("本月已用 0 / 2000 积分")).toBeInTheDocument();
+    expect(
+      screen.getByText("本月已用 0 / 2000 积分（0%）"),
+    ).toBeInTheDocument();
     const bar = screen.getByRole("progressbar");
     expect(bar).toHaveAttribute("value", "0");
     expect(bar.className).not.toContain("is-exhausted");
+  });
+
+  // 评审 P2：上限为 0（不允许消费）时进度条按满条渲染，不因 max=0 回退成空条。
+  it("renders a full bar for a zero cap instead of an empty one", async () => {
+    const zeroCapped = {
+      ...subAccount,
+      monthly_quota_credits: 0,
+      quota_used_credits: 0,
+      quota_remaining_credits: 0,
+    };
+    stubFetch(() =>
+      jsonResponse({ sub_accounts: [zeroCapped], total_count: 1 }),
+    );
+    render(
+      <SubAccountManagementPage
+        store={storeWithSession(sessionToken)}
+        onSessionExpired={vi.fn()}
+      />,
+    );
+    await screen.findByText("张三", { selector: "strong" });
+
+    expect(screen.getByText("本月已用 0 / 0 积分（100%）")).toBeInTheDocument();
+    const bar = screen.getByRole("progressbar");
+    expect(bar).toHaveAttribute("max", "1");
+    expect(bar).toHaveAttribute("value", "1");
+    expect(bar.className).toContain("is-exhausted");
   });
 
   // Phase 3a：创建时可一并提交初始额度（留空则不下发该字段）。
@@ -405,7 +443,7 @@ describe("SubAccountManagementPage", () => {
         onSessionExpired={vi.fn()}
       />,
     );
-    await screen.findByText("张三");
+    await screen.findByText("张三", { selector: "strong" });
 
     fireEvent.click(screen.getByRole("button", { name: "设置额度" }));
 
@@ -450,7 +488,7 @@ describe("SubAccountManagementPage", () => {
         onSessionExpired={vi.fn()}
       />,
     );
-    await screen.findByText("张三");
+    await screen.findByText("张三", { selector: "strong" });
 
     fireEvent.click(screen.getByRole("button", { name: "设置额度" }));
 
@@ -467,6 +505,110 @@ describe("SubAccountManagementPage", () => {
     });
     expect(
       await screen.findByText("已清除「张三」的额度限制。"),
+    ).toBeInTheDocument();
+  });
+
+  // 批次1：KPI 行聚合与消费占比条形图（按消费降序、占比为全局百分比）。
+  it("renders the quota KPI row and the consumption share bars", async () => {
+    const heavy = {
+      ...subAccount,
+      id: "sub-1",
+      display_name: "张三",
+      monthly_quota_credits: 5000,
+      quota_used_credits: 1800,
+      quota_remaining_credits: 3200,
+    };
+    const light = {
+      ...subAccount,
+      id: "sub-2",
+      username: "sub_2",
+      display_name: "李四",
+      monthly_quota_credits: null,
+      quota_used_credits: 300,
+      quota_remaining_credits: null,
+    };
+    stubFetch(() =>
+      jsonResponse({ sub_accounts: [light, heavy], total_count: 2 }),
+    );
+    render(
+      <SubAccountManagementPage
+        now={new Date("2026-09-22T04:00:00Z")}
+        store={storeWithSession(sessionToken)}
+        onSessionExpired={vi.fn()}
+      />,
+    );
+    await screen.findByText("张三", { selector: "strong" });
+
+    // KPI：总数 2、本月总消费 2100、剩余额度总和 3200、无超限。
+    const kpis = screen.getByRole("region", { name: "子账号额度概览" });
+    expect(within(kpis).getByText("2")).toBeInTheDocument();
+    expect(within(kpis).getByText("2100 积分")).toBeInTheDocument();
+    expect(within(kpis).getByText("3200 积分")).toBeInTheDocument();
+    expect(within(kpis).getByText("暂无额度超限的子账号")).toBeInTheDocument();
+
+    // 条形图按消费降序：张三 1800（86%）在前，李四 300（14%）在后。
+    const chart = screen.getByRole("region", { name: "本月消费占比" });
+    const names = within(chart).getAllByText(/张三|李四/);
+    expect(names[0]).toHaveTextContent("张三");
+    expect(names[1]).toHaveTextContent("李四");
+    expect(within(chart).getByText("86%")).toBeInTheDocument();
+    expect(within(chart).getByText("14%")).toBeInTheDocument();
+  });
+
+  // 批次1：80% 邻近上限 → is-warning 三态 + 月末前用尽的预警文案。
+  it("marks a near-limit sub-account as warning and forecasts exhaustion", async () => {
+    const nearLimit = {
+      ...subAccount,
+      monthly_quota_credits: 5000,
+      quota_used_credits: 4400,
+      quota_remaining_credits: 600,
+    };
+    stubFetch(() =>
+      jsonResponse({ sub_accounts: [nearLimit], total_count: 1 }),
+    );
+    render(
+      <SubAccountManagementPage
+        now={new Date("2026-09-20T04:00:00Z")}
+        store={storeWithSession(sessionToken)}
+        onSessionExpired={vi.fn()}
+      />,
+    );
+    await screen.findByText("张三", { selector: "strong" });
+
+    expect(
+      screen.getByText("本月已用 4400 / 5000 积分（88%）"),
+    ).toBeInTheDocument();
+    const bar = screen.getByRole("progressbar");
+    expect(bar.className).toContain("is-warning");
+    expect(screen.getByText("额度接近上限")).toBeInTheDocument();
+    expect(
+      screen.getByText("预计 3 天后额度用完，建议提前调整。"),
+    ).toBeInTheDocument();
+  });
+
+  // 批次1：用尽卡片给出恢复路径徽章与提示（沿用 Phase 3a 的 is-exhausted 标记）。
+  it("shows the recovery hint on an exhausted sub-account", async () => {
+    const exhausted = {
+      ...subAccount,
+      monthly_quota_credits: 2000,
+      quota_used_credits: 2000,
+      quota_remaining_credits: 0,
+    };
+    stubFetch(() =>
+      jsonResponse({ sub_accounts: [exhausted], total_count: 1 }),
+    );
+    render(
+      <SubAccountManagementPage
+        now={new Date("2026-09-22T04:00:00Z")}
+        store={storeWithSession(sessionToken)}
+        onSessionExpired={vi.fn()}
+      />,
+    );
+    await screen.findByText("张三", { selector: "strong" });
+
+    expect(screen.getByText("额度已用尽")).toBeInTheDocument();
+    expect(
+      screen.getByText("额度已用尽；调高月度额度或等下月 1 日重置后恢复消费。"),
     ).toBeInTheDocument();
   });
 });

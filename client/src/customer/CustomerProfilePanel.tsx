@@ -1,11 +1,22 @@
 import { useEffect, useState } from "react";
 
-import type { CustomerDeviceListResponse, CustomerProfile } from "../api";
+import {
+  type CustomerDeviceListResponse,
+  type CustomerProfile,
+  customerListSubAccounts,
+} from "../api";
 import { CustomerWalletPanel } from "./CustomerWalletPanel";
 import { DeviceManagementPage } from "./DeviceManagementPage";
 import { HeartbeatStatus } from "./HeartbeatStatus";
 import { LeaseCountdown } from "./LeaseCountdown";
 import { PairingApprovalCard } from "./PairingApprovalCard";
+import {
+  forecastQuota,
+  type QuotaOverview,
+  type ShanghaiMonthProgress,
+  shanghaiMonthProgress,
+  summarizeSubAccountQuotas,
+} from "./quotaViz";
 import { SubAccountManagementPage } from "./SubAccountManagementPage";
 import type {
   CustomerCredentialStore,
@@ -38,6 +49,7 @@ export function CustomerProfilePanel({
   sessionRuntime = null,
   store,
   walletRefreshKey,
+  now,
 }: {
   devices: CustomerDeviceListResponse | null;
   deviceError: string;
@@ -63,6 +75,8 @@ export function CustomerProfilePanel({
   sessionRuntime?: CustomerSessionRuntime | null;
   store: CustomerCredentialStore;
   walletRefreshKey: number;
+  /** 测试注入固定时刻；缺省取渲染时当前时间（与子账号额度卡的月末口径一致）。 */
+  now?: Date;
 }) {
   const [displayName, setDisplayName] = useState(profile?.display_name ?? "");
   const [profileError, setProfileError] = useState("");
@@ -74,6 +88,10 @@ export function CustomerProfilePanel({
   const [deferredPairingIds, setDeferredPairingIds] = useState<Set<string>>(
     () => new Set(),
   );
+  // 批次1：母账号概览「子账号数 / 本月子账号消费」两卡——惰性拉一次列表，
+  // 失败静默（概览卡是锦上添花，不打扰个人中心主路径）。
+  const [subAccountOverview, setSubAccountOverview] =
+    useState<QuotaOverview | null>(null);
   const pendingPairings = devices?.pending_pairings ?? [];
   const overviewPairings = pendingPairings.filter(
     (pairing) => !deferredPairingIds.has(pairing.pairing_request_id),
@@ -133,6 +151,30 @@ export function CustomerProfilePanel({
   useEffect(() => {
     setDisplayName(profile?.display_name ?? "");
   }, [profile?.display_name]);
+
+  useEffect(() => {
+    if (!isMaster || tab !== "overview" || subAccountOverview !== null) {
+      return;
+    }
+    let active = true;
+    void (async () => {
+      try {
+        const token = await store.loadSessionToken();
+        if (token === null) {
+          return;
+        }
+        const list = await customerListSubAccounts({ kind: "session", token });
+        if (active) {
+          setSubAccountOverview(summarizeSubAccountQuotas(list));
+        }
+      } catch {
+        // 静默：概览卡加载失败不改变个人中心其余内容。
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [isMaster, tab, store, subAccountOverview]);
 
   async function saveProfile(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -203,6 +245,12 @@ export function CustomerProfilePanel({
     quotaCap === null || quotaUsed === null
       ? null
       : Math.max(0, quotaCap - quotaUsed);
+  // 批次1：月度进度（上海自然月）与预测，用于额度卡的百分比/距离月末/日均行。
+  const quotaProgress = shanghaiMonthProgress(now ?? new Date());
+  const quotaForecast =
+    quotaUsed !== null && quotaCap !== null
+      ? forecastQuota(quotaUsed, quotaCap, quotaProgress)
+      : null;
 
   return (
     <section className="customer-profile" aria-label="个人中心">
@@ -359,6 +407,24 @@ export function CustomerProfilePanel({
               <strong>{pendingPairings.length}</strong>
               <small>请只批准本人设备</small>
             </article>
+            {isMaster && subAccountOverview !== null ? (
+              <article>
+                <span>子账号数</span>
+                <strong>{subAccountOverview.count}</strong>
+                <small>
+                  {subAccountOverview.cappedCount > 0
+                    ? `${subAccountOverview.cappedCount} 个已设月度额度`
+                    : "均共享母账号额度"}
+                </small>
+              </article>
+            ) : null}
+            {isMaster && subAccountOverview !== null ? (
+              <article>
+                <span>本月子账号消费</span>
+                <strong>{subAccountOverview.totalUsed} 积分</strong>
+                <small>所有子账号合计</small>
+              </article>
+            ) : null}
             {quotaUsed !== null ? (
               <article>
                 <span>本月额度</span>
@@ -367,7 +433,14 @@ export function CustomerProfilePanel({
                     ? `已用 ${quotaUsed} 积分`
                     : `剩余 ${quotaRemaining} 积分`}
                 </strong>
-                <small>{quotaSummary(quotaUsed, quotaCap)}</small>
+                <small>
+                  {quotaSummary(quotaUsed, quotaCap, quotaProgress)}
+                </small>
+                {quotaForecast ? (
+                  <small>
+                    {`日均 ${Math.round(quotaForecast.dailyAvg)} · 预计月末用量 ${quotaForecast.projectedMonthEnd}`}
+                  </small>
+                ) : null}
               </article>
             ) : null}
           </div>
@@ -459,6 +532,7 @@ export function CustomerProfilePanel({
 
       {tab === "sub-accounts" && isMaster ? (
         <SubAccountManagementPage
+          now={now}
           onSessionExpired={onSessionExpired}
           store={store}
         />
@@ -469,15 +543,20 @@ export function CustomerProfilePanel({
 
 // activationStatus 已删除（激活码方案废弃，2026-09-19）
 
-/** Phase 3a 子账号额度小字：无上限 → 说明；用尽 → 警示；否则进度。 */
-function quotaSummary(used: number, cap: number | null): string {
+/** 子账号额度小字：无上限 → 说明；用尽 → 恢复路径；否则剩余比例 + 月末距离。 */
+function quotaSummary(
+  used: number,
+  cap: number | null,
+  progress: ShanghaiMonthProgress,
+): string {
   if (cap === null) {
     return "额度不限，消费由母账号统一承担";
   }
-  if (used >= cap) {
-    return `本月已用 ${used} / ${cap} 积分，额度已用完`;
+  if (cap <= 0 || used >= cap) {
+    return "额度已用尽；调高额度或等下月 1 日重置";
   }
-  return `本月已用 ${used} / ${cap} 积分`;
+  const remainingPercent = Math.round(((cap - used) / cap) * 100);
+  return `剩余 ${remainingPercent}% · 距离月末还有 ${progress.daysLeft} 天`;
 }
 
 function identityBadge(identity: CustomerStoredIdentity | null): string {

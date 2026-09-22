@@ -74,6 +74,8 @@ const store: CustomerCredentialStore = {
 describe("CustomerProfilePanel", () => {
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   const defaultProps = {
@@ -168,14 +170,18 @@ describe("CustomerProfilePanel", () => {
       quota_used_credits: 1200,
     };
     render(
-      <CustomerProfilePanel {...defaultProps} profile={cappedSubProfile} />,
+      <CustomerProfilePanel
+        {...defaultProps}
+        now={new Date("2026-09-22T04:00:00Z")}
+        profile={cappedSubProfile}
+      />,
     );
 
     expect(screen.getByText("本月额度")).toBeInTheDocument();
     // 剩余额度钳制到 0，不出现负数。
     expect(screen.getByText("剩余 0 积分")).toBeInTheDocument();
     expect(
-      screen.getByText("本月已用 1200 / 1000 积分，额度已用完"),
+      screen.getByText("额度已用尽；调高额度或等下月 1 日重置"),
     ).toBeInTheDocument();
   });
 
@@ -190,11 +196,17 @@ describe("CustomerProfilePanel", () => {
       quota_used_credits: -50,
     };
     render(
-      <CustomerProfilePanel {...defaultProps} profile={negativeSubProfile} />,
+      <CustomerProfilePanel
+        {...defaultProps}
+        now={new Date("2026-09-20T04:00:00Z")}
+        profile={negativeSubProfile}
+      />,
     );
 
     expect(screen.getByText("剩余 1000 积分")).toBeInTheDocument();
-    expect(screen.getByText("本月已用 0 / 1000 积分")).toBeInTheDocument();
+    expect(
+      screen.getByText("剩余 100% · 距离月末还有 10 天"),
+    ).toBeInTheDocument();
   });
 
   // Phase 3a：未设额度的子账号只展示用量说明；母账号不出现该卡。
@@ -388,5 +400,180 @@ describe("CustomerProfilePanel", () => {
     );
     expect(logoutButton).toBeEnabled();
     expect(logoutButton).toHaveTextContent("退出登录");
+  });
+
+  // 批次1：额度卡显示剩余比例 / 距离月末 / 日均与月末外推（原型 v4 文案）。
+  it("shows remaining share and the monthly forecast for a capped sub-account", () => {
+    const cappedSubProfile: CustomerProfile = {
+      ...profile,
+      account_type: "SUB",
+      parent_user_id: "parent-1",
+      parent_display_name: "总部机构",
+      monthly_quota_credits: 5000,
+      quota_used_credits: 1800,
+    };
+    render(
+      <CustomerProfilePanel
+        {...defaultProps}
+        now={new Date("2026-09-19T04:00:00Z")}
+        profile={cappedSubProfile}
+      />,
+    );
+
+    expect(
+      screen.getByText("剩余 64% · 距离月末还有 11 天"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("日均 95 · 预计月末用量 2843")).toBeInTheDocument();
+  });
+
+  // 批次1：母账号概览新增「子账号数 / 本月子账号消费」两卡（惰性拉取）。
+  it("shows sub-account count and monthly spend cards for a master", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: async () => ({
+        sub_accounts: [
+          {
+            id: "sub-1",
+            username: "employee_001",
+            display_name: "张三",
+            account_type: "SUB",
+            parent_user_id: "user-1",
+            is_active: true,
+            has_password: true,
+            created_at: "2026-09-01T08:00:00Z",
+            updated_at: null,
+            monthly_quota_credits: 5000,
+            quota_used_credits: 350,
+            quota_remaining_credits: 4650,
+          },
+        ],
+        total_count: 1,
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(
+      <CustomerProfilePanel
+        {...defaultProps}
+        store={{
+          ...store,
+          loadSessionToken: vi.fn().mockResolvedValue("session-token"),
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("子账号数")).toBeInTheDocument();
+    expect(screen.getByText("1 个已设月度额度")).toBeInTheDocument();
+    expect(screen.getByText("350 积分")).toBeInTheDocument();
+  });
+
+  // 批次1：子账号列表拉取失败时概览卡静默隐藏，不打扰个人中心。
+  it("keeps the master overview quiet when the sub-account list fails", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      headers: new Headers(),
+      json: async () => ({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(
+      <CustomerProfilePanel
+        {...defaultProps}
+        store={{
+          ...store,
+          loadSessionToken: vi.fn().mockResolvedValue("session-token"),
+        }}
+      />,
+    );
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect(screen.queryByText("子账号数")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  // 评审 P3：无会话 token 时概览卡不发起列表请求（惰性加载的第一道闸）。
+  it("skips the overview request when the session token is missing", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const loadSessionToken = vi.fn().mockResolvedValue(null);
+    render(
+      <CustomerProfilePanel
+        {...defaultProps}
+        store={{ ...store, loadSessionToken }}
+      />,
+    );
+
+    await waitFor(() => expect(loadSessionToken).toHaveBeenCalled());
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(screen.queryByText("子账号数")).not.toBeInTheDocument();
+  });
+
+  // 评审 P3：子账号身份无组织概览权，概览 effect 连 token 都不读。
+  it("does not request the overview for a sub-account identity", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const loadSessionToken = vi.fn().mockResolvedValue("session-token");
+    const subProfile: CustomerProfile = {
+      ...profile,
+      account_type: "SUB",
+      parent_user_id: "parent-1",
+      parent_display_name: "总部机构",
+    };
+    render(
+      <CustomerProfilePanel
+        {...defaultProps}
+        profile={subProfile}
+        store={{ ...store, loadSessionToken }}
+      />,
+    );
+
+    expect(await screen.findByText("子账号")).toBeInTheDocument();
+    expect(loadSessionToken).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // 评审 P3：概览拉取成功后切走再切回不重复请求（快照语义，允许过期）。
+  it("fetches the overview only once across tab switches", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: async () => ({
+        sub_accounts: [
+          {
+            id: "sub-1",
+            username: "employee_001",
+            display_name: "张三",
+            account_type: "SUB",
+            parent_user_id: "user-1",
+            is_active: true,
+            has_password: true,
+            created_at: "2026-09-01T08:00:00Z",
+            updated_at: null,
+            monthly_quota_credits: 5000,
+            quota_used_credits: 350,
+            quota_remaining_credits: 4650,
+          },
+        ],
+        total_count: 1,
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(
+      <CustomerProfilePanel
+        {...defaultProps}
+        store={{
+          ...store,
+          loadSessionToken: vi.fn().mockResolvedValue("session-token"),
+        }}
+      />,
+    );
+
+    expect(await screen.findByText("子账号数")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "设备管理" }));
+    fireEvent.click(screen.getByRole("button", { name: "账号概览" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
   });
 });
