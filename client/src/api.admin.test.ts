@@ -21,6 +21,7 @@ import {
   getCustomerPricing,
   listActivationCodes,
   loginAdminWithPassword,
+  reconcileFirstFrameTask,
   recoverAdminPassword,
   refreshCollectedVideoStatistics,
   resumeActivationCode,
@@ -553,6 +554,32 @@ describe("admin activation API adapter", () => {
       );
       expect(new Headers(request.headers).get("Idempotency-Key")).toBeTruthy();
     }
+  });
+
+  it("reconciles a first-frame task through the CSRF-carrying admin write lane", async () => {
+    // 该端点声明 requestBody?: never，也不跑写契约——但 POST 仍受 CSRF 门禁。
+    // 走裸 requestControl 不带 CSRF 头会被服务端 403 ADMIN_CSRF_REQUIRED
+    // （本仓库已有同类缺陷先例：selfCheckWechatNative）。这条用例钉住它必须
+    // 经 adminWrite，防止有人日后"因为不需要 body"而把它简化掉。
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await signIn(fetchMock);
+    fetchMock.mockImplementationOnce(() =>
+      jsonResponse({ task_id: "ff-1", result: "RESUMED", detail_code: null }),
+    );
+
+    const result = await reconcileFirstFrameTask("ff-1", "运营核对供应商回执");
+
+    expect(result.result).toBe("RESUMED");
+    const last = fetchMock.mock.calls.at(-1) as [string, RequestInit];
+    expect(last[0]).toBe(
+      "http://127.0.0.1:8000/api/control/first-frame-tasks/ff-1/reconcile",
+    );
+    expect(last[1].method).toBe("POST");
+    expect(new Headers(last[1].headers).get("X-Admin-CSRF")).toBe(
+      CSRF_TOKEN_TEXT,
+    );
+    expect(new Headers(last[1].headers).get("Idempotency-Key")).toBeTruthy();
   });
 
   it("generates codes for a batch and downloads the one-time export", async () => {

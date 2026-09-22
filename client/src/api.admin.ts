@@ -1683,6 +1683,41 @@ export async function getAdminGenerationRecordSummary(
   return response.json() as Promise<AdminGenerationRecordSummary>;
 }
 
+export interface FirstFrameReconcileResult {
+  task_id: string;
+  result: "RESUMED" | "FAILED";
+  detail_code: string | null;
+}
+
+/**
+ * Reconcile a first-frame task stuck in SUBMISSION_UNCERTAIN.
+ *
+ * `POST /api/control/first-frame-tasks/{task_id}/reconcile` — the operator
+ * entry for a task whose provider submission outcome is unknown. The server
+ * asks the provider what really happened (never a second paid submission)
+ * and answers RESUMED (requeued, status back to PENDING) or FAILED.
+ *
+ * The route consumes no body: its OpenAPI operation declares
+ * `requestBody?: never`, it does not run the write contract, and a repeat
+ * answers 409 `IMAGE_TASK_NOT_UNCERTAIN` rather than replaying — so there is
+ * nothing for an idempotency key to do. It is still sent through `adminWrite`
+ * because a POST on this lane is CSRF-gated: a bare `requestControl` POST
+ * carries no CSRF header and the server answers 403 `ADMIN_CSRF_REQUIRED`.
+ * The reason travels for shape consistency with every other admin write; the
+ * server derives the audit wording from the reconcile decision instead.
+ */
+export async function reconcileFirstFrameTask(
+  taskId: string,
+  reason: string,
+): Promise<FirstFrameReconcileResult> {
+  return adminWrite<FirstFrameReconcileResult>(
+    `/api/control/first-frame-tasks/${encodeURIComponent(taskId)}/reconcile`,
+    {},
+    reason,
+    "首帧任务对账失败",
+  );
+}
+
 export type AdminAnalysisDiagnosticAttempt =
   components["schemas"]["AnalysisDiagnosticAttempt"];
 export type AdminAnalysisDiagnosticRecord =

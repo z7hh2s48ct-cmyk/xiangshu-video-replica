@@ -4416,6 +4416,12 @@ button.activation-generator__submit {
   margin-top: 12px;
 }
 
+/* 生成记录详情里的首帧对账入口（与「查看诊断」同处一个 <details>，
+   两者按 record_type 互斥，间距口径保持一致）。 */
+.admin-shell--control .admin-generation-records__reconcile {
+  margin-top: 12px;
+}
+
 .admin-shell--control .pagination {
   margin-top: 18px;
   padding-top: 16px;

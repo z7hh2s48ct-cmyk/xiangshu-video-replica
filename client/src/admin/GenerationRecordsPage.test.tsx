@@ -8,7 +8,38 @@ vi.mock("../api.admin", () => ({
   getAdminGenerationRecords: vi.fn(),
   getAdminGenerationRecordSummary: vi.fn(),
   getAdminAnalysisDiagnostics: vi.fn(),
+  reconcileFirstFrameTask: vi.fn(),
 }));
+
+/** 首帧记录行：默认"提交结果待核对"，正是可对账的那一档。 */
+function firstFrameRecord(
+  overrides: Partial<adminApi.AdminGenerationRecord> = {},
+): adminApi.AdminGenerationRecord {
+  return {
+    record_id: "ff-1",
+    record_type: "FIRST_FRAME_IMAGE",
+    operation: "GENERATE",
+    user_id: "user-1",
+    username: "customer-1",
+    display_name: "客户一",
+    project_id: "project-1",
+    project_name: "演示项目",
+    status: "SUBMISSION_UNCERTAIN",
+    provider: "apilio",
+    model: "gpt-image-2",
+    provider_cost: null,
+    provider_cost_status: "UNAVAILABLE",
+    record_data_status: "VALID",
+    charged_credits: 0,
+    result_reference: null,
+    provider_reference: null,
+    error_code: null,
+    error_message: null,
+    created_at: "2026-09-02T10:00:00Z",
+    completed_at: null,
+    ...overrides,
+  } as adminApi.AdminGenerationRecord;
+}
 
 describe("GenerationRecordsPage", () => {
   beforeEach(() => {
@@ -456,5 +487,112 @@ describe("GenerationRecordsPage", () => {
       }),
     );
     expect(screen.getByLabelText("诊断任务编号")).toHaveValue("analysis-1");
+  });
+
+  it("offers first-frame reconcile only for a SUBMISSION_UNCERTAIN row", async () => {
+    vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
+      items: [
+        firstFrameRecord({ record_id: "ff-uncertain" }),
+        firstFrameRecord({ record_id: "ff-done", status: "SUCCEEDED" }),
+      ],
+      total: 2,
+      limit: 50,
+      offset: 0,
+    });
+
+    render(<GenerationRecordsPage />);
+    for (const summary of await screen.findAllByText("查看详情")) {
+      fireEvent.click(summary);
+    }
+
+    // 服务端也只在 SUBMISSION_UNCERTAIN 放行，其余状态一律 409；前端按同一
+    // 条件显示入口，避免运营点开就是错。
+    expect(
+      screen.getByRole("button", { name: "重新对账首帧任务 ff-uncertain" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "重新对账首帧任务 ff-done" }),
+    ).toBeNull();
+  });
+
+  it("hides the reconcile entry from the read-only auditor role", async () => {
+    vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
+      items: [firstFrameRecord({ record_id: "ff-uncertain" })],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+
+    render(<GenerationRecordsPage readOnly />);
+    fireEvent.click(await screen.findByText("查看详情"));
+
+    expect(
+      screen.queryByRole("button", { name: "重新对账首帧任务 ff-uncertain" }),
+    ).toBeNull();
+  });
+
+  it("reconciles a stuck first-frame task and reports the server verdict", async () => {
+    vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
+      items: [firstFrameRecord({ record_id: "ff-stuck" })],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+    vi.mocked(adminApi.reconcileFirstFrameTask).mockResolvedValue({
+      task_id: "ff-stuck",
+      result: "RESUMED",
+      detail_code: null,
+    });
+
+    render(<GenerationRecordsPage />);
+    fireEvent.click(await screen.findByText("查看详情"));
+    fireEvent.click(
+      screen.getByRole("button", { name: "重新对账首帧任务 ff-stuck" }),
+    );
+    await screen.findByRole("dialog");
+
+    fireEvent.click(screen.getByRole("button", { name: "重新对账" }));
+
+    // standard 级：不收原因，因此按空串发出（该端点也不消费 reason）。
+    await waitFor(() =>
+      expect(adminApi.reconcileFirstFrameTask).toHaveBeenCalledWith(
+        "ff-stuck",
+        "",
+      ),
+    );
+    expect(
+      await screen.findByText(/已对账：任务 ff-stuck 供应商侧已受理/),
+    ).toBeInTheDocument();
+    // 对账后重新拉取列表：状态已被服务端改写，旧行不该留在页面上。
+    await waitFor(() =>
+      expect(adminApi.getAdminGenerationRecords).toHaveBeenCalledTimes(2),
+    );
+  });
+
+  it("surfaces a rejected reconcile inside the dialog", async () => {
+    vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
+      items: [firstFrameRecord({ record_id: "ff-raced" })],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+    vi.mocked(adminApi.reconcileFirstFrameTask).mockRejectedValue(
+      new Error("Only SUBMISSION_UNCERTAIN tasks can be reconciled."),
+    );
+
+    render(<GenerationRecordsPage />);
+    fireEvent.click(await screen.findByText("查看详情"));
+    fireEvent.click(
+      screen.getByRole("button", { name: "重新对账首帧任务 ff-raced" }),
+    );
+    await screen.findByRole("dialog");
+    fireEvent.click(screen.getByRole("button", { name: "重新对账" }));
+
+    expect(
+      await screen.findByText(
+        "Only SUBMISSION_UNCERTAIN tasks can be reconciled.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 });

@@ -825,6 +825,7 @@ export function AdminApp() {
               initialRecordType={
                 navigationIntent === "analysisFailures" ? "ANALYSIS" : undefined
               }
+              readOnly={readOnly}
             />
           ) : null}
           {activeTab === "auditCenter" ? <AuditCenterPage /> : null}

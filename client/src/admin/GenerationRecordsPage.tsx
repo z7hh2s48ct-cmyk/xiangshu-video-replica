@@ -5,8 +5,10 @@ import {
   type AdminGenerationRecordSummary,
   getAdminGenerationRecordSummary,
   getAdminGenerationRecords,
+  reconcileFirstFrameTask,
 } from "../api.admin";
 import { AnalysisDiagnosticPanel } from "./AnalysisDiagnosticPanel";
+import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { DataTable } from "./ui/DataTable";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
@@ -24,13 +26,21 @@ import {
 const PAGE_SIZE = 50;
 // 只有 analysis_tasks 有失败阶段列，其他类型不该出现这个筛选项。
 const ANALYSIS_RECORD_TYPE = "ANALYSIS";
+// 首帧任务：只有"供应商提交结果未知"的行才可人工对账——服务端
+// prepare_first_frame_reconcile 也只在 status='SUBMISSION_UNCERTAIN' 时放行，
+// 其余状态一律 409 IMAGE_TASK_NOT_UNCERTAIN。前端按同一条件显示入口，
+// 避免点开就是错。
+const FIRST_FRAME_RECORD_TYPE = "FIRST_FRAME_IMAGE";
+const SUBMISSION_UNCERTAIN = "SUBMISSION_UNCERTAIN";
 
 export function GenerationRecordsPage({
   initialStatus = "",
   initialRecordType = "",
+  readOnly = false,
 }: {
   initialStatus?: string;
   initialRecordType?: string;
+  readOnly?: boolean;
 }) {
   const [items, setItems] = useState<AdminGenerationRecord[]>([]);
   const [total, setTotal] = useState(0);
@@ -57,6 +67,12 @@ export function GenerationRecordsPage({
   // 合并页签：诊断是同一页面的第二视图，跳转时把任务编号一起带过去。
   const [view, setView] = useState<"records" | "diagnostics">("records");
   const [diagnosticTaskId, setDiagnosticTaskId] = useState("");
+  const [notice, setNotice] = useState("");
+  // 首帧对账：确认框里只放"待处理的那一行"，避免把行对象散进多个状态。
+  const [pendingReconcile, setPendingReconcile] =
+    useState<AdminGenerationRecord | null>(null);
+  const [reconcileBusy, setReconcileBusy] = useState(false);
+  const [reconcileError, setReconcileError] = useState("");
   const requestIdRef = useRef(0);
 
   const loadRecords = useCallback(async () => {
@@ -104,6 +120,33 @@ export function GenerationRecordsPage({
   useEffect(() => {
     void loadRecords();
   }, [loadRecords]);
+
+  async function submitReconcile(reason: string) {
+    if (!pendingReconcile || reconcileBusy) return;
+    const target = pendingReconcile;
+    setReconcileBusy(true);
+    setReconcileError("");
+    setNotice("");
+    try {
+      const result = await reconcileFirstFrameTask(target.record_id, reason);
+      // 服务端按供应商真实回执裁决，两种结局对运营的含义完全不同，分开说清。
+      setNotice(
+        result.result === "RESUMED"
+          ? `已对账：任务 ${result.task_id} 供应商侧已受理，已回到生成队列继续处理。`
+          : `已对账：任务 ${result.task_id} 供应商侧未成功，已置为失败并走计费退回。`,
+      );
+      setPendingReconcile(null);
+      await loadRecords();
+    } catch (cause) {
+      setReconcileError(
+        cause instanceof Error && cause.message
+          ? cause.message
+          : "首帧任务对账失败：未知错误",
+      );
+    } finally {
+      setReconcileBusy(false);
+    }
+  }
 
   return (
     <section
@@ -299,6 +342,7 @@ export function GenerationRecordsPage({
           ) : null}
 
           {error ? <PageBanner tone="error">{error}</PageBanner> : null}
+          {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
 
           {!loading && items.length === 0 ? (
             <PageBanner tone="notice">暂无生成记录。</PageBanner>
@@ -414,6 +458,21 @@ export function GenerationRecordsPage({
                           查看诊断
                         </button>
                       ) : null}
+                      {!readOnly &&
+                      item.record_type === FIRST_FRAME_RECORD_TYPE &&
+                      item.status === SUBMISSION_UNCERTAIN ? (
+                        <button
+                          aria-label={`重新对账首帧任务 ${item.record_id}`}
+                          className="admin-generation-records__reconcile"
+                          type="button"
+                          onClick={() => {
+                            setPendingReconcile(item);
+                            setReconcileError("");
+                          }}
+                        >
+                          重新对账
+                        </button>
+                      ) : null}
                     </details>
                   </td>
                 </tr>
@@ -430,6 +489,29 @@ export function GenerationRecordsPage({
           />
         </>
       )}
+
+      {/* 首帧对账：standard 级。该端点不接受也不消费 reason（服务端按供应商
+          真实回执自行裁决并写审计），让运营手填一个被丢弃的原因只会制造
+          "已经留痕"的错觉，因此这里不放原因输入，只把后果说明白。 */}
+      <ConfirmDialog
+        busy={reconcileBusy}
+        confirmLabel="重新对账"
+        description={
+          pendingReconcile
+            ? `将向图像供应商核对任务 ${pendingReconcile.record_id} 的真实提交结果：已受理则回到生成队列继续处理；未成功则置为失败并释放预扣额度。同一任务重复对账会被拒绝。`
+            : undefined
+        }
+        error={reconcileError}
+        level="standard"
+        open={pendingReconcile !== null && !readOnly}
+        title="重新对账首帧任务"
+        onClose={() => {
+          if (reconcileBusy) return;
+          setPendingReconcile(null);
+          setReconcileError("");
+        }}
+        onConfirm={(reason) => void submitReconcile(reason)}
+      />
     </section>
   );
 }
