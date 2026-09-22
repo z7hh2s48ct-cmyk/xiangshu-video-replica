@@ -959,6 +959,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/studio/materials/groups": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Material Groups */
+    get: operations["read_material_groups_api_studio_materials_groups_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/studio/materials/resolve": {
     parameters: {
       query?: never;
@@ -1025,6 +1042,23 @@ export interface paths {
     options?: never;
     head?: never;
     patch?: never;
+    trace?: never;
+  };
+  "/api/studio/materials/bulk": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Patch Materials Bulk */
+    patch: operations["patch_materials_bulk_api_studio_materials_bulk_patch"];
     trace?: never;
   };
   "/api/studio/materials/{material_id}": {
@@ -3319,7 +3353,9 @@ export interface paths {
      *     Shanghai calendar month; ``null`` deletes the row and the sub-account is
      *     unlimited again. Enforcement lives where the money moves —
      *     ``accept_operation`` under the actor's billing lock — so this endpoint
-     *     owns the configuration row only.
+     *     owns the configuration row only. The billing lock does not span this
+     *     transaction: at most one already-accepted, still in-flight operation can
+     *     land under the previous cap; every later one re-reads the new value.
      */
     put: operations["set_sub_account_quota_api_customer_sub_accounts__sub_account_id__quota_put"];
     post?: never;
@@ -3948,6 +3984,70 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/customer/recharge-packages": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Customer Recharge Packages
+     * @description 客户侧档位列表：只返回启用行，按 ``sort_order, id`` 稳定排序.
+     */
+    get: operations["customer_recharge_packages_api_customer_recharge_packages_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/settings/recharge-packages": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Admin Recharge Packages
+     * @description 管理端档位列表：含停用行（后台需要看到全部配置）.
+     */
+    get: operations["admin_recharge_packages_api_control_settings_recharge_packages_get"];
+    put?: never;
+    /**
+     * Create Recharge Package
+     * @description 新建套餐（写契约 + 幂等快照 + advisory lock + 审计）.
+     */
+    post: operations["create_recharge_package_api_control_settings_recharge_packages_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/settings/recharge-packages/{package_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    /**
+     * Update Recharge Package
+     * @description 更新套餐（乐观锁：``expected_version`` 不符 → 409，重读重试）.
+     */
+    put: operations["update_recharge_package_api_control_settings_recharge_packages__package_id__put"];
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/wallet": {
     parameters: {
       query?: never;
@@ -4298,6 +4398,23 @@ export interface paths {
     get: operations["read_analysis_task_api_analysis_tasks__task_id__get"];
     put?: never;
     post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/analysis-tasks/{task_id}/cancel": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Cancel Project Analysis Task */
+    post: operations["cancel_project_analysis_task_api_analysis_tasks__task_id__cancel_post"];
     delete?: never;
     options?: never;
     head?: never;
@@ -6847,6 +6964,8 @@ export interface components {
        * @default false
        */
       allow_unverified: boolean;
+      /** First Frame Candidates Version Id */
+      first_frame_candidates_version_id?: string | null;
     };
     /** ConfirmNotChargedRequest */
     ConfirmNotChargedRequest: {
@@ -7122,6 +7241,8 @@ export interface components {
     CreateRechargeOrderRequest: {
       /** Amount Fen */
       amount_fen: number;
+      /** Package Id */
+      package_id?: string | null;
     };
     /**
      * CreatedApiKeyResponse
@@ -7957,6 +8078,10 @@ export interface components {
       estimated_credits: number;
       /** Credit Price Version */
       credit_price_version: number;
+      /** Discount Rate */
+      discount_rate?: string | null;
+      /** Discount Source */
+      discount_source?: string | null;
     };
     /** GenerationReconcileOperationResponse */
     GenerationReconcileOperationResponse: {
@@ -8266,12 +8391,44 @@ export interface components {
         [key: string]: string;
       };
     };
+    /** MaterialBulkRequest */
+    MaterialBulkRequest: {
+      /** Material Ids */
+      material_ids: string[];
+      update: components["schemas"]["MaterialBulkUpdate"];
+    };
+    /** MaterialBulkResult */
+    MaterialBulkResult: {
+      /** Updated */
+      updated: number;
+      /** Skipped */
+      skipped: number;
+    };
+    /** MaterialBulkUpdate */
+    MaterialBulkUpdate: {
+      /** Group */
+      group?: string | null;
+      /** Hidden */
+      hidden?: boolean | null;
+    };
     /** MaterialCharacterView */
     MaterialCharacterView: {
       /** Asset Id */
       asset_id: string;
       /** View Type */
       view_type: string;
+    };
+    /** MaterialGroupItem */
+    MaterialGroupItem: {
+      /** Name */
+      name: string;
+      /** Count */
+      count: number;
+    };
+    /** MaterialGroupsResponse */
+    MaterialGroupsResponse: {
+      /** Items */
+      items: components["schemas"]["MaterialGroupItem"][];
     };
     /** MaterialItem */
     MaterialItem: {
@@ -9290,6 +9447,110 @@ export interface components {
       created_at: string;
       /** Paid At */
       paid_at: string | null;
+    };
+    /** RechargePackageListResponse */
+    RechargePackageListResponse: {
+      /** Items */
+      items: components["schemas"]["RechargePackageView"][];
+    };
+    /** RechargePackageUpdate */
+    RechargePackageUpdate: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /** Name */
+      name: string;
+      /** Amount Fen */
+      amount_fen: number;
+      /** Credits */
+      credits: number;
+      /** Discount Rate */
+      discount_rate?: number | string | null;
+      /** Discount Interfaces */
+      discount_interfaces?: string[];
+      /**
+       * Sort Order
+       * @default 0
+       */
+      sort_order: number;
+      /**
+       * Is Active
+       * @default true
+       */
+      is_active: boolean;
+      /** Expected Version */
+      expected_version: number;
+    };
+    /**
+     * RechargePackageView
+     * @description 套餐的对外形状（客户与管理端共用；时间戳为 ISO 字符串）.
+     */
+    RechargePackageView: {
+      /** Id */
+      id: string;
+      /** Name */
+      name: string;
+      /** Amount Fen */
+      amount_fen: number;
+      /** Credits */
+      credits: number;
+      /** Discount Rate */
+      discount_rate: string | null;
+      /** Discount Interfaces */
+      discount_interfaces: string[];
+      /** Sort Order */
+      sort_order: number;
+      /** Is Active */
+      is_active: boolean;
+      /** Version */
+      version: number;
+      /** Created At */
+      created_at?: string | null;
+      /** Updated At */
+      updated_at?: string | null;
+    };
+    /**
+     * RechargePackageWrite
+     * @description 管理端新建/更新套餐的草稿（含写契约字段）.
+     */
+    RechargePackageWrite: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /** Name */
+      name: string;
+      /** Amount Fen */
+      amount_fen: number;
+      /** Credits */
+      credits: number;
+      /** Discount Rate */
+      discount_rate?: number | string | null;
+      /** Discount Interfaces */
+      discount_interfaces?: string[];
+      /**
+       * Sort Order
+       * @default 0
+       */
+      sort_order: number;
+      /**
+       * Is Active
+       * @default true
+       */
+      is_active: boolean;
     };
     /** ReconcileGenerationTaskRequest */
     ReconcileGenerationTaskRequest: {
@@ -13150,6 +13411,7 @@ export interface operations {
           | ("upload" | "project" | "character" | "oral" | "generation")
           | null;
         q?: string | null;
+        group?: string | null;
         page?: number;
         page_size?: number;
       };
@@ -13169,6 +13431,38 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["MaterialPage"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_material_groups_api_studio_materials_groups_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["MaterialGroupsResponse"];
         };
       };
       /** @description Validation Error */
@@ -13301,6 +13595,39 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["MaterialItem"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  patch_materials_bulk_api_studio_materials_bulk_patch: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["MaterialBulkRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["MaterialBulkResult"];
         };
       };
       /** @description Validation Error */
@@ -18957,6 +19284,114 @@ export interface operations {
       };
     };
   };
+  customer_recharge_packages_api_customer_recharge_packages_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["RechargePackageListResponse"];
+        };
+      };
+    };
+  };
+  admin_recharge_packages_api_control_settings_recharge_packages_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["RechargePackageListResponse"];
+        };
+      };
+    };
+  };
+  create_recharge_package_api_control_settings_recharge_packages_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["RechargePackageWrite"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["RechargePackageView"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  update_recharge_package_api_control_settings_recharge_packages__package_id__put: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        package_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["RechargePackageUpdate"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["RechargePackageView"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   read_wallet_api_wallet_get: {
     parameters: {
       query?: never;
@@ -19613,6 +20048,37 @@ export interface operations {
         "X-Dev-User-Id"?: string | null;
         Authorization?: string | null;
       };
+      path: {
+        task_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AnalysisTaskResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  cancel_project_analysis_task_api_analysis_tasks__task_id__cancel_post: {
+    parameters: {
+      query?: never;
+      header?: never;
       path: {
         task_id: string;
       };

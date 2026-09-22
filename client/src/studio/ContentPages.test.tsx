@@ -27,6 +27,8 @@ const {
   saveViralFavorite,
   removeViralFavorite,
   listMaterials,
+  listMaterialGroups,
+  bulkUpdateMaterials,
   createMaterialUploadIntent,
   uploadMaterial,
   completeMaterialUpload,
@@ -62,6 +64,12 @@ const {
   saveViralFavorite: vi.fn(),
   removeViralFavorite: vi.fn(),
   listMaterials: vi.fn(),
+  listMaterialGroups: vi.fn(
+    async (): Promise<{ items: { name: string; count: number }[] }> => ({
+      items: [],
+    }),
+  ),
+  bulkUpdateMaterials: vi.fn(),
   createMaterialUploadIntent: vi.fn(),
   uploadMaterial: vi.fn(),
   completeMaterialUpload: vi.fn(),
@@ -105,6 +113,8 @@ vi.mock("../api", () => ({
   saveViralFavorite,
   removeViralFavorite,
   listMaterials,
+  listMaterialGroups,
+  bulkUpdateMaterials,
   createMaterialUploadIntent,
   uploadMaterial,
   completeMaterialUpload,
@@ -428,6 +438,8 @@ describe("V1.4 内容与运营页面", () => {
     });
     window.history.replaceState(null, "", "/");
     listMaterials.mockReset();
+    listMaterialGroups.mockReset().mockResolvedValue({ items: [] });
+    bulkUpdateMaterials.mockReset();
     createMaterialUploadIntent.mockReset();
     uploadMaterial.mockReset();
     completeMaterialUpload.mockReset();
@@ -3588,6 +3600,7 @@ describe("V1.4 内容与运营页面", () => {
         mediaType: undefined,
         source: "upload",
         query: "庭院",
+        group: undefined,
         page: 1,
         pageSize: 24,
       }),
@@ -4168,6 +4181,12 @@ describe("V1.4 内容与运营页面", () => {
       page_size: 6,
       total: 1,
     });
+    listMaterialGroups.mockResolvedValue({
+      items: [
+        { name: "我的上传", count: 1 },
+        { name: "庭院案例", count: 2 },
+      ],
+    });
     updateMaterial.mockResolvedValue({ ...material, group: "庭院案例" });
     downloadMaterialAsset.mockResolvedValue(undefined);
     useStudio.mockReturnValue(
@@ -4194,6 +4213,81 @@ describe("V1.4 内容与运营页面", () => {
         "image-cloud-2",
         "院门.png",
       ),
+    );
+  });
+
+  it("分组导航按分组筛选，整理模式可跨卡片批量移动", async () => {
+    listMaterials.mockResolvedValue({
+      items: [material("gate", { group: "庭院案例" }), material("door")],
+      page: 1,
+      page_size: 24,
+      total: 2,
+    });
+    listMaterialGroups.mockResolvedValue({
+      items: [
+        { name: "我的上传", count: 1 },
+        { name: "庭院案例", count: 1 },
+      ],
+    });
+    bulkUpdateMaterials.mockResolvedValue({ updated: 1, skipped: 0 });
+    useStudio.mockReturnValue(studio({ review: false }));
+    render(<MaterialsPage />);
+
+    await screen.findByRole("button", { name: "选择素材 gate.png" });
+    fireEvent.click(screen.getByRole("button", { name: "筛选分组 庭院案例" }));
+    await waitFor(() =>
+      expect(listMaterials).toHaveBeenLastCalledWith(
+        expect.objectContaining({ group: "庭院案例", page: 1 }),
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "整理素材" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择素材 gate.png" }));
+    expect(screen.getByText("已选 1 项")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("批量目标分组"), {
+      target: { value: "我的上传" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "移入分组" }));
+    await waitFor(() =>
+      expect(bulkUpdateMaterials).toHaveBeenCalledWith({
+        material_ids: ["asset:gate"],
+        update: { group: "我的上传" },
+      }),
+    );
+    expect(
+      screen.getByRole("button", { name: "筛选分组 庭院案例" }),
+    ).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("详情面板可把素材改入新建分组", async () => {
+    const item = material("gate");
+    listMaterials.mockResolvedValue({
+      items: [item],
+      page: 1,
+      page_size: 24,
+      total: 1,
+    });
+    listMaterialGroups.mockResolvedValue({
+      items: [{ name: "我的上传", count: 1 }],
+    });
+    updateMaterial.mockResolvedValue({ ...item, group: "门头专题" });
+    useStudio.mockReturnValue(studio({ review: false }));
+    render(<MaterialsPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "选择素材 gate.png" }),
+    );
+    fireEvent.change(screen.getByLabelText("素材分组"), {
+      target: { value: "__new__" },
+    });
+    fireEvent.change(screen.getByLabelText("新分组名称"), {
+      target: { value: "门头专题" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存分组" }));
+    await waitFor(() =>
+      expect(updateMaterial).toHaveBeenCalledWith("asset:gate", {
+        group: "门头专题",
+      }),
     );
   });
 

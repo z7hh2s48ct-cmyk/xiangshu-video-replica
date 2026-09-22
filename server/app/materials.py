@@ -193,6 +193,40 @@ class MaterialUpdateRequest(BaseModel):
     hidden: bool | None = None
 
 
+class MaterialGroupItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    count: int
+
+
+class MaterialGroupsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[MaterialGroupItem]
+
+
+class MaterialBulkUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    group: str | None = Field(default=None, max_length=80)
+    hidden: bool | None = None
+
+
+class MaterialBulkRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    material_ids: list[str] = Field(min_length=1, max_length=100)
+    update: MaterialBulkUpdate
+
+
+class MaterialBulkResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    updated: int
+    skipped: int
+
+
 @dataclass(frozen=True)
 class PreparedMaterialUpload:
     asset_id: str
@@ -455,6 +489,15 @@ def _grouped_character_clause() -> str:
     ))"""
 
 
+def _group_expression() -> str:
+    """有效分组（override 优先，空串回落 base_group），与 MaterialItem.group 同口径。
+
+    读侧统一 BTRIM：存量数据可能带首尾空格（历史 upload intent 未 strip），
+    若不 trim，导航会展示“点进去为空”的幽灵分组。
+    """
+    return "COALESCE(NULLIF(BTRIM(preference.group_override), ''), candidate.base_group)"
+
+
 def _read_rows(
     conn: BusinessConnection,
     *,
@@ -465,6 +508,7 @@ def _read_rows(
     include_hidden: bool,
     limit: int | None,
     offset: int = 0,
+    group: str | None = None,
     material_ids: list[tuple[Literal["asset", "generation"], str]] | None = None,
 ) -> list[Any]:
     scope, scope_params = _scope_clause(actor)
@@ -483,6 +527,10 @@ def _read_rows(
     if query:
         clauses.append("LOWER(COALESCE(preference.title_override, candidate.base_title)) LIKE %s")
         parameters.append(f"%{query.lower()}%")
+    if group is not None:
+        # 空串即「未分组」：base_group 恒非空，因此空集返回属预期语义保留。
+        clauses.append(f"{_group_expression()} = %s")
+        parameters.append(group)
     if material_ids:
         clauses.append(
             "("
@@ -535,6 +583,7 @@ def _count_rows(
     media_type: str | None,
     source: str | None,
     query: str | None,
+    group: str | None = None,
 ) -> int:
     scope, scope_params = _scope_clause(actor)
     clauses = [scope, "COALESCE(preference.hidden, 0) = 0", _grouped_character_clause()]
@@ -548,6 +597,9 @@ def _count_rows(
     if query:
         clauses.append("LOWER(COALESCE(preference.title_override, candidate.base_title)) LIKE %s")
         parameters.append(f"%{query.lower()}%")
+    if group is not None:
+        clauses.append(f"{_group_expression()} = %s")
+        parameters.append(group)
     row = conn.execute(
         _candidate_cte()
         + f"""
@@ -687,6 +739,7 @@ def list_materials(
     query: str | None,
     page: int,
     page_size: int,
+    group: str | None = None,
 ) -> MaterialPage:
     total = _count_rows(
         conn,
@@ -694,6 +747,7 @@ def list_materials(
         media_type=media_type,
         source=source,
         query=query,
+        group=group,
     )
     start = (page - 1) * page_size
     rows = _read_rows(
@@ -705,12 +759,42 @@ def list_materials(
         include_hidden=False,
         limit=page_size,
         offset=start,
+        group=group,
     )
     return MaterialPage(
         items=[material_item(row) for row in rows],
         page=page,
         page_size=page_size,
         total=total,
+    )
+
+
+def list_material_groups(
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+) -> MaterialGroupsResponse:
+    """按有效分组聚合当前用户可见、未隐藏的候选素材（同一张 contact sheet 只计一条）。"""
+    scope, scope_params = _scope_clause(actor)
+    rows = conn.execute(
+        _candidate_cte()
+        + f"""
+        SELECT {_group_expression()} AS name, COUNT(*) AS count
+        FROM material_candidates AS candidate
+        LEFT JOIN studio_material_preferences AS preference
+          ON preference.user_id = %s
+         AND preference.source_type = candidate.source_type
+         AND preference.source_id = candidate.source_id
+        WHERE {scope}
+          AND COALESCE(preference.hidden, 0) = 0
+          AND {_grouped_character_clause()}
+        GROUP BY name
+        ORDER BY count DESC, name ASC
+        """,
+        tuple([actor.id, actor.id, *scope_params]),
+    ).fetchall()
+    return MaterialGroupsResponse(
+        items=[MaterialGroupItem(name=str(row["name"]), count=int(row["count"])) for row in rows]
     )
 
 
@@ -1350,6 +1434,100 @@ def update_material(
     return result
 
 
+def bulk_update_materials(
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    request: MaterialBulkRequest,
+) -> MaterialBulkResult:
+    """逐条 owner 校验的批量维护；直出成片的 group 变更逐条跳过。
+
+    在调用者的单一写事务内处理；只写一条汇总审计，不逐条写。
+    """
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="studio.material.bulk_update",
+        entity_type="material",
+        entity_id="bulk",
+    )
+    fields = request.update.model_fields_set
+    if not fields:
+        raise material_error(422, "MATERIAL_UPDATE_EMPTY", "至少提交一项修改。")
+    submitted_group = request.update.group
+    group = submitted_group.strip() if isinstance(submitted_group, str) else None
+    if "group" in fields and submitted_group is not None and not group:
+        raise material_error(422, "MATERIAL_GROUP_EMPTY", "素材分组不能为空。")
+    set_group = "group" in fields and group is not None
+    clear_group = "group" in fields and group is None
+    hidden = request.update.hidden
+    updated = 0
+    skipped = 0
+    with conn:
+        # 去重并固定顺序：重复 id 不多计 updated，同时消除乱序并发批量间的行锁死锁面。
+        for material_id in sorted(dict.fromkeys(request.material_ids)):
+            try:
+                source_type, source_id = parse_material_id(material_id)
+                current = require_material(conn, actor=actor, material_id=material_id)
+                if source_type == "generation" and "group" in fields:
+                    # 单条 409（直出成片不支持分组）的批量降级：逐条跳过。
+                    skipped += 1
+                    continue
+                target_hidden = current.hidden if hidden is None else hidden
+                if set_group:
+                    _upsert_preference(
+                        conn,
+                        actor_id=actor.id,
+                        source_type=source_type,
+                        source_id=source_id,
+                        title=None,
+                        group=group,
+                        hidden=target_hidden,
+                    )
+                elif clear_group:
+                    _upsert_preference(
+                        conn,
+                        actor_id=actor.id,
+                        source_type=source_type,
+                        source_id=source_id,
+                        title=None,
+                        group=None,
+                        hidden=target_hidden,
+                        clear_group=True,
+                    )
+                else:
+                    # 仅 hidden：preserve_overrides 语义，绝不覆盖 title/group。
+                    _upsert_preference(
+                        conn,
+                        actor_id=actor.id,
+                        source_type=source_type,
+                        source_id=source_id,
+                        title=None,
+                        group=None,
+                        hidden=target_hidden,
+                        preserve_overrides=True,
+                    )
+                updated += 1
+            except HTTPException:
+                skipped += 1
+        write_audit(
+            conn,
+            actor=actor,
+            action="studio.material.bulk_update",
+            entity_type="material",
+            entity_id="bulk",
+            metadata={
+                "requested": len(request.material_ids),
+                "updated": updated,
+                "skipped": skipped,
+                "group_changed": "group" in fields,
+                "hidden_changed": "hidden" in fields,
+            },
+            commit=False,
+        )
+    return MaterialBulkResult(updated=updated, skipped=skipped)
+
+
 def hide_material(
     conn: BusinessConnection,
     *,
@@ -1397,18 +1575,37 @@ def _upsert_preference(
     group: str | None,
     hidden: bool,
     preserve_overrides: bool = False,
+    clear_group: bool = False,
 ) -> None:
+    # 写入侧统一 strip：与单条 PATCH / bulk 一致，避免新增带首尾空格的 override。
+    if isinstance(group, str):
+        group = group.strip() or None
     if preserve_overrides:
         conn.execute(
             """
             INSERT INTO studio_material_preferences (
                 user_id, source_type, source_id, hidden
-            ) VALUES (%s, %s, %s, 1)
+            ) VALUES (%s, %s, %s, %s)
             ON CONFLICT (user_id, source_type, source_id) DO UPDATE SET
-                hidden = 1,
+                hidden = excluded.hidden,
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (actor_id, source_type, source_id),
+            (actor_id, source_type, source_id, 1 if hidden else 0),
+        )
+        return
+    if clear_group:
+        # 显式清除 override：COALESCE 保留语义做不到，只能置回 NULL。
+        conn.execute(
+            """
+            INSERT INTO studio_material_preferences (
+                user_id, source_type, source_id, hidden
+            ) VALUES (%s, %s, %s, %s)
+            ON CONFLICT (user_id, source_type, source_id) DO UPDATE SET
+                group_override = NULL,
+                hidden = excluded.hidden,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (actor_id, source_type, source_id, 1 if hidden else 0),
         )
         return
     conn.execute(

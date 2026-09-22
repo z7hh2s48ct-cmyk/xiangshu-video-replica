@@ -358,6 +358,12 @@ export type MaterialResolveResponse =
 export type MaterialUpdate = components["schemas"]["MaterialUpdateRequest"];
 export type MaterialUploadIntent =
   components["schemas"]["MaterialUploadIntentResponse"];
+export type MaterialGroupItem = components["schemas"]["MaterialGroupItem"];
+export type MaterialGroupsResponse =
+  components["schemas"]["MaterialGroupsResponse"];
+export type MaterialBulkUpdate = components["schemas"]["MaterialBulkUpdate"];
+export type MaterialBulkRequest = components["schemas"]["MaterialBulkRequest"];
+export type MaterialBulkResult = components["schemas"]["MaterialBulkResult"];
 
 export type CompletedUpload = {
   asset_id: string;
@@ -2519,6 +2525,9 @@ export async function listMaterials(
     mediaType?: MaterialItem["media_type"];
     source?: MaterialItem["source"];
     query?: string;
+    // MATERIAL-UX-01：分组导航精确筛选。undefined 忽略；空串为「未分组」
+    // 语义（当前数据模型下为空集）；非空为分组名精确匹配。
+    group?: string;
     page?: number;
     pageSize?: number;
   } = {},
@@ -2527,6 +2536,7 @@ export async function listMaterials(
   if (filters.mediaType) query.set("media_type", filters.mediaType);
   if (filters.source) query.set("source", filters.source);
   if (filters.query?.trim()) query.set("q", filters.query.trim());
+  if (filters.group !== undefined) query.set("group", filters.group);
   if (filters.page !== undefined) query.set("page", String(filters.page));
   if (filters.pageSize !== undefined) {
     query.set("page_size", String(filters.pageSize));
@@ -2636,6 +2646,25 @@ export async function updateMaterial(
     `/api/studio/materials/${encodeURIComponent(materialId)}`,
     "更新素材失败",
     { method: "PATCH", body: JSON.stringify(update) },
+  );
+}
+
+// MATERIAL-UX-01：分组导航计数（对当前用户可见、未隐藏素材按有效分组聚合）。
+export async function listMaterialGroups(): Promise<MaterialGroupsResponse> {
+  return requestApiJson<MaterialGroupsResponse>(
+    "/api/studio/materials/groups",
+    "读取素材分组失败",
+  );
+}
+
+// MATERIAL-UX-01：批量分组/隐藏。越权或不支持的素材由服务端逐条跳过。
+export async function bulkUpdateMaterials(
+  request: MaterialBulkRequest,
+): Promise<MaterialBulkResult> {
+  return requestApiJson<MaterialBulkResult>(
+    "/api/studio/materials/bulk",
+    "批量更新素材失败",
+    { method: "PATCH", body: JSON.stringify(request) },
   );
 }
 

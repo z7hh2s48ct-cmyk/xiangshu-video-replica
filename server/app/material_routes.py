@@ -11,6 +11,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.auth import AuthenticatedUser, Database
 from app.customer_fence import BusinessDbDep
 from app.materials import (
+    MaterialBulkRequest,
+    MaterialBulkResult,
+    MaterialGroupsResponse,
     MaterialItem,
     MaterialMediaType,
     MaterialPage,
@@ -20,8 +23,10 @@ from app.materials import (
     MaterialUploadIntentRequest,
     MaterialUploadIntentResponse,
     attach_video_thumbnail,
+    bulk_update_materials,
     create_material_upload_intent,
     hide_material,
+    list_material_groups,
     list_materials,
     persist_material_upload,
     prepare_material_upload,
@@ -48,6 +53,7 @@ def read_materials(
     media_type: MaterialMediaType | None = None,
     source: MaterialSource | None = None,
     q: Annotated[str | None, Query(max_length=120)] = None,
+    group: Annotated[str | None, Query(max_length=80)] = None,
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 24,
 ) -> MaterialPage:
@@ -59,7 +65,16 @@ def read_materials(
         query=q.strip() if q and q.strip() else None,
         page=page,
         page_size=page_size,
+        group=group.strip() if group is not None else None,
     )
+
+
+@router.get("/groups", response_model=MaterialGroupsResponse)
+def read_material_groups(
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> MaterialGroupsResponse:
+    return list_material_groups(conn, actor=actor)
 
 
 @router.post("/resolve", response_model=MaterialResolveResponse)
@@ -166,6 +181,15 @@ def complete_upload(
         except StorageBackendUnavailable:
             pass
     return item
+
+
+@router.patch("/bulk", response_model=MaterialBulkResult)
+def patch_materials_bulk(
+    request: MaterialBulkRequest,
+    db: BusinessDbDep,
+) -> MaterialBulkResult:
+    with db.write() as (conn, actor):
+        return bulk_update_materials(conn, actor=actor, request=request)
 
 
 @router.patch("/{material_id}", response_model=MaterialItem)

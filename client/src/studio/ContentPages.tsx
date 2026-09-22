@@ -1,6 +1,9 @@
 import type { RefObject } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
+  MaterialBulkResult,
+  MaterialBulkUpdate,
+  MaterialGroupItem,
   MaterialItem,
   MaterialPage,
   ViralImportPurpose,
@@ -9,6 +12,7 @@ import type {
   ViralVideoItem,
 } from "../api";
 import {
+  bulkUpdateMaterials,
   clearMaterialCache,
   createGenerationTaskPreviewUrl,
   createMaterialUploadIntent,
@@ -26,6 +30,7 @@ import {
   getStudioDraft,
   getViralImportTask,
   hideMaterial,
+  listMaterialGroups,
   listMaterials,
   listViralFavorites,
   listViralVideos,
@@ -1730,6 +1735,8 @@ export function ViralDetailPage() {
 function AssetCard({
   asset,
   selected,
+  organize = false,
+  checked = false,
   previewStatus,
   onSelect,
   onPreviewError,
@@ -1737,6 +1744,9 @@ function AssetCard({
 }: {
   asset: StudioAsset;
   selected: boolean;
+  // MATERIAL-UX-01：整理模式下卡片进入可勾选态，点击切换选中而非打开详情。
+  organize?: boolean;
+  checked?: boolean;
   previewStatus?: "loading" | "ready" | "error";
   onSelect: () => void;
   onPreviewError: (failedUrl?: string) => void;
@@ -1762,10 +1772,16 @@ function AssetCard({
   return (
     <button
       type="button"
-      className={`content-asset content-asset--${asset.kind} ${selected ? "is-selected" : ""} ${asset.composite ? "content-asset--composite" : ""}`}
+      className={`content-asset content-asset--${asset.kind} ${selected ? "is-selected" : ""} ${asset.composite ? "content-asset--composite" : ""} ${organize ? "is-organizing" : ""} ${organize && checked ? "is-checked" : ""}`}
       onClick={onSelect}
       aria-label={`选择素材 ${asset.name}`}
+      aria-pressed={organize ? checked : undefined}
     >
+      {organize ? (
+        <span aria-hidden="true" className="content-asset__check">
+          {checked ? "✓" : ""}
+        </span>
+      ) : null}
       <Media
         asset={asset}
         alt={asset.name}
@@ -1815,6 +1831,19 @@ function MaterialsPageContent() {
   const [busyAction, setBusyAction] = useState<string>();
   const [renameValue, setRenameValue] = useState("");
   const [groupValue, setGroupValue] = useState("");
+  const [groupNewName, setGroupNewName] = useState("");
+  // MATERIAL-UX-01：分组导航与整理模式的页面态。group 为 undefined 时不过滤；
+  // 非空时与素材的有效分组精确匹配。
+  const [group, setGroup] = useState<string | undefined>(undefined);
+  const [groups, setGroups] = useState<MaterialGroupItem[]>([]);
+  const [groupsRevision, setGroupsRevision] = useState(0);
+  const [refreshRevision, setRefreshRevision] = useState(0);
+  const [organize, setOrganize] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkGroupChoice, setBulkGroupChoice] = useState("");
+  const [bulkGroupDraft, setBulkGroupDraft] = useState("");
+  const [uploadGroup, setUploadGroup] = useState("我的上传");
+  const [uploadGroupDraft, setUploadGroupDraft] = useState("");
   const [previewStates, setPreviewStates] = useState<MaterialPreviewStates>({});
   // MATERIAL-THUMBS-B：视频瓦片封面（键 = 授权 id；7 天签名，img 直接展示）。
   const [thumbnailUrls, setThumbnailUrls] = useState<Record<string, string>>(
@@ -1849,7 +1878,6 @@ function MaterialsPageContent() {
   const [clearingCache, setClearingCache] = useState(false);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
-  const groupInputRef = useRef<HTMLInputElement | null>(null);
   const reviewAssets = data.assets.filter(
     (asset) => kind === "全部" || asset.kind === kind,
   );
@@ -2221,6 +2249,8 @@ function MaterialsPageContent() {
 
   useEffect(() => {
     if (review) return;
+    // refreshRevision 仅作为“强制重拉”触发器，不参与请求参数。
+    void refreshRevision;
     let current = true;
     setRemoteLoading(true);
     setRemoteError(undefined);
@@ -2228,6 +2258,7 @@ function MaterialsPageContent() {
       mediaType: kind === "全部" ? undefined : kind,
       source: source || undefined,
       query: query || undefined,
+      group,
       page,
       pageSize,
     })
@@ -2247,7 +2278,25 @@ function MaterialsPageContent() {
     return () => {
       current = false;
     };
-  }, [kind, page, query, review, source]);
+  }, [group, kind, page, query, refreshRevision, review, source]);
+
+  // MATERIAL-UX-01：分组导航计数（随素材变动刷新）。
+  useEffect(() => {
+    if (review) return;
+    // groupsRevision 仅作为“强制重拉”触发器。
+    void groupsRevision;
+    let current = true;
+    void listMaterialGroups()
+      .then((result) => {
+        if (current) setGroups(result.items);
+      })
+      .catch(() => {
+        /* 分组导航失败不阻塞素材浏览。 */
+      });
+    return () => {
+      current = false;
+    };
+  }, [groupsRevision, review]);
 
   useEffect(() => {
     if (!review && remotePage?.page === page && page > pages) setPage(pages);
@@ -2258,8 +2307,11 @@ function MaterialsPageContent() {
     void page;
     void query;
     void source;
+    void group;
     cacheSuppressedRef.current = false;
-  }, [kind, page, query, source]);
+    // 列表参数变化后旧勾选可能已不可见：清空避免“已选 0 项”与按钮状态矛盾。
+    setSelectedIds(new Set());
+  }, [group, kind, page, query, source]);
 
   useEffect(() => {
     if (review || remotePage?.page !== page) return;
@@ -2323,6 +2375,7 @@ function MaterialsPageContent() {
   useEffect(() => {
     setRenameValue(selected?.name ?? "");
     setGroupValue(selected?.group ?? "");
+    setGroupNewName("");
   }, [selected?.group, selected?.name]);
 
   const currentAssets = review
@@ -2346,9 +2399,12 @@ function MaterialsPageContent() {
     setBusyAction("upload");
     setUploadProgress(0);
     try {
+      // MATERIAL-UX-01：标题区可选上传目标分组，默认“我的上传”。
+      const targetGroup =
+        uploadGroup === "__new__" ? uploadGroupDraft.trim() : uploadGroup;
       const intent = await createMaterialUploadIntent(file, {
         title: file.name,
-        group: "我的上传",
+        group: targetGroup || "我的上传",
       });
       const completed = await putMaterial(intent, file, setUploadProgress);
       const asset = studioAssetFromMaterial(completed);
@@ -2357,19 +2413,23 @@ function MaterialsPageContent() {
       patchState({ selectedAssetId: asset.id });
       setKind(completed.media_type);
       setPage(1);
-      setRemotePage((current) => ({
-        items: [completed, ...(current?.items ?? [])]
-          .filter(
-            (item, index, items) =>
-              items.findIndex((candidate) => candidate.id === item.id) ===
-              index,
-          )
-          .slice(0, pageSize),
-        page: 1,
-        page_size: pageSize,
-        total: (current?.total ?? 0) + 1,
-      }));
+      // 当前筛选不含新素材时不在本地插入，交由刷新纠正列表。
+      if (group === undefined || group === completed.group) {
+        setRemotePage((current) => ({
+          items: [completed, ...(current?.items ?? [])]
+            .filter(
+              (item, index, items) =>
+                items.findIndex((candidate) => candidate.id === item.id) ===
+                index,
+            )
+            .slice(0, pageSize),
+          page: 1,
+          page_size: pageSize,
+          total: (current?.total ?? 0) + 1,
+        }));
+      }
       notify(`素材“${completed.title}”已上传并永久保存`);
+      refreshMaterials();
     } catch (error) {
       notify(error instanceof Error ? error.message : "上传素材失败");
     } finally {
@@ -2436,6 +2496,7 @@ function MaterialsPageContent() {
           : current,
       );
       notify("素材已从素材库移除，原业务记录仍保留");
+      refreshMaterials();
     } catch (error) {
       notify(error instanceof Error ? error.message : "移除素材失败");
     } finally {
@@ -2443,17 +2504,163 @@ function MaterialsPageContent() {
     }
   };
 
+  // MATERIAL-UX-01：分组导航与整理模式（本页勾选、批量整理）。
+  const selectGroup = (name: string | undefined) => {
+    setGroup(name);
+    setPage(1);
+    setSelectedIds(new Set());
+  };
+
+  const toggleOrganize = () => {
+    setOrganize((current) => !current);
+    setSelectedIds(new Set());
+    setBulkGroupChoice("");
+    setBulkGroupDraft("");
+  };
+
+  const toggleSelected = (assetId: string) => {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(assetId)) next.delete(assetId);
+      else next.add(assetId);
+      return next;
+    });
+  };
+
+  const selectablePageIds = currentAssets
+    .filter((asset) => asset.materialId)
+    .map((asset) => asset.id);
+  const allPageSelected =
+    selectablePageIds.length > 0 &&
+    selectablePageIds.every((id) => selectedIds.has(id));
+
+  const toggleSelectCurrentPage = () => {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      for (const id of selectablePageIds) {
+        if (allPageSelected) next.delete(id);
+        else next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const refreshMaterials = () => {
+    setGroupsRevision((current) => current + 1);
+    setRefreshRevision((current) => current + 1);
+  };
+
+  const bulkTargets = currentAssets.filter(
+    (asset) => selectedIds.has(asset.id) && asset.materialId,
+  );
+
+  const runBulkUpdate = async (
+    update: MaterialBulkUpdate,
+    describe: (result: MaterialBulkResult) => string,
+  ) => {
+    const materialIds = [
+      ...new Set(
+        bulkTargets
+          .map((asset) => asset.materialId)
+          .filter((id): id is string => Boolean(id)),
+      ),
+    ];
+    if (materialIds.length === 0) {
+      notify("请先选择要整理的素材");
+      return;
+    }
+    setBusyAction("bulk");
+    try {
+      const result = await bulkUpdateMaterials({
+        material_ids: materialIds,
+        update,
+      });
+      notify(describe(result));
+      setSelectedIds(new Set());
+      refreshMaterials();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "批量整理素材失败");
+    } finally {
+      setBusyAction(undefined);
+    }
+  };
+
+  const bulkMoveToGroup = () => {
+    const target =
+      bulkGroupChoice === "__new__" ? bulkGroupDraft.trim() : bulkGroupChoice;
+    if (!target) {
+      notify("请先选择或填写目标分组");
+      return;
+    }
+    void runBulkUpdate({ group: target }, (result) =>
+      result.skipped > 0
+        ? `已移动 ${result.updated} 项到“${target}”，${result.skipped} 项不支持调整分组`
+        : `已移动 ${result.updated} 项到“${target}”`,
+    );
+  };
+
+  const bulkRestoreDefault = () => {
+    void runBulkUpdate({ group: null }, (result) =>
+      result.skipped > 0
+        ? `已恢复 ${result.updated} 项默认分组，${result.skipped} 项未变更`
+        : `已恢复 ${result.updated} 项默认分组`,
+    );
+  };
+
+  const bulkHide = () => {
+    void runBulkUpdate({ hidden: true }, (result) =>
+      result.skipped > 0
+        ? `已移除 ${result.updated} 项，${result.skipped} 项未变更`
+        : `已移除 ${result.updated} 项素材`,
+    );
+  };
+
+  const bulkDownload = async () => {
+    const targets = bulkTargets.filter(
+      (asset): asset is StudioAsset & { assetId: string } =>
+        Boolean(asset.assetId),
+    );
+    if (targets.length === 0) {
+      notify("所选素材暂无可下载文件");
+      return;
+    }
+    setBusyAction("bulk-download");
+    let failed = 0;
+    try {
+      for (const [index, asset] of targets.entries()) {
+        // 浏览器对连续下载有节流，逐项间隔触发避免被拦截。
+        if (index > 0) await new Promise((resolve) => setTimeout(resolve, 150));
+        try {
+          await downloadMaterialAsset(asset.assetId, asset.name);
+        } catch {
+          failed += 1;
+        }
+      }
+      notify(
+        failed > 0
+          ? `已开始下载 ${targets.length - failed} 项，${failed} 项失败`
+          : `已开始下载 ${targets.length} 项素材`,
+      );
+    } finally {
+      setBusyAction(undefined);
+    }
+  };
+
   const saveGroup = async () => {
-    const group = groupInputRef.current?.value.trim() ?? groupValue.trim();
-    if (!selected?.materialId || !group) return;
+    // 下拉切到“新建分组…”（哨兵 __new__）时取新建输入框的值。
+    const target =
+      groupValue === "__new__" ? groupNewName.trim() : groupValue.trim();
+    if (!selected?.materialId || !target) return;
     setBusyAction("group");
     try {
       const updated = studioAssetFromMaterial(
         await updateMaterial(selected.materialId, {
-          group,
+          group: target,
         }),
       );
       setSelectedAsset({ ...updated, url: selected.url });
+      setGroupValue(updated.group);
+      setGroupNewName("");
       setRemotePage((current) =>
         current
           ? {
@@ -2467,6 +2674,7 @@ function MaterialsPageContent() {
           : current,
       );
       notify("素材分组已保存");
+      refreshMaterials();
     } catch (error) {
       notify(error instanceof Error ? error.message : "更新素材分组失败");
     } finally {
@@ -2513,6 +2721,40 @@ function MaterialsPageContent() {
           ref={uploadInputRef}
           type="file"
         />
+        {!review ? (
+          <div className="content-material-upload-group">
+            <select
+              aria-label="上传目标分组"
+              value={uploadGroup}
+              onChange={(event) => {
+                setUploadGroup(event.target.value);
+                if (event.target.value !== "__new__") setUploadGroupDraft("");
+              }}
+            >
+              {[
+                ...new Set([
+                  uploadGroup === "__new__" ? "我的上传" : uploadGroup,
+                  "我的上传",
+                  ...groups.map((item) => item.name),
+                ]),
+              ].map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+              <option value="__new__">新建分组…</option>
+            </select>
+            {uploadGroup === "__new__" ? (
+              <input
+                aria-label="上传新分组名称"
+                maxLength={80}
+                placeholder="新分组名称"
+                value={uploadGroupDraft}
+                onChange={(event) => setUploadGroupDraft(event.target.value)}
+              />
+            ) : null}
+          </div>
+        ) : null}
         <Button
           className="content-title-action"
           disabled={busyAction === "upload"}
@@ -2602,7 +2844,126 @@ function MaterialsPageContent() {
         </form>
       ) : null}
       <section className="content-material-layout">
+        {!review ? (
+          <aside aria-label="素材分组导航" className="content-material-groups">
+            <button
+              aria-label="筛选分组 全部素材"
+              aria-pressed={group === undefined}
+              className={`content-material-group ${group === undefined ? "is-active" : ""}`}
+              type="button"
+              onClick={() => selectGroup(undefined)}
+            >
+              <span className="content-material-group__name">全部素材</span>
+            </button>
+            {groups.map((item) => (
+              <button
+                key={item.name}
+                aria-label={`筛选分组 ${item.name}`}
+                aria-pressed={group === item.name}
+                className={`content-material-group ${group === item.name ? "is-active" : ""}`}
+                type="button"
+                onClick={() => selectGroup(item.name)}
+              >
+                <span className="content-material-group__name">
+                  {item.name}
+                </span>
+                <span className="content-material-group__count">
+                  {item.count}
+                </span>
+              </button>
+            ))}
+          </aside>
+        ) : null}
         <div className="content-material-list">
+          {!review ? (
+            <div className="content-material-toolbar">
+              <span className="content-material-toolbar__summary">
+                {organize ? `已选 ${bulkTargets.length} 项` : `共 ${total} 条`}
+              </span>
+              {organize ? (
+                <>
+                  <Button
+                    disabled={selectablePageIds.length === 0}
+                    variant="quiet"
+                    onClick={toggleSelectCurrentPage}
+                  >
+                    {allPageSelected ? "取消本页" : "全选本页"}
+                  </Button>
+                  <Button
+                    disabled={selectedIds.size === 0}
+                    variant="quiet"
+                    onClick={() => setSelectedIds(new Set())}
+                  >
+                    清空选择
+                  </Button>
+                </>
+              ) : null}
+              <Button
+                variant={organize ? "primary" : "outline"}
+                onClick={toggleOrganize}
+              >
+                {organize ? "退出整理" : "整理素材"}
+              </Button>
+            </div>
+          ) : null}
+          {organize ? (
+            <div
+              aria-label="批量整理"
+              className="content-material-bulkbar"
+              role="toolbar"
+            >
+              <select
+                aria-label="批量目标分组"
+                value={bulkGroupChoice}
+                onChange={(event) => setBulkGroupChoice(event.target.value)}
+              >
+                <option value="">选择目标分组…</option>
+                {groups.map((item) => (
+                  <option key={item.name} value={item.name}>
+                    {item.name}
+                  </option>
+                ))}
+                <option value="__new__">新建分组…</option>
+              </select>
+              {bulkGroupChoice === "__new__" ? (
+                <input
+                  aria-label="批量新分组名称"
+                  maxLength={80}
+                  placeholder="新分组名称"
+                  value={bulkGroupDraft}
+                  onChange={(event) => setBulkGroupDraft(event.target.value)}
+                />
+              ) : null}
+              <Button
+                disabled={bulkTargets.length === 0 || busyAction !== undefined}
+                variant="primary"
+                onClick={bulkMoveToGroup}
+              >
+                移入分组
+              </Button>
+              <Button
+                disabled={bulkTargets.length === 0 || busyAction !== undefined}
+                variant="outline"
+                onClick={bulkRestoreDefault}
+              >
+                恢复默认分组
+              </Button>
+              <Button
+                disabled={bulkTargets.length === 0 || busyAction !== undefined}
+                variant="outline"
+                onClick={() => void bulkDownload()}
+              >
+                批量下载
+              </Button>
+              <Button
+                disabled={bulkTargets.length === 0 || busyAction !== undefined}
+                variant="quiet"
+                onClick={bulkHide}
+              >
+                移入回收侧
+              </Button>
+            </div>
+          ) : null}
           <div className="content-asset-grid">
             {currentAssets.map((asset) => {
               const authId = asset.previewAssetId ?? asset.assetId ?? "";
@@ -2629,8 +2990,14 @@ function MaterialsPageContent() {
                     poster: thumbnailUrl ?? asset.poster,
                   }}
                   selected={selected?.id === asset.id}
+                  organize={organize}
+                  checked={selectedIds.has(asset.id)}
                   previewStatus={previewStates[asset.id]?.status}
                   onSelect={() => {
+                    if (organize) {
+                      toggleSelected(asset.id);
+                      return;
+                    }
                     if (previewStates[asset.id]?.status === "error")
                       void loadPreview(asset);
                     setSelectedAsset(asset);
@@ -2849,16 +3216,50 @@ function MaterialsPageContent() {
                   </div>
                   <div className="content-material-manage">
                     <Field label="素材分组">
-                      <input
+                      <select
                         aria-label="素材分组"
-                        maxLength={80}
-                        onChange={(event) => setGroupValue(event.target.value)}
-                        ref={groupInputRef}
                         value={groupValue}
-                      />
+                        onChange={(event) => {
+                          setGroupValue(event.target.value);
+                          if (event.target.value !== "__new__")
+                            setGroupNewName("");
+                        }}
+                      >
+                        {[
+                          ...new Set([
+                            ...(groupValue && groupValue !== "__new__"
+                              ? [groupValue]
+                              : []),
+                            ...groups.map((item) => item.name),
+                          ]),
+                        ].map((name) => (
+                          <option key={name} value={name}>
+                            {name}
+                          </option>
+                        ))}
+                        <option value="__new__">新建分组…</option>
+                      </select>
                     </Field>
+                    {groupValue === "__new__" ? (
+                      <Field label="新分组名称">
+                        <input
+                          aria-label="新分组名称"
+                          maxLength={80}
+                          placeholder="输入新分组名称"
+                          value={groupNewName}
+                          onChange={(event) =>
+                            setGroupNewName(event.target.value)
+                          }
+                        />
+                      </Field>
+                    ) : null}
                     <Button
-                      disabled={busyAction === "group" || !groupValue.trim()}
+                      disabled={
+                        busyAction === "group" ||
+                        (groupValue === "__new__"
+                          ? !groupNewName.trim()
+                          : !groupValue.trim())
+                      }
                       onClick={() => void saveGroup()}
                       variant="outline"
                     >
