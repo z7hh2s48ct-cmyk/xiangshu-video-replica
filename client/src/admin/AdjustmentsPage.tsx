@@ -14,6 +14,7 @@ import {
   formatDateTime,
   formatFen,
   labelFrom,
+  signedCredits,
 } from "./ui/vocabulary";
 
 /**
@@ -161,8 +162,19 @@ export function AdjustmentsPage({ userId }: { userId?: string }) {
                   <code>{adj.source_document_ref}</code>
                 </td>
                 <td>{adj.reason}</td>
-                <td className="amount">{formatFen(adj.amount_fen)}</td>
-                <td>+{adj.credits} 积分</td>
+                <td className="amount">
+                  {/* B1：反向调账在系统内不产生资金流水（不建充值单），金额列
+                      不编造一个不存在的数字；实际退付在 ZPay 后台，以来源单号对齐。 */}
+                  {adj.credits < 0 ? "—" : formatFen(adj.amount_fen)}
+                </td>
+                <td>
+                  {signedCredits(adj.credits)}
+                  {adj.credits < 0 ? (
+                    <span className="admin-hint">
+                      账本反向记账，实际退付在 ZPay 后台办理
+                    </span>
+                  ) : null}
+                </td>
                 <td>
                   {adj.balance_before === null ||
                   adj.balance_before === undefined ||

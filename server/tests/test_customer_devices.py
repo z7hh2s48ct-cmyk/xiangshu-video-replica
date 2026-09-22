@@ -80,6 +80,12 @@ from app.db_pg import DATABASE_URL_ENV, close_pg_pool
 
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 
+# 链尾（alembic head）。038/037 的降级守卫用例断言「拒绝后 schema 停在 head」，
+# 用的是这个常量——此前那两处把 head 字面量写在断言里，追加迁移时漏掉一处就会红
+# 而没有任何自动化提示。B1 追加 20260923T1200 时正是被这两个断言抓到的，
+# 因此顺手收敛成一个常量。
+_HEAD_REVISION = "20260923T1200_admin_refund_adjustment"
+
 T16_DB_NAME = "t16_customer_devices_test"
 
 TEST_KEY = secrets.token_urlsafe(48)  # code HMAC key (v1), never a real secret
@@ -2814,7 +2820,7 @@ def test_admin_device_events_downgrade_guard(route_state: str) -> None:
         command.downgrade(config, "037_device_pairing_requests")
     with psycopg.connect(_t16_dsn()) as conn:
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-    assert version == "20260922T2200_material_preference_tags"
+    assert version == _HEAD_REVISION
 
 
 # ---------------------------------------------------------------------------
@@ -2891,7 +2897,7 @@ def test_pairing_downgrade_refuses_once_rows_exist(route_state: str) -> None:
     # the version stays at the current head.
     with psycopg.connect(_t16_dsn()) as conn:
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-    assert version == "20260922T2200_material_preference_tags"
+    assert version == _HEAD_REVISION
 
     # An emptied table downgrades symmetrically, and upgrading back restores
     # the schema for any rerun of this module. Revision 038 added the

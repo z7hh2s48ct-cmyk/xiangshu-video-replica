@@ -1973,3 +1973,438 @@ def test_w15_large_export_reports_real_filtered_total(route_state: str) -> None:
         assert (
             len(list(csv.DictReader(io.StringIO(bytes(response.body).decode("utf-8-sig"))))) == 5000
         )
+
+
+# ---------------------------------------------------------------------------
+# B1 — audited reverse adjustment (反向调账, SOP §10 step 2)
+# ---------------------------------------------------------------------------
+#
+# `docs/客户版部署与灰度手册.md` §10 第 2 步要求「管理员经 T23 审计调账做反向调账，
+# 实际退付在 ZPay 后台办理」。在本批之前枚举里有「退款审批」，通道却只收正数，
+# 动作与标签方向相反。下面这组用例锁住放开后的形状：
+#
+# - 反向调账落一条 `REFUND` 流水（available_delta < 0、不挂订单/任务/计费轮次），
+#   **不建**充值单（D4），审计行挂在 `admin_adjustments` 上；
+# - 余额下限（D2）：超过当前可用余额的退款返回 400 `ADJUSTMENT_BALANCE_INSUFFICIENT`，
+#   DB 的 `ck_wallets_available_nonnegative` 是纵深兜底；
+# - 正向调账零回归：其余来源类型仍然只收正数。
+
+
+def _ledger_rows(user_id: str, tx_type: str) -> list[tuple]:
+    return _fetch_all(
+        "SELECT id, available_delta, reserved_delta, recharge_order_id, task_id, "
+        "oral_task_id, billing_round, billing_operation_id, idempotency_key, auth_source "
+        "FROM wallet_transactions WHERE user_id = %s AND type = %s ORDER BY id",
+        (user_id, tx_type),
+    )
+
+
+def _audit_row_for(adjustment_id: str) -> tuple:
+    row = _fetch_one(
+        "SELECT id, recharge_order_id, target_user_id, admin_user_id, "
+        "source_document_type, source_document_ref, reason, request_id "
+        "FROM admin_adjustments WHERE id = %s",
+        (adjustment_id,),
+    )
+    assert row is not None
+    return row
+
+
+def test_reversal_writes_refund_row_and_audit_row_without_order(client: TestClient) -> None:
+    """DoD 1: 反向调账 → `REFUND` 负向流水 + 可审计的 admin_adjustments 行，且无充值单."""
+    admin = _admin_session(client)
+    before_counts = _fetch_one(
+        "SELECT (SELECT COUNT(*) FROM recharge_orders), "
+        "(SELECT COUNT(*) FROM wallet_transactions), "
+        "(SELECT COUNT(*) FROM admin_adjustments)"
+    )
+
+    response = _create_adjustment(
+        client,
+        admin,
+        credits=-8,
+        source_document_type="REFUND_APPROVAL",
+        source_document_ref="REFUND-2026-0918",
+        reason="客户诉求退款：视频未交付，工单 2026-0918",
+        key="adj-refund-1",
+    )
+
+    assert response.status_code == 201, response.text
+    payload = response.json()
+    # No order is produced (D4), and the field stays a string: "" not "None".
+    assert payload["order_id"] == ""
+    assert payload["credits"] == "-8"
+    assert payload["amount_fen"] == "0"
+    assert payload["wallet_balance_after"] == 42
+    assert payload["source_document_type"] == "REFUND_APPROVAL"
+    assert payload["source_document_ref"] == "REFUND-2026-0918"
+    assert payload["request_id"]
+
+    # Exactly one new ledger row, one new audit row, and NO new order.
+    after_counts = _fetch_one(
+        "SELECT (SELECT COUNT(*) FROM recharge_orders), "
+        "(SELECT COUNT(*) FROM wallet_transactions), "
+        "(SELECT COUNT(*) FROM admin_adjustments)"
+    )
+    assert after_counts[0] == before_counts[0]
+    assert after_counts[1] == before_counts[1] + 1
+    assert after_counts[2] == before_counts[2] + 1
+
+    refunds = _ledger_rows(CUSTOMER_USER_ID, "REFUND")
+    assert len(refunds) == 1
+    (
+        row_id,
+        available_delta,
+        reserved_delta,
+        order_id,
+        task_id,
+        oral_task_id,
+        billing_round,
+        billing_operation_id,
+        idempotency_key,
+        auth_source,
+    ) = refunds[0]
+    assert available_delta == -8
+    assert reserved_delta == 0
+    # The 20260923T1200 shape branch: a reversal is not attached to anything.
+    assert order_id is None
+    assert task_id is None
+    assert oral_task_id is None
+    assert billing_round is None
+    assert billing_operation_id is None
+    assert auth_source == "internal"
+    assert str(idempotency_key) == f"admin_adjustment:refund:{payload['adjustment_id']}"
+
+    audit = _audit_row_for(str(payload["adjustment_id"]))
+    assert audit[1] is None  # recharge_order_id — the D4 hole, guarded by the CHECK
+    assert audit[2] == CUSTOMER_USER_ID
+    assert audit[3] == "admin_u"  # real acting administrator, not a service identity
+    assert audit[4] == "REFUND_APPROVAL"
+    assert audit[5] == "REFUND-2026-0918"
+    assert "工单 2026-0918" in str(audit[6])
+    assert str(audit[7])
+
+    assert _wallet_balance(CUSTOMER_USER_ID) == (42, 0)
+    assert str(row_id) == f"admin_adjustment:refund:{payload['adjustment_id']}"
+
+
+def test_reversal_is_visible_in_the_audit_listings(client: TestClient) -> None:
+    """反向调账必须出现在两个调账列表里（LEFT JOIN），并且能看出方向."""
+    admin = _admin_session(client)
+    created = _create_adjustment(
+        client,
+        admin,
+        credits=-6,
+        source_document_type="REFUND_APPROVAL",
+        source_document_ref="REFUND-2026-0919",
+        reason="退款审批通过",
+        key="adj-refund-list-1",
+    )
+    assert created.status_code == 201, created.text
+    forward = _create_adjustment(client, admin, credits=4, key="adj-forward-list-1")
+    assert forward.status_code == 201, forward.text
+
+    per_customer = client.get(_adjustment_path(CUSTOMER_USER_ID), headers=admin)
+    assert per_customer.status_code == 200, per_customer.text
+    items = {item["adjustment_id"]: item for item in per_customer.json()["items"]}
+    assert per_customer.json()["total"] == 2
+    reversal_item = items[created.json()["adjustment_id"]]
+    assert reversal_item["credits"] == -6
+    assert reversal_item["order_id"] == ""
+    assert reversal_item["amount_fen"] == 0
+    assert reversal_item["source_document_type"] == "REFUND_APPROVAL"
+    assert reversal_item["source_document_ref"] == "REFUND-2026-0919"
+    # The forward row keeps its order-derived values (regression on the COALESCE).
+    forward_item = items[forward.json()["adjustment_id"]]
+    assert forward_item["credits"] == 4
+    assert forward_item["order_id"] == forward.json()["order_id"]
+    assert forward_item["amount_fen"] > 0
+
+    global_list = client.get("/api/control/adjustments", headers=admin)
+    assert global_list.status_code == 200, global_list.text
+    global_items = {item["adjustment_id"]: item for item in global_list.json()["items"]}
+    assert global_list.json()["total"] == 2
+    global_reversal = global_items[created.json()["adjustment_id"]]
+    assert global_reversal["credits"] == -6
+    assert global_reversal["order_id"] == ""
+    assert global_reversal["admin_username"] == "admin_u"
+    assert global_reversal["target_username"] == "customer_u"
+    # Deterministic ledger balances still resolve for the order-less row:
+    # the opening 50 → 44 after the reversal, and balance_before is 50.
+    assert global_reversal["balance_after"] == 44
+    assert global_reversal["balance_before"] == 50
+    # Filtering by the new source type finds it.
+    filtered = client.get(
+        "/api/control/adjustments?source_document_type=REFUND_APPROVAL", headers=admin
+    )
+    assert filtered.status_code == 200, filtered.text
+    assert filtered.json()["total"] == 1
+
+
+def test_reversal_beyond_available_balance_is_rejected_with_a_business_code(
+    client: TestClient,
+) -> None:
+    """DoD 3（最关键的一条）D2：不允许负余额，超额退款是 400 而不是 500，也不静默截断."""
+    admin = _admin_session(client)
+    before_wallet = _wallet_balance(CUSTOMER_USER_ID)
+    before_counts = _fetch_one(
+        "SELECT (SELECT COUNT(*) FROM recharge_orders), "
+        "(SELECT COUNT(*) FROM wallet_transactions), "
+        "(SELECT COUNT(*) FROM admin_adjustments)"
+    )
+
+    # 50 available, ask for 51 back: the customer already consumed nothing here,
+    # but the guard is the balance, not the consumption history.
+    over = _create_adjustment(
+        client,
+        admin,
+        credits=-51,
+        source_document_type="REFUND_APPROVAL",
+        source_document_ref="REFUND-2026-0920",
+        reason="超额退款必须被拒",
+        key="adj-refund-over-1",
+    )
+    assert over.status_code == 400, over.text
+    detail = over.json()["detail"]
+    assert detail["code"] == "ADJUSTMENT_BALANCE_INSUFFICIENT"
+    # The operator must be told the consumed part is not refundable through the
+    # ledger — never silently clamped to the maximum refundable amount.
+    assert "unspent" in detail["message"]
+    assert _wallet_balance(CUSTOMER_USER_ID) == before_wallet
+    assert (
+        _fetch_one(
+            "SELECT (SELECT COUNT(*) FROM recharge_orders), "
+            "(SELECT COUNT(*) FROM wallet_transactions), "
+            "(SELECT COUNT(*) FROM admin_adjustments)"
+        )
+        == before_counts
+    )
+
+    # The boundary is inclusive: refunding exactly the whole balance lands at 0.
+    exact = _create_adjustment(
+        client,
+        admin,
+        credits=-50,
+        source_document_type="REFUND_APPROVAL",
+        source_document_ref="REFUND-2026-0920",
+        reason="全额退未消耗部分",
+        key="adj-refund-exact-1",
+    )
+    assert exact.status_code == 201, exact.text
+    assert exact.json()["wallet_balance_after"] == 0
+
+    # And one credit past it is refused again — the floor is zero, not "one more".
+    floor = _create_adjustment(
+        client,
+        admin,
+        credits=-1,
+        source_document_type="REFUND_APPROVAL",
+        source_document_ref="REFUND-2026-0920",
+        reason="余额为 0 后不能再退",
+        key="adj-refund-floor-1",
+    )
+    assert floor.status_code == 400, floor.text
+    assert floor.json()["detail"]["code"] == "ADJUSTMENT_BALANCE_INSUFFICIENT"
+    assert _wallet_balance(CUSTOMER_USER_ID) == (0, 0)
+
+    # The DB CHECK remains the defence in depth for any path that bypasses the
+    # route (red line: never UPDATE the balance directly, and never relax this).
+    with psycopg.connect(_t23_dsn(), autocommit=True) as conn:
+        with pytest.raises(CheckViolation):
+            conn.execute(
+                "UPDATE wallets SET available_credits = -1 WHERE user_id = %s",
+                (CUSTOMER_USER_ID,),
+            )
+
+
+def test_reversal_rejects_zero_and_oversized_credits(client: TestClient) -> None:
+    """反向调账要求非零整数；越界与溢出仍是 400，且在动账本之前就被拦下."""
+    admin = _admin_session(client)
+    before_wallet = _wallet_balance(CUSTOMER_USER_ID)
+    for credits in (0, 2_147_483_648, -(2_147_483_648)):
+        response = _create_adjustment(
+            client,
+            admin,
+            credits=credits,
+            source_document_type="REFUND_APPROVAL",
+            source_document_ref="REFUND-BOUNDS",
+            key=f"adj-refund-bounds-{credits}",
+        )
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"]["code"] == "ADJUSTMENT_VALIDATION_FAILED"
+    assert _wallet_balance(CUSTOMER_USER_ID) == before_wallet
+    assert _ledger_rows(CUSTOMER_USER_ID, "REFUND") == []
+
+
+def test_positive_refund_approval_still_uses_the_forward_charge_path(
+    client: TestClient,
+) -> None:
+    """`REFUND_APPROVAL` 只是「允许负数」，不是「只能负数」：补记仍走正向 CHARGE."""
+    admin = _admin_session(client)
+    response = _create_adjustment(
+        client,
+        admin,
+        credits=3,
+        source_document_type="REFUND_APPROVAL",
+        source_document_ref="REFUND-REVERSAL-2026",
+        reason="撤回一笔退款：补记回客户账本",
+        key="adj-refund-forward-1",
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["order_id"] != ""
+    order = _order_row(response.json()["order_id"])
+    assert order[0] == "admin_adjustment"
+    charges = _fetch_all(
+        "SELECT id FROM wallet_transactions WHERE type = 'CHARGE' AND recharge_order_id = %s",
+        (response.json()["order_id"],),
+    )
+    assert len(charges) == 1
+    assert _ledger_rows(CUSTOMER_USER_ID, "REFUND") == []
+
+
+@pytest.mark.parametrize(
+    "source_document_type",
+    ["CS_TICKET", "COMPENSATION_APPROVAL", "FREE_GRANT", "CREDIT_COMPENSATION"],
+)
+def test_non_reversal_sources_still_reject_negative_credits(
+    client: TestClient, source_document_type: str
+) -> None:
+    """正向来源类型的负数是 400（零回归）：只有退款类来源能反向记账."""
+    admin = _admin_session(client)
+    before_wallet = _wallet_balance(CUSTOMER_USER_ID)
+    response = _create_adjustment(
+        client,
+        admin,
+        credits=-1,
+        source_document_type=source_document_type,
+        key=f"adj-forward-negative-{source_document_type}",
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["code"] == "ADJUSTMENT_VALIDATION_FAILED"
+    assert _wallet_balance(CUSTOMER_USER_ID) == before_wallet
+
+
+def test_reversal_is_idempotent_and_auditor_cannot_write_it(client: TestClient) -> None:
+    """四件套对反向调账同样成立：幂等重放不重复冲减；auditor 只读."""
+    admin = _admin_session(client)
+    first = _create_adjustment(
+        client,
+        admin,
+        credits=-5,
+        source_document_type="LEDGER_CORRECTION",
+        source_document_ref="LEDGER-FIX-2026-1",
+        reason="账本更正：重复计费冲回",
+        key="adj-refund-replay-1",
+    )
+    assert first.status_code == 201, first.text
+    after_first = _wallet_balance(CUSTOMER_USER_ID)
+
+    replay = _create_adjustment(
+        client,
+        admin,
+        credits=-5,
+        source_document_type="LEDGER_CORRECTION",
+        source_document_ref="LEDGER-FIX-2026-1",
+        reason="账本更正：重复计费冲回",
+        key="adj-refund-replay-1",
+    )
+    assert replay.status_code == 201, replay.text
+    assert replay.headers.get(REPLAY_HEADER) == "true"
+    assert replay.json()["adjustment_id"] == first.json()["adjustment_id"]
+    assert _wallet_balance(CUSTOMER_USER_ID) == after_first
+    assert len(_ledger_rows(CUSTOMER_USER_ID, "REFUND")) == 1
+
+    # A second reversal must coexist: the UNIQUE index on recharge_order_id
+    # survives the DROP NOT NULL and PostgreSQL treats NULLs as distinct, so
+    # "one audit row per order" still holds while order-less rows accumulate.
+    # (Run before the auditor login below — the shared client's cookie jar is
+    # single-session, so signing in as the auditor replaces the admin session.)
+    second = _create_adjustment(
+        client,
+        admin,
+        credits=-4,
+        source_document_type="REFUND_APPROVAL",
+        source_document_ref="REFUND-2026-0922",
+        reason="第二笔独立退款",
+        key="adj-refund-replay-2",
+    )
+    assert second.status_code == 201, second.text
+    assert second.json()["order_id"] == ""
+    orderless = _fetch_all(
+        "SELECT id FROM admin_adjustments WHERE recharge_order_id IS NULL AND target_user_id = %s",
+        (CUSTOMER_USER_ID,),
+    )
+    assert {str(row[0]) for row in orderless} == {
+        first.json()["adjustment_id"],
+        second.json()["adjustment_id"],
+    }
+    after_second = _wallet_balance(CUSTOMER_USER_ID)
+
+    auditor = _admin_session(client, actor="auditor_u")
+    denied = _create_adjustment(
+        client,
+        auditor,
+        credits=-5,
+        source_document_type="REFUND_APPROVAL",
+        source_document_ref="REFUND-2026-0921",
+        key="adj-refund-auditor-1",
+    )
+    assert denied.status_code == 403
+    assert denied.json()["detail"]["code"] == "AUDITOR_READ_ONLY"
+    assert _wallet_balance(CUSTOMER_USER_ID) == after_second
+    assert len(_ledger_rows(CUSTOMER_USER_ID, "REFUND")) == 2
+
+
+def test_reconcile_invariants_stay_green_after_a_refund(client: TestClient) -> None:
+    """SOP §10 第 3 步：处置后跑 reconcile_customer_billing，差额为零。
+
+    反向调账落一条负向 `REFUND` 后，钱包汇总、PAID 单↔CHARGE 配对与计费轮次三条
+    不变量都必须保持成立——这正是「不放开负向调账，SOP 就无法闭环」那句判断的
+    反面验收：账本侧能反向记账，差额才对得平。
+
+    同时这也是 `reconcile_customer_billing` 的 PG_ONLY 清单**不需要同步**的证据：
+    `REFUND` 不引入新表 / 新列，而三条账本不变量要么与方向无关（钱包汇总是
+    求和），要么已被类型/轮次条件排除在 `REFUND` 之外（配对只看 `CHARGE`，
+    轮次只看 `task_id`+`billing_round` 非空）。
+    """
+    from scripts.reconcile_customer_billing import validate_database_invariants
+
+    def _invariants() -> tuple:
+        with psycopg.connect(_t23_dsn(), autocommit=True) as conn:
+            return validate_database_invariants(conn, "postgresql", "target")
+
+    # The seeded fixture is not invariant-clean and never claimed to be: the
+    # 027 activation FK needs a PAID dummy order that has no CHARGE row, so the
+    # baseline carries exactly that one paid_order_charge_mismatch. What this
+    # test has to prove is that the refund adds **no** issue on top of it
+    # (and in particular no wallet_balance_mismatch).
+    baseline = _invariants()
+    baseline_codes = sorted(f"{issue.code}:{issue.scope}" for issue in baseline)
+
+    admin = _admin_session(client)
+    before_zero = _create_adjustment(client, admin, credits=4, key="adj-reconcile-before")
+    assert before_zero.status_code == 201, before_zero.text
+    reversed_away = _create_adjustment(
+        client,
+        admin,
+        credits=-9,
+        source_document_type="REFUND_APPROVAL",
+        source_document_ref="REFUND-2026-0922",
+        reason="对账前的一笔实际退款",
+        key="adj-reconcile-refund",
+    )
+    assert reversed_away.status_code == 201, reversed_away.text
+
+    after = _invariants()
+    assert [f"{issue.code}:{issue.scope}" for issue in after] == baseline_codes, baseline_codes
+    assert not any(issue.code == "wallet_balance_mismatch" for issue in after)
+
+    # And the wallet/ledger identity the aggregate check is built on, spelled out:
+    # the wallet must equal the signed sum of its own ledger rows.
+    wallet_total, ledger_total = _fetch_one(
+        "SELECT w.available_credits, COALESCE(SUM(wt.available_delta), 0) "
+        "FROM wallets w LEFT JOIN wallet_transactions wt ON wt.user_id = w.user_id "
+        "WHERE w.user_id = %s GROUP BY w.available_credits",
+        (CUSTOMER_USER_ID,),
+    )
+    assert wallet_total == ledger_total

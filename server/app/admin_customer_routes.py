@@ -1,7 +1,9 @@
 """T23 / BILL-02 — audited admin adjustments API.
 
 Application layer on top of the T26/T27 billing schema (recharge_orders, wallets,
-wallet_transactions). Every adjustment lands as one atomic transaction that writes:
+wallet_transactions). Every adjustment lands as one atomic transaction.
+
+**Forward** (``credits >= 1``) writes:
 
 1. A `provider='admin_adjustment'` `status='PAID'` recharge order (revision 026 shapes;
    no third-party trade number, created PAID by double confirmation)
@@ -9,9 +11,24 @@ wallet_transactions). Every adjustment lands as one atomic transaction that writ
 3. The atomic wallet credit increment (available_credits += credits)
 4. One append-only `admin_adjustments` audit row naming the real administrator (§15)
 
+**Reverse** (``credits < 0``, only for ``REVERSAL_SOURCE_DOCUMENT_TYPES`` — B1,
+SOP §10 step 2 "反向调账") writes:
+
+1. A wallet `REFUND` ledger row with `available_delta = credits < 0`, attached to
+   no order / task / billing round (the 20260923T1200 shape branch)
+2. The atomic wallet decrement (available_credits += credits), refused with
+   400 ``ADJUSTMENT_BALANCE_INSUFFICIENT`` when it would go below zero
+3. One append-only `admin_adjustments` audit row with ``recharge_order_id`` NULL
+
+There is **no recharge order** on the reverse path (D4) and ``amount_fen`` is 0:
+the money itself is refunded out of band in the ZPay back office, and the two
+facts are aligned by ``source_document_ref``. See the D2/D4 note further down.
+
 Write contract (dev doc §15): every write behind the full admin gate — real admin
 session (auditors are read-only), Idempotency-Key header (400 without it),
 confirm=true (400 CONFIRMATION_REQUIRED), non-blank reason (400 REASON_REQUIRED).
+The same four-part contract covers the reverse path; there is no second approver
+(D5).
 
 Idempotency (revision 031 snapshot layer): each business write runs inside a
 PostgreSQL transaction that inserts an `admin_write_idempotency` placeholder keyed by
@@ -27,9 +44,9 @@ not constrain the customer sale price.
 Pricing scope inference: a target user bound to an activation code is CUSTOMER_STANDARD;
 an internal account stays INTERNAL (revision 026 pairing).
 
-Zero ledger difference invariant: after any adjustment the wallet balance grew by exactly
-credits, the order is PAID with credits, and one CHARGE row references it — no balance
-mutation without its ledger row (禁止直接改余额).
+Zero ledger difference invariant: after any adjustment the wallet balance moved by
+exactly credits, and the matching ledger row (CHARGE forward, REFUND reverse) is in
+the same transaction — no balance mutation without its ledger row (禁止直接改余额).
 
 Fail-closed runtime: SQLite/missing DSN returns 503 ADJUSTMENT_SERVICE_UNAVAILABLE instead
 of falling back to legacy control identity (the T12/T18 precedent).
@@ -124,6 +141,28 @@ SOURCE_DOCUMENT_TYPES = (
     "FREE_GRANT",
     "CREDIT_COMPENSATION",
 )
+
+# 允许**负向**（反向调账）的来源单类型。SOP §10 第 2 步要求退款走「管理员审计调账
+# 反向调账 + ZPay 后台人工退付」双事实对齐；在此之前枚举里虽有「退款审批」，通道
+# 却只收正数，动作与标签方向相反。这里只放开「可以填负数」这一件事：账本侧冲减
+# credits（`REFUND` 类型），资金侧仍在 ZPay 后台人工办理、以来源单号对齐留档。
+# 其余来源类型维持正向口径（1 <= credits），文案与校验零变化。
+REVERSAL_SOURCE_DOCUMENT_TYPES = frozenset({"REFUND_APPROVAL", "LEDGER_CORRECTION"})
+
+# --- 反向调账的两条设计边界（已拍板，不是待解决缺口）-----------------------
+#
+# D2（行业惯例：退款只覆盖未消耗部分）：钱包下限仍是 026 的
+# `ck_wallets_available_nonnegative`，**不允许负余额**，也不做透支分支。因此反向
+# 调账的上限就是客户**当前可用余额**；客户已消耗的额度对应已交付服务，账本层面
+# 不予退回（争议走线下 / 拒付核销通道，不在本任务范围）。SOP §10 第 3 步的
+# 「事后差额为零」因此只在未消耗部分成立——这是口径本身的边界，不是实现缺陷：
+# 若将来业务要求连已消耗部分也能退，那是「允许透支」的另一条方案，需要单独批准，
+# 不要在这里放宽。
+#
+# D4（退款不产生充值单）：反向调账**不建 `recharge_orders` 行**——`ck_recharge_orders_status`
+# 没有退款态，且 `reconcile_customer_billing` 要求每张 PAID 单恰好对应一条同额
+# `CHARGE`（正向形状），用负 credits 造单必然对不平。审计留痕落在 `admin_adjustments`
+# 行上（`recharge_order_id` 由 20260923T1200 放开为可空，仅反向调账为 NULL）。
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +450,15 @@ def create_admin_adjustment(
     response: Response,
     actor: AdminWriter,
 ) -> dict[str, object]:
-    """Create an admin adjustment: PAID order + CHARGE + wallet + audit row."""
+    """Create an admin adjustment.
+
+    Forward (``credits >= 1``): PAID order + CHARGE + wallet + audit row.
+
+    Reverse (``credits < 0``, only for ``REVERSAL_SOURCE_DOCUMENT_TYPES``):
+    wallet decrement + ``REFUND`` ledger row + audit row, **no order row**
+    (see the module-level D2/D4 notes). The real money refund happens in the
+    ZPay back office and is aligned to this row by ``source_document_ref``.
+    """
 
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         if user_id == actor.user_id:
@@ -423,7 +470,21 @@ def create_admin_adjustment(
                 reason=body.reason.strip(),
                 request_id=request_id,
             )
-        if not 1 <= body.credits <= 2147483647:
+
+        # 来源单类型决定这笔调账能不能填负数，所以先取出来再校验金额。
+        # 未在 `REVERSAL_SOURCE_DOCUMENT_TYPES` 里的类型（含拼错的类型名）仍走
+        # 原来的正向口径，错误码与文案与既有行为逐字一致。
+        source_document_type = body.source_document_type.strip()
+        source_document_ref = body.source_document_ref.strip()
+        if source_document_type in REVERSAL_SOURCE_DOCUMENT_TYPES:
+            if body.credits == 0 or not -2147483647 <= body.credits <= 2147483647:
+                raise _http(
+                    400,
+                    "ADJUSTMENT_VALIDATION_FAILED",
+                    "Reversal credits must be a non-zero integer between "
+                    "-2147483647 and 2147483647.",
+                )
+        elif not 1 <= body.credits <= 2147483647:
             raise _http(
                 400, "ADJUSTMENT_VALIDATION_FAILED", "Credits must be between 1 and 2147483647."
             )
@@ -431,8 +492,6 @@ def create_admin_adjustment(
         # Validate the source document (来源单): frozen enum + non-blank ref —
         # the revision 039 CHECK constraints are the defense in depth, the
         # route answers the operator with a 400 before touching the ledger.
-        source_document_type = body.source_document_type.strip()
-        source_document_ref = body.source_document_ref.strip()
         if source_document_type not in SOURCE_DOCUMENT_TYPES:
             raise _http(
                 400,
@@ -491,9 +550,12 @@ def create_admin_adjustment(
         recharge_step_fen = billing["recharge_step_fen"]
 
         credits = body.credits
+        # 反向调账：只有负向才走 REFUND 分支；REFUND_APPROVAL / LEDGER_CORRECTION
+        # 填正数仍走既有的正向 CHARGE 通道（例如撤回一笔退款的补记）。
+        is_reversal = credits < 0
         amount_fen = (
             0
-            if source_document_type in {"FREE_GRANT", "CREDIT_COMPENSATION"}
+            if is_reversal or source_document_type in {"FREE_GRANT", "CREDIT_COMPENSATION"}
             else credits * unit_price_fen
         )
         # Paid adjustments must fit the money column; no-money credits have no price product.
@@ -505,7 +567,9 @@ def create_admin_adjustment(
             )
 
         # FREE_GRANT records no payment; the price snapshot remains auditable.
-        if source_document_type in {"FREE_GRANT", "CREDIT_COMPENSATION"}:
+        # 反向调账同理记 0：系统内没有资金流水（不建充值单），实际退付在 ZPay
+        # 后台人工办理，两笔事实以来源单号对齐——金额列不编造一个系统内不存在的数字。
+        if is_reversal or source_document_type in {"FREE_GRANT", "CREDIT_COMPENSATION"}:
             amount_fen = 0
 
         # Note: the min/step recharge ladder only governs zpay orders
@@ -514,79 +578,118 @@ def create_admin_adjustment(
 
         # Generate identifiers
         adjustment_id = str(uuid.uuid4())
-        order_id = str(uuid.uuid4())
 
         # Timestamp from PostgreSQL transaction clock (SES-01)
         paid_at = _transaction_now_iso(conn)
         now = paid_at
 
-        # Insert recharge order (PAID, no third-party trade for admin_adjustment)
-        conn.execute(
-            """
-            INSERT INTO recharge_orders
-            (id, user_id, merchant_order_no, provider, status, pricing_scope,
-             base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot,
-             min_recharge_fen_snapshot, recharge_step_fen_snapshot,
-             amount_fen, credits, paid_at)
-            VALUES (%s, %s, %s, 'admin_adjustment', 'PAID', %s,
-                    %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                order_id,
-                user_id,
-                f"ADJ-{adjustment_id}",  # Local trade number format
-                pricing_scope,
-                base_unit_price_fen,
-                unit_price_fen,
-                min_recharge_fen,
-                recharge_step_fen,
-                amount_fen,
-                credits,
-                paid_at,
-            ),
-        )
+        order_id: str | None = None
+        if is_reversal:
+            # 反向调账的账本事实：一条 REFUND 流水，不挂订单 / 任务 / 口播任务 /
+            # 计费操作 / 计费轮次（20260923T1200 新增的形状分支）。审计行
+            # （admin_adjustments.recharge_order_id 为 NULL）与它同事务落库。
+            refund_id = f"admin_adjustment:refund:{adjustment_id}"
+            conn.execute(
+                """
+                INSERT INTO wallet_transactions
+                (id, user_id, type, available_delta, reserved_delta, recharge_order_id,
+                 task_id, oral_task_id, billing_round, idempotency_key, auth_source)
+                VALUES (%s, %s, 'REFUND', %s, 0, NULL, NULL, NULL, NULL, %s, 'internal')
+                """,
+                (refund_id, user_id, credits, refund_id),
+            )
+        else:
+            order_id = str(uuid.uuid4())
 
-        # Insert wallet CHARGE ledger row (task_id=NULL, billing_round=NULL for manual)
-        charge_id = f"admin_adjustment:charge:{order_id}"
-        conn.execute(
-            """
-            INSERT INTO wallet_transactions
-            (id, user_id, type, available_delta, reserved_delta, recharge_order_id,
-             task_id, billing_round, idempotency_key, auth_source)
-            VALUES (%s, %s, 'CHARGE', %s, 0, %s, NULL, NULL, %s, 'internal')
-            """,
-            (charge_id, user_id, credits, order_id, charge_id),
-        )
+            # Insert recharge order (PAID, no third-party trade for admin_adjustment)
+            conn.execute(
+                """
+                INSERT INTO recharge_orders
+                (id, user_id, merchant_order_no, provider, status, pricing_scope,
+                 base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot,
+                 min_recharge_fen_snapshot, recharge_step_fen_snapshot,
+                 amount_fen, credits, paid_at)
+                VALUES (%s, %s, %s, 'admin_adjustment', 'PAID', %s,
+                        %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    order_id,
+                    user_id,
+                    f"ADJ-{adjustment_id}",  # Local trade number format
+                    pricing_scope,
+                    base_unit_price_fen,
+                    unit_price_fen,
+                    min_recharge_fen,
+                    recharge_step_fen,
+                    amount_fen,
+                    credits,
+                    paid_at,
+                ),
+            )
 
-        # Atomic wallet credit increment — RETURNING the post-update balance so
+            # Insert wallet CHARGE ledger row (task_id=NULL, billing_round=NULL for manual)
+            charge_id = f"admin_adjustment:charge:{order_id}"
+            conn.execute(
+                """
+                INSERT INTO wallet_transactions
+                (id, user_id, type, available_delta, reserved_delta, recharge_order_id,
+                 task_id, billing_round, idempotency_key, auth_source)
+                VALUES (%s, %s, 'CHARGE', %s, 0, %s, NULL, NULL, %s, 'internal')
+                """,
+                (charge_id, user_id, credits, order_id, charge_id),
+            )
+
+        # Atomic wallet balance move — RETURNING the post-update balance so
         # the response never reports a stale pre-read plus credits (a concurrent
         # charge/settle on the same wallet would otherwise be invisible here).
-        # The WHERE bound keeps the post-increment balance inside the int4
-        # column range: PostgreSQL would otherwise raise NumericValueOutOfRange
-        # (a raw 500 on a financial endpoint — the PR #54 connector review P2).
-        updated = conn.execute(
-            "UPDATE wallets SET available_credits = available_credits + %s "
-            "WHERE user_id = %s AND available_credits <= 2147483647 - %s "
-            "RETURNING available_credits",
-            (credits, user_id, credits),
-        ).fetchone()
+        #
+        # 两个方向各有一条 WHERE 护栏，且**刻意不共用**表达式：
+        # - 正向 `available_credits <= 2147483647 - credits` 避免先把
+        #   `available_credits + credits` 算出来造成 int4 溢出（那会变成资金端点上的
+        #   裸 500 —— PR #54 connector review P2）；
+        # - 反向 `available_credits + credits >= 0` 是 D2 的余额下限护栏。credits < 0
+        #   时这个和不可能超过 int4 上限，所以不会引入同类溢出。
+        if is_reversal:
+            updated = conn.execute(
+                "UPDATE wallets SET available_credits = available_credits + %s "
+                "WHERE user_id = %s AND available_credits + %s >= 0 "
+                "RETURNING available_credits",
+                (credits, user_id, credits),
+            ).fetchone()
+            refusal = (
+                "ADJUSTMENT_BALANCE_INSUFFICIENT",
+                "The refund exceeds the customer's available balance: only unspent credits "
+                "are refundable, already-consumed credits must be handled off-ledger "
+                "(dispute / chargeback channel).",
+            )
+        else:
+            updated = conn.execute(
+                "UPDATE wallets SET available_credits = available_credits + %s "
+                "WHERE user_id = %s AND available_credits <= 2147483647 - %s "
+                "RETURNING available_credits",
+                (credits, user_id, credits),
+            ).fetchone()
+            refusal = (
+                "ADJUSTMENT_VALIDATION_FAILED",
+                "The credits amount would overflow the wallet balance integer range.",
+            )
         if updated is None:
-            # Distinguish the two refusal shapes: a wallet that vanished between
-            # the existence check and the increment (out-of-band maintenance)
-            # versus a balance that would overflow the int4 column.
+            # Distinguish the three refusal shapes: a wallet that vanished between
+            # the existence check and the move (out-of-band maintenance), a
+            # forward balance that would overflow the int4 column, and a reverse
+            # balance that would go negative (D2 — the DB CHECK stays the
+            # defense in depth, this 400 is the operator-facing answer).
             wallet_exists = conn.execute(
                 "SELECT 1 FROM wallets WHERE user_id = %s", (user_id,)
             ).fetchone()
             if not wallet_exists:
                 raise _http(404, "WALLET_NOT_FOUND", "Wallet not found for target user.")
-            raise _http(
-                400,
-                "ADJUSTMENT_VALIDATION_FAILED",
-                "The credits amount would overflow the wallet balance integer range.",
-            )
+            raise _http(400, refusal[0], refusal[1])
         balance_after = int(updated[0])
 
-        # Insert audit row (append-only, names the real admin)
+        # Insert audit row (append-only, names the real admin).
+        # ``recharge_order_id`` is NULL exactly for reverse adjustments (D4: no
+        # recharge order), kept honest by ck_admin_adjustments_order_required.
         conn.execute(
             """
             INSERT INTO admin_adjustments
@@ -612,19 +715,22 @@ def create_admin_adjustment(
 
         logger.info(
             "admin adjustment created: adjustment=%s order=%s user=%s "
-            "credits=%d actor=%s request=%s",
+            "credits=%d direction=%s actor=%s request=%s",
             adjustment_id,
             order_id,
             user_id,
             credits,
+            "reversal" if is_reversal else "grant",
             actor.user_id,
             request_id,
         )
 
-        # Return success response
+        # Return success response. ``order_id`` is "" for reverse adjustments:
+        # the field stays a string (no response-shape change) and there is no
+        # recharge order to name.
         return {
             "adjustment_id": adjustment_id,
-            "order_id": order_id,
+            "order_id": order_id if order_id is not None else "",
             "credits": str(credits),
             "amount_fen": str(amount_fen),
             "pricing_scope": pricing_scope,
@@ -644,6 +750,23 @@ def create_admin_adjustment(
 
 DEFAULT_LIST_LIMIT = 100
 MAX_LIST_LIMIT = 200
+
+# 两个调账列表端点共用的连接子句。
+#
+# ``recharge_orders`` 必须是 LEFT JOIN：反向调账（20260923T1200 起）没有充值单，
+# 内连接会把整行审计事实从列表里吃掉——运营在界面上看不到自己刚做的退款。
+#
+# 台账行同样用 LEFT JOIN 定位：两条通道的流水 id 都是确定式的
+# （正向 `admin_adjustment:charge:{order_id}`、反向
+# `admin_adjustment:refund:{adjustment_id}`），这里按同一规则反查，因此不需要
+# 在审计行上冗余一列流水 id，也不会误配到同客户的其它流水。反向调账的
+# credits / amount_fen 只有账本这一个事实源（`available_delta` 为负数）。
+_ADJUSTMENT_ORDER_AND_LEDGER_JOINS = """
+    LEFT JOIN recharge_orders ro ON ro.id = aa.recharge_order_id
+    LEFT JOIN wallet_transactions tx ON tx.id = COALESCE(
+        'admin_adjustment:charge:' || aa.recharge_order_id,
+        'admin_adjustment:refund:' || aa.id)
+"""
 
 
 @router.get("/customers/{user_id}/adjustments")
@@ -666,9 +789,10 @@ def list_admin_adjustments(
                 SELECT aa.id, aa.recharge_order_id, aa.admin_user_id,
                        aa.source_document_type, aa.source_document_ref,
                        aa.reason, aa.request_id, aa.created_at,
-                       ro.amount_fen, ro.credits, ro.pricing_scope, ro.status
+                       COALESCE(ro.amount_fen, 0), COALESCE(ro.credits, tx.available_delta, 0),
+                       COALESCE(ro.pricing_scope, ''), COALESCE(ro.status, '')
                 FROM admin_adjustments aa
-                JOIN recharge_orders ro ON ro.id = aa.recharge_order_id
+                {_ADJUSTMENT_ORDER_AND_LEDGER_JOINS}
                 WHERE aa.target_user_id = %s
                 ORDER BY {order_by}
                 LIMIT %s OFFSET %s
@@ -689,7 +813,9 @@ def list_admin_adjustments(
     items = [
         {
             "adjustment_id": str(row[0]),
-            "order_id": str(row[1]),
+            # "" for reverse adjustments (no recharge order — D4); the field
+            # stays a string so the response shape is unchanged.
+            "order_id": str(row[1]) if row[1] is not None else "",
             "admin_user_id": str(row[2]),
             "source_document_type": str(row[3]),
             "source_document_ref": str(row[4]),
@@ -738,13 +864,11 @@ def list_all_admin_adjustments(
         clauses, params, column="aa.created_at", created_from=created_from, created_to=created_to
     )
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    joins = """
+    joins = f"""
         FROM admin_adjustments aa
-        JOIN recharge_orders ro ON ro.id = aa.recharge_order_id
+        {_ADJUSTMENT_ORDER_AND_LEDGER_JOINS}
         JOIN users admin_user ON admin_user.id = aa.admin_user_id
         JOIN users target_user ON target_user.id = aa.target_user_id
-        LEFT JOIN wallet_transactions tx
-          ON tx.recharge_order_id = aa.recharge_order_id AND tx.type = 'CHARGE'
     """
     try:
         with pg_transaction() as conn:
@@ -753,8 +877,9 @@ def list_all_admin_adjustments(
                 SELECT aa.id, aa.recharge_order_id, aa.admin_user_id,
                        admin_user.username, aa.target_user_id, target_user.username,
                        aa.source_document_type, aa.source_document_ref, aa.reason,
-                       aa.request_id, aa.created_at, ro.amount_fen, ro.credits,
-                       ro.pricing_scope, ro.status,
+                       aa.request_id, aa.created_at,
+                       COALESCE(ro.amount_fen, 0), COALESCE(ro.credits, tx.available_delta, 0),
+                       COALESCE(ro.pricing_scope, ''), COALESCE(ro.status, ''),
                        CASE WHEN tx.ledger_sequence IS NULL THEN NULL
                             ELSE ledger_balance.balance_after END AS balance_after,
                        CASE WHEN tx.ledger_sequence IS NULL THEN NULL ELSE
@@ -788,7 +913,8 @@ def list_all_admin_adjustments(
         "items": [
             {
                 "adjustment_id": str(row[0]),
-                "order_id": str(row[1]),
+                # "" for reverse adjustments (no recharge order — D4).
+                "order_id": str(row[1]) if row[1] is not None else "",
                 "admin_user_id": str(row[2]),
                 "admin_username": str(row[3]),
                 "target_user_id": str(row[4]),

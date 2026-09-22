@@ -79,9 +79,9 @@ REPO_ROOT = SERVER_DIR.parent
 # 本分支的 20260922T1500_viral_search_discoveries（爆款视频搜索发现记录表）
 # 按手册 §3 重挂于链尾：tables/primary_keys +1、columns +9、unique_constraints +1
 # （五列身份约束）、两个非 partial 查询索引；全 Text 列，无 FK/CHECK/jsonb/timestamptz 增量。
-# MATERIAL-UX 批量的 20260922T2200_material_preference_tags 再按手册 §3 重挂到
-# 1500_viral 之后：为素材偏好表增加 tags_json（TEXT-JSON，默认 '[]'）——columns +1。
-HEAD_REVISION = "20260922T2200_material_preference_tags"
+# 合并 main 后：本分支的 20260923T1200_admin_refund_adjustment 按手册 §3 重挂于
+# main 链尾（20260922T2200_material_preference_tags）之上，故链尾为该值。
+HEAD_REVISION = "20260923T1200_admin_refund_adjustment"
 
 # 最后一个已发布（受支持）起点。其后的 056…090 与本迁移尚未随任何受支持版本发布，
 # 故冻结范围止于此——把未发布 revision 也纳入哈希会让每次新增迁移都必须改常量，
@@ -124,8 +124,16 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # 空库 → head 的 schema 面冻结计数（回归锁）。每项都绑定精确查询口径：
 # 例如 triggers 用 information_schema.triggers 的**行数**（BEFORE UPDATE 与
 # BEFORE DELETE 各算一行），故 18 行对应 10 个 distinct trigger，不是 10 行。
+# B1（20260923T1200_admin_refund_adjustment）增量：只改 CHECK 约束、不加表也不加列。
+# `ck_wallet_transactions_type` / `ck_wallet_transactions_shape` 是 drop+recreate
+# （净 0），另新增一条 `ck_admin_adjustments_order_required`（反向调账以外必须有充值单）
+# ——故 check_constraints +1，其余计数与表名全集不变。注意 `HEAD_SCHEMA_DIGEST`
+# 仍然会变：它把 `pg_get_constraintdef` 的文本一起哈希，约束体一改就换值。
 HEAD_SCHEMA_COUNTS = {
-    "check_constraints": 322,
+    # 两条线上各加一项，且互不相干，故两边都要取：
+    #   check_constraints 322 → 323：本分支新增 ck_admin_adjustments_order_required
+    #   columns           1219 → 1220：main 的 material_preferences.tags_json
+    "check_constraints": 323,
     "columns": 1220,
     "foreign_keys": 193,
     "identity_columns": 0,
@@ -310,10 +318,19 @@ HEAD_TABLE_NAMES = (
 #   tables/primary_keys +1=103、columns +9=1219、unique_constraints +1=39（五列身份约束）；
 #   两个查询索引均非 partial，jsonb / CHECK / FK / timestamptz 无增量；
 #   表名集追加 viral_search_discoveries。
+# - 20260923T1200_admin_refund_adjustment（B1 反向调账）：只动 CHECK，不加表不加列。
+#   ck_wallet_transactions_type / ck_wallet_transactions_shape 为 drop+recreate（净 0），
+#   新增 ck_admin_adjustments_order_required（check_constraints +1=323）；
+#   admin_adjustments.recharge_order_id 放开 NOT NULL 不属于本矩阵口径的计数项
+#   （只影响 is_nullable，不进 inventory digest），但它的 CHECK 伙伴会进。
+#   digest 随之重算——约束文本变了，digest 必然变，这不是漂移。
 # digest/counts 以 scripts/ci/migration_manifest.py --print-schema 于 postgres:16 重算
-# （合并后新 head：sub_account_permissions + 三个 analysis 迁移 + viral 搜索发现表
-#  + 本分支的 MATERIAL-UX tags_json 列叠加；digest 在本地 PG 探针重算）。
-HEAD_SCHEMA_DIGEST = "82fe39417531b9bcfdd09644e3deb79e0f1f82de9a66d3468148e91d02a6552f"
+# （合并后的新 head：sub_account_permissions + 三个 analysis 迁移 + viral 搜索发现表
+#  + main 的 MATERIAL-UX tags_json 列 + 本分支的 REFUND 调账迁移，串成一条单 head 链）。
+#  两侧原来的 digest 都不能用——本分支那条是接在 viral 之后的旧链、main 那条只到
+#  MATERIAL-UX，合并后 head 变成接在 MATERIAL-UX 之后的本分支迁移，约束文本随之变化，
+#  digest 必然要重算。由 scripts/ci/migration_manifest.py --print-schema 在 PG 上重算后粘贴。
+HEAD_SCHEMA_DIGEST = "5acb67bf0cc6998f3179731784f62168779c924231118bdb31e8be50dc9096ac"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

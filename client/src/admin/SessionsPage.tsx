@@ -30,6 +30,14 @@ const SOURCE_DOCUMENT_OPTIONS = [
   "LEDGER_CORRECTION",
 ] as const;
 
+/**
+ * B1（SOP §10 第 2 步）：这几个来源单类型可以做**反向调账**（负数）。
+ *
+ * 与服务端 `REVERSAL_SOURCE_DOCUMENT_TYPES` 同集合——服务端仍是权威，这里只决定
+ * 输入框要不要挡住负号，以及给运营看什么提示。其余来源类型维持正向（>= 1）。
+ */
+const REVERSAL_SOURCE_TYPES = new Set(["REFUND_APPROVAL", "LEDGER_CORRECTION"]);
+
 function platformLabel(platform: string) {
   const labels: Record<string, string> = {
     windows: "Windows",
@@ -245,8 +253,17 @@ export function SessionsPage({
     setWriteError("");
     setError("");
     const seconds = Number(credits);
-    if (!Number.isSafeInteger(seconds) || seconds <= 0) {
-      setError("请输入大于 0 的积分整数");
+    const isReversal = REVERSAL_SOURCE_TYPES.has(sourceType);
+    if (!Number.isSafeInteger(seconds) || seconds === 0) {
+      setError(
+        isReversal ? "请输入非 0 的积分整数" : "请输入大于 0 的积分整数",
+      );
+      return;
+    }
+    if (seconds < 0 && !isReversal) {
+      setError(
+        "该来源单类型只能正向加积分；反向调账请选择「退款审批」或「账本修正」",
+      );
       return;
     }
     if (!adjustReason.trim()) {
@@ -278,7 +295,9 @@ export function SessionsPage({
       );
       if (contextIdRef.current !== actionContextId) return;
       setNotice(
-        `增加积分成功（request id: ${result.request_id}），余额 ${result.wallet_balance_after} 积分`,
+        seconds < 0
+          ? `反向调账成功（request id: ${result.request_id}），余额 ${result.wallet_balance_after} 积分；实际退付请在 ZPay 后台办理并以来源单号对齐`
+          : `增加积分成功（request id: ${result.request_id}），余额 ${result.wallet_balance_after} 积分`,
       );
       setCredits("");
       setAdjustReason("");
@@ -288,7 +307,11 @@ export function SessionsPage({
     } catch (cause) {
       if (contextIdRef.current !== actionContextId) return;
       setWriteError(
-        cause instanceof Error ? cause.message : "增加积分失败：未知错误",
+        cause instanceof Error
+          ? cause.message
+          : seconds < 0
+            ? "反向调账失败：未知错误"
+            : "增加积分失败：未知错误",
       );
     } finally {
       if (contextIdRef.current === actionContextId) {
@@ -296,6 +319,8 @@ export function SessionsPage({
       }
     }
   }
+
+  const isReversalSource = REVERSAL_SOURCE_TYPES.has(sourceType);
 
   return (
     <section aria-label="客户会话" className="admin-sessions admin-panel">
@@ -404,16 +429,20 @@ export function SessionsPage({
             type="button"
             onClick={() => setAdjustOpen((open) => !open)}
           >
-            {adjustOpen ? "收起后台增加积分" : "展开后台增加积分"}
+            {adjustOpen ? "收起后台调账" : "展开后台调账"}
           </button>
           {adjustOpen ? (
             <form className="admin-form" onSubmit={handleAdjustSubmit}>
-              <h3>为 {activeUserId} 后台增加积分</h3>
+              <h3>
+                {isReversalSource
+                  ? `为 ${activeUserId} 反向调账（扣减积分）`
+                  : `为 ${activeUserId} 后台增加积分`}
+              </h3>
               <label>
                 积分整数
                 <input
                   disabled={adjustConfirmOpen}
-                  min={1}
+                  min={isReversalSource ? undefined : 1}
                   step={1}
                   type="number"
                   value={credits}
@@ -451,9 +480,18 @@ export function SessionsPage({
                   }}
                 />
               </label>
-              <p className="admin-hint">来源单号自动生成，事由留痕审计。</p>
+              {isReversalSource ? (
+                <p className="admin-hint">
+                  此为账本反向记账，实际退付在 ZPay
+                  后台办理（两笔事实以来源单号对齐）。
+                  退款额度以客户当前可用余额为限：已消耗的部分不在账本内退回，
+                  超额提交会被拒绝。
+                </p>
+              ) : (
+                <p className="admin-hint">来源单号自动生成，事由留痕审计。</p>
+              )}
               <button type="submit" disabled={adjustConfirmOpen}>
-                执行后台增加积分
+                {isReversalSource ? "执行反向调账" : "执行后台增加积分"}
               </button>
             </form>
           ) : null}
@@ -481,20 +519,28 @@ export function SessionsPage({
       />
       <ConfirmDialog
         busy={submitting}
-        confirmLabel="确认增加积分"
+        confirmLabel={isReversalSource ? "确认反向调账" : "确认增加积分"}
         description={
           <>
-            即将为 {activeUserId} 增加 {credits} 积分。
+            {isReversalSource
+              ? `即将为 ${activeUserId} 反向调账 ${credits} 积分（账本扣减）。`
+              : `即将为 ${activeUserId} 增加 ${credits} 积分。`}
             <br />
             事由：{adjustReason.trim()}
             <br />
             来源单号：GRANT-{adjustKey}
+            {isReversalSource ? (
+              <>
+                <br />
+                实际退付在 ZPay 后台办理，以该来源单号对齐留档。
+              </>
+            ) : null}
           </>
         }
         error={writeError}
         level="standard"
         open={adjustConfirmOpen}
-        title="确认后台增加积分"
+        title={isReversalSource ? "确认反向调账" : "确认后台增加积分"}
         onClose={() => {
           setAdjustConfirmOpen(false);
           setWriteError("");

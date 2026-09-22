@@ -65,7 +65,9 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 PERMISSIONS_TABLE = "sub_account_permissions"
 PERMISSIONS_DB = "t_sub_account_permission"
 
-_HEAD_REVISION = "20260922T2200_material_preference_tags"
+# 链尾：本分支的 20260923T1200_admin_refund_adjustment 按手册 §3 重挂于
+# main 链尾（20260922T2200_material_preference_tags）之上，故链尾为该值。
+_HEAD_REVISION = "20260923T1200_admin_refund_adjustment"
 _PRIOR_REVISION = "20260921T1200_sub_account_quotas"
 
 

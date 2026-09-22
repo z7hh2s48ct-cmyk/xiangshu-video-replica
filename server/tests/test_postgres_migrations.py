@@ -44,7 +44,7 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 # 20260922T2000_analysis_task_attempts 新建失败历史表 analysis_task_attempts；
 # 20260922T2200_material_preference_tags 为素材偏好表增加标签列 tags_json（MATERIAL-UX-05）。
 # 迁移后 alembic 版本头即该值，9 处 assert version == HEAD_REVISION 依赖此值。
-HEAD_REVISION = "20260922T2200_material_preference_tags"
+HEAD_REVISION = "20260923T1200_admin_refund_adjustment"
 
 
 def test_viral_script_cache_migration_preserves_results_without_task_foreign_keys(
@@ -2148,5 +2148,239 @@ def test_generation_capacity_claim_is_atomic_across_oral_and_generation_workers(
                 "SELECT type FROM wallet_transactions WHERE oral_task_id='capacity-o1' "
                 "ORDER BY created_at,id"
             ).fetchall() == [("RESERVE",)]
+    finally:
+        _drop_database(db_name)
+
+
+# ---------------------------------------------------------------------------
+# B1 — audited reverse adjustment (`REFUND` ledger type, 20260923T1200)
+# ---------------------------------------------------------------------------
+
+
+def _insert_wallet_ledger_row(
+    conn: psycopg.Connection,
+    row_id: str,
+    *,
+    tx_type: str,
+    available_delta: int,
+    reserved_delta: int = 0,
+    recharge_order_id: str | None = None,
+    task_id: str | None = None,
+    billing_round: int | None = None,
+    billing_operation_id: str | None = None,
+) -> None:
+    conn.execute(
+        "INSERT INTO wallet_transactions "
+        "(id, user_id, type, available_delta, reserved_delta, recharge_order_id, "
+        " task_id, billing_round, billing_operation_id, idempotency_key) "
+        "VALUES (%s, 'u-t08', %s, %s, %s, %s, %s, %s, %s, %s)",
+        (
+            row_id,
+            tx_type,
+            available_delta,
+            reserved_delta,
+            recharge_order_id,
+            task_id,
+            billing_round,
+            billing_operation_id,
+            row_id,
+        ),
+    )
+
+
+def test_pg_refund_ledger_shape_accepted_and_rejected() -> None:
+    """B1 / D3: the ``REFUND`` branch is negative-only and orderless.
+
+    The new branch must not become a back door for minting credits under a
+    "refund" label (positive delta), nor for attaching a negative row to an
+    order / task / billing round — the CHECK is the defence in depth behind
+    the route's 400s.
+    """
+
+    db_name = "t08_refund_shape"
+    dsn = _t08_database(db_name)
+    try:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            # --- legal shapes -------------------------------------------------
+            # The reversal itself: negative credits, no order/task/round.
+            _insert_wallet_ledger_row(conn, "tx-refund-ok", tx_type="REFUND", available_delta=-5)
+
+            # --- regression: the existing shapes are untouched ----------------
+            _insert_t08_order(conn, 91)
+            _insert_wallet_ledger_row(
+                conn,
+                "tx-charge-ok",
+                tx_type="CHARGE",
+                available_delta=5,
+                recharge_order_id="o-t08-91",
+            )
+            _insert_wallet_ledger_row(
+                conn, "tx-conversion-ok", tx_type="CONVERSION", available_delta=-3
+            )
+
+            def rejected(row_id: str, **kwargs: Any) -> None:
+                with pytest.raises(psycopg.errors.CheckViolation):
+                    _insert_wallet_ledger_row(conn, row_id, **kwargs)
+
+            # A "refund" that adds credits is not a refund; that is CHARGE.
+            rejected("tx-refund-positive", tx_type="REFUND", available_delta=5)
+            # Zero-delta rows carry no fact and must not borrow the branch.
+            rejected("tx-refund-zero", tx_type="REFUND", available_delta=0)
+            # Reserved credits belong to RESERVE/SETTLE/RELEASE, never to REFUND.
+            rejected("tx-refund-reserved", tx_type="REFUND", available_delta=-5, reserved_delta=3)
+            # A reversal is not a recharge: it must not reference an order.
+            _insert_t08_order(conn, 92)
+            rejected(
+                "tx-refund-order",
+                tx_type="REFUND",
+                available_delta=-5,
+                recharge_order_id="o-t08-92",
+            )
+            # ... nor a task / billing round / billing operation.
+            rejected("tx-refund-task", tx_type="REFUND", available_delta=-5, task_id="t-x")
+            rejected("tx-refund-round", tx_type="REFUND", available_delta=-5, billing_round=1)
+            # An unknown ledger type stays rejected (the enum is still frozen).
+            rejected("tx-unknown", tx_type="DEBIT", available_delta=-5)
+            # A negative CHARGE stays rejected (022/20260913T1100 unchanged).
+            rejected(
+                "tx-charge-negative",
+                tx_type="CHARGE",
+                available_delta=-5,
+                recharge_order_id="o-t08-91",
+            )
+    finally:
+        _drop_database(db_name)
+
+
+def test_pg_admin_adjustment_order_pairing_is_enforced() -> None:
+    """B1 / D4: only the reversal source types may carry no recharge order.
+
+    ``admin_adjustments.recharge_order_id`` had to become nullable so a reverse
+    adjustment (which never produces a recharge order) can leave an audit row.
+    The pairing CHECK keeps that opening narrow: every other source type still
+    requires its order, so no path can write a half-fact forward adjustment.
+    """
+
+    db_name = "t08_adjustment_order_pairing"
+    dsn = _t08_database(db_name)
+    try:
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            conn.execute(
+                "INSERT INTO users (id, username, display_name, role) "
+                "VALUES ('b1_admin', 'b1_admin', 'B1 Admin', 'admin')"
+            )
+            _insert_t08_order(conn, 93)
+            _insert_t08_order(conn, 94)
+
+            def insert_audit(oid: str, *, doc_type: str, order_id: str | None) -> None:
+                conn.execute(
+                    "INSERT INTO admin_adjustments "
+                    "(id, recharge_order_id, target_user_id, admin_user_id, "
+                    " source_document_type, source_document_ref, reason, request_id) "
+                    "VALUES (%s, %s, 'u-t08', 'b1_admin', %s, %s, 'reason', 'req')",
+                    (oid, order_id, doc_type, f"DOC-{oid}"),
+                )
+
+            # Fail fast if the migration forgot to relax NOT NULL — the whole
+            # point of 20260923T1200's admin_adjustments half.
+            nullable = conn.execute(
+                "SELECT is_nullable FROM information_schema.columns "
+                "WHERE table_name = 'admin_adjustments' AND column_name = 'recharge_order_id'"
+            ).fetchone()
+            assert nullable == ("YES",), nullable
+
+            # Legal: the two reversal source types, with and without an order
+            # (a positive REFUND_APPROVAL adjustment is a forward CHARGE and
+            # keeps its order — the branch only permits orderlessness, it does
+            # not require it).
+            insert_audit("b1-rev-1", doc_type="REFUND_APPROVAL", order_id=None)
+            insert_audit("b1-rev-2", doc_type="LEDGER_CORRECTION", order_id=None)
+            insert_audit("b1-rev-3", doc_type="REFUND_APPROVAL", order_id="o-t08-93")
+            insert_audit("b1-fwd-1", doc_type="CS_TICKET", order_id="o-t08-94")
+
+            # The "one audit row per adjustment order" invariant still bites for
+            # forward rows (UNIQUE survives the DROP NOT NULL: NULLs are exempt,
+            # real orders are not).
+            with pytest.raises(psycopg.errors.UniqueViolation):
+                insert_audit("b1-dup", doc_type="CS_TICKET", order_id="o-t08-94")
+
+            # Illegal: an orderless forward adjustment of any other source type.
+            for seq, doc_type in enumerate(
+                ("CS_TICKET", "COMPENSATION_APPROVAL", "FREE_GRANT", "CREDIT_COMPENSATION")
+            ):
+                with pytest.raises(psycopg.errors.CheckViolation):
+                    insert_audit(f"b1-bad-{seq}", doc_type=doc_type, order_id=None)
+
+            # The append-only trigger still holds for the new rows.
+            with pytest.raises(psycopg.errors.RaiseException):
+                conn.execute(
+                    "UPDATE admin_adjustments SET reason = 'rewritten' WHERE id = 'b1-rev-1'"
+                )
+    finally:
+        _drop_database(db_name)
+
+
+def test_pg_refund_downgrade_guard_and_shape_round_trip() -> None:
+    """B1: the new revision is downgradable, and the downgrade is byte-faithful.
+
+    Two claims, both checked against a real PG rather than by reading the file:
+
+    1. an empty database downgrades cleanly and the pre-B1 ledger shape comes
+       back **identical** (the upgrade appended one OR branch and did not
+       rewrite the existing shapes);
+    2. once a REFUND fact exists, the downgrade refuses instead of silently
+       dropping money facts.
+    """
+
+    from alembic import command
+
+    db_name = "t54_refund_downgrade_guard"
+    previous = "20260922T1500_viral_search_discoveries"
+    shape_sql = (
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+        "WHERE conname = 'ck_wallet_transactions_shape'"
+    )
+    nullable_sql = (
+        "SELECT is_nullable FROM information_schema.columns "
+        "WHERE table_name = 'admin_adjustments' AND column_name = 'recharge_order_id'"
+    )
+    try:
+        dsn = _t08_database(db_name)
+        config = _alembic_config(dsn.replace("postgresql://", "postgresql+psycopg://"))
+
+        # --- 1. empty database: downgrade is clean and faithful ---------------
+        command.downgrade(config, previous)
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            pre_shape = conn.execute(shape_sql).fetchone()
+            assert pre_shape is not None
+            assert "REFUND" not in pre_shape[0]
+            pre_nullable = conn.execute(nullable_sql).fetchone()
+
+        command.upgrade(config, "head")
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            assert "REFUND" in conn.execute(shape_sql).fetchone()[0]
+
+        command.downgrade(config, previous)
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            assert conn.execute(shape_sql).fetchone() == pre_shape
+            assert conn.execute(nullable_sql).fetchone() == pre_nullable
+            assert conn.execute(
+                "SELECT count(*) FROM pg_constraint "
+                "WHERE conname = 'ck_admin_adjustments_order_required'"
+            ).fetchone() == (0,)
+
+        # --- 2. a refund fact blocks the rollback -----------------------------
+        command.upgrade(config, "head")
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            _insert_wallet_ledger_row(conn, "t54-refund", tx_type="REFUND", available_delta=-1)
+        with pytest.raises(RuntimeError, match="must survive rollback"):
+            command.downgrade(config, previous)
+        with psycopg.connect(dsn) as conn:
+            assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == (
+                "20260923T1200_admin_refund_adjustment",
+            )
+            assert conn.execute(
+                "SELECT available_delta FROM wallet_transactions WHERE id = 't54-refund'"
+            ).fetchone() == (-1,)
     finally:
         _drop_database(db_name)

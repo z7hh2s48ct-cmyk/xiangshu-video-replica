@@ -1215,7 +1215,9 @@ def list_customer_wallet_transactions(
     offset: int = Query(default=0, ge=0),
     token_group_id: str | None = Query(default=None, max_length=128),
     auth_source: Literal["session", "api_key", "internal", "historical"] | None = None,
-    transaction_type: Literal["CHARGE", "RESERVE", "SETTLE", "RELEASE", "CONVERSION"] | None = None,
+    transaction_type: (
+        Literal["CHARGE", "RESERVE", "SETTLE", "RELEASE", "CONVERSION", "REFUND"] | None
+    ) = None,
     business: Literal[
         "video",
         "oral",

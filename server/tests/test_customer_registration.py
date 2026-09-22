@@ -58,7 +58,7 @@ CW076_MIGRATION_DB_NAME = "cw076_migration_test"
 REGISTER_PATH = "/api/customer/register"
 # 重挂后链尾：#188 recharge_packages 之后是 Phase 3a sub_account_quotas、
 # Phase 3b sub_account_permissions，再叠加 BILLING-OBS-20260922 三个 analysis 迁移。
-HEAD_REVISION = "20260922T2200_material_preference_tags"
+HEAD_REVISION = "20260923T1200_admin_refund_adjustment"
 PRIOR_REVISION = "20260912T1353_customer_discounts"
 
 # A policy-valid password (>= MIN_PASSWORD_LENGTH, not blank). Never a secret.

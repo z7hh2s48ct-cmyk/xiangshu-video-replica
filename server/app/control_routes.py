@@ -61,7 +61,9 @@ _TRUTHY = {"1", "true", "yes", "on"}
 ANALYSIS_DIAGNOSTIC_MATCH_LIMIT = 20
 
 OrderStatus = Literal["PENDING", "PAID", "FAILED", "CLOSED"]
-TransactionType = Literal["CHARGE", "RESERVE", "SETTLE", "RELEASE", "CONVERSION"]
+# REFUND（20260923T1200_admin_refund_adjustment）：审计调账的反向记账类型，
+# available_delta < 0，不挂订单/任务/计费轮次。
+TransactionType = Literal["CHARGE", "RESERVE", "SETTLE", "RELEASE", "CONVERSION", "REFUND"]
 GenerationRecordType = Literal[
     "VIDEO",
     "ORAL_VIDEO",

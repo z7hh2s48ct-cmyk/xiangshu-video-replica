@@ -53,6 +53,8 @@ export const TRANSACTION_TYPE_LABELS: LabelMap = {
   RESERVE: "冻结",
   SETTLE: "结算",
   RELEASE: "释放",
+  // B1：审计调账的反向记账类型（20260923T1200），金额为负、不挂充值单。
+  REFUND: "退款调账",
 };
 
 export const ADJUSTMENT_SOURCE_LABELS: LabelMap = {
@@ -152,6 +154,16 @@ export function platformLabel(platform: string): string {
 /** 精确的分为元展示：不丢分位（¥10050 → "¥100.50"）。 */
 export function formatFen(fen: number): string {
   return `¥${formatYuanFromFen(fen)}`;
+}
+
+/**
+ * 带符号的积分展示（"+5 积分" / "-8 积分"）。
+ *
+ * B1 起调账可以是负向（反向调账），原先写死的 `+{credits} 积分` 会把一笔扣减
+ * 渲染成"+-8 积分"——方向和数字各说各话，运营无法一眼分辨。
+ */
+export function signedCredits(credits: number): string {
+  return `${credits > 0 ? "+" : ""}${credits} 积分`;
 }
 
 /** 分转数字元字符串，保留两位小数（供金额列与输入框回显使用）。 */

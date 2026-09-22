@@ -255,4 +255,80 @@ describe("AdjustmentsPage (ADM-02 / T33)", () => {
       expect(screen.getByText("¥100.50")).toBeInTheDocument();
     });
   });
+
+  it("shows a reversal with a signed credits delta and the ZPay note", async () => {
+    // B1: a reverse adjustment has no recharge order and no in-system money
+    // movement, so the amount column must not claim "¥0.00" and the credits
+    // column must not render a plus sign in front of a negative number.
+    const mockAdjustments = [
+      {
+        adjustment_id: "adj-rev",
+        order_id: "",
+        admin_user_id: "admin-1",
+        source_document_type: "REFUND_APPROVAL",
+        source_document_ref: "REFUND-2026-0918",
+        reason: "客户诉求退款",
+        request_id: "req-rev",
+        created_at: "2026-09-18T10:00:00Z",
+        amount_fen: 0,
+        credits: -50,
+        pricing_scope: "",
+        status: "",
+      },
+    ];
+
+    vi.mocked(adminApi.listAdminAdjustments).mockResolvedValue({
+      items: mockAdjustments,
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+
+    render(<AdjustmentsPage userId="user-1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("-50 积分")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("+-50 积分")).not.toBeInTheDocument();
+    expect(screen.queryByText("¥0.00")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("账本反向记账，实际退付在 ZPay 后台办理"),
+    ).toBeInTheDocument();
+  });
+
+  it("does not show the reversal note for a forward adjustment", async () => {
+    const mockAdjustments = [
+      {
+        adjustment_id: "adj-fwd",
+        order_id: "order-1",
+        admin_user_id: "admin-1",
+        source_document_type: "REFUND_APPROVAL",
+        source_document_ref: "REFUND-REVERSAL",
+        reason: "撤回一笔退款",
+        request_id: "req-fwd",
+        created_at: "2026-09-18T11:00:00Z",
+        amount_fen: 3000,
+        credits: 3,
+        pricing_scope: "INTERNAL",
+        status: "PAID",
+      },
+    ];
+
+    vi.mocked(adminApi.listAdminAdjustments).mockResolvedValue({
+      items: mockAdjustments,
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+
+    render(<AdjustmentsPage userId="user-1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("+3 积分")).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByText("账本反向记账，实际退付在 ZPay 后台办理"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("¥30.00")).toBeInTheDocument();
+  });
 });

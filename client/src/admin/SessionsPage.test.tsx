@@ -284,7 +284,7 @@ describe("SessionsPage", () => {
 
     await screen.findByText("customer_one");
     expect(screen.queryByLabelText("积分整数")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "展开后台增加积分" }));
+    fireEvent.click(screen.getByRole("button", { name: "展开后台调账" }));
     expect(screen.getByLabelText("积分整数")).toBeInTheDocument();
     expect(screen.queryByText(/加款条数/)).not.toBeInTheDocument();
   });
@@ -301,7 +301,52 @@ describe("SessionsPage", () => {
       screen.queryByRole("button", { name: /强制下线/ }),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: /后台增加积分/ }),
+      screen.queryByRole("button", { name: /后台调账/ }),
     ).not.toBeInTheDocument();
+  });
+
+  it("allows a negative amount only for the reversal sources (B1)", async () => {
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      jsonResponse(sessionList()),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    render(<SessionsPage userId={CUSTOMER_ID} />);
+
+    await screen.findByText("customer_one");
+    fireEvent.click(screen.getByRole("button", { name: "展开后台调账" }));
+
+    const credits = screen.getByLabelText("积分整数");
+    const source = screen.getByLabelText("来源单类型");
+    const form = credits.closest("form");
+    if (!form) throw new Error("adjustment form not found");
+    fireEvent.change(screen.getByLabelText("事由"), {
+      target: { value: "客户诉求退款" },
+    });
+
+    // Forward source (the default): a negative amount never reaches the API.
+    fireEvent.change(credits, { target: { value: "-5" } });
+    fireEvent.submit(form);
+    expect(await screen.findByText(/只能正向加积分/)).toBeInTheDocument();
+
+    // Reversal source: the sign is accepted, the copy says where the money
+    // actually moves, and the confirmation dialog switches to the reversal
+    // wording.
+    fireEvent.change(source, { target: { value: "REFUND_APPROVAL" } });
+    expect(
+      screen.getByText(/此为账本反向记账，实际退付在 ZPay 后台办理/),
+    ).toBeInTheDocument();
+    fireEvent.submit(form);
+    const dialog = await screen.findByRole("dialog", {
+      name: "确认反向调账",
+    });
+    expect(dialog).toHaveTextContent("-5 积分");
+    expect(dialog).toHaveTextContent("实际退付在 ZPay 后台办理");
+
+    // Zero is still not a valid amount, even for a reversal source.
+    fireEvent.change(credits, { target: { value: "0" } });
+    fireEvent.submit(form);
+    expect(
+      await screen.findByText("请输入非 0 的积分整数"),
+    ).toBeInTheDocument();
   });
 });
