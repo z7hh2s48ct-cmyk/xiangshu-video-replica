@@ -79,7 +79,9 @@ REPO_ROOT = SERVER_DIR.parent
 # 本分支的 20260922T1500_viral_search_discoveries（爆款视频搜索发现记录表）
 # 按手册 §3 重挂于链尾：tables/primary_keys +1、columns +9、unique_constraints +1
 # （五列身份约束）、两个非 partial 查询索引；全 Text 列，无 FK/CHECK/jsonb/timestamptz 增量。
-HEAD_REVISION = "20260922T1500_viral_search_discoveries"
+# MATERIAL-UX 批量的 20260922T2200_material_preference_tags 再按手册 §3 重挂到
+# 1500_viral 之后：为素材偏好表增加 tags_json（TEXT-JSON，默认 '[]'）——columns +1。
+HEAD_REVISION = "20260922T2200_material_preference_tags"
 
 # 最后一个已发布（受支持）起点。其后的 056…090 与本迁移尚未随任何受支持版本发布，
 # 故冻结范围止于此——把未发布 revision 也纳入哈希会让每次新增迁移都必须改常量，
@@ -124,7 +126,7 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # BEFORE DELETE 各算一行），故 18 行对应 10 个 distinct trigger，不是 10 行。
 HEAD_SCHEMA_COUNTS = {
     "check_constraints": 322,
-    "columns": 1219,
+    "columns": 1220,
     "foreign_keys": 193,
     "identity_columns": 0,
     "jsonb_columns": 6,
@@ -309,8 +311,9 @@ HEAD_TABLE_NAMES = (
 #   两个查询索引均非 partial，jsonb / CHECK / FK / timestamptz 无增量；
 #   表名集追加 viral_search_discoveries。
 # digest/counts 以 scripts/ci/migration_manifest.py --print-schema 于 postgres:16 重算
-# （合并后新 head：sub_account_permissions + 三个 analysis 迁移 + 本分支迁移叠加）。
-HEAD_SCHEMA_DIGEST = "782f76c27e7a92106bd260cd9e9bba9de614e97436d911dea4af8d83b3bb1675"
+# （合并后新 head：sub_account_permissions + 三个 analysis 迁移 + viral 搜索发现表
+#  + 本分支的 MATERIAL-UX tags_json 列叠加；digest 在本地 PG 探针重算）。
+HEAD_SCHEMA_DIGEST = "82fe39417531b9bcfdd09644e3deb79e0f1f82de9a66d3468148e91d02a6552f"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

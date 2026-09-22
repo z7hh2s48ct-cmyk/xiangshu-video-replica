@@ -391,6 +391,171 @@
   flex-basis: 100%;
   margin: 0;
 }
+/* MATERIAL-UX-04：多文件上传队列条与整页拖拽高亮。 */
+.content-materials--drag {
+  outline: 2px dashed #4a7dff;
+  outline-offset: -10px;
+}
+.content-upload-queue {
+  border: 1px solid var(--studio-border, #e2e4e8);
+  border-radius: 10px;
+  display: grid;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  font-size: var(--font-caption);
+}
+.content-upload-queue__summary {
+  color: var(--studio-muted, #747b88);
+}
+.content-upload-queue ul {
+  display: grid;
+  gap: 4px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.content-upload-queue__item {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+}
+.content-upload-queue__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.content-upload-queue__item--error .content-upload-queue__state {
+  color: #f05e4b;
+}
+.content-upload-queue__item--done .content-upload-queue__state {
+  color: var(--studio-muted, #747b88);
+}
+/* MATERIAL-UX-05：详情面板标签编辑器。 */
+.content-tag-editor {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.content-tag-editor__chip {
+  align-items: center;
+  background: rgba(74, 125, 255, 0.12);
+  border-radius: 999px;
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px 4px 2px 10px;
+}
+.content-tag-editor input {
+  min-width: 120px;
+}
+/* MATERIAL-UX-06：卡片 hover 快捷动作浮层与 direct 待归档状态色。 */
+.content-asset-cell {
+  min-width: 0;
+  position: relative;
+}
+.content-asset-cell > .content-asset {
+  width: 100%;
+}
+.content-asset__quick {
+  bottom: 48px;
+  display: none;
+  gap: 6px;
+  left: 8px;
+  position: absolute;
+  right: 8px;
+  z-index: 2;
+}
+.content-asset-cell:hover .content-asset__quick,
+.content-asset-cell:focus-within .content-asset__quick {
+  display: flex;
+}
+.content-asset__quick button {
+  background: rgba(23, 26, 33, 0.86);
+  border: 0;
+  border-radius: 8px;
+  color: #fff;
+  cursor: pointer;
+  flex: 1;
+  font-size: var(--font-caption, 12px);
+  padding: 6px 8px;
+}
+.content-asset__quick button:hover {
+  background: rgba(23, 26, 33, 0.96);
+}
+.content-asset__status.is-direct {
+  color: #b7791f;
+}
+/* MATERIAL-UX-08：媒体区高度按方向分档（缺比例保持默认 160px）。 */
+.content-asset--portrait .studio-media {
+  height: 200px;
+}
+.content-asset--landscape .studio-media {
+  height: 120px;
+}
+/* MATERIAL-UX-07：列表视图 / 音频紧凑行。 */
+.content-view-switch {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.content-material-rows {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.content-material-row {
+  align-items: center;
+  background: var(--studio-surface, #fff);
+  border: 1px solid var(--studio-border, #e2e4e8);
+  border-radius: 10px;
+  display: flex;
+  gap: 12px;
+  padding: 8px 12px;
+}
+.content-material-row__main {
+  background: none;
+  border: 0;
+  cursor: pointer;
+  flex: 1;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.content-material-row__meta {
+  color: var(--studio-muted, #747b88);
+  flex-shrink: 0;
+  font-size: var(--font-caption, 12px);
+  white-space: nowrap;
+}
+.content-material-row__purpose {
+  background: rgba(74, 125, 255, 0.12);
+  border-radius: 999px;
+  flex-shrink: 0;
+  font-size: var(--font-caption, 12px);
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+.content-material-row__actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+}
+.content-material-row__actions button {
+  background: rgba(74, 125, 255, 0.1);
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: var(--font-caption, 12px);
+  padding: 4px 8px;
+}
 .content-material-filters {
   align-items: center;
   display: grid;
@@ -1762,4 +1927,29 @@ span.viral-card-cover-empty.content-player-viral-poster {
 .content-player-viral > .video-preview,
 .content-player-viral-trigger > .video-preview {
   height: 100%;
+}
+
+/* MATERIAL-UX-10：详情面板使用记录区块。 */
+.content-usage-panel {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+.content-usage-panel__empty {
+  color: var(--studio-muted, #747b88);
+  font-size: var(--font-caption, 12px);
+  margin: 0;
+}
+.content-usage-panel__list ul {
+  display: grid;
+  gap: 4px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.content-usage-panel__list li {
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  font-size: var(--font-caption, 12px);
 }

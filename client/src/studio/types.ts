@@ -44,6 +44,20 @@ export type StudioAsset = {
   durationSeconds?: number;
   group: string;
   personId?: string;
+  /** MATERIAL-UX-03：归属对象显示名与创建/大小信息（供卡片 meta 与详情三行）。 */
+  personName?: string;
+  projectId?: string;
+  projectTitle?: string;
+  createdAt?: string;
+  sizeBytes?: number;
+  /** MATERIAL-UX-05：用户侧标签（详情可编辑，卡片展示前 2 个）。 */
+  tags?: string[];
+  /** MATERIAL-UX-08：宽高与比例（存量素材可能缺省，前端优雅降级）。 */
+  width?: number;
+  height?: number;
+  aspectRatio?: number;
+  /** MATERIAL-UX-07：音频用途三态（oral_audio / voice_clone / reference）。 */
+  audioPurpose?: "oral_audio" | "voice_clone" | "reference";
   composite?: boolean;
   previewAssetId?: string;
   characterViews?: { assetId: string; viewType: string }[];

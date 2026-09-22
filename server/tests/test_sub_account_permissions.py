@@ -65,9 +65,7 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 PERMISSIONS_TABLE = "sub_account_permissions"
 PERMISSIONS_DB = "t_sub_account_permission"
 
-# 链尾：本分支 20260922T1500_viral_search_discoveries 按手册 §3 重挂于
-# main 新链尾（open_h3_extended_modes）之上，故链尾为该值。
-_HEAD_REVISION = "20260922T1500_viral_search_discoveries"
+_HEAD_REVISION = "20260922T2200_material_preference_tags"
 _PRIOR_REVISION = "20260921T1200_sub_account_quotas"
 
 

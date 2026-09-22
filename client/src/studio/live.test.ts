@@ -560,6 +560,7 @@ describe("真实 Studio 只读适配器", () => {
       composite: false,
       allowed_uses: ["first_frame", "tail_frame", "reference"],
       allowed_actions: ["preview", "download", "rename", "hide"],
+      tags: [],
     } satisfies MaterialItem;
     api.resolveMaterials.mockResolvedValue({
       items: [material],
@@ -646,6 +647,7 @@ describe("真实 Studio 只读适配器", () => {
           composite: false,
           allowed_uses: ["reference"],
           allowed_actions: ["preview", "download", "rename", "hide"],
+          tags: [],
         } satisfies MaterialItem,
       ],
       unavailable_ids: [],
@@ -1294,6 +1296,7 @@ describe("真实 Studio 只读适配器", () => {
             composite: false,
             allowed_uses: ["reference"],
             allowed_actions: ["preview"],
+            tags: [],
           }) satisfies MaterialItem,
       ),
       page: 1,
@@ -1875,6 +1878,7 @@ describe("studioAssetFromMaterial（素材映射数值时长）", () => {
     composite: false,
     allowed_uses: ["reference"],
     allowed_actions: ["preview", "download"],
+    tags: [],
   } satisfies MaterialItem;
 
   it("把 duration_seconds 映射为数值 durationSeconds 供选取路径 ≤15s 比较", () => {
@@ -2025,6 +2029,7 @@ describe("素材按内容哈希去重命中时的复用", () => {
     composite: false,
     allowed_uses: ["reference"],
     allowed_actions: ["preview", "download"],
+    tags: [],
   } satisfies MaterialItem;
 
   beforeEach(() => {

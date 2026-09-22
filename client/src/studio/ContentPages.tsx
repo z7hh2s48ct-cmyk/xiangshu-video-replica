@@ -6,6 +6,9 @@ import type {
   MaterialGroupItem,
   MaterialItem,
   MaterialPage,
+  MaterialSort,
+  MaterialTagItem,
+  MaterialUsagesResponse,
   ViralImportPurpose,
   ViralImportTask,
   ViralPlatform,
@@ -27,11 +30,13 @@ import {
   getMaterialBatchPreviews,
   getMaterialCachedPreview,
   getMaterialCacheUsage,
+  getMaterialUsages,
   getStudioDraft,
   getViralImportTask,
   hideMaterial,
   listMaterialGroups,
   listMaterials,
+  listMaterialTags,
   listViralFavorites,
   listViralVideos,
   putMaterial,
@@ -62,7 +67,17 @@ import type {
   StudioPublishDraft,
   StudioVideo,
 } from "./types";
-import { Button, Empty, Field, Hint, Icon, Media, Panel, Tabs } from "./ui";
+import {
+  Button,
+  Empty,
+  Field,
+  formatTaskTime,
+  Hint,
+  Icon,
+  Media,
+  Panel,
+  Tabs,
+} from "./ui";
 import {
   clearViralImportIdempotencyKey,
   shouldClearViralImportIdempotencyKey,
@@ -109,6 +124,47 @@ function formatCount(value: number | null) {
 function assetKindLabel(kind: StudioAsset["kind"]) {
   return kind === "image" ? "图片" : kind === "video" ? "视频" : "音频";
 }
+
+// MATERIAL-UX-03：详情面板“文件大小”行人读化；无存档直出成片无大小返回 undefined。
+function formatMaterialSize(bytes?: number): string | undefined {
+  if (bytes === undefined || bytes === null || bytes < 0) return undefined;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024)
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+// MATERIAL-UX-04：客户端大小预校验，与服务端 materials.py / media.py 常量对齐
+// （图片 10 MB，其余 50 MB）；超限在客户端拦截，不等后端 413。
+const UPLOAD_IMAGE_LIMIT = 10 * 1024 * 1024;
+const UPLOAD_FILE_LIMIT = 50 * 1024 * 1024;
+
+function uploadSizeError(file: File): string | undefined {
+  const isImage = file.type.startsWith("image/");
+  if (file.size > (isImage ? UPLOAD_IMAGE_LIMIT : UPLOAD_FILE_LIMIT)) {
+    return isImage ? "图片不能超过 10 MB" : "视频不能超过 50 MB";
+  }
+  return undefined;
+}
+
+// MATERIAL-UX-08：按比例派生方向档位（阈值与服务端一致）；缺比例不启用分档。
+function orientationClass(asset: StudioAsset): string {
+  if (asset.aspectRatio === undefined) return "";
+  if (asset.aspectRatio > 1.05) return "content-asset--landscape";
+  if (asset.aspectRatio < 0.95) return "content-asset--portrait";
+  return "content-asset--square";
+}
+
+type UploadQueueItemStatus = "pending" | "uploading" | "done" | "error";
+
+type UploadQueueItem = {
+  key: string;
+  file: File;
+  status: UploadQueueItemStatus;
+  progress?: number;
+  error?: string;
+};
 
 const viralInitialCount = 12;
 const viralPageSize = 12;
@@ -1753,26 +1809,30 @@ function AssetCard({
   onPlay: () => void;
 }) {
   const kindLabel = asset.composite ? "五视图" : assetKindLabel(asset.kind);
+  // MATERIAL-UX-06：状态语言用户化——direct 是“待归档”（可预览不可复用），
+  // 已归档是“可用（云端）”，避免实现词汇暴露给用户。
   const status =
     previewStatus === "loading"
       ? "预览加载中…"
       : previewStatus === "error"
         ? "预览加载失败，点击重试"
         : asset.delivery === "direct"
-          ? "生成完成"
+          ? "待归档 · 可预览"
           : asset.saved
-            ? "永久保存"
+            ? "可用（云端）"
             : "处理中";
   const statusTone =
     previewStatus === "error"
       ? "is-error"
-      : previewStatus === "loading" || status === "处理中"
-        ? "is-pending"
-        : "is-ready";
+      : asset.delivery === "direct"
+        ? "is-direct"
+        : previewStatus === "loading" || !asset.saved
+          ? "is-pending"
+          : "is-ready";
   return (
     <button
       type="button"
-      className={`content-asset content-asset--${asset.kind} ${selected ? "is-selected" : ""} ${asset.composite ? "content-asset--composite" : ""} ${organize ? "is-organizing" : ""} ${organize && checked ? "is-checked" : ""}`}
+      className={`content-asset content-asset--${asset.kind} ${orientationClass(asset)} ${selected ? "is-selected" : ""} ${asset.composite ? "content-asset--composite" : ""} ${organize ? "is-organizing" : ""} ${organize && checked ? "is-checked" : ""}`}
       onClick={onSelect}
       aria-label={`选择素材 ${asset.name}`}
       aria-pressed={organize ? checked : undefined}
@@ -1795,15 +1855,144 @@ function AssetCard({
       </div>
       <span className="content-asset__meta">
         {asset.group} · {asset.composite ? "1 套五视图" : kindLabel}
+        {asset.createdAt ? ` · ${formatTaskTime(asset.createdAt)}` : ""}
+        {asset.tags && asset.tags.length > 0
+          ? ` · ${asset.tags
+              .slice(0, 2)
+              .join(
+                " / ",
+              )}${asset.tags.length > 2 ? ` +${asset.tags.length - 2}` : ""}`
+          : ""}
       </span>
       <span className={`content-asset__status ${statusTone}`}>{status}</span>
     </button>
   );
 }
 
+// MATERIAL-UX-07：列表行——名称/时长/大小/时间/来源 + 快捷动作；音频 tab 内
+// 另有用途标签与“用于音频口播”去向。行容器不是交互元素，动作按钮是它的
+// 兄弟节点，避免 button 嵌套。
+function MaterialRow({
+  asset,
+  compact,
+  showPurpose,
+  quickActions,
+  onOralUse,
+  onSelect,
+}: {
+  asset: StudioAsset;
+  compact?: boolean;
+  showPurpose?: boolean;
+  quickActions: { key: string; label: string; run: () => void }[];
+  onOralUse?: () => void;
+  onSelect: () => void;
+}) {
+  const purposeLabel =
+    asset.audioPurpose === "oral_audio"
+      ? "完整口播"
+      : asset.audioPurpose === "voice_clone"
+        ? "声音克隆样本"
+        : asset.audioPurpose === "reference"
+          ? "参考音频"
+          : undefined;
+  return (
+    <div
+      className={`content-material-row${compact ? " content-material-row--compact" : ""}`}
+    >
+      <button
+        type="button"
+        className="content-material-row__main"
+        onClick={onSelect}
+        aria-label={`选择素材 ${asset.name}`}
+      >
+        <strong>{asset.name}</strong>
+      </button>
+      {showPurpose && purposeLabel ? (
+        <span className="content-material-row__purpose">{purposeLabel}</span>
+      ) : null}
+      <span className="content-material-row__meta">
+        {asset.duration ?? "—"}
+      </span>
+      {!compact ? (
+        <>
+          <span className="content-material-row__meta">
+            {formatMaterialSize(asset.sizeBytes) ?? "—"}
+          </span>
+          <span className="content-material-row__meta">
+            {asset.createdAt ? formatTaskTime(asset.createdAt) : "—"}
+          </span>
+          <span className="content-material-row__meta">{asset.source}</span>
+        </>
+      ) : null}
+      <span className="content-material-row__actions">
+        {onOralUse ? (
+          <button
+            type="button"
+            aria-label={`将 ${asset.name} 用于音频口播`}
+            onClick={onOralUse}
+          >
+            用于音频口播
+          </button>
+        ) : null}
+        {quickActions.map((action) => (
+          <button key={action.key} type="button" onClick={action.run}>
+            {action.label}
+          </button>
+        ))}
+      </span>
+    </div>
+  );
+}
+
 export function MaterialsPage() {
   const { user } = useStudio();
   return <MaterialsPageContent key={user.id} />;
+}
+
+// MATERIAL-UX-06：素材库视图状态 session 内保活（最低成本版）。模块级存储让
+// 筛选/分页在页面切走（组件卸载）后保留，回到素材库时原样恢复；完整页缓存
+// （stale-while-revalidate）方案按 2026-09-17 性能方案另行评估。
+type MaterialsViewState = {
+  kind: "全部" | StudioAsset["kind"];
+  source: "" | MaterialItem["source"];
+  sort: MaterialSort;
+  objectMode: "" | "person" | "project";
+  personFilter: string;
+  projectFilter: string;
+  tagFilter: string;
+  orientation: "" | "portrait" | "landscape" | "square";
+  viewMode: "grid" | "list";
+  query: string;
+  page: number;
+  group: string | undefined;
+};
+
+const MATERIALS_VIEW_DEFAULT: MaterialsViewState = {
+  kind: "全部",
+  source: "",
+  sort: "created_desc",
+  objectMode: "",
+  personFilter: "",
+  projectFilter: "",
+  tagFilter: "",
+  orientation: "",
+  viewMode: "grid",
+  query: "",
+  page: 1,
+  group: undefined,
+};
+
+const MATERIALS_VIEW_STORAGE_KEY = "studio.materials.view";
+
+function loadMaterialsSavedView(): MaterialsViewState {
+  // sessionStorage：标签页会话内筛选/分页保留，关闭标签即清；隐私模式降级默认值。
+  try {
+    const raw = window.sessionStorage.getItem(MATERIALS_VIEW_STORAGE_KEY);
+    if (raw) return { ...MATERIALS_VIEW_DEFAULT, ...JSON.parse(raw) };
+  } catch {
+    /* 读不到（隐私模式/序列化损坏）就回默认视图。 */
+  }
+  return { ...MATERIALS_VIEW_DEFAULT };
 }
 
 function MaterialsPageContent() {
@@ -1818,10 +2007,42 @@ function MaterialsPageContent() {
     navigate,
     notify,
   } = useStudio();
-  const [kind, setKind] = useState<"全部" | StudioAsset["kind"]>("全部");
-  const [source, setSource] = useState<"" | MaterialItem["source"]>("");
-  const [queryInput, setQueryInput] = useState("");
-  const [query, setQuery] = useState("");
+  const initialView = useMemo(() => loadMaterialsSavedView(), []);
+  const [kind, setKind] = useState<"全部" | StudioAsset["kind"]>(
+    initialView.kind,
+  );
+  const [source, setSource] = useState<"" | MaterialItem["source"]>(
+    initialView.source,
+  );
+  // MATERIAL-UX-03：排序维度 + 对象（人物/项目）二级筛选。objectMode 决定第二级
+  // 下拉数据源；选中后 personFilter/projectFilter 之一非空，随请求下发。
+  const [sort, setSort] = useState<MaterialSort>(initialView.sort);
+  const [objectMode, setObjectMode] = useState<"" | "person" | "project">(
+    initialView.objectMode,
+  );
+  const [personFilter, setPersonFilter] = useState(initialView.personFilter);
+  const [projectFilter, setProjectFilter] = useState(initialView.projectFilter);
+  // MATERIAL-UX-05：标签筛选 + 详情面板标签编辑（建议来自聚合端点）。
+  const [tagFilter, setTagFilter] = useState(initialView.tagFilter);
+  // MATERIAL-UX-08：方向筛选（portrait / landscape / square）。
+  const [orientationFilter, setOrientationFilter] = useState(
+    initialView.orientation,
+  );
+  // MATERIAL-UX-07：网格/列表视图（音频 tab 恒为列表形态）。
+  const [viewMode, setViewMode] = useState<"grid" | "list">(
+    initialView.viewMode,
+  );
+  // MATERIAL-UX-09：回收站视图（临时态，不入保活；物理删除不在范围）。
+  const [trashedView, setTrashedView] = useState(false);
+  const [tagSuggestions, setTagSuggestions] = useState<MaterialTagItem[]>([]);
+  const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [tagInput, setTagInput] = useState("");
+  // MATERIAL-UX-10：使用记录（按需请求；切换选中素材即失效）。
+  const [usages, setUsages] = useState<MaterialUsagesResponse | null>(null);
+  const [usagesLoading, setUsagesLoading] = useState(false);
+  const [usagesError, setUsagesError] = useState<string>();
+  const [queryInput, setQueryInput] = useState(initialView.query);
+  const [query, setQuery] = useState(initialView.query);
   const [remotePage, setRemotePage] = useState<MaterialPage | null>(null);
   const [remoteError, setRemoteError] = useState<string>();
   const [remoteLoading, setRemoteLoading] = useState(false);
@@ -1834,7 +2055,7 @@ function MaterialsPageContent() {
   const [groupNewName, setGroupNewName] = useState("");
   // MATERIAL-UX-01：分组导航与整理模式的页面态。group 为 undefined 时不过滤；
   // 非空时与素材的有效分组精确匹配。
-  const [group, setGroup] = useState<string | undefined>(undefined);
+  const [group, setGroup] = useState<string | undefined>(initialView.group);
   const [groups, setGroups] = useState<MaterialGroupItem[]>([]);
   const [groupsRevision, setGroupsRevision] = useState(0);
   const [refreshRevision, setRefreshRevision] = useState(0);
@@ -1904,7 +2125,11 @@ function MaterialsPageContent() {
       ? characterView
       : selected;
   const [page, setPage] = useState(() =>
-    review && selectedIndex >= 0 ? Math.floor(selectedIndex / pageSize) + 1 : 1,
+    review
+      ? selectedIndex >= 0
+        ? Math.floor(selectedIndex / pageSize) + 1
+        : 1
+      : initialView.page,
   );
   const total = review ? reviewAssets.length : (remotePage?.total ?? 0);
   const pages = Math.max(1, Math.ceil(total / pageSize));
@@ -2247,6 +2472,34 @@ function MaterialsPageContent() {
     }
   };
 
+  // MATERIAL-UX-06：视图状态写回 sessionStorage（session 内保活）；
+  // 审核模式不写回，避免审核期间的筛选污染正常浏览态。
+  useEffect(() => {
+    if (review) return;
+    const view: MaterialsViewState = {
+      kind,
+      source,
+      sort,
+      objectMode,
+      personFilter,
+      projectFilter,
+      tagFilter,
+      orientation: orientationFilter,
+      viewMode,
+      query,
+      page,
+      group,
+    };
+    try {
+      window.sessionStorage.setItem(
+        MATERIALS_VIEW_STORAGE_KEY,
+        JSON.stringify(view),
+      );
+    } catch {
+      /* 写不进（隐私模式）只影响保活，不影响功能。 */
+    }
+  });
+
   useEffect(() => {
     if (review) return;
     // refreshRevision 仅作为“强制重拉”触发器，不参与请求参数。
@@ -2259,6 +2512,12 @@ function MaterialsPageContent() {
       source: source || undefined,
       query: query || undefined,
       group,
+      sort,
+      personId: personFilter || undefined,
+      projectId: projectFilter || undefined,
+      tag: tagFilter || undefined,
+      orientation: orientationFilter || undefined,
+      trashed: trashedView || undefined,
       page,
       pageSize,
     })
@@ -2278,7 +2537,21 @@ function MaterialsPageContent() {
     return () => {
       current = false;
     };
-  }, [group, kind, page, query, refreshRevision, review, source]);
+  }, [
+    group,
+    kind,
+    page,
+    personFilter,
+    projectFilter,
+    query,
+    refreshRevision,
+    review,
+    sort,
+    source,
+    tagFilter,
+    orientationFilter,
+    trashedView,
+  ]);
 
   // MATERIAL-UX-01：分组导航计数（随素材变动刷新）。
   useEffect(() => {
@@ -2298,6 +2571,23 @@ function MaterialsPageContent() {
     };
   }, [groupsRevision, review]);
 
+  // MATERIAL-UX-05：标签聚合（筛选下拉与编辑建议共用；随素材变动刷新）。
+  useEffect(() => {
+    if (review) return;
+    void groupsRevision;
+    let current = true;
+    void listMaterialTags()
+      .then((result) => {
+        if (current) setTagSuggestions(result);
+      })
+      .catch(() => {
+        /* 标签建议失败不阻塞素材浏览。 */
+      });
+    return () => {
+      current = false;
+    };
+  }, [groupsRevision, review]);
+
   useEffect(() => {
     if (!review && remotePage?.page === page && page > pages) setPage(pages);
   }, [page, pages, remotePage?.page, review]);
@@ -2308,10 +2598,26 @@ function MaterialsPageContent() {
     void query;
     void source;
     void group;
+    void sort;
+    void personFilter;
+    void projectFilter;
+    void tagFilter;
+    void orientationFilter;
     cacheSuppressedRef.current = false;
     // 列表参数变化后旧勾选可能已不可见：清空避免“已选 0 项”与按钮状态矛盾。
     setSelectedIds(new Set());
-  }, [group, kind, page, query, source]);
+  }, [
+    group,
+    kind,
+    page,
+    personFilter,
+    projectFilter,
+    query,
+    sort,
+    source,
+    tagFilter,
+    orientationFilter,
+  ]);
 
   useEffect(() => {
     if (review || remotePage?.page !== page) return;
@@ -2376,11 +2682,22 @@ function MaterialsPageContent() {
     setRenameValue(selected?.name ?? "");
     setGroupValue(selected?.group ?? "");
     setGroupNewName("");
-  }, [selected?.group, selected?.name]);
+    setSelectedTags(selected?.tags ?? []);
+    setTagInput("");
+    setUsages(null);
+    setUsagesError(undefined);
+  }, [selected?.group, selected?.name, selected?.tags]);
 
   const currentAssets = review
     ? assets.slice((page - 1) * pageSize, page * pageSize)
     : assets;
+  // MATERIAL-UX-07：音频 tab 恒为列表形态；“全部”tab 音频折叠为紧凑横条；
+  // 整理模式强制网格（勾选交互在卡片上）。
+  const rowsMode = !organize && (viewMode === "list" || kind === "audio");
+  const audioCompactRows = !organize && kind === "全部" && viewMode === "grid";
+  const audioCompactAssets = audioCompactRows
+    ? currentAssets.filter((asset) => asset.kind === "audio")
+    : [];
 
   const retainForDraft = (asset: StudioAsset) => {
     const retained = asset.url?.startsWith("blob:")
@@ -2395,7 +2712,25 @@ function MaterialsPageContent() {
     }));
   };
 
-  const handleUpload = async (file: File) => {
+  // MATERIAL-UX-04：顺序上传队列。真源在 ref（泵异步推进不重入），state 只做渲染镜像。
+  const [uploadQueue, setUploadQueue] = useState<UploadQueueItem[]>([]);
+  const uploadQueueRef = useRef<UploadQueueItem[]>([]);
+  const uploadQueueKeyRef = useRef(0);
+  const pumpingUploadRef = useRef(false);
+  const [dragActive, setDragActive] = useState(false);
+  const dragDepthRef = useRef(0);
+
+  const patchUploadQueue = useCallback(
+    (key: string, changes: Partial<UploadQueueItem>) => {
+      uploadQueueRef.current = uploadQueueRef.current.map((item) =>
+        item.key === key ? { ...item, ...changes } : item,
+      );
+      setUploadQueue(uploadQueueRef.current);
+    },
+    [],
+  );
+
+  const uploadOne = async (file: File) => {
     setBusyAction("upload");
     setUploadProgress(0);
     try {
@@ -2406,6 +2741,9 @@ function MaterialsPageContent() {
         title: file.name,
         group: targetGroup || "我的上传",
       });
+      if (intent.upload_required === false) {
+        notify("检测到相同文件，已复用已有素材");
+      }
       const completed = await putMaterial(intent, file, setUploadProgress);
       const asset = studioAssetFromMaterial(completed);
       retainForDraft(asset);
@@ -2428,15 +2766,78 @@ function MaterialsPageContent() {
           total: (current?.total ?? 0) + 1,
         }));
       }
-      notify(`素材“${completed.title}”已上传并永久保存`);
+      notify(`素材“${completed.title}”已上传，云端可用`);
       refreshMaterials();
-    } catch (error) {
-      notify(error instanceof Error ? error.message : "上传素材失败");
     } finally {
+      setUploadProgress(undefined);
+    }
+  };
+
+  // 泵只依赖 ref 与稳定 setter，闭包内的 uploadOne 经 ref 取最新渲染版本。
+  const uploadOneRef = useRef(uploadOne);
+  useEffect(() => {
+    uploadOneRef.current = uploadOne;
+  });
+
+  const pumpUploadQueue = useCallback(async () => {
+    if (pumpingUploadRef.current) return;
+    pumpingUploadRef.current = true;
+    try {
+      for (;;) {
+        const next = uploadQueueRef.current.find(
+          (item) => item.status === "pending",
+        );
+        if (!next) break;
+        patchUploadQueue(next.key, {
+          status: "uploading",
+          progress: 0,
+          error: undefined,
+        });
+        try {
+          await uploadOneRef.current(next.file);
+          patchUploadQueue(next.key, { status: "done", progress: 100 });
+        } catch (cause) {
+          patchUploadQueue(next.key, {
+            status: "error",
+            error: cause instanceof Error ? cause.message : "上传素材失败",
+          });
+        }
+      }
+    } finally {
+      pumpingUploadRef.current = false;
       setBusyAction(undefined);
       setUploadProgress(undefined);
-      if (uploadInputRef.current) uploadInputRef.current.value = "";
     }
+  }, [patchUploadQueue]);
+
+  const enqueueUploads = useCallback(
+    (files: File[]) => {
+      if (files.length === 0) return;
+      const items: UploadQueueItem[] = files.map((file) => {
+        const error = uploadSizeError(file);
+        uploadQueueKeyRef.current += 1;
+        return {
+          key: `upload-${uploadQueueKeyRef.current}`,
+          file,
+          status: error ? "error" : "pending",
+          error,
+        };
+      });
+      uploadQueueRef.current = [...uploadQueueRef.current, ...items];
+      setUploadQueue(uploadQueueRef.current);
+      void pumpUploadQueue();
+    },
+    [pumpUploadQueue],
+  );
+
+  const retryUpload = (key: string) => {
+    patchUploadQueue(key, { status: "pending", error: undefined });
+    void pumpUploadQueue();
+  };
+
+  const clearUploadQueue = () => {
+    uploadQueueRef.current = [];
+    setUploadQueue([]);
   };
 
   const saveName = async () => {
@@ -2467,6 +2868,51 @@ function MaterialsPageContent() {
       notify(error instanceof Error ? error.message : "更新素材失败");
     } finally {
       setBusyAction(undefined);
+    }
+  };
+
+  // MATERIAL-UX-05：标签全量覆盖保存（tags=[] 即清空）。
+  const saveTags = async () => {
+    if (!selected?.materialId) return;
+    setBusyAction("tags");
+    try {
+      const updated = studioAssetFromMaterial(
+        await updateMaterial(selected.materialId, { tags: selectedTags }),
+      );
+      setSelectedAsset({ ...updated, url: selected.url });
+      setRemotePage((current) =>
+        current
+          ? {
+              ...current,
+              items: current.items.map((item) =>
+                item.id === updated.materialId
+                  ? { ...item, tags: updated.tags ?? [] }
+                  : item,
+              ),
+            }
+          : current,
+      );
+      notify("素材标签已保存");
+      refreshMaterials();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "保存素材标签失败");
+    } finally {
+      setBusyAction(undefined);
+    }
+  };
+
+  // MATERIAL-UX-10：按需拉取使用记录（点开才请求，不拖慢详情面板）。
+  const loadUsages = async (materialId: string) => {
+    setUsagesLoading(true);
+    setUsagesError(undefined);
+    try {
+      setUsages(await getMaterialUsages(materialId));
+    } catch (error) {
+      setUsagesError(
+        error instanceof Error ? error.message : "读取使用记录失败",
+      );
+    } finally {
+      setUsagesLoading(false);
     }
   };
 
@@ -2703,8 +3149,87 @@ function MaterialsPageContent() {
     navigate("reference", { returnTo: "materials" });
   };
 
+  // MATERIAL-UX-06/07：卡片与列表行共用的快捷动作构造。
+  const quickActionsFor = (asset: StudioAsset) => {
+    const actions: { key: string; label: string; run: () => void }[] = [];
+    if (asset.kind === "image" && asset.allowedUses?.includes("first_frame")) {
+      actions.push({
+        key: "first-frame",
+        label: "用作首帧",
+        run: () => {
+          retainForDraft(asset);
+          patchDraft({ firstFrameId: asset.id });
+          navigate("video", { returnTo: "materials" });
+        },
+      });
+    }
+    if (asset.allowedUses?.includes("reference")) {
+      actions.push({
+        key: "reference",
+        label: "加入参考",
+        run: () => applyAsReference(asset),
+      });
+    }
+    return actions;
+  };
+
+  // MATERIAL-UX-09：恢复已移除素材（hidden=false，原分组与名称偏好保留）。
+  const restoreMaterial = async (asset: StudioAsset) => {
+    if (!asset.materialId) return;
+    setBusyAction("restore");
+    try {
+      await updateMaterial(asset.materialId, { hidden: false });
+      notify(`素材“${asset.name}”已恢复`);
+      refreshMaterials();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "恢复素材失败");
+    } finally {
+      setBusyAction(undefined);
+    }
+  };
+
+  const selectAsset = (asset: StudioAsset) => {
+    setSelectedAsset(asset);
+    patchState({ selectedAssetId: asset.id });
+  };
+
   return (
-    <section className="content-page content-materials">
+    // biome-ignore lint/a11y/noStaticElementInteractions: 整页拖放是鼠标增强交互，无对应键盘语义（参照 CharacterLibrary 遮罩先例）。
+    <section
+      className={`content-page content-materials${
+        dragActive ? " content-materials--drag" : ""
+      }`}
+      onDragEnter={(event) => {
+        if (review || !event.dataTransfer?.types.includes("Files")) return;
+        dragDepthRef.current += 1;
+        setDragActive(true);
+      }}
+      onDragOver={(event) => {
+        if (review) return;
+        event.preventDefault();
+      }}
+      onDragLeave={(event) => {
+        if (review) return;
+        dragDepthRef.current -= 1;
+        if (
+          dragDepthRef.current <= 0 ||
+          !event.currentTarget.contains(event.relatedTarget as Node | null)
+        ) {
+          dragDepthRef.current = 0;
+          setDragActive(false);
+        }
+      }}
+      onDrop={(event) => {
+        if (review) return;
+        event.preventDefault();
+        dragDepthRef.current = 0;
+        setDragActive(false);
+        const files = Array.from(event.dataTransfer?.files ?? []);
+        if (files.length > 0) {
+          enqueueUploads(files);
+        }
+      }}
+    >
       <header className="content-title">
         <div>
           <h1>素材库</h1>
@@ -2714,9 +3239,11 @@ function MaterialsPageContent() {
           accept=".jpg,.jpeg,.png,.mp3,.mp4,.mov"
           aria-label="选择上传素材"
           hidden
+          multiple
           onChange={(event) => {
-            const file = event.target.files?.[0];
-            if (file) void handleUpload(file);
+            const files = Array.from(event.target.files ?? []);
+            event.target.value = "";
+            if (files.length > 0) enqueueUploads(files);
           }}
           ref={uploadInputRef}
           type="file"
@@ -2765,11 +3292,65 @@ function MaterialsPageContent() {
               : uploadInputRef.current?.click()
           }
         >
-          {uploadProgress === undefined
-            ? "上传素材"
-            : `上传中 ${uploadProgress}%`}
+          {(() => {
+            const uploadingIndex = uploadQueue.findIndex(
+              (item) => item.status === "uploading",
+            );
+            if (uploadingIndex >= 0) {
+              return `上传中 ${uploadingIndex + 1}/${uploadQueue.length}`;
+            }
+            return uploadProgress === undefined
+              ? "上传素材"
+              : `上传中 ${uploadProgress}%`;
+          })()}
         </Button>
       </header>
+      {uploadQueue.length > 0 ? (
+        <div
+          aria-label="上传队列"
+          className="content-upload-queue"
+          role="status"
+        >
+          <span className="content-upload-queue__summary">
+            上传队列{" "}
+            {uploadQueue.filter((item) => item.status === "done").length}/
+            {uploadQueue.length}
+          </span>
+          <ul>
+            {uploadQueue.map((item) => (
+              <li
+                key={item.key}
+                className={`content-upload-queue__item content-upload-queue__item--${item.status}`}
+              >
+                <span className="content-upload-queue__name">
+                  {item.file.name}
+                </span>
+                <span className="content-upload-queue__state">
+                  {item.status === "uploading"
+                    ? `上传中 ${item.progress ?? 0}%`
+                    : item.status === "done"
+                      ? "已完成"
+                      : item.status === "error"
+                        ? (item.error ?? "上传失败")
+                        : "等待上传"}
+                </span>
+                {item.status === "error" ? (
+                  <Button variant="quiet" onClick={() => retryUpload(item.key)}>
+                    重试 {item.file.name}
+                  </Button>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+          {uploadQueue.every(
+            (item) => item.status === "done" || item.status === "error",
+          ) ? (
+            <Button variant="quiet" onClick={clearUploadQueue}>
+              清空队列
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
       <Tabs
         items={[
           { id: "全部", label: "全部" },
@@ -2783,6 +3364,22 @@ function MaterialsPageContent() {
           setPage(1);
         }}
       />
+      {!review ? (
+        <div className="content-view-switch">
+          <Button
+            variant={viewMode === "grid" ? "primary" : "outline"}
+            onClick={() => setViewMode("grid")}
+          >
+            网格视图
+          </Button>
+          <Button
+            variant={viewMode === "list" ? "primary" : "outline"}
+            onClick={() => setViewMode("list")}
+          >
+            列表视图
+          </Button>
+        </div>
+      ) : null}
       {!review ? (
         <section aria-label="本机素材缓存" className="content-material-cache">
           <span>
@@ -2838,6 +3435,109 @@ function MaterialsPageContent() {
             <option value="oral">口播成片</option>
             <option value="generation">视频成片</option>
           </select>
+          <select
+            aria-label="排序方式"
+            value={sort}
+            onChange={(event) => {
+              setSort(event.target.value as MaterialSort);
+              setPage(1);
+            }}
+          >
+            <option value="created_desc">最新上传</option>
+            <option value="created_asc">最早上传</option>
+            <option value="title_asc">名称 A→Z</option>
+            <option value="size_desc">文件大小</option>
+          </select>
+          <select
+            aria-label="对象筛选方式"
+            value={objectMode}
+            onChange={(event) => {
+              setObjectMode(event.target.value as typeof objectMode);
+              setPersonFilter("");
+              setProjectFilter("");
+              setPage(1);
+            }}
+          >
+            <option value="">全部对象</option>
+            <option value="person">按人物</option>
+            <option value="project">按项目</option>
+          </select>
+          {objectMode === "person" ? (
+            <select
+              aria-label="按人物筛选"
+              value={personFilter}
+              onChange={(event) => {
+                setPersonFilter(event.target.value);
+                setPage(1);
+              }}
+            >
+              <option value="">全部人物</option>
+              {data.people.map((person) => (
+                <option key={person.id} value={person.id}>
+                  {person.name}
+                </option>
+              ))}
+            </select>
+          ) : null}
+          {objectMode === "project" ? (
+            <select
+              aria-label="按项目筛选"
+              value={projectFilter}
+              onChange={(event) => {
+                setProjectFilter(event.target.value);
+                setPage(1);
+              }}
+            >
+              <option value="">全部项目</option>
+              {data.projects.map((project) => (
+                <option key={project.id} value={project.id}>
+                  {project.name}
+                </option>
+              ))}
+            </select>
+          ) : null}
+          <select
+            aria-label="方向筛选"
+            value={orientationFilter}
+            onChange={(event) => {
+              setOrientationFilter(
+                event.target.value as typeof orientationFilter,
+              );
+              setPage(1);
+            }}
+          >
+            <option value="">全部方向</option>
+            <option value="portrait">竖屏</option>
+            <option value="landscape">横屏</option>
+            <option value="square">方形</option>
+          </select>
+          {tagSuggestions.length > 0 ? (
+            <select
+              aria-label="标签筛选"
+              value={tagFilter}
+              onChange={(event) => {
+                setTagFilter(event.target.value);
+                setPage(1);
+              }}
+            >
+              <option value="">全部标签</option>
+              {tagSuggestions.map((item) => (
+                <option key={item.tag} value={item.tag}>
+                  {item.tag}（{item.count}）
+                </option>
+              ))}
+            </select>
+          ) : null}
+          <Button
+            variant={trashedView ? "primary" : "outline"}
+            onClick={() => {
+              setTrashedView((value) => !value);
+              setOrganize(false);
+              setPage(1);
+            }}
+          >
+            {trashedView ? "返回素材库" : "已移除"}
+          </Button>
           <Button type="submit" variant="outline">
             搜索
           </Button>
@@ -2964,53 +3664,145 @@ function MaterialsPageContent() {
               </Button>
             </div>
           ) : null}
-          <div className="content-asset-grid">
-            {currentAssets.map((asset) => {
-              const authId = asset.previewAssetId ?? asset.assetId ?? "";
-              // MATERIAL-THUMBS-B / MATERIAL-UX-02：带封面的视频瓦片用 img 展示
-              // 缩略图（懒加载），不再让浏览器经服务端代理流式拉原视频；图片瓦片
-              // 同样走派生缩略图（单张手机照片可达 10MB）；点开详情仍用原图/原视频。
-              const thumbnailUrl =
-                asset.kind === "video" || asset.kind === "image"
-                  ? thumbnailUrls[authId]
-                  : undefined;
-              return (
-                <AssetCard
-                  key={asset.id}
-                  asset={{
-                    ...asset,
-                    url:
-                      asset.kind === "image"
-                        ? (thumbnailUrl ??
-                          asset.url ??
-                          previewStates[asset.id]?.url)
-                        : thumbnailUrl
-                          ? undefined
-                          : (asset.url ?? previewStates[asset.id]?.url),
-                    poster: thumbnailUrl ?? asset.poster,
-                  }}
-                  selected={selected?.id === asset.id}
-                  organize={organize}
-                  checked={selectedIds.has(asset.id)}
-                  previewStatus={previewStates[asset.id]?.status}
-                  onSelect={() => {
-                    if (organize) {
-                      toggleSelected(asset.id);
-                      return;
+          {rowsMode ? (
+            <div className="content-material-rows">
+              {currentAssets.map((asset) => {
+                const oralAction =
+                  !trashedView && asset.allowedUses?.includes("oral_audio")
+                    ? () => {
+                        retainForDraft(asset);
+                        patchDraft({
+                          audioId: asset.id,
+                          ipId: asset.personId,
+                          voiceId: undefined,
+                        });
+                        navigate("oral-audio", { returnTo: "materials" });
+                      }
+                    : undefined;
+                return (
+                  <MaterialRow
+                    key={asset.id}
+                    asset={asset}
+                    showPurpose={kind === "audio" && !trashedView}
+                    quickActions={
+                      trashedView
+                        ? [
+                            {
+                              key: "restore",
+                              label: "恢复",
+                              run: () => void restoreMaterial(asset),
+                            },
+                          ]
+                        : quickActionsFor(asset)
                     }
-                    if (previewStates[asset.id]?.status === "error")
-                      void loadPreview(asset);
-                    setSelectedAsset(asset);
-                    patchState({ selectedAssetId: asset.id });
-                  }}
-                  onPreviewError={(failedUrl) => {
-                    invalidatePreview(asset, failedUrl);
-                  }}
-                  onPlay={() => void warmPreview(asset)}
+                    onOralUse={oralAction}
+                    onSelect={() => selectAsset(asset)}
+                  />
+                );
+              })}
+            </div>
+          ) : (
+            <div className="content-asset-grid">
+              {currentAssets
+                .filter((asset) => !audioCompactRows || asset.kind !== "audio")
+                .map((asset) => {
+                  const authId = asset.previewAssetId ?? asset.assetId ?? "";
+                  // MATERIAL-UX-06/07/09：卡片快捷动作——回收站视图替换为“恢复”。
+                  const quickActions = trashedView
+                    ? [
+                        {
+                          key: "restore",
+                          label: "恢复",
+                          run: () => void restoreMaterial(asset),
+                        },
+                      ]
+                    : quickActionsFor(asset);
+                  // MATERIAL-THUMBS-B / MATERIAL-UX-02：带封面的视频瓦片用 img 展示
+                  // 缩略图（懒加载），不再让浏览器经服务端代理流式拉原视频；图片瓦片
+                  // 同样走派生缩略图（单张手机照片可达 10MB）；点开详情仍用原图/原视频。
+                  const thumbnailUrl =
+                    asset.kind === "video" || asset.kind === "image"
+                      ? thumbnailUrls[authId]
+                      : undefined;
+                  return (
+                    <div className="content-asset-cell" key={asset.id}>
+                      <AssetCard
+                        asset={{
+                          ...asset,
+                          url:
+                            asset.kind === "image"
+                              ? (thumbnailUrl ??
+                                asset.url ??
+                                previewStates[asset.id]?.url)
+                              : thumbnailUrl
+                                ? undefined
+                                : (asset.url ?? previewStates[asset.id]?.url),
+                          poster: thumbnailUrl ?? asset.poster,
+                        }}
+                        selected={selected?.id === asset.id}
+                        organize={organize}
+                        checked={selectedIds.has(asset.id)}
+                        previewStatus={previewStates[asset.id]?.status}
+                        onSelect={() => {
+                          if (organize) {
+                            toggleSelected(asset.id);
+                            return;
+                          }
+                          if (previewStates[asset.id]?.status === "error")
+                            void loadPreview(asset);
+                          setSelectedAsset(asset);
+                          patchState({ selectedAssetId: asset.id });
+                        }}
+                        onPreviewError={(failedUrl) => {
+                          invalidatePreview(asset, failedUrl);
+                        }}
+                        onPlay={() => void warmPreview(asset)}
+                      />
+                      {/* MATERIAL-UX-06：hover 快捷动作（卡片 button 的兄弟浮层，避免嵌套交互元素）。 */}
+                      {!organize && quickActions.length > 0 ? (
+                        <div className="content-asset__quick">
+                          {quickActions.map((action) => (
+                            <button
+                              key={action.key}
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                action.run();
+                              }}
+                            >
+                              {action.label}
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+            </div>
+          )}
+          {audioCompactRows && audioCompactAssets.length > 0 ? (
+            <div className="content-material-rows">
+              {audioCompactAssets.map((asset) => (
+                <MaterialRow
+                  key={asset.id}
+                  asset={asset}
+                  compact
+                  quickActions={
+                    trashedView
+                      ? [
+                          {
+                            key: "restore",
+                            label: "恢复",
+                            run: () => void restoreMaterial(asset),
+                          },
+                        ]
+                      : quickActionsFor(asset)
+                  }
+                  onSelect={() => selectAsset(asset)}
                 />
-              );
-            })}
-          </div>
+              ))}
+            </div>
+          ) : null}
           {remoteLoading ? <Hint>正在读取云端素材…</Hint> : null}
           {remoteError ? <Hint>{remoteError}</Hint> : null}
           {!remoteLoading && !remoteError && currentAssets.length === 0 ? (
@@ -3104,16 +3896,167 @@ function MaterialsPageContent() {
                 <dt>来源</dt>
                 <dd>{selected.source}</dd>
                 <dt>归属</dt>
-                <dd>{selected.personId ? "人物库" : selected.group}</dd>
+                <dd>
+                  {selected.personId && selected.personName ? (
+                    <Button
+                      variant="quiet"
+                      onClick={() =>
+                        navigate("person-photos", {
+                          selectedPersonId: selected.personId,
+                        })
+                      }
+                    >
+                      {selected.personName}（人物库）
+                    </Button>
+                  ) : selected.projectId && selected.projectTitle ? (
+                    <Button
+                      variant="quiet"
+                      onClick={() => navigate("workbench")}
+                    >
+                      {selected.projectTitle}
+                    </Button>
+                  ) : (
+                    selected.group
+                  )}
+                </dd>
+                {selected.createdAt ? (
+                  <>
+                    <dt>上传时间</dt>
+                    <dd>{formatTaskTime(selected.createdAt)}</dd>
+                  </>
+                ) : null}
+                {formatMaterialSize(selected.sizeBytes) ? (
+                  <>
+                    <dt>文件大小</dt>
+                    <dd>{formatMaterialSize(selected.sizeBytes)}</dd>
+                  </>
+                ) : null}
+                {selected.width && selected.height ? (
+                  <>
+                    <dt>尺寸</dt>
+                    <dd>
+                      {selected.width} × {selected.height}
+                      {selected.aspectRatio ? ` · ${selected.aspectRatio}` : ""}
+                    </dd>
+                  </>
+                ) : null}
+                {selected.duration ? (
+                  <>
+                    <dt>时长</dt>
+                    <dd>{selected.duration}</dd>
+                  </>
+                ) : null}
+                {!review ? (
+                  <>
+                    <dt>标签</dt>
+                    <dd>
+                      <div className="content-tag-editor">
+                        {selectedTags.map((tag) => (
+                          <span key={tag} className="content-tag-editor__chip">
+                            {tag}
+                            <Button
+                              aria-label={`删除标签 ${tag}`}
+                              variant="quiet"
+                              onClick={() =>
+                                setSelectedTags((current) =>
+                                  current.filter((item) => item !== tag),
+                                )
+                              }
+                            >
+                              ×
+                            </Button>
+                          </span>
+                        ))}
+                        <input
+                          aria-label="添加标签"
+                          list="material-tag-suggestions"
+                          maxLength={40}
+                          placeholder="回车添加标签"
+                          value={tagInput}
+                          onChange={(event) => setTagInput(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key !== "Enter") return;
+                            event.preventDefault();
+                            const tag = tagInput.trim();
+                            if (!tag) return;
+                            setSelectedTags((current) =>
+                              current.includes(tag)
+                                ? current
+                                : [...current, tag],
+                            );
+                            setTagInput("");
+                          }}
+                        />
+                        <datalist id="material-tag-suggestions">
+                          {tagSuggestions.map((item) => (
+                            <option key={item.tag} value={item.tag} />
+                          ))}
+                        </datalist>
+                        {selectedTags.join(",") !==
+                        (selected.tags ?? []).join(",") ? (
+                          <Button
+                            variant="quiet"
+                            disabled={busyAction === "tags"}
+                            onClick={() => void saveTags()}
+                          >
+                            {busyAction === "tags" ? "保存中…" : "保存标签"}
+                          </Button>
+                        ) : null}
+                      </div>
+                    </dd>
+                  </>
+                ) : null}
                 <dt>状态</dt>
                 <dd>
                   {selected.delivery === "direct"
-                    ? "生成完成，尚未归档"
+                    ? "待归档（可预览不可复用）"
                     : selected.saved
-                      ? "云端永久保存"
+                      ? "可用（云端）"
                       : "处理中"}
                 </dd>
               </dl>
+              {selected.materialId && !trashedView ? (
+                <div className="content-usage-panel">
+                  <Button
+                    variant="outline"
+                    disabled={usagesLoading}
+                    onClick={() => void loadUsages(selected.materialId!)}
+                  >
+                    {usagesLoading ? "读取中…" : "查看使用记录"}
+                  </Button>
+                  {usages ? (
+                    usages.total === 0 ? (
+                      <p className="content-usage-panel__empty">未被使用</p>
+                    ) : (
+                      <div className="content-usage-panel__list">
+                        <p>被 {usages.total} 个任务引用</p>
+                        <ul>
+                          {usages.items.map((usage) => (
+                            <li key={usage.task_id}>
+                              <span>
+                                {usage.kind === "oral"
+                                  ? "口播任务"
+                                  : "视频生成"}
+                                {" · "}
+                                {usage.status}
+                              </span>
+                              <span>{formatTaskTime(usage.created_at)}</span>
+                            </li>
+                          ))}
+                        </ul>
+                        {usages.total > usages.items.length ? (
+                          <p>
+                            还有 {usages.total - usages.items.length} 条未显示
+                          </p>
+                        ) : null}
+                      </div>
+                    )
+                  ) : null}
+                  {usagesError ? (
+                    <p className="content-usage-panel__empty">{usagesError}</p>
+                  ) : null}
+                </div>
+              ) : null}
               {selected.composite && selected.personId ? (
                 <Button
                   variant="outline"

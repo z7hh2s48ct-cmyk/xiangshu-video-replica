@@ -16,17 +16,23 @@ from app.materials import (
     MaterialGroupsResponse,
     MaterialItem,
     MaterialMediaType,
+    MaterialOrientation,
     MaterialPage,
     MaterialResolveResponse,
+    MaterialSort,
     MaterialSource,
+    MaterialTagItem,
     MaterialUpdateRequest,
     MaterialUploadIntentRequest,
     MaterialUploadIntentResponse,
+    MaterialUsagesResponse,
     attach_video_thumbnail,
     bulk_update_materials,
     create_material_upload_intent,
     hide_material,
     list_material_groups,
+    list_material_tags,
+    list_material_usages,
     list_materials,
     persist_material_upload,
     prepare_material_upload,
@@ -54,6 +60,12 @@ def read_materials(
     source: MaterialSource | None = None,
     q: Annotated[str | None, Query(max_length=120)] = None,
     group: Annotated[str | None, Query(max_length=80)] = None,
+    sort: MaterialSort = "created_desc",
+    person_id: Annotated[str | None, Query(max_length=64)] = None,
+    project_id: Annotated[str | None, Query(max_length=64)] = None,
+    tag: Annotated[str | None, Query(max_length=40)] = None,
+    orientation: MaterialOrientation | None = None,
+    trashed: bool = False,
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 24,
 ) -> MaterialPage:
@@ -66,6 +78,12 @@ def read_materials(
         page=page,
         page_size=page_size,
         group=group.strip() if group is not None else None,
+        sort=sort,
+        person_id=person_id.strip() if person_id and person_id.strip() else None,
+        project_id=project_id.strip() if project_id and project_id.strip() else None,
+        tag=tag.strip() if tag and tag.strip() else None,
+        orientation=orientation,
+        trashed=trashed,
     )
 
 
@@ -75,6 +93,25 @@ def read_material_groups(
     actor: AuthenticatedUser,
 ) -> MaterialGroupsResponse:
     return list_material_groups(conn, actor=actor)
+
+
+@router.get("/{material_id}/usages", response_model=MaterialUsagesResponse)
+def read_material_usages(
+    material_id: str,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> MaterialUsagesResponse:
+    """MATERIAL-UX-10：单素材按需使用记录（owner 围栏；直出成片恒为空）。"""
+    return list_material_usages(conn, actor=actor, material_id=material_id)
+
+
+@router.get("/tags", response_model=list[MaterialTagItem])
+def read_material_tags(
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> list[MaterialTagItem]:
+    """MATERIAL-UX-05：当前用户可见素材的标签聚合计数（count DESC, tag ASC）。"""
+    return list_material_tags(conn, actor=actor)
 
 
 @router.post("/resolve", response_model=MaterialResolveResponse)

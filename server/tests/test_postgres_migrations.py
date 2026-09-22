@@ -35,19 +35,16 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 # HEAD_REVISION 取链尾：20260921T0000_merge_wallet_actor_and_billing_metadata 把
 # CUSTOMER-CENTER-V2-20260919（sub_accounts → wallet_actor）与 main
 # （oral_soft_delete → merge_parallel_heads → add_api_metadata_to_billing_ops）
-# 两条并行链线性化，保持 alembic 单头；20260922T1200_recharge_packages（充值套餐）、
-# 20260921T1200_sub_account_quotas（Phase 3a 月度额度表）、
-# 20260922T1800_sub_account_permissions（Phase 3b 功能权限矩阵表）依次叠加；
+# 两条并行链线性化，保持 alembic 单头；20260922T1200_recharge_packages（充值套餐）
+# 叠加在其上，20260921T1200_sub_account_quotas（Phase 3a 月度额度表）之后，
+# 20260922T1800_sub_account_permissions（Phase 3b 功能权限矩阵表）；
 # BILLING-OBS-20260922 三个迁移重挂到 sub_account_permissions 之上：
 # 20260922T1200_analysis_task_failure_diagnostic 追加 analysis_tasks.upstream_diagnostic_json，
 # 20260922T1600_analysis_task_request_id 再追加 analysis_tasks.request_id，
-# 20260922T2000_analysis_task_attempts 新建失败历史表 analysis_task_attempts，
-# 20260923T0000_open_h3_extended_modes 移除 T2V/R2V/L2V 门禁并 DROP 掉
-# runtime_settings.h3_extended_modes_enabled。
-# 本分支的 20260922T1500_viral_search_discoveries（爆款视频搜索发现记录表）
-# 按手册 §3 重挂于链尾，故链尾（alembic head）为该值。
+# 20260922T2000_analysis_task_attempts 新建失败历史表 analysis_task_attempts；
+# 20260922T2200_material_preference_tags 为素材偏好表增加标签列 tags_json（MATERIAL-UX-05）。
 # 迁移后 alembic 版本头即该值，9 处 assert version == HEAD_REVISION 依赖此值。
-HEAD_REVISION = "20260922T1500_viral_search_discoveries"
+HEAD_REVISION = "20260922T2200_material_preference_tags"
 
 
 def test_viral_script_cache_migration_preserves_results_without_task_foreign_keys(

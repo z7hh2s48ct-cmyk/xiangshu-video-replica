@@ -64,10 +64,7 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 QUOTA_TABLE = "sub_account_quotas"
 QUOTA_DB = "t_sub_account_quota"
 
-# 链尾：本分支 20260922T1500_viral_search_discoveries（爆款视频搜索发现记录表）
-# 按手册 §3 重挂于 main 新链尾（open_h3_extended_modes）之上，故链尾为该值。
-_HEAD_REVISION = "20260922T1500_viral_search_discoveries"
-# _PRIOR_REVISION 是本迁移自身的 down_revision，用于降级断言。
+_HEAD_REVISION = "20260922T2200_material_preference_tags"
 # 合并 main 后 1200 重挂到 20260922T1200_recharge_packages（手册 §3）；Phase 3b
 # permissions 与其后的 analysis 三迁移（failure_diagnostic / request_id /
 # task_attempts）追加为链尾。降级到它只回退本迁移（及清零后的 permissions 空表），

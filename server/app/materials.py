@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import struct
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.auth import CurrentUser
+from app.character_identity import jpeg_dimensions
 from app.content_store import (
     delete_object_outside_content_namespace,
     find_content_object,
@@ -58,9 +60,13 @@ from app.storage import (
 
 MaterialMediaType = Literal["image", "video", "audio"]
 MaterialSource = Literal["upload", "project", "character", "oral", "generation"]
+# MATERIAL-UX-03：列表排序维度。created_desc 为默认，与既有行为逐字一致。
+MaterialSort = Literal["created_desc", "created_asc", "title_asc", "size_desc"]
 MaterialStatus = Literal["uploading", "ready", "unavailable"]
 MaterialDelivery = Literal["stored", "direct"]
 AudioPurpose = Literal["oral_audio", "voice_clone", "reference"]
+# MATERIAL-UX-08：方向筛选维度（按 aspect_ratio 派生：>1.05 横屏、<0.95 竖屏、其余方形）。
+MaterialOrientation = Literal["portrait", "landscape", "square"]
 
 IMAGE_UPLOAD_LIMIT = 10 * 1024 * 1024
 VOICE_CLONE_UPLOAD_LIMIT = 20 * 1024 * 1024
@@ -117,6 +123,18 @@ class MaterialItem(BaseModel):
     generation_task_id: str | None
     project_id: str | None
     person_id: str | None
+    # MATERIAL-UX-03：归属对象显示名（人物分支=display_name；项目/成片分支=projects.name）。
+    # 无对应对象的分支（如「我的上传」）为 None，前端需容错。
+    person_name: str | None = None
+    project_title: str | None = None
+    # MATERIAL-UX-05：用户侧标签（偏好层 tags_json，全量覆盖语义；无偏好行为 []）。
+    tags: list[str] = Field(default_factory=list)
+    # MATERIAL-UX-08：宽高与比例（assets.metadata_json 派生；存量素材/直出无存档为 None）。
+    width: int | None = None
+    height: int | None = None
+    aspect_ratio: float | None = None
+    # MATERIAL-UX-07：音频用途三态（metadata 派生；非音频/缺省为 None）。
+    audio_purpose: AudioPurpose | None = None
     title: str
     group: str
     media_type: MaterialMediaType
@@ -191,6 +209,8 @@ class MaterialUpdateRequest(BaseModel):
     title: str | None = Field(default=None, max_length=120)
     group: str | None = Field(default=None, max_length=80)
     hidden: bool | None = None
+    # MATERIAL-UX-05：None=未提交（不动既有标签）；list=全量覆盖（[] 即清空）。
+    tags: list[str] | None = None
 
 
 class MaterialGroupItem(BaseModel):
@@ -198,6 +218,35 @@ class MaterialGroupItem(BaseModel):
 
     name: str
     count: int
+
+
+class MaterialTagItem(BaseModel):
+    """MATERIAL-UX-05：当前用户可见素材的标签聚合计数。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tag: str
+    count: int
+
+
+class MaterialUsage(BaseModel):
+    """MATERIAL-UX-10：引用该素材的一个任务。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str
+    kind: Literal["generation", "oral"]
+    status: str
+    created_at: str
+
+
+class MaterialUsagesResponse(BaseModel):
+    """MATERIAL-UX-10：单素材按需的使用记录（不做列表批量聚合）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    total: int
+    items: list[MaterialUsage]
 
 
 class MaterialGroupsResponse(BaseModel):
@@ -211,6 +260,8 @@ class MaterialBulkUpdate(BaseModel):
 
     group: str | None = Field(default=None, max_length=80)
     hidden: bool | None = None
+    # MATERIAL-UX-05：语义同单条 PATCH——None 不动，list 全量覆盖。
+    tags: list[str] | None = None
 
 
 class MaterialBulkRequest(BaseModel):
@@ -251,10 +302,86 @@ class ProbedMaterialUpload:
     # MATERIAL-THUMBS-B：视频素材的首帧 JPEG 字节（探测期抽出；落存储与记键
     # 延后到持久化之后——dedup 可能改写最终对象键，且外部 I/O 不得进入写事务）。
     thumbnail_jpeg: bytes | None = None
+    # MATERIAL-UX-08：探测期顺手取宽高（视频来自 ffprobe，图片来自头解析）；
+    # 取不到为 None，不影响上传结果。
+    width: int | None = None
+    height: int | None = None
 
 
 def material_error(status: int, code: str, message: str) -> HTTPException:
     return HTTPException(status_code=status, detail={"code": code, "message": message})
+
+
+# MATERIAL-UX-05：标签服务端规整上限。trim/去空/去重静默做，超限显式拒绝（可预期的
+# 失败优于静默截断）；字符数按 Unicode 码点计，中文一字一符。
+TAG_MAX_PER_MATERIAL = 20
+TAG_MAX_LENGTH = 40
+
+
+def _probe_image_dimensions(content: bytes, suffix: str) -> tuple[int, int] | None:
+    """MATERIAL-UX-08：图片宽高头解析（PNG/JPEG/WebP），尽力而为。
+
+    与人物库源图校验（image_dimensions，失败即 422）不同——素材库方向信息是
+    增值数据，任何解析失败都返回 None，绝不阻塞上传主链路。
+    """
+    try:
+        if (
+            suffix == ".png"
+            and len(content) >= 24
+            and content[:8] == b"\x89PNG\r\n\x1a\n"
+            and content[12:16] == b"IHDR"
+        ):
+            width, height = struct.unpack(">II", content[16:24])
+            return (width, height) if width and height else None
+        if suffix in (".jpg", ".jpeg"):
+            return jpeg_dimensions(content)
+        if len(content) >= 25 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+            chunk = content[12:16]
+            if chunk == b"VP8X" and len(content) >= 30:
+                width = 1 + int.from_bytes(content[24:27], "little")
+                height = 1 + int.from_bytes(content[27:30], "little")
+                return (width, height) if width and height else None
+            if chunk == b"VP8 " and len(content) >= 30:
+                # 有损 WebP 的 FourCC 是 "VP8 "（第四个字符是空格）。
+                width = int.from_bytes(content[26:28], "little") & 0x3FFF
+                height = int.from_bytes(content[28:30], "little") & 0x3FFF
+                return (width, height) if width and height else None
+            if chunk == b"VP8L" and len(content) >= 25 and content[20] == 0x2F:
+                bits = int.from_bytes(content[21:25], "little")
+                width = (bits & 0x3FFF) + 1
+                height = ((bits >> 14) & 0x3FFF) + 1
+                return (width, height) if width and height else None
+    except (struct.error, ValueError, IndexError, HTTPException):
+        # 人物库的 jpeg_dimensions 校验失败走 HTTPException——在这里统一降级为
+        # “无方向信息”，方向缺失绝不影响上传主链路。
+        return None
+    return None
+
+
+def _decode_tags(raw: Any) -> list[str]:
+    """MATERIAL-UX-05：偏好行 tags_json（TEXT-JSON）容错解析为字符串列表。"""
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            return []
+        return [str(tag) for tag in parsed] if isinstance(parsed, list) else []
+    if isinstance(raw, list):
+        return [str(tag) for tag in raw]
+    return []
+
+
+def _normalize_tags(raw: list[str]) -> list[str]:
+    normalized = list(dict.fromkeys(tag.strip() for tag in raw if tag.strip()))
+    if len(normalized) > TAG_MAX_PER_MATERIAL or any(
+        len(tag) > TAG_MAX_LENGTH for tag in normalized
+    ):
+        raise material_error(
+            422,
+            "MATERIAL_TAGS_INVALID",
+            f"每条素材最多 {TAG_MAX_PER_MATERIAL} 个标签，单个标签不超过 {TAG_MAX_LENGTH} 字。",
+        )
+    return normalized
 
 
 def parse_material_id(material_id: str) -> tuple[Literal["asset", "generation"], str]:
@@ -375,7 +502,9 @@ def _candidate_cte() -> str:
                 ELSE 'video'
             END AS media_type,
             CASE WHEN asset.size_bytes > 0 THEN 'ready' ELSE 'uploading' END AS status,
-            'stored' AS delivery
+            'stored' AS delivery,
+            NULL AS person_name,
+            project.name AS project_title
         FROM assets AS asset
         JOIN projects AS project ON project.id = asset.project_id
         WHERE (asset.content_type LIKE 'image/%%'
@@ -395,7 +524,8 @@ def _candidate_cte() -> str:
                 ELSE 'video'
             END,
             CASE WHEN asset.size_bytes > 0 AND asset.sha256 != '' THEN 'ready' ELSE 'uploading' END,
-            'stored'
+            'stored',
+            NULL, NULL
         FROM assets AS asset
         WHERE asset.project_id IS NULL
           AND asset.kind IN ('material_image', 'material_audio', 'material_video')
@@ -408,9 +538,11 @@ def _candidate_cte() -> str:
             'asset', asset.id, oral.owner_user_id, asset.id, NULL,
             NULL, oral.identity_id, oral.title, '口播成片', 'oral',
             asset.content_type, asset.size_bytes, asset.metadata_json,
-            asset.created_at, 'video', 'ready', 'stored'
+            asset.created_at, 'video', 'ready', 'stored',
+            oral_identity.display_name, NULL
         FROM oral_tasks AS oral
         JOIN assets AS asset ON asset.id = oral.result_asset_id
+        LEFT JOIN person_identities AS oral_identity ON oral_identity.id = oral.identity_id
         WHERE oral.status = 'SUCCEEDED'
 
         UNION ALL
@@ -422,7 +554,8 @@ def _candidate_cte() -> str:
                 THEN sheet.name ELSE '基础五视图' END,
             CASE WHEN sheet.appearance_type = 'scene' THEN '场景形象照' ELSE '基础五视图' END,
             'character', asset.content_type, asset.size_bytes, asset.metadata_json,
-            asset.created_at, 'image', 'ready', 'stored'
+            asset.created_at, 'image', 'ready', 'stored',
+            sheet.display_name, NULL
         FROM character_sheets AS sheet
         JOIN assets AS asset ON asset.id = sheet.asset_id
 
@@ -433,7 +566,8 @@ def _candidate_cte() -> str:
             NULL, identity.id,
             identity.display_name || ' · 人物素材', '人物素材', 'character',
             asset.content_type, asset.size_bytes, asset.metadata_json,
-            asset.created_at, 'image', 'ready', 'stored'
+            asset.created_at, 'image', 'ready', 'stored',
+            identity.display_name, NULL
         FROM character_assets AS character_asset
         JOIN assets AS asset ON asset.id = character_asset.asset_id
         JOIN character_versions AS version
@@ -456,7 +590,8 @@ def _candidate_cte() -> str:
             '任务结果', 'generation', 'video/mp4', asset.size_bytes,
             COALESCE(asset.metadata_json,'{}'),
             COALESCE(asset.created_at,task.created_at), 'video', 'ready',
-            CASE WHEN asset.id IS NULL THEN 'direct' ELSE 'stored' END
+            CASE WHEN asset.id IS NULL THEN 'direct' ELSE 'stored' END,
+            NULL, project.name
         FROM generation_tasks AS task
         JOIN generation_batches AS batch ON batch.id = task.batch_id
         LEFT JOIN projects AS project ON project.id = batch.project_id
@@ -489,6 +624,24 @@ def _grouped_character_clause() -> str:
     ))"""
 
 
+def _orientation_clause() -> str:
+    """MATERIAL-UX-08：按 metadata 里的宽高派生方向（与前端阈值一致）。
+
+    metadata_json 是 TEXT-JSON（仓库约定），筛选时按需 ::jsonb 提取；缺宽高的
+    存量素材对任何方向筛选都不命中（派生为 NULL），前端提示“上传后生效”。
+    """
+    ratio = (
+        "CAST(candidate.metadata_json::jsonb->>'width' AS float) / "
+        "NULLIF(CAST(candidate.metadata_json::jsonb->>'height' AS float), 0)"
+    )
+    return f"""(CASE
+        WHEN {ratio} IS NULL THEN NULL
+        WHEN {ratio} > 1.05 THEN 'landscape'
+        WHEN {ratio} < 0.95 THEN 'portrait'
+        ELSE 'square'
+    END) = %s"""
+
+
 def _group_expression() -> str:
     """有效分组（override 优先，空串回落 base_group），与 MaterialItem.group 同口径。
 
@@ -496,6 +649,26 @@ def _group_expression() -> str:
     若不 trim，导航会展示“点进去为空”的幽灵分组。
     """
     return "COALESCE(NULLIF(BTRIM(preference.group_override), ''), candidate.base_group)"
+
+
+def _order_by_clause(sort: str) -> str:
+    """列表排序（MATERIAL-UX-03）。
+
+    默认 ``created_desc`` 与既有 ORDER BY 逐字一致（回归护栏）；tiebreaker 保证
+    跨分支稳定分页；``size_desc`` 用 NULLS LAST 让无存档直出成片（size_bytes
+    IS NULL）稳定落在最后。``title_asc`` 按有效标题（override 优先）升序。
+    """
+    tiebreaker = "candidate.source_type DESC, candidate.source_id DESC"
+    if sort == "created_asc":
+        return f"candidate.created_at ASC, {tiebreaker}"
+    if sort == "title_asc":
+        return (
+            "COALESCE(preference.title_override, candidate.base_title) ASC, "
+            f"candidate.created_at DESC, {tiebreaker}"
+        )
+    if sort == "size_desc":
+        return f"candidate.size_bytes DESC NULLS LAST, {tiebreaker}"
+    return f"candidate.created_at DESC, {tiebreaker}"
 
 
 def _read_rows(
@@ -509,6 +682,12 @@ def _read_rows(
     limit: int | None,
     offset: int = 0,
     group: str | None = None,
+    sort: str = "created_desc",
+    person_id: str | None = None,
+    project_id: str | None = None,
+    tag: str | None = None,
+    orientation: str | None = None,
+    trashed: bool = False,
     material_ids: list[tuple[Literal["asset", "generation"], str]] | None = None,
 ) -> list[Any]:
     scope, scope_params = _scope_clause(actor)
@@ -516,7 +695,10 @@ def _read_rows(
     if material_ids is None:
         clauses.append(_grouped_character_clause())
     parameters: list[object] = [actor.id, actor.id, *scope_params]
-    if not include_hidden:
+    if trashed:
+        # MATERIAL-UX-09：回收站视图——只看已移除（hidden=1）。
+        clauses.append("COALESCE(preference.hidden, 0) = 1")
+    elif not include_hidden:
         clauses.append("COALESCE(preference.hidden, 0) = 0")
     if media_type:
         clauses.append("candidate.media_type = %s")
@@ -531,6 +713,20 @@ def _read_rows(
         # 空串即「未分组」：base_group 恒非空，因此空集返回属预期语义保留。
         clauses.append(f"{_group_expression()} = %s")
         parameters.append(group)
+    if project_id is not None:
+        clauses.append("candidate.project_id = %s")
+        parameters.append(project_id)
+    if person_id is not None:
+        clauses.append("candidate.person_id = %s")
+        parameters.append(person_id)
+    if tag is not None:
+        # MATERIAL-UX-05：JSONB 数组包含（函数形式避开操作符字符的驱动差异）。
+        clauses.append("jsonb_exists(COALESCE(preference.tags_json::jsonb, '[]'::jsonb), %s)")
+        parameters.append(tag)
+    if orientation is not None:
+        # MATERIAL-UX-08：方向筛选（metadata 宽高派生）。
+        clauses.append(_orientation_clause())
+        parameters.append(orientation)
     if material_ids:
         clauses.append(
             "("
@@ -561,6 +757,7 @@ def _read_rows(
             ) AS reference) AS character_views_json,
             preference.title_override,
             preference.group_override,
+            COALESCE(preference.tags_json, '[]') AS tags_json,
             COALESCE(preference.hidden, 0) AS hidden
         FROM material_candidates AS candidate
         LEFT JOIN studio_material_preferences AS preference
@@ -568,8 +765,7 @@ def _read_rows(
          AND preference.source_type = candidate.source_type
          AND preference.source_id = candidate.source_id
         WHERE {" AND ".join(clauses)}
-        ORDER BY candidate.created_at DESC, candidate.source_type DESC,
-                 candidate.source_id DESC
+        ORDER BY {_order_by_clause(sort)}
         {pagination}
         """,
         tuple(parameters),
@@ -584,9 +780,19 @@ def _count_rows(
     source: str | None,
     query: str | None,
     group: str | None = None,
+    person_id: str | None = None,
+    project_id: str | None = None,
+    tag: str | None = None,
+    orientation: str | None = None,
+    trashed: bool = False,
 ) -> int:
     scope, scope_params = _scope_clause(actor)
-    clauses = [scope, "COALESCE(preference.hidden, 0) = 0", _grouped_character_clause()]
+    clauses = [
+        scope,
+        # MATERIAL-UX-09：trashed 视图只看 hidden=1，默认只看未移除。
+        "COALESCE(preference.hidden, 0) = 1" if trashed else "COALESCE(preference.hidden, 0) = 0",
+        _grouped_character_clause(),
+    ]
     parameters: list[object] = [actor.id, actor.id, *scope_params]
     if media_type:
         clauses.append("candidate.media_type = %s")
@@ -600,6 +806,18 @@ def _count_rows(
     if group is not None:
         clauses.append(f"{_group_expression()} = %s")
         parameters.append(group)
+    if project_id is not None:
+        clauses.append("candidate.project_id = %s")
+        parameters.append(project_id)
+    if person_id is not None:
+        clauses.append("candidate.person_id = %s")
+        parameters.append(person_id)
+    if tag is not None:
+        clauses.append("jsonb_exists(COALESCE(preference.tags_json::jsonb, '[]'::jsonb), %s)")
+        parameters.append(tag)
+    if orientation is not None:
+        clauses.append(_orientation_clause())
+        parameters.append(orientation)
     row = conn.execute(
         _candidate_cte()
         + f"""
@@ -701,6 +919,24 @@ def material_item(row: Any) -> MaterialItem:
         ),
         project_id=None if row["project_id"] is None else str(row["project_id"]),
         person_id=None if row["person_id"] is None else str(row["person_id"]),
+        person_name=None if row["person_name"] is None else str(row["person_name"]),
+        project_title=None if row["project_title"] is None else str(row["project_title"]),
+        tags=_decode_tags(row["tags_json"]),
+        width=metadata.get("width") if isinstance(metadata.get("width"), int) else None,
+        height=metadata.get("height") if isinstance(metadata.get("height"), int) else None,
+        aspect_ratio=(
+            float(metadata["aspect_ratio"])
+            if isinstance(metadata.get("aspect_ratio"), (int, float))
+            else None
+        ),
+        audio_purpose=(
+            cast(
+                AudioPurpose,
+                metadata["audio_purpose"],
+            )
+            if metadata.get("audio_purpose") in {"oral_audio", "voice_clone", "reference"}
+            else None
+        ),
         title=_row_title(row, metadata),
         group=(
             group_override.strip()
@@ -734,12 +970,18 @@ def list_materials(
     conn: BusinessConnection,
     *,
     actor: CurrentUser,
-    media_type: str | None,
-    source: str | None,
+    media_type: MaterialMediaType | None,
+    source: MaterialSource | None,
     query: str | None,
     page: int,
     page_size: int,
     group: str | None = None,
+    sort: MaterialSort = "created_desc",
+    person_id: str | None = None,
+    project_id: str | None = None,
+    tag: str | None = None,
+    orientation: MaterialOrientation | None = None,
+    trashed: bool = False,
 ) -> MaterialPage:
     total = _count_rows(
         conn,
@@ -748,6 +990,11 @@ def list_materials(
         source=source,
         query=query,
         group=group,
+        person_id=person_id,
+        project_id=project_id,
+        tag=tag,
+        orientation=orientation,
+        trashed=trashed,
     )
     start = (page - 1) * page_size
     rows = _read_rows(
@@ -760,6 +1007,12 @@ def list_materials(
         limit=page_size,
         offset=start,
         group=group,
+        sort=sort,
+        person_id=person_id,
+        project_id=project_id,
+        tag=tag,
+        orientation=orientation,
+        trashed=trashed,
     )
     return MaterialPage(
         items=[material_item(row) for row in rows],
@@ -796,6 +1049,90 @@ def list_material_groups(
     return MaterialGroupsResponse(
         items=[MaterialGroupItem(name=str(row["name"]), count=int(row["count"])) for row in rows]
     )
+
+
+def list_material_tags(
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+) -> list[MaterialTagItem]:
+    """MATERIAL-UX-05：按标签聚合当前用户可见、未隐藏的候选素材。
+
+    展开的是「偏好层标签」，未打标签的素材不产生行；owner 围栏、隐藏过滤与
+    人物去重口径与列表/分组聚合完全一致。
+    """
+    scope, scope_params = _scope_clause(actor)
+    rows = conn.execute(
+        _candidate_cte()
+        + f"""
+        SELECT tag.value AS tag, COUNT(*) AS count
+        FROM material_candidates AS candidate
+        LEFT JOIN studio_material_preferences AS preference
+          ON preference.user_id = %s
+         AND preference.source_type = candidate.source_type
+         AND preference.source_id = candidate.source_id
+        CROSS JOIN LATERAL jsonb_array_elements_text(
+            COALESCE(preference.tags_json::jsonb, '[]'::jsonb)
+        ) AS tag(value)
+        WHERE {scope}
+          AND COALESCE(preference.hidden, 0) = 0
+          AND {_grouped_character_clause()}
+        GROUP BY tag.value
+        ORDER BY count DESC, tag.value ASC
+        """,
+        tuple([actor.id, actor.id, *scope_params]),
+    ).fetchall()
+    return [MaterialTagItem(tag=str(row["tag"]), count=int(row["count"])) for row in rows]
+
+
+def list_material_usages(
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    material_id: str,
+) -> MaterialUsagesResponse:
+    """MATERIAL-UX-10：按需查询单个素材被哪些任务引用。
+
+    只对 asset 来源素材有意义（直出成片本身就是任务产物，无“被引用”概念）；
+    owner 围栏：generation 任务经 batch 归属校验，oral 任务按 owner 直属。
+    最多返回 20 条（total 用窗口计数给出全量），避免详情面板长列表。
+    """
+    require_material(conn, actor=actor, material_id=material_id)
+    source_type, source_id = parse_material_id(material_id)
+    if source_type == "generation":
+        return MaterialUsagesResponse(total=0, items=[])
+    rows = conn.execute(
+        """
+        SELECT usage.kind, usage.task_id, usage.status, usage.created_at,
+               COUNT(*) OVER () AS total_count
+        FROM (
+            SELECT 'generation' AS kind, task.id AS task_id, task.status AS status,
+                   task.created_at AS created_at
+            FROM generation_tasks task
+            JOIN generation_batches batch ON batch.id = task.batch_id
+            WHERE task.result_asset_id = %s AND batch.created_by_user_id = %s
+            UNION ALL
+            SELECT 'oral' AS kind, oral.id AS task_id, oral.status AS status,
+                   oral.created_at AS created_at
+            FROM oral_tasks oral
+            WHERE oral.result_asset_id = %s AND oral.owner_user_id = %s
+        ) AS usage
+        ORDER BY usage.created_at DESC
+        LIMIT 20
+        """,
+        (source_id, actor.id, source_id, actor.id),
+    ).fetchall()
+    items = [
+        MaterialUsage(
+            task_id=str(row["task_id"]),
+            kind=cast(Literal["generation", "oral"], row["kind"]),
+            status=str(row["status"]),
+            created_at=str(row["created_at"]),
+        )
+        for row in rows
+    ]
+    total = int(rows[0]["total_count"]) if rows else 0
+    return MaterialUsagesResponse(total=total, items=items)
 
 
 def resolve_materials(
@@ -1179,12 +1516,18 @@ def probe_material_upload(
         raise material_error(422, "MATERIAL_CONTENT_INVALID", "文件内容与素材类型不匹配。")
     duration_seconds = None
     thumbnail_jpeg: bytes | None = None
+    probed_width: int | None = None
+    probed_height: int | None = None
+    probed_dimensions: tuple[int, int] | None = None
     if prepared.media_type == "video":
         try:
             inspection = inspect_media_bytes(
                 content, suffix=".mp4", expected_type="video", min_duration_seconds=0.001
             )
             duration_seconds = inspection.duration_seconds
+            # MATERIAL-UX-08：ffprobe 已返回宽高，顺手记录（缺失不阻塞）。
+            probed_width = inspection.width
+            probed_height = inspection.height
         except MediaValidationFailed as exc:
             raise material_error(422, "MATERIAL_VIDEO_INVALID", "无法读取有效视频及时长。") from exc
         except (MediaToolFailed, MediaToolUnavailable) as exc:
@@ -1192,6 +1535,9 @@ def probe_material_upload(
                 503, "MATERIAL_VIDEO_PROBE_UNAVAILABLE", "视频校验服务暂不可用，请稍后重试。"
             ) from exc
         thumbnail_jpeg = extract_thumbnail_jpeg(content)
+    if prepared.media_type == "image":
+        # MATERIAL-UX-08：图片宽高头解析，失败只损失方向信息，不影响上传。
+        probed_dimensions = _probe_image_dimensions(content, suffix)
     if prepared.media_type == "image":
         # MATERIAL-UX-02：图片素材复用同一抽帧派生（ffmpeg 把单帧图缩成
         # ≤960×480 的 JPEG，超宽合成图也有宽度上界）；网格瓦片因此不再直拉
@@ -1243,6 +1589,8 @@ def probe_material_upload(
         content=content,
         content_type=prepared.content_type,
     )
+    if probed_dimensions is not None:
+        probed_width, probed_height = probed_dimensions
     return ProbedMaterialUpload(
         prepared=prepared,
         storage_uri=stored.uri,
@@ -1250,6 +1598,8 @@ def probe_material_upload(
         size_bytes=stored.size,
         duration_seconds=duration_seconds,
         thumbnail_jpeg=thumbnail_jpeg,
+        width=probed_width,
+        height=probed_height,
     )
 
 
@@ -1314,6 +1664,11 @@ def persist_material_upload(
     metadata["upload_status"] = "READY"
     if probed.duration_seconds is not None:
         metadata["duration_seconds"] = probed.duration_seconds
+    # MATERIAL-UX-08：宽高与方向派生数据（存量素材缺字段时前端优雅降级）。
+    if probed.width and probed.height:
+        metadata["width"] = probed.width
+        metadata["height"] = probed.height
+        metadata["aspect_ratio"] = round(probed.width / probed.height, 2)
     if prepared.media_type == "video" and probed.duration_seconds is not None:
         metadata["video_duration_verified"] = True
     if prepared.media_type == "audio" and probed.duration_seconds is not None:
@@ -1399,10 +1754,17 @@ def update_material(
     current = require_material(conn, actor=actor, material_id=material_id)
     if source_type == "generation" and (request.title is not None or request.group is not None):
         raise material_error(409, "MATERIAL_ACTION_UNAVAILABLE", "直出成片暂不支持重命名。")
-    if request.title is None and request.group is None and request.hidden is None:
+    if (
+        request.title is None
+        and request.group is None
+        and request.hidden is None
+        and request.tags is None
+    ):
         raise material_error(422, "MATERIAL_UPDATE_EMPTY", "至少提交一项修改。")
     title = request.title.strip() if isinstance(request.title, str) else None
     group = request.group.strip() if isinstance(request.group, str) else None
+    # MATERIAL-UX-05：None=未提交不动；list=全量覆盖（规整后）。
+    tags = _normalize_tags(request.tags) if request.tags is not None else None
     if request.title is not None and not title:
         raise material_error(422, "MATERIAL_TITLE_EMPTY", "素材名称不能为空。")
     if request.group is not None and not group:
@@ -1416,6 +1778,7 @@ def update_material(
             title=title,
             group=group,
             hidden=current.hidden if request.hidden is None else request.hidden,
+            tags=tags,
         )
         write_audit(
             conn,
@@ -1427,6 +1790,7 @@ def update_material(
                 "title_changed": request.title is not None,
                 "group_changed": request.group is not None,
                 "hidden_changed": request.hidden is not None,
+                "tags_changed": request.tags is not None,
             },
             commit=False,
         )
@@ -1461,6 +1825,8 @@ def bulk_update_materials(
     set_group = "group" in fields and group is not None
     clear_group = "group" in fields and group is None
     hidden = request.update.hidden
+    # MATERIAL-UX-05：批量标签全量覆盖（规整一次，逐条应用）；None=不动。
+    set_tags = _normalize_tags(request.update.tags) if request.update.tags is not None else None
     updated = 0
     skipped = 0
     with conn:
@@ -1483,6 +1849,7 @@ def bulk_update_materials(
                         title=None,
                         group=group,
                         hidden=target_hidden,
+                        tags=set_tags,
                     )
                 elif clear_group:
                     _upsert_preference(
@@ -1494,6 +1861,7 @@ def bulk_update_materials(
                         group=None,
                         hidden=target_hidden,
                         clear_group=True,
+                        tags=set_tags,
                     )
                 else:
                     # 仅 hidden：preserve_overrides 语义，绝不覆盖 title/group。
@@ -1506,6 +1874,7 @@ def bulk_update_materials(
                         group=None,
                         hidden=target_hidden,
                         preserve_overrides=True,
+                        tags=set_tags,
                     )
                 updated += 1
             except HTTPException:
@@ -1522,6 +1891,7 @@ def bulk_update_materials(
                 "skipped": skipped,
                 "group_changed": "group" in fields,
                 "hidden_changed": "hidden" in fields,
+                "tags_changed": "tags" in fields,
             },
             commit=False,
         )
@@ -1576,21 +1946,26 @@ def _upsert_preference(
     hidden: bool,
     preserve_overrides: bool = False,
     clear_group: bool = False,
+    tags: list[str] | None = None,
 ) -> None:
     # 写入侧统一 strip：与单条 PATCH / bulk 一致，避免新增带首尾空格的 override。
     if isinstance(group, str):
         group = group.strip() or None
+    # MATERIAL-UX-05：tags 参数语义——None=不动既有标签；list（含 []）=全量覆盖。
+    # INSERT 无既有行时落到 '[]'；UPDATE 用 COALESCE 保留。列是 TEXT-JSON，直接存文本。
+    tags_json = json.dumps(tags, ensure_ascii=False) if tags is not None else None
     if preserve_overrides:
         conn.execute(
             """
             INSERT INTO studio_material_preferences (
-                user_id, source_type, source_id, hidden
-            ) VALUES (%s, %s, %s, %s)
+                user_id, source_type, source_id, hidden, tags_json
+            ) VALUES (%s, %s, %s, %s, COALESCE(%s, '[]'))
             ON CONFLICT (user_id, source_type, source_id) DO UPDATE SET
                 hidden = excluded.hidden,
+                tags_json = COALESCE(%s, studio_material_preferences.tags_json),
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (actor_id, source_type, source_id, 1 if hidden else 0),
+            (actor_id, source_type, source_id, 1 if hidden else 0, tags_json, tags_json),
         )
         return
     if clear_group:
@@ -1598,30 +1973,41 @@ def _upsert_preference(
         conn.execute(
             """
             INSERT INTO studio_material_preferences (
-                user_id, source_type, source_id, hidden
-            ) VALUES (%s, %s, %s, %s)
+                user_id, source_type, source_id, hidden, tags_json
+            ) VALUES (%s, %s, %s, %s, COALESCE(%s, '[]'))
             ON CONFLICT (user_id, source_type, source_id) DO UPDATE SET
                 group_override = NULL,
                 hidden = excluded.hidden,
+                tags_json = COALESCE(%s, studio_material_preferences.tags_json),
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (actor_id, source_type, source_id, 1 if hidden else 0),
+            (actor_id, source_type, source_id, 1 if hidden else 0, tags_json, tags_json),
         )
         return
     conn.execute(
         """
         INSERT INTO studio_material_preferences (
-            user_id, source_type, source_id, title_override, group_override, hidden
-        ) VALUES (%s, %s, %s, %s, %s, %s)
+            user_id, source_type, source_id, title_override, group_override, hidden, tags_json
+        ) VALUES (%s, %s, %s, %s, %s, %s, COALESCE(%s, '[]'))
         ON CONFLICT (user_id, source_type, source_id) DO UPDATE SET
             title_override = COALESCE(excluded.title_override,
                                       studio_material_preferences.title_override),
             group_override = COALESCE(excluded.group_override,
                                       studio_material_preferences.group_override),
             hidden = excluded.hidden,
+            tags_json = COALESCE(%s, studio_material_preferences.tags_json),
             updated_at = CURRENT_TIMESTAMP
         """,
-        (actor_id, source_type, source_id, title, group, 1 if hidden else 0),
+        (
+            actor_id,
+            source_type,
+            source_id,
+            title,
+            group,
+            1 if hidden else 0,
+            tags_json,
+            tags_json,
+        ),
     )
 
 

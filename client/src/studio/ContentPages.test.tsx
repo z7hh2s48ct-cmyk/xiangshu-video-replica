@@ -28,6 +28,7 @@ const {
   removeViralFavorite,
   listMaterials,
   listMaterialGroups,
+  listMaterialTags,
   bulkUpdateMaterials,
   createMaterialUploadIntent,
   uploadMaterial,
@@ -40,6 +41,7 @@ const {
   getMaterialBatchPreviews,
   getMaterialCachedPreview,
   getMaterialCacheUsage,
+  getMaterialUsages,
   clearMaterialCache,
   evictMaterialCachedPreview,
   getStudioDraft,
@@ -69,6 +71,9 @@ const {
       items: [],
     }),
   ),
+  listMaterialTags: vi.fn(
+    async (): Promise<{ tag: string; count: number }[]> => [],
+  ),
   bulkUpdateMaterials: vi.fn(),
   createMaterialUploadIntent: vi.fn(),
   uploadMaterial: vi.fn(),
@@ -80,6 +85,22 @@ const {
   getAssetDownloadUrl: vi.fn(),
   getMaterialBatchPreviews: vi.fn(),
   getMaterialCachedPreview: vi.fn(),
+  getMaterialUsages: vi.fn(
+    async (
+      _materialId: string,
+    ): Promise<{
+      total: number;
+      items: {
+        task_id: string;
+        kind: string;
+        status: string;
+        created_at: string;
+      }[];
+    }> => ({
+      total: 0,
+      items: [],
+    }),
+  ),
   getMaterialCacheUsage: vi.fn(),
   clearMaterialCache: vi.fn(),
   evictMaterialCachedPreview: vi.fn(),
@@ -114,6 +135,7 @@ vi.mock("../api", () => ({
   removeViralFavorite,
   listMaterials,
   listMaterialGroups,
+  listMaterialTags,
   bulkUpdateMaterials,
   createMaterialUploadIntent,
   uploadMaterial,
@@ -126,6 +148,7 @@ vi.mock("../api", () => ({
   getMaterialBatchPreviews,
   getMaterialCachedPreview,
   getMaterialCacheUsage,
+  getMaterialUsages,
   clearMaterialCache,
   evictMaterialCachedPreview,
   getStudioDraft,
@@ -151,11 +174,16 @@ vi.mock("./localPublishAccounts", async (importOriginal) => ({
 }));
 // 组件现在统一走 putMaterial。默认实现沿用旧的「传输 → 完成」两步，
 // 这样既有用例针对 uploadMaterial / completeMaterialUpload 打的桩仍然生效；
-// 需要覆盖复用路径的用例可以直接给 putMaterial 打桩。
-putMaterial.mockImplementation(async (intent, file, onProgress) => {
+// 需要覆盖复用路径的用例可以直接给 putMaterial 打桩（beforeEach 会复位到此实现）。
+const defaultPutMaterial = async (
+  intent: Parameters<typeof putMaterial>[0],
+  file: Parameters<typeof putMaterial>[1],
+  onProgress: Parameters<typeof putMaterial>[2],
+) => {
   await uploadMaterial(intent, file, onProgress);
   return completeMaterialUpload(intent.asset_id);
-});
+};
+putMaterial.mockImplementation(defaultPutMaterial);
 
 class IntersectionObserverStub {
   observe() {}
@@ -313,6 +341,7 @@ function material(
     generation_task_id: null,
     project_id: null,
     person_id: null,
+    tags: [],
     title: `${id}.png`,
     group: "我的上传",
     media_type: "image",
@@ -439,10 +468,12 @@ describe("V1.4 内容与运营页面", () => {
     window.history.replaceState(null, "", "/");
     listMaterials.mockReset();
     listMaterialGroups.mockReset().mockResolvedValue({ items: [] });
+    listMaterialTags.mockReset().mockResolvedValue([]);
     bulkUpdateMaterials.mockReset();
     createMaterialUploadIntent.mockReset();
     uploadMaterial.mockReset();
     completeMaterialUpload.mockReset();
+    putMaterial.mockReset().mockImplementation(defaultPutMaterial);
     updateMaterial.mockReset();
     hideMaterial.mockReset();
     downloadMaterialAsset.mockReset();
@@ -475,6 +506,7 @@ describe("V1.4 内容与运营页面", () => {
           return { previews, thumbnails: {} };
         },
       );
+    getMaterialUsages.mockReset().mockResolvedValue({ total: 0, items: [] });
     getMaterialCacheUsage.mockReset().mockResolvedValue({
       bytes: 0,
       limitBytes: 256 * 1024 * 1024,
@@ -3010,7 +3042,7 @@ describe("V1.4 内容与运营页面", () => {
       "乡墅工程师施工现场人物竖版场景形象图.png",
     );
     expect(card.querySelector(".content-asset__status")).toHaveTextContent(
-      "永久保存",
+      "可用（云端）",
     );
     expect(
       rendered.container.querySelector(".content-asset__kind"),
@@ -3601,6 +3633,9 @@ describe("V1.4 内容与运营页面", () => {
         source: "upload",
         query: "庭院",
         group: undefined,
+        sort: "created_desc",
+        personId: undefined,
+        projectId: undefined,
         page: 1,
         pageSize: 24,
       }),
@@ -3615,11 +3650,7 @@ describe("V1.4 内容与运营页面", () => {
         media_type: "video",
         content_type: "video/mp4",
       }),
-      material("audio-3", {
-        title: "audio-3.mp3",
-        media_type: "audio",
-        content_type: "audio/mpeg",
-      }),
+      material("image-3"),
       ...Array.from({ length: 21 }, (_, index) =>
         material(`image-${index + 4}`),
       ),
@@ -3646,7 +3677,7 @@ describe("V1.4 内容与运营页面", () => {
     expect(firstEntries).toHaveLength(24);
     expect(
       firstEntries.slice(0, 3).map((entry: { id: string }) => entry.id),
-    ).toEqual(["image-1", "video-2", "audio-3"]);
+    ).toEqual(["image-1", "video-2", "image-3"]);
     // 首屏只读已有缓存或签在线地址，不等待 22 张原图全部下载到本机。
     const populateIds = firstEntries
       .filter((entry: { populate: boolean }) => entry.populate)
@@ -3659,10 +3690,9 @@ describe("V1.4 内容与运营页面", () => {
       "src",
       "https://storage.test/video-2",
     );
-    expect(screen.getByLabelText("audio-3.mp3")).toHaveAttribute(
-      "src",
-      "https://storage.test/audio-3",
-    );
+    expect(
+      await screen.findByRole("img", { name: "image-3.png" }),
+    ).toHaveAttribute("src", "https://storage.test/image-3");
 
     fireEvent.click(screen.getByRole("button", { name: "下一页" }));
     await waitFor(() =>
@@ -3821,10 +3851,11 @@ describe("V1.4 内容与运营页面", () => {
     expect(getAssetDownloadUrl).toHaveBeenCalledTimes(2);
   });
 
+  // MATERIAL-UX-07 后音频素材在网格中折叠为紧凑行（无瓦片 Media），
+  // 媒体错误重签机制由 image / video 两个分支覆盖；音频播放经详情面板。
   it.each([
     ["image", "image/png", "img"],
     ["video", "video/mp4", "video"],
-    ["audio", "audio/mpeg", "audio"],
   ] as const)(
     "%s 媒体错误后单次重签并让详情复用新地址",
     async (mediaType, contentType, tagName) => {
@@ -4257,6 +4288,761 @@ describe("V1.4 内容与运营页面", () => {
     expect(
       screen.getByRole("button", { name: "筛选分组 庭院案例" }),
     ).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("MATERIAL-UX-03：排序下拉切换后按新 sort 重拉并回到第 1 页", async () => {
+    listMaterials.mockResolvedValue({
+      items: [material("gate")],
+      page: 1,
+      page_size: 24,
+      total: 1,
+    });
+    useStudio.mockReturnValue(studio({ review: false }));
+    render(<MaterialsPage />);
+    await screen.findByRole("button", { name: "选择素材 gate.png" });
+    fireEvent.change(screen.getByLabelText("排序方式"), {
+      target: { value: "size_desc" },
+    });
+    await waitFor(() =>
+      expect(listMaterials).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sort: "size_desc", page: 1 }),
+      ),
+    );
+  });
+
+  it("MATERIAL-UX-03：按人物二级筛选来源于人物列表并下发 person_id", async () => {
+    listMaterials.mockResolvedValue({
+      items: [material("gate")],
+      page: 1,
+      page_size: 24,
+      total: 1,
+    });
+    const value = studio({ review: false });
+    value.data = {
+      ...value.data,
+      people: [
+        { id: "person-1", name: "张工" } as StudioData["people"][number],
+      ],
+    };
+    useStudio.mockReturnValue(value);
+    render(<MaterialsPage />);
+    await screen.findByRole("button", { name: "选择素材 gate.png" });
+    // 未选“按人物”时不出现人物二级下拉
+    expect(screen.queryByLabelText("按人物筛选")).toBeNull();
+    fireEvent.change(screen.getByLabelText("对象筛选方式"), {
+      target: { value: "person" },
+    });
+    const personSelect = await screen.findByLabelText("按人物筛选");
+    // 二级下拉数据源复用已加载的人物列表
+    expect(
+      personSelect.querySelector('option[value="person-1"]'),
+    ).not.toBeNull();
+    fireEvent.change(personSelect, { target: { value: "person-1" } });
+    await waitFor(() =>
+      expect(listMaterials).toHaveBeenLastCalledWith(
+        expect.objectContaining({ personId: "person-1", page: 1 }),
+      ),
+    );
+  });
+
+  it("MATERIAL-UX-03：详情面板显示时间/大小/时长且归属可跳转", async () => {
+    const item = material("gate", {
+      person_id: "person-1",
+      person_name: "张工",
+      media_type: "video",
+      size_bytes: 2048,
+      duration_seconds: 75,
+      created_at: "2026-09-08 10:00:00",
+    });
+    listMaterials.mockResolvedValue({
+      items: [item],
+      page: 1,
+      page_size: 24,
+      total: 1,
+    });
+    const value = studio({ review: false });
+    useStudio.mockReturnValue(value);
+    render(<MaterialsPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "选择素材 gate.png" }),
+    );
+    expect(await screen.findByText("上传时间")).toBeInTheDocument();
+    // 排序下拉也有「文件大小」选项：此处必须断言详情面板的 <dt>，而非任意文本节点。
+    expect(
+      screen.getAllByText("文件大小").some((el) => el.tagName === "DT"),
+    ).toBe(true);
+    expect(screen.getByText("2.0 KB")).toBeInTheDocument();
+    // UX-02 后卡片角标也显示时长：此处断言详情面板的 <dd>，而非任意文本节点。
+    expect(screen.getAllByText("01:15").some((el) => el.tagName === "DD")).toBe(
+      true,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "张工（人物库）" }));
+    expect(value.navigate).toHaveBeenCalledWith("person-photos", {
+      selectedPersonId: "person-1",
+    });
+  });
+
+  // ---------- MATERIAL-UX-04：上传增强 ----------
+
+  function ux04MockUploads() {
+    createMaterialUploadIntent.mockImplementation(async (file: File) => ({
+      material_id: `asset:${file.name}`,
+      asset_id: file.name,
+      storage_key: `k/${file.name}`,
+      method: "PUT",
+      url: "https://storage.test/upload",
+      headers: {},
+      expires_at: "",
+    }));
+    uploadMaterial.mockImplementation(
+      (_intent: unknown, _file: File, onProgress: (n: number) => void) => {
+        onProgress(100);
+        return Promise.resolve();
+      },
+    );
+    completeMaterialUpload.mockImplementation(async (assetId: string) =>
+      material(assetId),
+    );
+  }
+
+  it("MATERIAL-UX-04：多文件顺序入队逐个上传并显示队列进度", async () => {
+    listMaterials.mockResolvedValue({
+      items: [],
+      page: 1,
+      page_size: 24,
+      total: 0,
+    });
+    ux04MockUploads();
+    useStudio.mockReturnValue(
+      studio({ review: false, data: { ...studio().data, assets: [] } }),
+    );
+    render(<MaterialsPage />);
+
+    const files = ["a", "b", "c"].map(
+      (name) =>
+        new File([new Uint8Array(4)], `${name}.png`, { type: "image/png" }),
+    );
+    fireEvent.change(screen.getByLabelText("选择上传素材"), {
+      target: { files },
+    });
+
+    await waitFor(() =>
+      expect(completeMaterialUpload).toHaveBeenCalledTimes(3),
+    );
+    expect(
+      createMaterialUploadIntent.mock.calls.map(
+        (call) => (call[0] as File).name,
+      ),
+    ).toEqual(["a.png", "b.png", "c.png"]);
+    expect(screen.getByLabelText("上传队列")).toHaveTextContent("3/3");
+    expect(
+      screen.getByRole("button", { name: "上传素材" }),
+    ).toBeInTheDocument();
+  });
+
+  it("MATERIAL-UX-04：单个文件失败隔离其余上传且失败项可重试", async () => {
+    listMaterials.mockResolvedValue({
+      items: [],
+      page: 1,
+      page_size: 24,
+      total: 0,
+    });
+    ux04MockUploads();
+    let badStillFailing = true;
+    putMaterial.mockImplementation(
+      async (intent: never, file: File, onProgress: (n: number) => void) => {
+        if (file.name === "bad.png" && badStillFailing) {
+          throw new Error("传输失败");
+        }
+        return defaultPutMaterial(intent, file, onProgress);
+      },
+    );
+    useStudio.mockReturnValue(
+      studio({ review: false, data: { ...studio().data, assets: [] } }),
+    );
+    render(<MaterialsPage />);
+
+    const files = ["good1.png", "bad.png", "good2.png"].map(
+      (name) => new File([new Uint8Array(4)], name, { type: "image/png" }),
+    );
+    fireEvent.change(screen.getByLabelText("选择上传素材"), {
+      target: { files },
+    });
+
+    await waitFor(() =>
+      expect(completeMaterialUpload).toHaveBeenCalledTimes(2),
+    );
+    const queue = screen.getByLabelText("上传队列");
+    expect(queue).toHaveTextContent("bad.png");
+    expect(queue).toHaveTextContent("传输失败");
+
+    // 重试前模拟网络恢复：同一 putMaterial 桩切换成功路径。
+    badStillFailing = false;
+    fireEvent.click(screen.getByRole("button", { name: "重试 bad.png" }));
+    await waitFor(() =>
+      expect(completeMaterialUpload).toHaveBeenCalledTimes(3),
+    );
+    expect(screen.getByLabelText("上传队列")).toHaveTextContent("3/3");
+  });
+
+  it("MATERIAL-UX-04：超限文件客户端预校验拦截不发起上传", async () => {
+    listMaterials.mockResolvedValue({
+      items: [],
+      page: 1,
+      page_size: 24,
+      total: 0,
+    });
+    ux04MockUploads();
+    useStudio.mockReturnValue(
+      studio({ review: false, data: { ...studio().data, assets: [] } }),
+    );
+    render(<MaterialsPage />);
+
+    const bigImage = new File([new Uint8Array(4)], "big.png", {
+      type: "image/png",
+    });
+    Object.defineProperty(bigImage, "size", { value: 11 * 1024 * 1024 });
+    const bigVideo = new File([new Uint8Array(4)], "big.mp4", {
+      type: "video/mp4",
+    });
+    Object.defineProperty(bigVideo, "size", { value: 51 * 1024 * 1024 });
+    const okImage = new File([new Uint8Array(4)], "ok.png", {
+      type: "image/png",
+    });
+    fireEvent.change(screen.getByLabelText("选择上传素材"), {
+      target: { files: [bigImage, bigVideo, okImage] },
+    });
+
+    await waitFor(() =>
+      expect(createMaterialUploadIntent).toHaveBeenCalledTimes(1),
+    );
+    const queue = screen.getByLabelText("上传队列");
+    expect(queue).toHaveTextContent("图片不能超过 10 MB");
+    expect(queue).toHaveTextContent("视频不能超过 50 MB");
+  });
+
+  it("MATERIAL-UX-04：服务端去重复用时提示已复用已有素材", async () => {
+    listMaterials.mockResolvedValue({
+      items: [],
+      page: 1,
+      page_size: 24,
+      total: 0,
+    });
+    createMaterialUploadIntent.mockResolvedValue({
+      material_id: "asset:dup-1",
+      asset_id: "dup-1",
+      storage_key: "k",
+      method: "",
+      url: "",
+      headers: {},
+      expires_at: "",
+      upload_required: false,
+      reused_from_asset_id: "dup-0",
+    });
+    putMaterial.mockResolvedValue(material("dup-1"));
+    const value = studio({
+      review: false,
+      data: { ...studio().data, assets: [] },
+    });
+    useStudio.mockReturnValue(value);
+    render(<MaterialsPage />);
+
+    fireEvent.change(screen.getByLabelText("选择上传素材"), {
+      target: {
+        files: [
+          new File([new Uint8Array(4)], "dup.png", { type: "image/png" }),
+        ],
+      },
+    });
+    await waitFor(() =>
+      expect(value.notify).toHaveBeenCalledWith(
+        "检测到相同文件，已复用已有素材",
+      ),
+    );
+    expect(createMaterialUploadIntent).toHaveBeenCalledTimes(1);
+  });
+
+  it("MATERIAL-UX-04：拖拽文件到素材页入队上传", async () => {
+    listMaterials.mockResolvedValue({
+      items: [],
+      page: 1,
+      page_size: 24,
+      total: 0,
+    });
+    ux04MockUploads();
+    useStudio.mockReturnValue(
+      studio({ review: false, data: { ...studio().data, assets: [] } }),
+    );
+    const { container } = render(<MaterialsPage />);
+    const dropZone = container.querySelector(
+      ".content-materials",
+    ) as HTMLElement;
+
+    fireEvent.dragEnter(dropZone, { dataTransfer: { types: ["Files"] } });
+    expect(dropZone.className).toContain("content-materials--drag");
+
+    fireEvent.drop(dropZone, {
+      dataTransfer: {
+        files: [
+          new File([new Uint8Array(4)], "d1.png", { type: "image/png" }),
+          new File([new Uint8Array(4)], "d2.png", { type: "image/png" }),
+        ],
+      },
+    });
+    await waitFor(() =>
+      expect(completeMaterialUpload).toHaveBeenCalledTimes(2),
+    );
+    expect(dropZone.className).not.toContain("content-materials--drag");
+  });
+
+  // ---------- MATERIAL-UX-05：标签底座 ----------
+
+  it("MATERIAL-UX-05：卡片显示前两个标签并在超出时折叠计数", async () => {
+    listMaterials.mockResolvedValue({
+      items: [
+        material("tagged", { tags: ["庭院", "外观", "工地"] }),
+        material("untagged", { tags: [] }),
+      ],
+      page: 1,
+      page_size: 24,
+      total: 2,
+    });
+    useStudio.mockReturnValue(studio({ review: false }));
+    render(<MaterialsPage />);
+
+    const card = await screen.findByRole("button", {
+      name: /选择素材 tagged\.png/,
+    });
+    expect(card).toHaveTextContent("庭院 / 外观 +1");
+  });
+
+  it("MATERIAL-UX-05：标签筛选下拉来源于聚合并随请求下发 tag", async () => {
+    listMaterials.mockResolvedValue({
+      items: [],
+      page: 1,
+      page_size: 24,
+      total: 0,
+    });
+    listMaterialTags.mockResolvedValue([
+      { tag: "庭院", count: 3 },
+      { tag: "外观", count: 1 },
+    ]);
+    useStudio.mockReturnValue(studio({ review: false }));
+    render(<MaterialsPage />);
+
+    const select = await screen.findByLabelText("标签筛选");
+    fireEvent.change(select, { target: { value: "庭院" } });
+    await waitFor(() =>
+      expect(listMaterials).toHaveBeenCalledWith(
+        expect.objectContaining({ tag: "庭院", page: 1 }),
+      ),
+    );
+  });
+
+  it("MATERIAL-UX-05：详情标签编辑回车添加、删除后保存全量覆盖", async () => {
+    const item = material("edit-tags", { tags: ["庭院"] });
+    listMaterials.mockResolvedValue({
+      items: [item],
+      page: 1,
+      page_size: 24,
+      total: 1,
+    });
+    listMaterialTags.mockResolvedValue([{ tag: "外观", count: 2 }]);
+    updateMaterial.mockResolvedValue({
+      ...item,
+      tags: ["庭院", "外观", "工地"],
+    });
+    const value = studio({ review: false });
+    useStudio.mockReturnValue(value);
+    render(<MaterialsPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "选择素材 edit-tags.png" }),
+    );
+    const input = await screen.findByLabelText("添加标签");
+    expect(input).toHaveAttribute("list", "material-tag-suggestions");
+
+    // 回车添加（重复标签不重复入列）
+    fireEvent.change(input, { target: { value: "外观" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.change(input, { target: { value: "外观" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.change(input, { target: { value: "工地" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    // 保存发出全量列表；保存后编辑器同步为服务端返回的最新标签。
+    fireEvent.click(screen.getByRole("button", { name: "保存标签" }));
+    await waitFor(() =>
+      expect(updateMaterial).toHaveBeenCalledWith("asset:edit-tags", {
+        tags: ["庭院", "外观", "工地"],
+      }),
+    );
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("button", { name: "保存标签" }),
+      ).not.toBeInTheDocument();
+    });
+
+    // 在同步后的列表上删除一项再保存，仍发出全量覆盖（[] 同理即清空）。
+    updateMaterial.mockResolvedValue({ ...item, tags: ["庭院", "工地"] });
+    fireEvent.click(screen.getByRole("button", { name: "删除标签 外观" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存标签" }));
+    await waitFor(() =>
+      expect(updateMaterial).toHaveBeenLastCalledWith("asset:edit-tags", {
+        tags: ["庭院", "工地"],
+      }),
+    );
+  });
+
+  // ---------- MATERIAL-UX-06：状态与衔接 ----------
+
+  it("MATERIAL-UX-06：direct 素材卡片状态为待归档，已存素材显示可用（云端）", async () => {
+    listMaterials.mockResolvedValue({
+      items: [
+        material("direct-1", {
+          delivery: "direct",
+          saved: false,
+          asset_id: null,
+        }),
+        material("stored-1", { delivery: "stored", saved: true }),
+      ],
+      page: 1,
+      page_size: 24,
+      total: 2,
+    });
+    useStudio.mockReturnValue(studio({ review: false }));
+    render(<MaterialsPage />);
+
+    expect(
+      await screen.findByRole("button", { name: /选择素材 direct-1\.png/ }),
+    ).toHaveTextContent("待归档 · 可预览");
+    expect(
+      screen.getByRole("button", { name: /选择素材 stored-1\.png/ }),
+    ).toHaveTextContent("可用（云端）");
+  });
+
+  it("MATERIAL-UX-06：卡片快捷动作可直达参考生视频入口", async () => {
+    listMaterials.mockResolvedValue({
+      items: [material("quick-ref", { allowed_uses: ["reference"] })],
+      page: 1,
+      page_size: 24,
+      total: 1,
+    });
+    const value = studio({ review: false });
+    useStudio.mockReturnValue(value);
+    render(<MaterialsPage />);
+
+    await screen.findByRole("button", { name: "选择素材 quick-ref.png" });
+    // hover 浮层由 CSS 控制显隐；此处验证动作存在且点击直达创作入口。
+    fireEvent.click(
+      screen.getByRole("button", { name: "加入参考", hidden: true }),
+    );
+    expect(value.patchDraft).toHaveBeenCalledWith({
+      referenceIds: ["quick-ref"],
+    });
+    expect(value.navigate).toHaveBeenCalledWith("reference", {
+      returnTo: "materials",
+    });
+  });
+
+  it("MATERIAL-UX-06：切走再回素材库保留搜索筛选（session 内保活）", async () => {
+    listMaterials.mockResolvedValue({
+      items: [],
+      page: 1,
+      page_size: 24,
+      total: 0,
+    });
+    useStudio.mockReturnValue(
+      studio({ review: false, data: { ...studio().data, assets: [] } }),
+    );
+
+    // 第一次进入：设置搜索词后离开（组件卸载）。
+    const first = render(<MaterialsPage />);
+    await waitFor(() => expect(listMaterials).toHaveBeenCalledTimes(1));
+    fireEvent.change(screen.getByLabelText("搜索素材"), {
+      target: { value: "庭院" },
+    });
+    fireEvent.submit(screen.getByRole("form", { name: "素材筛选" }));
+    await waitFor(() =>
+      expect(listMaterials).toHaveBeenLastCalledWith(
+        expect.objectContaining({ query: "庭院" }),
+      ),
+    );
+    first.unmount();
+
+    // 第二次进入：搜索词应自动恢复并随首次请求下发。
+    listMaterials.mockClear();
+    render(<MaterialsPage />);
+    await waitFor(() =>
+      expect(listMaterials).toHaveBeenCalledWith(
+        expect.objectContaining({ query: "庭院" }),
+      ),
+    );
+    expect((screen.getByLabelText("搜索素材") as HTMLInputElement).value).toBe(
+      "庭院",
+    );
+  });
+
+  it("MATERIAL-UX-08：方向筛选下发 orientation 且竖屏卡片启用分档", async () => {
+    listMaterials.mockResolvedValue({
+      items: [material("portrait-1", { aspect_ratio: 0.56 })],
+      page: 1,
+      page_size: 24,
+      total: 1,
+    });
+    useStudio.mockReturnValue(studio({ review: false }));
+    render(<MaterialsPage />);
+
+    fireEvent.change(screen.getByLabelText("方向筛选"), {
+      target: { value: "portrait" },
+    });
+    await waitFor(() =>
+      expect(listMaterials).toHaveBeenCalledWith(
+        expect.objectContaining({ orientation: "portrait", page: 1 }),
+      ),
+    );
+    const card = await screen.findByRole("button", {
+      name: /选择素材 portrait-1\.png/,
+    });
+    expect(card).toHaveClass("content-asset--portrait");
+  });
+
+  it("MATERIAL-UX-08：详情面板显示尺寸与比例，缺省素材不显示", async () => {
+    listMaterials.mockResolvedValue({
+      items: [
+        material("sized", { width: 1080, height: 1920, aspect_ratio: 0.56 }),
+        material("unsized", {}),
+      ],
+      page: 1,
+      page_size: 24,
+      total: 2,
+    });
+    useStudio.mockReturnValue(studio({ review: false }));
+    render(<MaterialsPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /选择素材 sized\.png/ }),
+    );
+    expect(await screen.findByText("尺寸")).toBeInTheDocument();
+    expect(screen.getByText(/1080 × 1920/)).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /选择素材 unsized\.png/ }),
+    );
+    await waitFor(() => {
+      expect(screen.queryByText("尺寸")).not.toBeInTheDocument();
+    });
+  });
+
+  it("MATERIAL-UX-07：切换列表视图后按行渲染完整信息并可切回", async () => {
+    listMaterials.mockResolvedValue({
+      items: [
+        material("row-a", {
+          title: "row-a.mp4",
+          media_type: "video",
+          content_type: "video/mp4",
+          duration_seconds: 75,
+          size_bytes: 2048,
+        }),
+      ],
+      page: 1,
+      page_size: 24,
+      total: 1,
+    });
+    useStudio.mockReturnValue(studio({ review: false }));
+    render(<MaterialsPage />);
+
+    expect(
+      await screen.findByRole("button", { name: "选择素材 row-a.mp4" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "列表视图" }));
+
+    const row = screen.getByRole("button", { name: "选择素材 row-a.mp4" });
+    expect(row.closest(".content-material-row")).toBeInTheDocument();
+    expect(screen.getByText("01:15")).toBeInTheDocument();
+    expect(screen.getByText("2.0 KB")).toBeInTheDocument();
+    expect(row.closest(".content-material-row")).toHaveTextContent("上传");
+
+    fireEvent.click(screen.getByRole("button", { name: "网格视图" }));
+    expect(
+      screen.getByRole("button", { name: "选择素材 row-a.mp4" }),
+    ).toHaveClass("content-asset");
+  });
+
+  it("MATERIAL-UX-07：全部标签页音频折叠为紧凑行，视频仍为卡片", async () => {
+    listMaterials.mockResolvedValue({
+      items: [
+        material("mix-audio", {
+          title: "mix-audio.mp3",
+          media_type: "audio",
+          content_type: "audio/mpeg",
+          duration_seconds: 30,
+          audio_purpose: "voice_clone",
+        }),
+        material("mix-video", {
+          title: "mix-video.mp4",
+          media_type: "video",
+          content_type: "video/mp4",
+        }),
+      ],
+      page: 1,
+      page_size: 24,
+      total: 2,
+    });
+    useStudio.mockReturnValue(studio({ review: false }));
+    render(<MaterialsPage />);
+
+    const audioRow = await screen.findByRole("button", {
+      name: "选择素材 mix-audio.mp3",
+    });
+    expect(
+      audioRow.closest(".content-material-row--compact"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "选择素材 mix-video.mp4" }),
+    ).toHaveClass("content-asset");
+    expect(screen.queryByText("网格视图")).toBeInTheDocument();
+  });
+
+  it("MATERIAL-UX-07：音频标签页列表化区分用途并可去往音频口播", async () => {
+    listMaterials.mockResolvedValue({
+      items: [
+        material("aud-1", {
+          title: "aud-1.mp3",
+          media_type: "audio",
+          content_type: "audio/mpeg",
+          duration_seconds: 75,
+          audio_purpose: "voice_clone",
+          allowed_uses: ["oral_audio"],
+        }),
+      ],
+      page: 1,
+      page_size: 24,
+      total: 1,
+    });
+    const value = studio({ review: false });
+    useStudio.mockReturnValue(value);
+    render(<MaterialsPage />);
+
+    fireEvent.click(screen.getByRole("tab", { name: "音频" }));
+    const row = await screen.findByRole("button", {
+      name: "选择素材 aud-1.mp3",
+    });
+    expect(row.closest(".content-material-row")).toBeInTheDocument();
+    expect(screen.getByText("声音克隆样本")).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "将 aud-1.mp3 用于音频口播" }),
+    );
+    expect(value.patchDraft).toHaveBeenCalledWith({
+      audioId: "aud-1",
+      ipId: undefined,
+      voiceId: undefined,
+    });
+    expect(value.navigate).toHaveBeenCalledWith("oral-audio", {
+      returnTo: "materials",
+    });
+  });
+
+  it("MATERIAL-UX-09：已移除视图下发 trashed 且恢复走 hidden:false", async () => {
+    listMaterials.mockResolvedValue({
+      items: [
+        material("trashed-1", {
+          title: "trashed-1.png",
+          saved: true,
+          delivery: "stored",
+        }),
+      ],
+      page: 1,
+      page_size: 24,
+      total: 1,
+    });
+    updateMaterial.mockResolvedValue(material("trashed-1"));
+    const value = studio({ review: false });
+    useStudio.mockReturnValue(value);
+    render(<MaterialsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "已移除" }));
+    await waitFor(() =>
+      expect(listMaterials).toHaveBeenCalledWith(
+        expect.objectContaining({ trashed: true }),
+      ),
+    );
+
+    // 回收站卡片快捷动作替换为“恢复”
+    const card = await screen.findByRole("button", {
+      name: /选择素材 trashed-1\.png/,
+    });
+    fireEvent.click(card);
+    fireEvent.click(
+      screen.getAllByRole("button", {
+        name: "恢复",
+        hidden: true,
+      })[0] as HTMLElement,
+    );
+    await waitFor(() =>
+      expect(updateMaterial).toHaveBeenCalledWith("asset:trashed-1", {
+        hidden: false,
+      }),
+    );
+    expect(value.notify).toHaveBeenCalledWith("素材“trashed-1.png”已恢复");
+  });
+
+  it("MATERIAL-UX-10：详情面板按需展示使用记录与未被使用", async () => {
+    const item = material("used", {
+      title: "used.mp4",
+      media_type: "video",
+      content_type: "video/mp4",
+    });
+    const unusedItem = material("unused", {});
+    listMaterials.mockResolvedValue({
+      items: [item, unusedItem],
+      page: 1,
+      page_size: 24,
+      total: 2,
+    });
+    getMaterialUsages.mockImplementation(async (materialId: string) =>
+      materialId === "asset:used"
+        ? {
+            total: 2,
+            items: [
+              {
+                task_id: "ux10-gtask",
+                kind: "generation" as const,
+                status: "SUCCEEDED",
+                created_at: "2026-09-08 10:00:00",
+              },
+              {
+                task_id: "ux10-otask",
+                kind: "oral" as const,
+                status: "SUCCEEDED",
+                created_at: "2026-09-09 10:00:00",
+              },
+            ],
+          }
+        : { total: 0, items: [] },
+    );
+    useStudio.mockReturnValue(studio({ review: false }));
+    render(<MaterialsPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /选择素材 used\.mp4/ }),
+    );
+    // 按需：打开详情不自动请求
+    expect(getMaterialUsages).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "查看使用记录" }));
+    expect(await screen.findByText("被 2 个任务引用")).toBeInTheDocument();
+    expect(screen.getByText(/口播任务/)).toBeInTheDocument();
+    expect(getMaterialUsages).toHaveBeenCalledWith("asset:used");
+
+    // 切到无引用素材显示“未被使用”
+    fireEvent.click(
+      screen.getByRole("button", { name: /选择素材 unused\.png/ }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "查看使用记录" }),
+    );
+    expect(await screen.findByText("未被使用")).toBeInTheDocument();
   });
 
   it("详情面板可把素材改入新建分组", async () => {

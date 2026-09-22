@@ -976,6 +976,40 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/studio/materials/{material_id}/usages": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Material Usages */
+    get: operations["read_material_usages_api_studio_materials__material_id__usages_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/studio/materials/tags": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Material Tags */
+    get: operations["read_material_tags_api_studio_materials_tags_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/studio/materials/resolve": {
     parameters: {
       query?: never;
@@ -8630,6 +8664,8 @@ export interface components {
       group?: string | null;
       /** Hidden */
       hidden?: boolean | null;
+      /** Tags */
+      tags?: string[] | null;
     };
     /** MaterialCharacterView */
     MaterialCharacterView: {
@@ -8644,6 +8680,34 @@ export interface components {
       name: string;
       /** Count */
       count: number;
+    };
+    /** MaterialTagItem */
+    MaterialTagItem: {
+      /** Tag */
+      tag: string;
+      /** Count */
+      count: number;
+    };
+    /** MaterialUsage */
+    MaterialUsage: {
+      /** Task Id */
+      task_id: string;
+      /**
+       * Kind
+       * @enum {string}
+       */
+      kind: "generation" | "oral";
+      /** Status */
+      status: string;
+      /** Created At */
+      created_at: string;
+    };
+    /** MaterialUsagesResponse */
+    MaterialUsagesResponse: {
+      /** Total */
+      total: number;
+      /** Items */
+      items: components["schemas"]["MaterialUsage"][];
     };
     /** MaterialGroupsResponse */
     MaterialGroupsResponse: {
@@ -8664,6 +8728,20 @@ export interface components {
       project_id: string | null;
       /** Person Id */
       person_id: string | null;
+      /** Person Name */
+      person_name?: string | null;
+      /** Project Title */
+      project_title?: string | null;
+      /** Tags */
+      tags: string[];
+      /** Width */
+      width?: number | null;
+      /** Height */
+      height?: number | null;
+      /** Aspect Ratio */
+      aspect_ratio?: number | null;
+      /** Audio Purpose */
+      audio_purpose?: "oral_audio" | "voice_clone" | "reference" | null;
       /** Title */
       title: string;
       /** Group */
@@ -8747,6 +8825,8 @@ export interface components {
       group?: string | null;
       /** Hidden */
       hidden?: boolean | null;
+      /** Tags */
+      tags?: string[] | null;
     };
     /** MaterialUploadIntentRequest */
     MaterialUploadIntentRequest: {
@@ -13669,6 +13749,12 @@ export interface operations {
           | null;
         q?: string | null;
         group?: string | null;
+        sort?: "created_desc" | "created_asc" | "title_asc" | "size_desc";
+        person_id?: string | null;
+        project_id?: string | null;
+        tag?: string | null;
+        orientation?: "portrait" | "landscape" | "square" | null;
+        trashed?: boolean | null;
         page?: number;
         page_size?: number;
       };
@@ -13720,6 +13806,70 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["MaterialGroupsResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_material_tags_api_studio_materials_tags_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["MaterialTagItem"][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_material_usages_api_studio_materials__material_id__usages_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["MaterialUsagesResponse"];
         };
       };
       /** @description Validation Error */

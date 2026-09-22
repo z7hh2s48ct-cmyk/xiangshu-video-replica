@@ -544,6 +544,7 @@ def test_bulk_sets_group_across_sources_and_writes_one_summary_audit(pg, client)
         "skipped": 0,
         "group_changed": True,
         "hidden_changed": False,
+        "tags_changed": False,
     }
 
 

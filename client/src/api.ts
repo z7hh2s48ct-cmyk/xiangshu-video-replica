@@ -352,6 +352,12 @@ export type UploadIntent = {
 };
 
 export type MaterialItem = components["schemas"]["MaterialItem"];
+// MATERIAL-UX-03：列表排序维度（镜像后端 MaterialSort Literal）。
+export type MaterialSort =
+  | "created_desc"
+  | "created_asc"
+  | "title_asc"
+  | "size_desc";
 export type MaterialPage = components["schemas"]["MaterialPage"];
 export type MaterialResolveResponse =
   components["schemas"]["MaterialResolveResponse"];
@@ -361,6 +367,12 @@ export type MaterialUploadIntent =
 export type MaterialGroupItem = components["schemas"]["MaterialGroupItem"];
 export type MaterialGroupsResponse =
   components["schemas"]["MaterialGroupsResponse"];
+// MATERIAL-UX-05：标签聚合计数（/materials/tags）。
+export type MaterialTagItem = components["schemas"]["MaterialTagItem"];
+// MATERIAL-UX-10：单素材使用记录（/materials/{id}/usages，按需请求）。
+export type MaterialUsage = components["schemas"]["MaterialUsage"];
+export type MaterialUsagesResponse =
+  components["schemas"]["MaterialUsagesResponse"];
 export type MaterialBulkUpdate = components["schemas"]["MaterialBulkUpdate"];
 export type MaterialBulkRequest = components["schemas"]["MaterialBulkRequest"];
 export type MaterialBulkResult = components["schemas"]["MaterialBulkResult"];
@@ -2530,6 +2542,16 @@ export async function listMaterials(
     // MATERIAL-UX-01：分组导航精确筛选。undefined 忽略；空串为「未分组」
     // 语义（当前数据模型下为空集）；非空为分组名精确匹配。
     group?: string;
+    // MATERIAL-UX-03：排序维度（默认 created_desc）+ 对象维度精确筛选。
+    sort?: MaterialSort;
+    personId?: string;
+    projectId?: string;
+    // MATERIAL-UX-05：标签包含过滤。
+    tag?: string;
+    // MATERIAL-UX-08：方向筛选（portrait / landscape / square）。
+    orientation?: "portrait" | "landscape" | "square";
+    // MATERIAL-UX-09：回收站视图——只看已移除素材。
+    trashed?: boolean;
     page?: number;
     pageSize?: number;
   } = {},
@@ -2539,6 +2561,14 @@ export async function listMaterials(
   if (filters.source) query.set("source", filters.source);
   if (filters.query?.trim()) query.set("q", filters.query.trim());
   if (filters.group !== undefined) query.set("group", filters.group);
+  if (filters.sort) query.set("sort", filters.sort);
+  if (filters.personId?.trim()) query.set("person_id", filters.personId.trim());
+  if (filters.projectId?.trim()) {
+    query.set("project_id", filters.projectId.trim());
+  }
+  if (filters.tag?.trim()) query.set("tag", filters.tag.trim());
+  if (filters.orientation) query.set("orientation", filters.orientation);
+  if (filters.trashed) query.set("trashed", "true");
   if (filters.page !== undefined) query.set("page", String(filters.page));
   if (filters.pageSize !== undefined) {
     query.set("page_size", String(filters.pageSize));
@@ -2656,6 +2686,24 @@ export async function listMaterialGroups(): Promise<MaterialGroupsResponse> {
   return requestApiJson<MaterialGroupsResponse>(
     "/api/studio/materials/groups",
     "读取素材分组失败",
+  );
+}
+
+// MATERIAL-UX-10：单素材被哪些任务引用（按需请求，最多 20 条 + 全量计数）。
+export async function getMaterialUsages(
+  materialId: string,
+): Promise<MaterialUsagesResponse> {
+  return requestApiJson<MaterialUsagesResponse>(
+    `/api/studio/materials/${encodeURIComponent(materialId)}/usages`,
+    "读取使用记录失败",
+  );
+}
+
+// MATERIAL-UX-05：当前用户可见素材的标签聚合（count DESC, tag ASC）。
+export async function listMaterialTags(): Promise<MaterialTagItem[]> {
+  return requestApiJson<MaterialTagItem[]>(
+    "/api/studio/materials/tags",
+    "读取素材标签失败",
   );
 }
 

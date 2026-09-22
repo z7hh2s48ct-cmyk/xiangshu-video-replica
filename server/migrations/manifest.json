@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20260922T1500_viral_search_discoveries"
+      "20260922T2200_material_preference_tags"
     ],
     "parents": {
       "001_core": null,
@@ -133,9 +133,10 @@
       "20260922T1600_analysis_task_request_id": "20260922T1200_analysis_task_failure_diagnostic",
       "20260922T1800_sub_account_permissions": "20260921T1200_sub_account_quotas",
       "20260922T2000_analysis_task_attempts": "20260922T1600_analysis_task_request_id",
+      "20260922T2200_material_preference_tags": "20260922T1500_viral_search_discoveries",
       "20260923T0000_open_h3_extended_modes": "20260922T2000_analysis_task_attempts"
     },
-    "revision_count": 117
+    "revision_count": 118
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -613,6 +614,10 @@
     "20260922T2000_analysis_task_attempts": {
       "file": "versions/20260922T2000_analysis_task_attempts.py",
       "sha256": "94660c279da2698e0d37d184699a20f5458f278beda5006aab2f6b5b316216b2"
+    },
+    "20260922T2200_material_preference_tags": {
+      "file": "versions/20260922T2200_material_preference_tags.py",
+      "sha256": "39995cbab5af6fa017075edf247c5dc587263795f757b73f5c20a97215be905d"
     },
     "20260923T0000_open_h3_extended_modes": {
       "file": "versions/20260923T0000_open_h3_extended_modes.py",
