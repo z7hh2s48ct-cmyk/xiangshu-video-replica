@@ -33,7 +33,8 @@ worktree：`.worktrees/LAUNCH-PREFLIGHT-FIXES-20260923`；共享 claim：主仓 
 
 ## 最终门禁记录
 
-- 评审修复后分片全量：shard0 911 / shard1 719 / shard2 743 / shard3 833(1 skipped) —— **3206 passed / 1 skipped，四片全 PASS**（第一轮评审前全量同样四片全绿，数字一致）。
+- 终跑（评审修复全部落地后的提交态，`CI_SHARD_BASE_PORT=5601` 独立容器四分片并行，待并行会话分片容器退出后独占运行）：shard0 914 / shard1 720 / shard2 743 / shard3 839(1 skipped) —— **3216 passed / 1 skipped，四片全 PASS**。
+- 过程中两次全量中断均为环境交叉，非代码问题，已留档：①标准夹具 customer-v3-pg-test 被并行会话 `pg-fixture.sh stop` 整体移除（已重启复验 sqlite_to_postgres + queue_load_10k 41/41 绿）；②`run-pytest-shards.sh` 的分片容器名按序号硬编码（`customer-v3-pg-test-shardN`），两个会话并发跑分片会互相同名互删——等待对方容器退出后独占重跑即绿。该脚本限制建议后续加容器名前缀隔离（不在本任务文件边界内）。
 - CI 三门禁以 PR 为准（本地未跑 cargo/audit/E2E/build，按仓规交 CI）。
 
 ## 登记的后续项（不阻塞本批）
