@@ -117,6 +117,10 @@ PG_ONLY_TABLES: frozenset[str] = frozenset(
         # 历史表，PG-only（守卫同 20260916T1400）。T07 导入源无此表，目标库为空
         # 属预期；非空即 divergent，仍 fail closed。
         "analysis_task_attempts",
+        # 20260922T1500_viral_search_discoveries: 爆款搜索发现记录表（运营侧每日
+        # 汇总与客户侧「我的发现」的共同事实来源），PG-only（守卫同 20260916T1400）。
+        # T07 导入源无此表，目标库为空属预期；非空即 divergent，仍 fail closed。
+        "viral_search_discoveries",
     }
 )
 

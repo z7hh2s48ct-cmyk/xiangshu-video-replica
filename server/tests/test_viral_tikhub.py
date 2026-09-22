@@ -118,16 +118,16 @@ def test_irrelevant_game_filter_only_matches_explicit_terms(title: str, expected
     assert is_irrelevant_viral_video(title) is expected
 
 
-def test_pick_douyin_play_url_prefers_lowest_resolution() -> None:
+def test_pick_douyin_play_url_takes_default_play_addr() -> None:
+    """P1：直取源站默认播放地址（不遍历 bit_rate 档位、不挑最低分辨率）."""
     video_block = {
+        "play_addr": {"url_list": ["https://cdn/default.mp4", "https://cdn/backup.mp4"]},
         "bit_rate": [
             {"play_addr": {"height": 1280, "url_list": ["https://cdn/720.mp4"]}},
             {"play_addr": {"height": 1024, "url_list": ["https://cdn/540.mp4"]}},
-            {"play_addr": {"height": 1280, "url_list": ["https://cdn/720b.mp4"]}},
         ],
-        "play_addr": {"url_list": ["https://cdn/fallback.mp4"]},
     }
-    assert pick_douyin_play_url(video_block) == "https://cdn/540.mp4"
+    assert pick_douyin_play_url(video_block) == "https://cdn/default.mp4"
 
 
 def test_pick_image_url_prefers_renderable_format_and_host() -> None:
@@ -145,10 +145,13 @@ def test_pick_image_url_prefers_renderable_format_and_host() -> None:
     assert _pick_image_url({"url_list": []}) is None
 
 
-def test_pick_douyin_play_url_falls_back_to_play_addr() -> None:
-    video_block = {"play_addr": {"url_list": ["https://cdn/fallback.mp4"]}}
-    assert pick_douyin_play_url(video_block) == "https://cdn/fallback.mp4"
+def test_pick_douyin_play_url_ignores_bit_rate_gears() -> None:
+    """没有顶层 play_addr 时返回 None：不再回退到 bit_rate 档位."""
     assert pick_douyin_play_url({}) is None
+    assert (
+        pick_douyin_play_url({"bit_rate": [{"play_addr": {"url_list": ["https://cdn/540.mp4"]}}]})
+        is None
+    )
 
 
 def test_normalize_douyin_aweme_caps_tags_and_maps_stats() -> None:
@@ -184,6 +187,7 @@ def test_normalize_douyin_aweme_caps_tags_and_maps_stats() -> None:
             "width": 576,
             "height": 1024,
             "cover": {"url_list": ["https://cdn/cover.webp"]},
+            "play_addr": {"url_list": ["https://cdn/default.mp4"]},
             "bit_rate": [
                 {"play_addr": {"height": 1280, "url_list": ["https://cdn/p720.mp4"]}},
                 {"play_addr": {"height": 1024, "url_list": ["https://cdn/p540.mp4"]}},
@@ -198,7 +202,7 @@ def test_normalize_douyin_aweme_caps_tags_and_maps_stats() -> None:
     assert video.likes == 55569
     assert video.verified is True
     assert video.cover_url == "https://cdn/cover.webp"
-    assert video.play_url == "https://cdn/p540.mp4"
+    assert video.play_url == "https://cdn/default.mp4"
     assert video.audio_url == "https://cdn/origin.mp3"
     assert video.tags == ["锦鲤体型", "鱼池养锦鲤", "第三个", "第四个", "第五个", "第六个"]
     client_dict = video.to_client_dict()

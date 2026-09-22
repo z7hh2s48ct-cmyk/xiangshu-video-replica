@@ -115,9 +115,6 @@ def viral_refresh_status(
 def acquire_viral_refresh_task(
     conn: BusinessConnection, *, worker_id: str
 ) -> ViralRefreshLease | None:
-    from app.viral_collection import enqueue_due_viral_collections
-
-    enqueue_due_viral_collections(conn)
     enabled = conn.execute(
         "SELECT collection_enabled FROM viral_runtime_controls WHERE id=1"
     ).fetchone()

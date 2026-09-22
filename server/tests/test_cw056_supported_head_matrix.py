@@ -74,10 +74,12 @@ REPO_ROOT = SERVER_DIR.parent
 # ——tables/primary_keys +1、columns +12、foreign_keys +1、unique_constraints +1
 # （task_id+attempt）、check_constraints +3（status/attempt/retryable）、jsonb_columns +1
 # （upstream_diagnostic_json）。
-# 20260923T0000_open_h3_extended_modes（本分支迁移，重挂于 main 新链尾之上）移除
-# T2V/R2V/L2V 门禁并 DROP 掉 runtime_settings.h3_extended_modes_enabled
-# ——columns -1；其余计数不变。
-HEAD_REVISION = "20260923T0000_open_h3_extended_modes"
+# 20260923T0000_open_h3_extended_modes 移除 T2V/R2V/L2V 门禁并 DROP 掉
+# runtime_settings.h3_extended_modes_enabled——columns -1；其余计数不变。
+# 本分支的 20260922T1500_viral_search_discoveries（爆款视频搜索发现记录表）
+# 按手册 §3 重挂于链尾：tables/primary_keys +1、columns +9、unique_constraints +1
+# （五列身份约束）、两个非 partial 查询索引；全 Text 列，无 FK/CHECK/jsonb/timestamptz 增量。
+HEAD_REVISION = "20260922T1500_viral_search_discoveries"
 
 # 最后一个已发布（受支持）起点。其后的 056…090 与本迁移尚未随任何受支持版本发布，
 # 故冻结范围止于此——把未发布 revision 也纳入哈希会让每次新增迁移都必须改常量，
@@ -122,17 +124,17 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # BEFORE DELETE 各算一行），故 18 行对应 10 个 distinct trigger，不是 10 行。
 HEAD_SCHEMA_COUNTS = {
     "check_constraints": 322,
-    "columns": 1210,
+    "columns": 1219,
     "foreign_keys": 193,
     "identity_columns": 0,
     "jsonb_columns": 6,
     "partial_indexes": 37,
-    "primary_keys": 102,
+    "primary_keys": 103,
     "sequences": 4,
-    "tables": 102,
+    "tables": 103,
     "timestamptz_columns": 56,
     "triggers": 27,
-    "unique_constraints": 38,
+    "unique_constraints": 39,
 }
 
 # head 的表名全集。counts 只能证明「数量没漂」，证明不了「同一批表」：
@@ -249,6 +251,7 @@ HEAD_TABLE_NAMES = (
     "viral_refresh_tasks",
     "viral_runtime_controls",
     "viral_script_cache",
+    "viral_search_discoveries",
     "viral_video_favorites",
     "viral_video_visibility",
     "viral_videos",
@@ -299,12 +302,15 @@ HEAD_TABLE_NAMES = (
 #   P1-6 analysis_task_attempts（新建表 analysis_task_attempts：tables/primary_keys +1、
 #   columns +12、foreign_keys +1、check_constraints +3、jsonb_columns +1；
 #   task_id+attempt 唯一性用 unique index 表达，unique_constraints 不变）。
-# - 20260923T0000_open_h3_extended_modes（本分支迁移，重挂于 main 新链尾之上）：
-#   移除 T2V/R2V/L2V 门禁并 DROP 掉 runtime_settings.h3_extended_modes_enabled
-#   （columns -1=1210；表名集、primary_keys、其余计数均不变）。
+# - 20260923T0000_open_h3_extended_modes：移除 T2V/R2V/L2V 门禁并 DROP 掉
+#   runtime_settings.h3_extended_modes_enabled（columns -1=1210；其余计数不变）。
+# - 本分支 20260922T1500_viral_search_discoveries（爆款视频搜索发现记录表）重挂于链尾：
+#   tables/primary_keys +1=103、columns +9=1219、unique_constraints +1=39（五列身份约束）；
+#   两个查询索引均非 partial，jsonb / CHECK / FK / timestamptz 无增量；
+#   表名集追加 viral_search_discoveries。
 # digest/counts 以 scripts/ci/migration_manifest.py --print-schema 于 postgres:16 重算
 # （合并后新 head：sub_account_permissions + 三个 analysis 迁移 + 本分支迁移叠加）。
-HEAD_SCHEMA_DIGEST = "0cd75046a00dc2d14889b4fccbd96dcbc0bbe696f9bf06406eebb249e8d9f740"
+HEAD_SCHEMA_DIGEST = "782f76c27e7a92106bd260cd9e9bba9de614e97436d911dea4af8d83b3bb1675"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

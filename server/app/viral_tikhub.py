@@ -334,26 +334,16 @@ def pick_douyin_cover(video_block: Mapping[str, Any]) -> str | None:
 
 
 def pick_douyin_play_url(video_block: Mapping[str, Any]) -> str | None:
-    """仅在浏览器兼容档位中选最低分辨率，避免 ByteVC/HEVC 私有变体。"""
-    gears = video_block.get("bit_rate")
-    candidates = [video_block, *(gears if isinstance(gears, list) else [])]
-    best: tuple[int, str] | None = None
-    for candidate in candidates:
-        if not isinstance(candidate, Mapping):
-            continue
-        if any(str(candidate.get(flag) or "0") != "0" for flag in ("is_bytevc1", "is_h265")):
-            continue
-        play_addr = candidate.get("play_addr")
-        if not isinstance(play_addr, Mapping):
-            continue
-        url = _first_url(play_addr)
-        if not url:
-            continue
-        height = play_addr.get("height")
-        rank = height if isinstance(height, int) and height > 0 else 2**31
-        if best is None or rank < best[0]:
-            best = (rank, url)
-    return best[1] if best else None
+    """直取源站默认播放地址（分辨率按默认档，不做档位挑选）.
+
+    2026-09-22 产品确认：客户端本地缓存按源站默认分辨率，不采用压缩低清档。
+    默认地址即顶层 ``play_addr`` 首个 URL；不再遍历 ``bit_rate`` 档位、
+    不做 ByteVC/HEVC 过滤（旧"浏览器预览选最低档"妥协废弃）。
+    """
+    play_addr = video_block.get("play_addr")
+    if not isinstance(play_addr, Mapping):
+        return None
+    return _first_url(play_addr)
 
 
 def _wechat_nonce(item: Mapping[str, Any]) -> str | None:
@@ -583,6 +573,53 @@ class ViralSourceClient:
                 if not isinstance(aweme, Mapping):
                     continue
                 normalized = normalize_douyin_aweme(aweme, category)
+                if normalized and not is_irrelevant_viral_video(normalized.title):
+                    videos.append(normalized)
+        return videos
+
+    def douyin_refresh(
+        self,
+        *,
+        platform: str,
+        video_id: str,
+    ) -> list[ViralVideo]:
+        """刷新单条视频信息（刷新封面/播放地址等资源）."""
+
+        # 由于 TikTokHub 没有单独的 refresh 接口，我们使用搜索 API 模拟刷新
+        url = f"{self._base_url}{DOUYIN_GENERAL_SEARCH_PATH}"
+        payload = json.dumps(
+            {
+                "keyword": f"#{video_id}",  # 假装用 ID 作为关键词搜索
+                "sort_type": "1",
+                "publish_time": "7",
+                "filter_duration": "0",
+                "content_type": "1",
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        content = self._transport.request("POST", url, headers=headers, body=payload)
+        envelope = json.loads(content)
+        if envelope.get("code") != 200:
+            raise ViralSourceError("爆款数据源暂时不可用，请稍后重试")
+        data = envelope.get("data", {})
+        cards = data.get("business_data")
+        videos: list[ViralVideo] = []
+        if isinstance(cards, list):
+            for card in cards:
+                if not isinstance(card, Mapping) or card.get("type") != 1:
+                    continue
+                card_data = card.get("data")
+                if not isinstance(card_data, Mapping):
+                    continue
+                aweme = card_data.get("aweme_info")
+                if not isinstance(aweme, Mapping):
+                    continue
+                normalized = normalize_douyin_aweme(aweme, "")
                 if normalized and not is_irrelevant_viral_video(normalized.title):
                     videos.append(normalized)
         return videos

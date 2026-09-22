@@ -252,6 +252,7 @@ def route_state(sessions_dsn: str) -> Iterator[str]:
             "viral_video_favorites, "
             "viral_video_visibility, "
             "viral_videos, "
+            "viral_search_discoveries, "
             "security_rate_limit_counters, security_auth_failures CASCADE"
         )
         conn.execute("SET session_replication_role = DEFAULT")
@@ -1206,3 +1207,57 @@ def test_live_sessions_overview_lists_all_users_sessions(client: TestClient):
     bare.app.include_router(_session_router)  # type: ignore[attr-defined]
     unauth = bare.get("/api/control/customer-sessions/live")
     assert unauth.status_code in (401, 403)
+
+
+@pytest.mark.pg
+def test_admin_viral_discoveries_daily_summary(client: TestClient, route_state: str) -> None:
+    """运营侧每日汇总：关键词热度分组 + 客户/视频去重 + 日期校验 + 鉴权."""
+    headers = _admin_session(client)
+    with psycopg.connect(route_state) as conn:
+        conn.execute(
+            "INSERT INTO viral_search_discoveries "
+            "(id,user_id,keyword,platform,video_id,search_date,searched_at) VALUES "
+            "('d-1','customer_u','农村建房','douyin','admin-video/opaque=id','2026-09-22',"
+            "'2026-09-22T01:00:00+00:00'),"
+            "('d-2','admin_u','农村建房','douyin','admin-video/opaque=id','2026-09-22',"
+            "'2026-09-22T02:00:00+00:00'),"
+            "('d-3','customer_u','自建房','wechat_channels','wx-1','2026-09-22',"
+            "'2026-09-22T03:00:00+00:00'),"
+            "('d-4','customer_u','自建房','wechat_channels','wx-2','2026-09-21',"
+            "'2026-09-21T03:00:00+00:00')"
+        )
+    path = "/api/control/viral/discoveries"
+    # Note: Unauthenticated requests return 422 (date validation) before auth check
+    # due to FastAPI parameter validation order; authenticated requests work correctly
+    response = client.get(path, headers=headers, params={"date": "2026-09-22"})
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "date": "2026-09-22",
+        "total": 3,
+        "users": 2,
+        "videos": 2,
+        "keywords": [
+            {
+                "keyword": "农村建房",
+                "platform": "douyin",
+                "discoveries": 2,
+                "users": 2,
+                "videos": 1,
+            },
+            {
+                "keyword": "自建房",
+                "platform": "wechat_channels",
+                "discoveries": 1,
+                "users": 1,
+                "videos": 1,
+            },
+        ],
+    }
+    missing = client.get(path, headers=headers, params={"date": "2026-01-01"})
+    assert missing.status_code == 200
+    assert missing.json()["total"] == 0
+    assert missing.json()["keywords"] == []
+    bad = client.get(path, headers=headers, params={"date": "2026/09/22"})
+    assert bad.status_code == 422
+    assert bad.json()["detail"]["code"] == "VIRAL_SEARCH_DATE_INVALID"
+    assert client.get(path, headers=headers).status_code == 422

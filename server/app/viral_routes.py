@@ -102,6 +102,7 @@ class ViralVideoItem(BaseModel):
     playUrl: str | None = None
     native: dict[str, Any] = Field(default_factory=dict)
     isFavorite: bool = False
+    hasCopy: bool = False
     availability: Literal["available", "hidden", "unavailable"] = "available"
 
 

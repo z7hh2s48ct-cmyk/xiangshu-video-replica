@@ -56,9 +56,11 @@ CW076_DB_NAME = "cw076_registration_test"
 CW076_MIGRATION_DB_NAME = "cw076_migration_test"
 
 REGISTER_PATH = "/api/customer/register"
+# 本分支 20260922T1500_viral_search_discoveries（爆款视频搜索发现记录表）
+# 按手册 §3 重挂于链尾，故链尾（alembic head）为该值。
 # 重挂后链尾：#188 recharge_packages 之后是 Phase 3a sub_account_quotas、
 # Phase 3b sub_account_permissions，再叠加 BILLING-OBS-20260922 三个 analysis 迁移。
-HEAD_REVISION = "20260923T0000_open_h3_extended_modes"
+HEAD_REVISION = "20260922T1500_viral_search_discoveries"
 PRIOR_REVISION = "20260912T1353_customer_discounts"
 
 # A policy-valid password (>= MIN_PASSWORD_LENGTH, not blank). Never a secret.

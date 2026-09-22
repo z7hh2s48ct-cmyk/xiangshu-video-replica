@@ -17,7 +17,10 @@ databases.
 
 from __future__ import annotations
 
-import fcntl
+try:
+    import fcntl  # Unix-only, used for file locking in tests
+except ImportError:
+    fcntl = None  # Windows doesn't have this module
 import hashlib
 import os
 from collections.abc import Iterator

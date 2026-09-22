@@ -541,10 +541,15 @@ def test_collection_settlement_recovers_once_and_never_retries_insufficient_bala
         )
 
 
-def test_scheduled_collector_wires_batch_meter_and_settlement(client, route_state, monkeypatch):
+def test_scheduled_collector_records_platform_cost_without_charging_customers(
+    client, route_state, monkeypatch
+):
+    """P1 停用采集计费后的 collector 语义：显式入队的任务照常消费、供应商成本
+    照记平台单（user_id IS NULL），但不再产生任何客户采集扣费."""
     from app.billing_meter import meter_call
     from app.generation_worker import run_pg_collection_once
     from app.storage import FakeStorageAdapter
+    from app.viral_collection import enqueue_due_viral_collections
 
     user = account(client, "scheduled_collection")[1]
     with psycopg.connect(route_state) as raw:
@@ -560,6 +565,7 @@ def test_scheduled_collector_wires_batch_meter_and_settlement(client, route_stat
             (json.dumps([{"platform": "douyin", "category": "其他", "keyword": "别墅"}]),),
         )
         raw.execute("DELETE FROM viral_refresh_tasks")
+        enqueue_due_viral_collections(BusinessConnection.postgres(raw))
 
     class Source:
         def douyin_search(self, **_kwargs):
@@ -574,7 +580,7 @@ def test_scheduled_collector_wires_batch_meter_and_settlement(client, route_stat
             worker_id="billing-integration",
             storage=FakeStorageAdapter(provider="cos", bucket="test"),
         )
-        > 0
+        == 1
     )
     with psycopg.connect(route_state) as raw:
         assert raw.execute("SELECT status FROM viral_refresh_tasks").fetchone()[0] == "SUCCEEDED"
@@ -582,17 +588,140 @@ def test_scheduled_collector_wires_batch_meter_and_settlement(client, route_stat
             raw.execute(
                 "SELECT available_credits FROM wallets WHERE user_id=%s", (user,)
             ).fetchone()[0]
-            == 98
+            == 100
         )
         config = json.loads(
             raw.execute("SELECT collection_config_json FROM viral_refresh_tasks").fetchone()[0]
         )
         assert (
             raw.execute(
-                "SELECT count(*) FROM billing_operations WHERE collection_batch_id=%s",
+                "SELECT count(*) FROM billing_operations WHERE collection_batch_id=%s "
+                "AND user_id IS NULL AND state='SUCCEEDED'",
                 (config["billing_batch_id"],),
             ).fetchone()[0]
-            == 2
+            == 1
+        )
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM billing_operations WHERE collection_batch_id=%s "
+                "AND user_id IS NOT NULL",
+                (config["billing_batch_id"],),
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM viral_collection_charges c "
+                "JOIN billing_operations p ON p.id=c.request_id "
+                "WHERE p.collection_batch_id=%s",
+                (config["billing_batch_id"],),
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_acquire_no_longer_enqueues_scheduled_collection(client, route_state):
+    """P1 停用采集调度：即使运行控制开着、关键词已到期，acquire 也不再自动入队
+    （采集任务只能被显式入队——admin 单条归档 / 失败重试）."""
+    from app.viral_refresh import acquire_viral_refresh_task
+
+    account(client, "no_auto_enqueue")
+    with psycopg.connect(route_state) as raw:
+        raw.execute("DELETE FROM viral_refresh_tasks")
+        rows_before = raw.execute("SELECT count(*) FROM viral_collection_batches").fetchone()[0]
+        raw.execute(
+            "INSERT INTO viral_runtime_controls(id,collection_enabled,keywords_json,"
+            "next_collection_at) VALUES(1,1,%s,NULL) ON CONFLICT(id) DO UPDATE SET "
+            "collection_enabled=1,keywords_json=excluded.keywords_json,next_collection_at=NULL",
+            (json.dumps([{"platform": "douyin", "category": "其他", "keyword": "别墅"}]),),
+        )
+        conn = BusinessConnection.postgres(raw)
+        assert acquire_viral_refresh_task(conn, worker_id="disabled-schedule") is None
+        assert raw.execute("SELECT count(*) FROM viral_refresh_tasks").fetchone()[0] == 0
+        assert (
+            raw.execute("SELECT count(*) FROM viral_collection_batches").fetchone()[0]
+            == rows_before
+        )
+
+
+def test_collector_does_not_settle_legacy_confirmed_collection_requests(client, route_state):
+    """P1 停用采集计费：即使库里存留"已确认未结算"的历史平台请求，collector
+    空轮也不再触发任何客户结算（settle 触发路径已摘除）."""
+    from app.generation_worker import run_pg_collection_once
+    from app.storage import FakeStorageAdapter
+    from app.viral_collection_billing import create_collection_batch
+
+    user = account(client, "legacy_settlement")[1]
+    with psycopg.connect(route_state) as raw:
+        credit_lot(
+            raw,
+            user,
+            key="legacy-settlement-funds",
+            credits=100,
+            amount_fen=100,
+            provider="admin_adjustment",
+        )
+        raw.execute(
+            "INSERT INTO "
+            "activation_code_batches(id,name,face_value_fen,unit_price_fen_snapshot,"
+            "credits_snapshot,quantity,activation_expires_at,status,created_by_user_id) "
+            "VALUES('legacy-code-batch','test',1000,10,100,1,'2099-01-01','OPEN',%s)",
+            (user,),
+        )
+        raw.execute(
+            "INSERT INTO "
+            "activation_codes(id,batch_id,code_digest,digest_key_version,masked_code,status,"
+            "issued_at,bound_user_id,activated_at) "
+            "VALUES('legacy-code','legacy-code-batch','legacy-digest',1,'TEST-****','ACTIVE',"
+            "'2026-01-01',%s,'2026-01-01')",
+            (user,),
+        )
+        raw.execute(
+            "INSERT INTO activation_code_activations(id,code_id,user_id,first_device_id,"
+            "recharge_order_id) "
+            "VALUES('legacy-binding','legacy-code',%s,NULL,'legacy-settlement-funds')",
+            (user,),
+        )
+        raw.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_credits,unit_cost_fen) "
+            "VALUES('viral_data',true,2,0.5)"
+        )
+        raw.execute("DELETE FROM viral_refresh_tasks")
+        batch = create_collection_batch(
+            BusinessConnection.postgres(raw),
+            platform="douyin",
+            config={"keywords": ["别墅"]},
+            user_ids=[user],
+        )
+        raw.execute(
+            "INSERT INTO billing_operations(id,service,module,source_id,unit,budget_units,"
+            "pricing_snapshot_json,collection_batch_id,state,actual_units,completed_at) "
+            "VALUES('legacy-request','viral_data','viral','legacy-request','call',1,'{}',%s,"
+            "'SUCCEEDED',1,now())",
+            (batch,),
+        )
+    assert (
+        run_pg_collection_once(
+            worker_id="legacy-settle-check",
+            storage=FakeStorageAdapter(provider="cos", bucket="test"),
+        )
+        == 0
+    )
+    with psycopg.connect(route_state) as raw:
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM viral_collection_charges c "
+                "JOIN billing_operations p ON p.id=c.request_id "
+                "WHERE p.collection_batch_id=%s",
+                (batch,),
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            raw.execute(
+                "SELECT available_credits FROM wallets WHERE user_id=%s", (user,)
+            ).fetchone()[0]
+            == 100
         )
 
 
@@ -1521,3 +1650,71 @@ def test_terminal_first_frame_auxiliary_cost_recovery(client, route_state, scena
         assert snapshot("SELECT * FROM wallet_transactions ORDER BY id") == before_ledger
         assert snapshot("SELECT * FROM first_frame_tasks ORDER BY id") == before_tasks
         assert snapshot("SELECT * FROM audit_logs ORDER BY id") == before_audits
+
+
+def test_reconcile_releases_stale_search_operations(client, route_state):
+    """崩溃残留的搜索预留：超时后按未交付释放（FAILED），重试开新轮次."""
+    from app.usage_billing import reconcile_operations
+    from app.viral_search import reserve_search_operation
+
+    _, uid = account(client)
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        raw.execute("UPDATE wallets SET available_credits=10 WHERE user_id=%s", (uid,))
+        raw.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_credits) "
+            "VALUES('viral_search',true,1) ON CONFLICT (service) "
+            "DO UPDATE SET enabled=true, unit_credits=1"
+        )
+        stale = reserve_search_operation(
+            conn, user_id=uid, source_id="stale-search-1", request_fingerprint="fp-stale"
+        )
+        fresh = reserve_search_operation(
+            conn, user_id=uid, source_id="fresh-search-1", request_fingerprint="fp-fresh"
+        )
+        assert tuple(
+            raw.execute(
+                "SELECT available_credits,reserved_credits FROM wallets WHERE user_id=%s", (uid,)
+            ).fetchone()
+        ) == (8, 2)
+        # 模拟"预留后、页面事务提交前"崩溃：把预留老化到窗口之外。
+        # billing_operations 的不可变事实触发器拒绝改 created_at；
+        # session_replication_role=replica 只用于老化夹具事实，与既有用例同款。
+        raw.execute("SET LOCAL session_replication_role=replica")
+        raw.execute(
+            "UPDATE billing_operations SET created_at=now()-interval '31 minutes' WHERE id=%s",
+            (stale,),
+        )
+        raw.execute("SET LOCAL session_replication_role=origin")
+        assert reconcile_operations(conn) == 1
+        assert reconcile_operations(conn) == 0
+        assert tuple(
+            raw.execute(
+                "SELECT available_credits,reserved_credits FROM wallets WHERE user_id=%s", (uid,)
+            ).fetchone()
+        ) == (9, 1)
+        # BusinessConnection 会把 raw 的 row_factory 换成 _NamedRow，
+        # _NamedRow == tuple 设计上恒为 False（镜像 sqlite3.Row），显式转 tuple 比较。
+        assert tuple(
+            raw.execute(
+                "SELECT state,actual_units FROM billing_operations WHERE id=%s", (stale,)
+            ).fetchone()
+        ) == ("FAILED", 0)
+        assert tuple(
+            raw.execute("SELECT state FROM billing_operations WHERE id=%s", (fresh,)).fetchone()
+        ) == ("PENDING",)
+        # 释放后的重试开新轮次：同一 source_id 重新预留，billing_round 升到 2。
+        retry = reserve_search_operation(
+            conn, user_id=uid, source_id="stale-search-1", request_fingerprint="fp-stale"
+        )
+        assert retry != stale
+        assert tuple(
+            raw.execute(
+                "SELECT billing_round FROM billing_operations WHERE id=%s", (retry,)
+            ).fetchone()
+        ) == (2,)
+        assert tuple(
+            raw.execute(
+                "SELECT available_credits,reserved_credits FROM wallets WHERE user_id=%s", (uid,)
+            ).fetchone()
+        ) == (8, 2)

@@ -4,14 +4,13 @@ server/tests/test_analysis_failure_diagnostics.py
 server/tests/test_analysis_scene_boundaries.py
 server/tests/test_asr_provider.py
 server/tests/test_billing_history_pg.py
+server/tests/test_bootstrap_all_env_pg_gate.py
 server/tests/test_csv_export.py
 server/tests/test_customer_activation.py
-server/tests/test_customer_ha_smoke.py
-server/tests/test_customer_pitr.py
 server/tests/test_customer_pricing.py
 server/tests/test_customer_queue_fairness.py
+server/tests/test_customer_release_preflight.py
 server/tests/test_customer_sessions.py
-server/tests/test_cw009_security_matrix_export.py
 server/tests/test_cw026_converged_auth.py
 server/tests/test_cw030_worker_pg_matrix.py
 server/tests/test_cw041_internal_identity_exit.py
@@ -23,6 +22,7 @@ server/tests/test_h3_prompts.py
 server/tests/test_independent_creation.py
 server/tests/test_logging_setup.py
 server/tests/test_material_ux14_simple_character_objects.py
+server/tests/test_migration_dialect_contract.py
 server/tests/test_operation_costs.py
 server/tests/test_postgres_migrations.py
 server/tests/test_prompt_optimizer.py
@@ -30,5 +30,7 @@ server/tests/test_publish_credentials.py
 server/tests/test_signed_thumbnail_grant.py
 server/tests/test_sub_account_permissions.py
 server/tests/test_usage_billing.py
-server/tests/test_wallet_pricing_breakdown.py
-server/tests/test_wechat_native_client.py
+server/tests/test_viral_search_pg.py
+server/tests/test_viral_tikhub.py
+server/tests/test_wechat_native_callback_verify.py
+server/tests/test_zpay.py

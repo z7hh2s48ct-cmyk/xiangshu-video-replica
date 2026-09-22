@@ -15,9 +15,11 @@ import binascii
 import json
 import threading
 from base64 import urlsafe_b64decode, urlsafe_b64encode
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
+from uuid import uuid4
 
 from app.db_portable import BusinessConnection
 from app.viral_tikhub import MAX_TAGS, ViralVideo, WechatVideoDetail, is_irrelevant_viral_video
@@ -49,7 +51,8 @@ INSERT INTO viral_videos (
     %s, %s, %s
 )
 ON CONFLICT (platform, video_id) DO UPDATE SET
-    category = excluded.category,
+    category = CASE WHEN excluded.category = '' THEN viral_videos.category
+                    ELSE excluded.category END,
     title = excluded.title,
     author = excluded.author,
     author_avatar = COALESCE(excluded.author_avatar, viral_videos.author_avatar),
@@ -678,8 +681,12 @@ def update_viral_cover(
     platform: str,
     video_id: str,
     cover_key: str,
+    commit: bool = True,
 ) -> None:
-    """封面落存储成功后回写 key（路由据此下发自有稳定地址）."""
+    """封面落存储成功后回写 key（路由据此下发自有稳定地址）.
+
+    ``commit=False`` 供已在事务内的调用方（搜索落库）使用，避免中途提交。
+    """
     conn.execute(
         """
         UPDATE viral_videos
@@ -688,7 +695,90 @@ def update_viral_cover(
         """,
         (cover_key, platform, video_id),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
+
+
+@dataclass(frozen=True)
+class ViralDiscovery:
+    """一条发现记录 + 其内容池条目（条目缺失/已删时为 None）."""
+
+    platform: str
+    video_id: str
+    keyword: str
+    search_date: str
+    searched_at: str
+    video: ViralVideo | None
+
+
+def mark_viral_discoveries(
+    conn: BusinessConnection,
+    *,
+    user_id: str,
+    keyword: str,
+    platform: str,
+    video_ids: Sequence[str],
+    search_date: str,
+    searched_at: str,
+) -> int:
+    """记录"某客户某天用某词搜到了哪些视频"；同键重复命中只刷新 searched_at.
+
+    返回尝试写入的去重条数（幂等重放不产生重复行）。
+    """
+    marked = 0
+    for video_id in dict.fromkeys(video_ids):
+        conn.execute(
+            """
+            INSERT INTO viral_search_discoveries
+                (id, user_id, keyword, platform, video_id, search_date, searched_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (user_id, keyword, platform, video_id, search_date)
+            DO UPDATE SET searched_at = excluded.searched_at,
+                          updated_at = CURRENT_TIMESTAMP
+            """,
+            (uuid4().hex, user_id, keyword, platform, video_id, search_date, searched_at),
+        )
+        marked += 1
+    return marked
+
+
+def list_viral_discoveries(
+    conn: BusinessConnection, *, user_id: str, search_date: str
+) -> list[ViralDiscovery]:
+    """客户"我的发现"（按天）：发现记录左联内容池，带回视频当前数据.
+
+    ``d.platform`` / ``d.video_id`` 起别名避开与 ``v.*`` 的同名列冲突：
+    LEFT JOIN 未命中时 ``v.platform`` 为 NULL，若与 ``d.platform`` 同名，
+    ``dict(row)`` 会折叠成首个（NULL），发现记录自身字段会丢。
+    """
+    rows = conn.execute(
+        """
+        SELECT v.*, d.platform AS d_platform, d.video_id AS d_video_id,
+               d.keyword, d.search_date, d.searched_at
+        FROM viral_search_discoveries d
+        LEFT JOIN viral_videos v
+            ON v.platform = d.platform AND v.video_id = d.video_id
+            AND v.deleted_at IS NULL
+        WHERE d.user_id = %s AND d.search_date = %s
+        ORDER BY d.searched_at DESC, d.keyword, d.video_id
+        """,
+        (user_id, search_date),
+    ).fetchall()
+    discoveries: list[ViralDiscovery] = []
+    for row in rows:
+        mapping = dict(row)
+        video = _row_to_video(mapping) if mapping.get("title") is not None else None
+        discoveries.append(
+            ViralDiscovery(
+                platform=str(mapping["d_platform"]),
+                video_id=str(mapping["d_video_id"]),
+                keyword=str(mapping["keyword"]),
+                search_date=str(mapping["search_date"]),
+                searched_at=str(mapping["searched_at"]),
+                video=video,
+            )
+        )
+    return discoveries
 
 
 def fetch_state_is_fresh(

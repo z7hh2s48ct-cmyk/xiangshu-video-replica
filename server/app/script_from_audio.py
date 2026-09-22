@@ -17,7 +17,7 @@ import logging
 import math
 import sqlite3
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -52,6 +52,7 @@ logger = logging.getLogger("app.script_from_audio")
 
 SCRIPT_FROM_AUDIO_TASK_LEASE_MINUTES = 20
 SCRIPT_FROM_AUDIO_MAX_SOURCE_BYTES = 2_000_000_000
+_TRANSCRIPT_LOOKUP_CHUNK = 100
 _DOWNLOAD_INTENT_EXPIRES = timedelta(minutes=30)
 
 
@@ -178,6 +179,61 @@ def _cached_transcript(raw: object) -> TranscriptResult | None:
         return TranscriptResult(text, duration, value.get("language"))
     except (ValueError, TypeError, KeyError):
         return None
+
+
+@dataclass(frozen=True)
+class CachedTranscriptHit:
+    """共享文案缓存命中：转写结果 + 最近写入时间（GET /api/viral/search/copy 的 updatedAt）."""
+
+    result: TranscriptResult
+    updated_at: str
+
+
+def _iso_updated_at(value: object) -> str:
+    return value.isoformat() if isinstance(value, datetime) else str(value)
+
+
+def cached_transcript(
+    conn: BusinessConnection, *, platform: str, video_id: str
+) -> CachedTranscriptHit | None:
+    """只读查询共享文案缓存；未命中或内容非法返回 None. 不加锁、不转写、不计费."""
+    row = conn.execute(
+        "SELECT result_json, updated_at FROM viral_script_cache WHERE platform=%s AND video_id=%s",
+        (platform, video_id),
+    ).fetchone()
+    if row is None:
+        return None
+    result = _cached_transcript(row["result_json"])
+    if result is None:
+        return None
+    return CachedTranscriptHit(result=result, updated_at=_iso_updated_at(row["updated_at"]))
+
+
+def cached_transcripts(
+    conn: BusinessConnection, refs: Sequence[tuple[str, str]]
+) -> dict[tuple[str, str], CachedTranscriptHit]:
+    """批量只读查询（搜索结果回填 hasCopy）；去重后分块 OR 查询，未命中不入结果."""
+    unique = list(dict.fromkeys(refs))
+    hits: dict[tuple[str, str], CachedTranscriptHit] = {}
+    for start in range(0, len(unique), _TRANSCRIPT_LOOKUP_CHUNK):
+        chunk = unique[start : start + _TRANSCRIPT_LOOKUP_CHUNK]
+        clause = " OR ".join(["(platform=%s AND video_id=%s)"] * len(chunk))
+        params: list[str] = []
+        for platform, video_id in chunk:
+            params.extend((platform, video_id))
+        rows = conn.execute(
+            f"SELECT platform, video_id, result_json, updated_at FROM viral_script_cache "
+            f"WHERE {clause}",  # noqa: S608 - 占位符模板拼接，值仍走参数化
+            tuple(params),
+        ).fetchall()
+        for row in rows:
+            result = _cached_transcript(row["result_json"])
+            if result is None:
+                continue
+            hits[(str(row["platform"]), str(row["video_id"]))] = CachedTranscriptHit(
+                result=result, updated_at=_iso_updated_at(row["updated_at"])
+            )
+    return hits
 
 
 def _historical_transcripts(

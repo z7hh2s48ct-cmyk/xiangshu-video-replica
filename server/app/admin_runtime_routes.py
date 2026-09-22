@@ -20,11 +20,12 @@ themselves require the PostgreSQL runtime and fail closed elsewhere.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from typing import Annotated, Literal
 
 import psycopg
-from fastapi import APIRouter, Query, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.admin_auth_routes import AdminReader, AdminWriter
@@ -419,6 +420,57 @@ def read_collected_viral_videos(
         item["collection_published"] = bool(item["collection_published"])
         items.append(item)
     return {"items": items, "total": int(total), "offset": offset, "limit": limit}
+
+
+@router.get("/viral/discoveries")
+def read_viral_search_discoveries(
+    request: Request,
+    _actor: AdminReader,
+) -> dict[str, object]:
+    """搜索发现每日汇总（运营视图）：按关键词×平台的热度分组.
+
+    一行 = 一个 (keyword, platform) 分组；`users`/`videos` 为去重覆盖数。
+    明细（谁在什么时候搜到什么）由客户侧 `GET /api/viral/search/discoveries`
+    与内容池 `GET /api/control/viral/videos` 交叉查看。
+    """
+    search_date_raw = request.query_params.get("date", "")
+    resolved_date = search_date_raw.strip()
+    if not resolved_date:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "VIRAL_SEARCH_DATE_REQUIRED", "message": "日期参数必填。"},
+        )
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", resolved_date):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "VIRAL_SEARCH_DATE_INVALID",
+                "message": "日期格式应为 YYYY-MM-DD。",
+            },
+        )
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        totals = conn.execute(
+            "SELECT count(*),count(DISTINCT user_id),"
+            "count(DISTINCT platform || '/' || video_id) "
+            "FROM viral_search_discoveries WHERE search_date=%s",
+            (resolved_date,),
+        ).fetchone()
+        rows = conn.execute(
+            "SELECT keyword,platform,count(*) AS discoveries,"
+            "count(DISTINCT user_id) AS users,count(DISTINCT video_id) AS videos "
+            "FROM viral_search_discoveries WHERE search_date=%s "
+            "GROUP BY keyword,platform "
+            "ORDER BY discoveries DESC,keyword,platform LIMIT 100",
+            (resolved_date,),
+        ).fetchall()
+    return {
+        "date": resolved_date,
+        "total": int(totals[0]),
+        "users": int(totals[1]),
+        "videos": int(totals[2]),
+        "keywords": [dict(row) for row in rows],
+    }
 
 
 @router.post("/viral/videos/{platform}/{video_id:path}/archive", status_code=202)

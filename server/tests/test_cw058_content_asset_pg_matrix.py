@@ -2897,6 +2897,7 @@ def test_weekly_collection_failure_keeps_published_snapshot_and_resumes_checkpoi
     from dataclasses import replace
 
     from app.generation_worker import run_pg_collection_once
+    from app.viral_collection import enqueue_due_viral_collections
     from app.viral_tikhub import ViralSourceError
 
     bus = BusinessConnection.postgres(pg)
@@ -2964,6 +2965,7 @@ def test_weekly_collection_failure_keeps_published_snapshot_and_resumes_checkpoi
             "enrich",
             lambda self, video: replace(video, cover_key=f"cover-{video.video_id}.jpg"),
         )
+    enqueue_due_viral_collections(bus)
     storage = FakeStorageAdapter(provider="fake", bucket="weekly")
     assert run_pg_collection_once(worker_id="collector", storage=storage) == 1
     assert calls == ["bad", "good"]
@@ -2996,6 +2998,7 @@ def test_weekly_collection_failure_keeps_published_snapshot_and_resumes_checkpoi
         "UPDATE viral_media_preparations SET "
         "updated_at=(CURRENT_TIMESTAMP - interval '1 minute')::text WHERE status='FAILED'"
     )
+    enqueue_due_viral_collections(bus)
     assert run_pg_collection_once(worker_id="collector", storage=storage) == 1
     assert calls.count("good") == 1
     assert streams.count("https://cdn.example/good.mp4") == 1
@@ -3042,6 +3045,7 @@ def test_weekly_wechat_cached_media_refreshes_statistics_but_pause_prevents_deta
     from types import SimpleNamespace
 
     from app.generation_worker import run_pg_collection_once
+    from app.viral_collection import enqueue_due_viral_collections
     from app.viral_media_preparation import ViralMediaPreparation
 
     video = replace(
@@ -3084,15 +3088,21 @@ def test_weekly_wechat_cached_media_refreshes_statistics_but_pause_prevents_deta
         "next_collection_at=NULL WHERE id=1",
         (json.dumps([{"platform": "wechat_channels", "category": "测试", "keyword": "建筑"}]),),
     )
+    enqueue_due_viral_collections(BusinessConnection.postgres(pg))
     assert run_pg_collection_once(worker_id="collector", storage=storage) == 1
     if pause_after_cover:
         assert detail_calls == []
         assert pg.execute("SELECT collection_published FROM viral_videos").fetchone()[0] == 0
     else:
         assert detail_calls == ["test-export"]
-        assert pg.execute(
-            "SELECT likes,comments,shares,collects,collection_published FROM viral_videos"
-        ).fetchone() == (9876, 12, 34, 56, 1)
+        # 显式入队要求先把 pg 包成 BusinessConnection，而 PostgresBackend
+        # 会把该连接的 row_factory 永久换成 _NamedRow（db_portable.py:112）；
+        # _NamedRow == tuple 设计上恒为 False（镜像 sqlite3.Row），故先显式转 tuple。
+        assert tuple(
+            pg.execute(
+                "SELECT likes,comments,shares,collects,collection_published FROM viral_videos"
+            ).fetchone()
+        ) == (9876, 12, 34, 56, 1)
 
 
 def test_viral_store_upsert_dedup_and_statistics_coalesce_on_pg(
@@ -3259,6 +3269,7 @@ def test_viral_list_reads_only_and_weekly_worker_prepares_cloud_media_on_pg(
     run_pg_worker_once 以独立连接消费——上游外呼不持有请求事务，结果落库后
     任务 SUCCEEDED、列表可从库中读出。"""
     from app.generation_worker import run_pg_collection_once, run_pg_worker_once
+    from app.viral_collection import enqueue_due_viral_collections
     from app.viral_store import fetch_state_is_fresh
 
     class StubClient(ViralSourceClient):
@@ -3336,6 +3347,7 @@ def test_viral_list_reads_only_and_weekly_worker_prepares_cloud_media_on_pg(
         (json.dumps([{"platform": "douyin", "category": "测试", "keyword": "农村建房"}]),),
     )
     pg.commit()
+    enqueue_due_viral_collections(BusinessConnection.postgres(pg))
     # PG worker 消费：租约获取/完成走 pg_transaction 短事务。
     # A configured collection cannot occupy the generation worker pool.
     advanced: list[str] = []

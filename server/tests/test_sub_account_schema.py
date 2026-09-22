@@ -31,9 +31,11 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 USERS_TABLE = "users"
 WALLET_TX_TABLE = "wallet_transactions"
 
+# 本分支 20260922T1500_viral_search_discoveries（爆款视频搜索发现记录表）
+# 按手册 §3 重挂于链尾，故链尾（alembic head）为该值。
 # 重挂后链尾：#188 recharge_packages 之后是 Phase 3a sub_account_quotas、
 # Phase 3b sub_account_permissions，再叠加 BILLING-OBS-20260922 三个 analysis 迁移。
-_HEAD_REVISION = "20260923T0000_open_h3_extended_modes"
+_HEAD_REVISION = "20260922T1500_viral_search_discoveries"
 # 1200 adds the sub-account columns; 1300 adds the wallet actor column;
 # 1500 + the 20260921T0000 merge revision sit on top of 1300, with the
 # BILLING-OBS revisions (failure diagnostic, request id, attempt history)

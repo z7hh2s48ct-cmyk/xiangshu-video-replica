@@ -1760,16 +1760,18 @@ def run_pg_worker_once(
 
 
 def run_pg_collection_once(*, worker_id: str, storage: StorageAdapter) -> int:
-    """Dedicated collector: never run in the customer generation worker pool."""
-    from app.viral_collection_billing import settle_collection_charges
+    """Dedicated collector: never run in the customer generation worker pool.
 
-    settled = settle_collection_charges()
+    P1 起采集调度与采集计费停用：本进程只消费显式入队的任务
+    （admin 单条归档 / 失败重试），不再自动入队、不再触发客户采集扣费
+    （设计 §5.5 / §12）。供应商成本仍由 meter_call 记平台单。
+    """
     with pg_transaction() as raw:
         lease = acquire_viral_refresh_task(BusinessConnection.postgres(raw), worker_id=worker_id)
     if lease is None:
-        return settled
+        return 0
     _run_pg_viral_refresh(lease, storage)
-    return 1 + settled + settle_collection_charges()
+    return 1
 
 
 # Content-addressable storage only ever *schedules* byte removal: dropping a
@@ -1919,7 +1921,7 @@ def main() -> None:
     parser.add_argument(
         "--viral-collection",
         action="store_true",
-        help="run only weekly keyword collection and cloud archiving",
+        help="run only explicitly queued viral archive tasks (scheduled collection is disabled)",
     )
     parser.add_argument(
         "--worker-id", help="logical worker label; each startup adds a unique suffix"

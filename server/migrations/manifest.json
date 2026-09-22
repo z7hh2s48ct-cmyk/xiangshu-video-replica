@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20260923T0000_open_h3_extended_modes"
+      "20260922T1500_viral_search_discoveries"
     ],
     "parents": {
       "001_core": null,
@@ -129,12 +129,13 @@
       "20260921T1200_sub_account_quotas": "20260922T1200_recharge_packages",
       "20260922T1200_analysis_task_failure_diagnostic": "20260922T1800_sub_account_permissions",
       "20260922T1200_recharge_packages": "20260921T0000_merge_wallet_actor_and_billing_metadata",
+      "20260922T1500_viral_search_discoveries": "20260923T0000_open_h3_extended_modes",
       "20260922T1600_analysis_task_request_id": "20260922T1200_analysis_task_failure_diagnostic",
       "20260922T1800_sub_account_permissions": "20260921T1200_sub_account_quotas",
       "20260922T2000_analysis_task_attempts": "20260922T1600_analysis_task_request_id",
       "20260923T0000_open_h3_extended_modes": "20260922T2000_analysis_task_attempts"
     },
-    "revision_count": 116
+    "revision_count": 117
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -596,6 +597,10 @@
     "20260922T1200_recharge_packages": {
       "file": "versions/20260922T1200_recharge_packages.py",
       "sha256": "40203dc6a8529974447a15812c16c0071203c5f1ac8b5d3c2e8712aa9ad410e3"
+    },
+    "20260922T1500_viral_search_discoveries": {
+      "file": "versions/20260922T1500_viral_search_discoveries.py",
+      "sha256": "c6032339731b2ec183e07345d79c649d6dc0ff9510328aca6d436a3555189ecd"
     },
     "20260922T1600_analysis_task_request_id": {
       "file": "versions/20260922T1600_analysis_task_request_id.py",

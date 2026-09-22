@@ -81,6 +81,8 @@ from app.studio_routes import router as studio_router
 from app.sub_account_routes import router as sub_account_router
 from app.viral_import_routes import router as viral_import_router
 from app.viral_routes import router as viral_router
+from app.viral_search_refresh_routes import router as viral_search_refresh_router
+from app.viral_search_routes import router as viral_search_router
 from app.wallet_routes import router as wallet_router
 
 # Configure application logging before the app serves traffic: uvicorn only
@@ -410,6 +412,8 @@ app.include_router(media_router)
 app.include_router(analysis_router)
 app.include_router(viral_router)
 app.include_router(viral_import_router)
+app.include_router(viral_search_router)
+app.include_router(viral_search_refresh_router)
 app.include_router(prompt_optimizer_router)
 app.include_router(character_router)
 app.include_router(character_identity_router)
