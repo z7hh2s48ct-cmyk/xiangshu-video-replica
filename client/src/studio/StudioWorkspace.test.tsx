@@ -2768,6 +2768,58 @@ describe("视频生成（C2 独立创作）", () => {
     ).not.toBeInTheDocument();
     expect(api.createIndependentVideoTask).toHaveBeenCalledOnce();
   });
+
+  it("非法草稿时长钳位到 15 秒提交，不再静默回落 8 秒（preflight P1-4）", async () => {
+    // 上线前检查 P1-4：云草稿恢复链不校验 duration，旧客户端写入的超界值
+    // 到达独立创作页后，提交/报价必须按 4–15 钳位（20 → 15），与复刻路径
+    // normalizeCustomerDuration 同口径；旧行为「非法 → 悄悄换 8」会让
+    // 时长下拉显示值与实际生成时长不一致。
+    live.loadStudioData.mockResolvedValue(emptyStudioData);
+    api.getGenerationPriceQuote.mockReset();
+    api.getGenerationPriceQuote.mockResolvedValue({
+      resolution: "768P",
+      duration_seconds: 15,
+      quantity: 1,
+      unit_price_fen_per_second: 120,
+      estimated_seconds: 15,
+      estimated_price_fen: 1800,
+    });
+    const base = createState();
+    render(
+      <StudioWorkspace
+        currentUser={reviewUser}
+        initialState={{
+          ...createState("reference"),
+          draft: { ...base.draft, duration: 20 },
+        }}
+      />,
+    );
+    await openVideoPage();
+    fireEvent.change(screen.getByLabelText("提示词"), {
+      target: { value: "乡墅庭院" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "生成视频" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "生成确认 · 视频生成",
+    });
+    await screen.findByText(/18\.00 元/);
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "确认费用并提交" }),
+    );
+    await waitFor(() =>
+      expect(api.createIndependentVideoTask).toHaveBeenCalledOnce(),
+    );
+    const call = api.createIndependentVideoTask.mock.calls[0]?.[0] as {
+      output_duration_seconds?: number;
+    } | undefined;
+    expect(call?.output_duration_seconds).toBe(15);
+    const quoteCalls = api.getGenerationPriceQuote.mock.calls as unknown as Array<
+      [{ duration_seconds?: number }]
+    >;
+    expect(
+      quoteCalls.some(([input]) => input.duration_seconds === 15),
+    ).toBe(true);
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useRealTimers();
