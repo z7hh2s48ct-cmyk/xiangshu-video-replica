@@ -14,6 +14,7 @@ import { H3AccountsManager } from "./H3AccountsManager";
 import { H3ExtendedModesSection } from "./H3ExtendedModesSection";
 import { PaymentSettingsSection } from "./PaymentSettingsSection";
 import { QueueModeSection } from "./QueueModeSection";
+import { RechargePackageManager } from "./RechargePackageManager";
 import { TabBar } from "./ui/TabBar";
 import { ViralRuntimeSection } from "./ViralRuntimeSection";
 
@@ -61,6 +62,7 @@ export function SystemSettingsPage({
       {tab === "payment" ? (
         <>
           <CustomerPricingManager readOnly={readOnly} />
+          <RechargePackageManager readOnly={readOnly} />
           <PaymentSettingsSection readOnly={readOnly} />
         </>
       ) : null}

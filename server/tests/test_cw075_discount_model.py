@@ -306,7 +306,8 @@ def test_get_active_discounts_empty_interfaces_matches_all(pg_dsn: str) -> None:
 
 
 def test_migration_090_creates_customer_discounts_columns(pg_dsn: str) -> None:
-    """customer_discounts 列集齐；applicable_interfaces 为 TEXT（维持 jsonb=0）。"""
+    """customer_discounts 列集齐（含 20260922T1200 套餐权益来源列）；
+    applicable_interfaces 为 TEXT（维持 jsonb=0）。"""
     with psycopg.connect(pg_dsn) as conn:
         columns = {
             str(row[0]): str(row[1])
@@ -335,6 +336,7 @@ def test_migration_090_creates_customer_discounts_columns(pg_dsn: str) -> None:
         "created_at",
         "updated_at",
         "created_by_user_id",
+        "source_recharge_order_id",
     }
     # R-A / cw056 §617：JSON 全存 TEXT，维持 head jsonb_columns=0 不变量。
     assert columns["applicable_interfaces"] == "text"

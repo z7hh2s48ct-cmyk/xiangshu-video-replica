@@ -15,8 +15,10 @@ from app.billing_catalog import (
     credits_from_snapshot,
     read_tariff,
     retail_snapshot,
+    snapshot_discount_rate,
 )
 from app.db_portable import BusinessConnection
+from app.sub_account_quota import enforce_sub_account_quota
 
 
 def resolve_wallet_owner(conn: BusinessConnection, user_id: str) -> str:
@@ -70,10 +72,14 @@ def accept_operation(
                 detail={"code": "BILLING_REQUEST_CONFLICT", "message": "计费用量与原请求不一致。"},
             )
         return str(old["id"])
+    # The wallet owner is resolved before pricing so the customer's package
+    # discount is read from the wallet owner (a sub-account spends the
+    # master's wallet and rides the master's discounts, T2.10).
+    wallet_owner_id = resolve_wallet_owner(conn, user_id)
     snapshot = (
         dict(pricing_snapshot)
         if pricing_snapshot is not None
-        else retail_snapshot(conn, service, units)
+        else retail_snapshot(conn, service, units, user_id=wallet_owner_id)
     )
     if snapshot["service"] != service or snapshot["unit"] != SERVICES[service].unit:
         raise ValueError("计价快照科目不匹配")
@@ -88,9 +94,11 @@ def accept_operation(
         )
     credits = int(str(snapshot["credits"]))
     funding: list[dict[str, Any]] = []
-    wallet_owner_id = user_id
     if credits:
-        wallet_owner_id = resolve_wallet_owner(conn, user_id)
+        if wallet_owner_id != user_id:
+            # Sub-account monthly cap (Phase 3a): enforced under the actor's
+            # advisory lock, before the shared wallet is touched.
+            enforce_sub_account_quota(conn, actor_id=user_id, additional_credits=credits)
         wallet = conn.execute(
             "SELECT available_credits FROM wallets WHERE user_id=%s FOR UPDATE",
             (wallet_owner_id,),
@@ -245,10 +253,11 @@ def _ledger(
         "INSERT INTO wallet_transactions(id,user_id,type,available_delta,reserved_delta,"
         "billing_operation_id,"
         "billing_round,idempotency_key,pricing_snapshot_json,api_key_id,auth_source,task_id,"
-        "oral_task_id,actor_user_id) "
+        "oral_task_id,actor_user_id,discount_rate) "
         "SELECT %s,%s,%s,%s,%s,id,%s,%s,%s,api_key_id,auth_source, "
         "CASE WHEN service IN ('video_768p','video_2k') THEN source_id END, "
-        "CASE WHEN service='oral' THEN source_id END,%s FROM billing_operations WHERE id=%s",
+        "CASE WHEN service='oral' THEN source_id END,%s,%s FROM billing_operations "
+        "WHERE id=%s",
         (
             str(uuid4()),
             user_id,
@@ -259,6 +268,7 @@ def _ledger(
             f"usage:{kind}:{operation_id}",
             json.dumps(snapshot),
             actor_user_id,
+            snapshot_discount_rate(snapshot),
             operation_id,
         ),
     )

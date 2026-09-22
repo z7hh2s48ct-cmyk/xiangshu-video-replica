@@ -2542,6 +2542,29 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/control/settings/customer-payments/wechat-native/self-check": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Self Check Wechat Settings
+     * @description Probe WeChat once with the saved credentials (mchid + serial_no + private
+     *     key must sign acceptably, api_v3_key must decrypt the answer). Read-only:
+     *     nothing is saved and the shared certificate cache is left alone, so a
+     *     misconfiguration surfaces here instead of at the first real customer order.
+     */
+    post: operations["self_check_wechat_settings_api_control_settings_customer_payments_wechat_native_self_check_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/control/settings/customer-payments/wechat-native": {
     parameters: {
       query?: never;
@@ -3238,11 +3261,12 @@ export interface paths {
      * Delete Sub Account
      * @description Delete a sub-account, degrading to deactivation when history pins it.
      *
-     *     The session/device footprint is purged inside a savepoint, then the row
-     *     itself. A ``ForeignKeyViolation`` there means business history (ledger,
-     *     tasks — FKs without CASCADE) refuses to be orphaned: the savepoint rolls
-     *     back and the account is deactivated + its session revoked instead, so the
-     *     response carries ``deleted: false`` rather than failing the request.
+     *     The session-state/device footprint is purged inside a savepoint, then the
+     *     row itself. A ``ForeignKeyViolation`` there means history refuses to be
+     *     orphaned — business rows (ledger, tasks) or the append-only session-event
+     *     log (029): the savepoint rolls back and the account is deactivated + its
+     *     session revoked instead, so the response carries ``deleted: false``
+     *     rather than failing the request.
      */
     delete: operations["delete_sub_account_api_customer_sub_accounts__sub_account_id__delete"];
     options?: never;
@@ -3273,6 +3297,32 @@ export interface paths {
      *     credential. Plaintext never touches the database or the audit trail.
      */
     post: operations["set_sub_account_password_api_customer_sub_accounts__sub_account_id__password_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/sub-accounts/{sub_account_id}/quota": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    /**
+     * Set Sub Account Quota
+     * @description Set (or, with an explicit null, clear) the monthly spend cap.
+     *
+     *     A number caps the sub-account's credit consumption for the current
+     *     Shanghai calendar month; ``null`` deletes the row and the sub-account is
+     *     unlimited again. Enforcement lives where the money moves —
+     *     ``accept_operation`` under the actor's billing lock — so this endpoint
+     *     owns the configuration row only.
+     */
+    put: operations["set_sub_account_quota_api_customer_sub_accounts__sub_account_id__quota_put"];
+    post?: never;
     delete?: never;
     options?: never;
     head?: never;
@@ -5561,12 +5611,13 @@ export interface paths {
     post?: never;
     /**
      * Delete Sub Account
-     * @description Delete a sub-account, purging its session/device footprint first.
+     * @description Delete a sub-account, purging its session-state/device footprint first.
      *
-     *     The session/device rows go before the user row in the same transaction
-     *     (their ``user_id`` FKs carry no CASCADE). Business history (ledger,
-     *     tasks) is deliberately never deleted: when such rows pin the account the
-     *     DELETE answers 409 and the operator deactivates instead.
+     *     Those rows go before the user row in the same transaction (their
+     *     ``user_id`` FKs carry no CASCADE). Business history (ledger, tasks) and
+     *     the append-only session-event log (029) are deliberately never deleted:
+     *     when such rows pin the account the DELETE answers 409 and the operator
+     *     deactivates instead.
      */
     delete: operations["delete_sub_account_api_admin_sub_accounts__sub_account_id__delete"];
     options?: never;
@@ -7285,6 +7336,10 @@ export interface components {
       parent_user_id?: string | null;
       /** Parent Display Name */
       parent_display_name?: string | null;
+      /** Monthly Quota Credits */
+      monthly_quota_credits?: number | null;
+      /** Quota Used Credits */
+      quota_used_credits?: number | null;
     };
     /** CustomerRegistrationRequest */
     CustomerRegistrationRequest: {
@@ -9620,6 +9675,11 @@ export interface components {
       /** Password */
       password: string;
     };
+    /** SetSubAccountQuotaRequest */
+    SetSubAccountQuotaRequest: {
+      /** Monthly Quota Credits */
+      monthly_quota_credits: number | null;
+    };
     /** SettingsDiagnosticReport */
     SettingsDiagnosticReport: {
       /** Id */
@@ -10906,6 +10966,8 @@ export interface components {
       display_name: string;
       /** Password */
       password?: string | null;
+      /** Monthly Quota Credits */
+      monthly_quota_credits?: number | null;
     };
     /** UpdateSubAccountRequest */
     app__customer_sub_account_routes__UpdateSubAccountRequest: {
@@ -16344,6 +16406,28 @@ export interface operations {
       };
     };
   };
+  self_check_wechat_settings_api_control_settings_customer_payments_wechat_native_self_check_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+    };
+  };
   save_wechat_settings_api_control_settings_customer_payments_wechat_native_patch: {
     parameters: {
       query?: never;
@@ -17681,6 +17765,43 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["SetSubAccountPasswordRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  set_sub_account_quota_api_customer_sub_accounts__sub_account_id__quota_put: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        sub_account_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["SetSubAccountQuotaRequest"];
       };
     };
     responses: {

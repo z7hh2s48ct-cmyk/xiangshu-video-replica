@@ -210,6 +210,10 @@ export type GenerationPriceQuote = {
   unit_credits?: number;
   estimated_credits?: number;
   credit_price_version?: number;
+  /** 客户套餐折扣率 4 位小数字符串（如 "0.9000"）；None/缺省 = 无折扣。 */
+  discount_rate?: string | null;
+  /** 折扣来源 token（"recharge_package" / "manual"）；仅当 discount_rate 非空时有意义。 */
+  discount_source?: string | null;
 };
 export type SavedPromptInput = {
   generation_context?: PromptGenerationContext;
@@ -4079,7 +4083,7 @@ async function pollFirstFrameTask(
 export async function confirmFirstFrame(
   projectId: string,
   firstFrameAssetId: string,
-  options?: { allowUnverified?: boolean },
+  options?: { allowUnverified?: boolean; candidatesVersionId?: string },
 ): Promise<AnalysisVersion> {
   return requestApiJson<AnalysisVersion>(
     `/api/projects/${encodeURIComponent(projectId)}/first-frames/confirm`,
@@ -4089,6 +4093,10 @@ export async function confirmFirstFrame(
       body: JSON.stringify({
         first_frame_asset_id: firstFrameAssetId,
         ...(options?.allowUnverified ? { allow_unverified: true } : {}),
+        // 问题3：历史版本确认显式指明候选版本，后端按该版本校验并放行。
+        ...(options?.candidatesVersionId
+          ? { first_frame_candidates_version_id: options.candidatesVersionId }
+          : {}),
       }),
     },
   );
@@ -5607,6 +5615,9 @@ const CUSTOMER_ACCOUNT_ERROR_MESSAGES: Readonly<Record<string, string>> = {
   SESSION_EXPIRED: "登录已过期，请重新登录。",
   SESSION_REPLACED: "当前设备已被另一台设备切换下线，请重新登录。",
   DEVICE_REVOKED: "当前设备凭据已失效，请联系服务人员处理。",
+  // 子账号月度额度超限（accept_operation 403）：保留业务语义而不是落成泛化的
+  // 「无权操作」——额度是配置问题，母账号调整后即可继续，文案要给人下一步。
+  SUB_ACCOUNT_QUOTA_EXCEEDED: "本月额度已用完，请联系母账号调整额度后重试。",
 };
 
 /**
@@ -6923,6 +6934,12 @@ export type CustomerSubAccount = {
   has_password: boolean;
   created_at: string;
   updated_at: string | null;
+  /** Phase 3a 月度额度：null = 不限（无额度行）；单位与钱包余额一致（积分）。 */
+  monthly_quota_credits: number | null;
+  /** 当月已用积分（-SUM(available_delta)，在途预扣计入）。 */
+  quota_used_credits: number;
+  /** 剩余额度（钳制到 0）；无额度行时为 null。 */
+  quota_remaining_credits: number | null;
 };
 
 export async function customerListSubAccounts(
@@ -6937,7 +6954,13 @@ export async function customerListSubAccounts(
 
 export async function customerCreateSubAccount(
   credential: CustomerSessionCredential,
-  input: { username: string; display_name: string; password?: string },
+  input: {
+    username: string;
+    display_name: string;
+    password?: string;
+    /** Phase 3a：可选的初始月度额度；缺省 = 不限。 */
+    monthly_quota_credits?: number;
+  },
 ): Promise<CustomerSubAccount> {
   const { body } = await customerJson<CustomerSubAccount>(
     "/api/customer/sub-accounts",
@@ -6966,6 +6989,23 @@ export async function customerSetSubAccountPassword(
   const { body } = await customerJson<{ id: string; has_password: boolean }>(
     `/api/customer/sub-accounts/${encodeURIComponent(subAccountId)}/password`,
     { method: "POST", credential, body: { password } },
+  );
+  return body;
+}
+
+/** Phase 3a：设置（数字）或清除（null）子账号的月度积分上限。 */
+export async function customerSetSubAccountQuota(
+  credential: CustomerSessionCredential,
+  subAccountId: string,
+  monthlyQuotaCredits: number | null,
+): Promise<CustomerSubAccount> {
+  const { body } = await customerJson<CustomerSubAccount>(
+    `/api/customer/sub-accounts/${encodeURIComponent(subAccountId)}/quota`,
+    {
+      method: "PUT",
+      credential,
+      body: { monthly_quota_credits: monthlyQuotaCredits },
+    },
   );
   return body;
 }
@@ -7030,19 +7070,56 @@ export async function customerListRechargeOrders(
   return body;
 }
 
+/** 客户可见的充值套餐档位（GET /api/customer/recharge-packages，仅启用行）。 */
+export type CustomerRechargePackage = {
+  id: string;
+  name: string;
+  amount_fen: number;
+  credits: number;
+  /** 折扣率 4 位小数字符串（如 "0.9000"）；null = 无权益档位。 */
+  discount_rate: string | null;
+  discount_interfaces: string[];
+  sort_order: number;
+  is_active: boolean;
+  version: number;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+/** 管理员配置的充值套餐（客户只读）。 */
+export async function customerListRechargePackages(
+  credential: CustomerSessionCredential,
+): Promise<CustomerRechargePackage[]> {
+  const { body } = await customerJson<{ items?: CustomerRechargePackage[] }>(
+    "/api/customer/recharge-packages",
+    { credential },
+  );
+  // 契约异常（缺 items）时按空列表处理：充值页不能因档位列表而整页崩。
+  return Array.isArray(body?.items) ? body.items : [];
+}
+
 /** Create a customer recharge order
- * (POST /api/customer/recharge-orders → 201 PENDING + ZPay payment form). */
+ * (POST /api/customer/recharge-orders → 201 PENDING + ZPay payment form).
+ *
+ * 传 `packageId` 时为套餐下单：amount_fen 必须等于套餐金额，到账积分与权益
+ * 以套餐为准并冻结进订单快照。不传时是自定义金额（基础汇率、无权益）。 */
 export async function customerCreateRechargeOrder(
   credential: CustomerSessionCredential,
   amountFen: number,
-  options: { idempotencyKey: string; requestId?: string },
+  options: { idempotencyKey: string; packageId?: string; requestId?: string },
 ): Promise<CreatedRechargeOrder> {
+  const payload: { amount_fen: number; package_id?: string } = {
+    amount_fen: amountFen,
+  };
+  if (options.packageId !== undefined) {
+    payload.package_id = options.packageId;
+  }
   const { body } = await customerJson<CreatedRechargeOrder>(
     "/api/customer/recharge-orders",
     {
       method: "POST",
       credential,
-      body: { amount_fen: amountFen },
+      body: payload,
       idempotencyKey: options.idempotencyKey,
       requestId: options.requestId,
     },

@@ -8,6 +8,7 @@ from typing import Literal, TypedDict, cast
 from uuid import uuid4
 
 from app.db_portable import BusinessConnection, IntegrityConstraintError
+from app.recharge_packages import grant_discount_from_snapshot, parse_package_snapshot
 from app.wechat_native_client import (
     NATIVE_MERCHANT_SWITCH_BLOCK_SECONDS,
     NATIVE_ORDER_VALIDITY_SECONDS,
@@ -125,6 +126,7 @@ def _read_settlement_order(
             SELECT
                 id, user_id, merchant_order_no, provider, channel, status,
                 amount_fen, credits, notify_digest, created_at, paid_at,
+                package_snapshot_json,
                 {trade_no_column} AS trade_ref
             FROM recharge_orders
             WHERE merchant_order_no = %s
@@ -510,6 +512,25 @@ def confirm_recharge_payment(
                     "WALLET_CREDIT_OVERFLOW",
                     "Wallet credit balance would overflow; settle manually.",
                     status_code=409,
+                )
+
+            # 套餐权益在资金入账后同事务授予（幂等：重放走上方 PAID 早退，不重复授予）。
+            # 快照漂移（非法折扣率等）不得回滚已支付入账：记录告警并跳过授予，
+            # 资金流水必须落定，权益由人工按订单快照补授。
+            try:
+                grant_discount_from_snapshot(
+                    conn,
+                    user_id=str(order["user_id"]),
+                    source_recharge_order_id=str(order["id"]),
+                    package_snapshot=parse_package_snapshot(order["package_snapshot_json"]),
+                )
+            except (ValueError, TypeError) as exc:
+                logger.error(
+                    "package discount grant skipped after payment settle: "
+                    "merchant_order_no=%s user_id=%s error=%s",
+                    merchant_order_no,
+                    order["user_id"],
+                    exc,
                 )
 
             confirmed = _read_settlement_order(

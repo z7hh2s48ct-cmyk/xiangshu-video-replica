@@ -556,6 +556,9 @@ def resolve_api_key_user(request: Request) -> ApiKeyUser | None:
             required_scope = "recharge"
     elif path.startswith("/api/customer/recharge-orders/") and request.method == "GET":
         required_scope = "recharge"
+    elif path == "/api/customer/recharge-packages" and request.method == "GET":
+        # 套餐是充值页的展示数据：与额度/下单同属 recharge scope，不单独发新 scope。
+        required_scope = "recharge"
     if required_scope is None or required_scope not in authed.scopes:
         raise HTTPException(
             403, detail={"code": "API_KEY_SCOPE_DENIED", "message": "Token 无权执行此操作。"}

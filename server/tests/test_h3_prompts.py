@@ -227,21 +227,37 @@ def test_confirmed_first_frame_sources_preserve_scene_replacement_flag(monkeypat
 
     monkeypatch.setattr(generation, "require_confirmed_first_frame", lambda *args, **kwargs: None)
 
-    def version(_conn, project_id, kind):
-        if kind == "first_frame_selection":
-            return {"id": "selection-v1"}
-        return {
-            "id": "candidates-v1",
-            "payload_json": json.dumps({"replace_scene": True}),
-        }
+    # 历史版本放开：候选版本按 selection 指向的 id 查询（不再回落最新版本），
+    # 本测试让 selection 指向 candidates-v1，并让连接返回它的 payload。
+    candidates_row = {
+        "id": "candidates-v1",
+        "payload_json": json.dumps({"replace_scene": True}),
+    }
+    monkeypatch.setattr(
+        generation,
+        "latest_version",
+        lambda _conn, project_id, kind: {
+            "id": "selection-v1",
+            "payload_json": json.dumps({"first_frame_candidates_version_id": "candidates-v1"}),
+        },
+    )
 
-    monkeypatch.setattr(generation, "latest_version", version)
+    class _Cursor:
+        def fetchone(self):
+            return candidates_row
+
+    class _Conn:
+        """只承载 selection 指向的候选版本查询，其余 SQL 不参与本测试。"""
+
+        def execute(self, *_args, **_kwargs):
+            return _Cursor()
 
     sources = generation.confirmed_first_frame_sources(
-        object(), project_id="project-1", first_frame_asset_id="frame-1"
+        _Conn(), project_id="project-1", first_frame_asset_id="frame-1"
     )
 
     assert sources["first_frame_replace_scene"] is True
+    assert sources["first_frame_candidates_version_id"] == "candidates-v1"
 
 
 def test_final_prompt_requires_explicit_timing_and_start_alignment() -> None:

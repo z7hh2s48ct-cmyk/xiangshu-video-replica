@@ -18,7 +18,7 @@
 }
 .sub-accounts-page__create {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
   align-items: end;
   gap: 12px;
   border: 1px solid var(--line);
@@ -44,7 +44,7 @@
 }
 .sub-account-card {
   display: grid;
-  grid-template-columns: minmax(160px, 1fr) auto auto;
+  grid-template-columns: minmax(160px, 1fr) minmax(150px, auto) auto auto;
   align-items: center;
   gap: 16px;
   border: 1px solid var(--line);
@@ -74,6 +74,39 @@
   flex-wrap: wrap;
   gap: 6px;
 }
+.sub-account-card__quota {
+  display: grid;
+  gap: 6px;
+  color: #aaa297;
+  font-size: var(--font-caption);
+}
+.sub-account-quota-bar {
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border: none;
+  border-radius: 999px;
+  background: #2a2a30;
+  overflow: hidden;
+}
+.sub-account-quota-bar::-webkit-progress-bar {
+  background: #2a2a30;
+  border-radius: 999px;
+}
+.sub-account-quota-bar::-webkit-progress-value {
+  background: #3f6b52;
+  border-radius: 999px;
+}
+.sub-account-quota-bar::-moz-progress-bar {
+  background: #3f6b52;
+  border-radius: 999px;
+}
+.sub-account-quota-bar.is-exhausted::-webkit-progress-value {
+  background: #b06060;
+}
+.sub-account-quota-bar.is-exhausted::-moz-progress-bar {
+  background: #b06060;
+}
 .sub-account-badge {
   border: 1px solid #4a4a4f;
   border-radius: 999px;
@@ -94,4 +127,114 @@
 .sub-account-card__actions button.is-danger:hover {
   color: #f2a3a3;
   background: #3a1d1d;
+}
+/* 批次1 额度可视化：KPI 行 / 消费占比条形图 / 三态进度与预测提示。
+   沿用本文件既有的直写色值风格（与 customer-access.css 令牌一致：金 #e0a83f /
+   成功 #315d47 / 危险 #b06060 / 次要文本 #aaa297）。 */
+
+.sub-accounts-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+.sub-accounts-kpis article {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-left: 3px solid #c6a45f;
+  border-radius: 12px;
+  padding: 14px 16px;
+  background: #141419;
+}
+.sub-accounts-kpis article.is-danger {
+  border-left-color: #b06060;
+}
+.sub-accounts-kpis article span {
+  color: #aaa297;
+  font-size: var(--font-caption);
+}
+.sub-accounts-kpis article strong {
+  color: #f0e9df;
+  font-size: 20px;
+}
+.sub-accounts-kpis article small {
+  color: #8d867c;
+  font-size: var(--font-caption);
+}
+
+.sub-accounts-chart {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px 18px;
+  background: #141419;
+}
+.sub-accounts-chart__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  color: #f0e9df;
+}
+.sub-accounts-chart__header small {
+  color: #aaa297;
+  font-size: var(--font-caption);
+}
+.sub-account-bar-row {
+  display: grid;
+  grid-template-columns: minmax(72px, 140px) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+.sub-account-bar-row__name {
+  color: #cfc8bd;
+  font-size: var(--font-caption);
+  overflow-wrap: anywhere;
+}
+.sub-account-bar-row__track {
+  height: 8px;
+  border-radius: 999px;
+  background: #2a2a30;
+  overflow: hidden;
+}
+.sub-account-bar-row__fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #315d47, #5c9a76);
+}
+.sub-account-bar-row.is-exhausted .sub-account-bar-row__fill {
+  background: linear-gradient(90deg, #713944, #b06060);
+}
+.sub-account-bar-row__amount {
+  display: grid;
+  justify-items: end;
+  color: #f0e9df;
+  font-variant-numeric: tabular-nums;
+}
+.sub-account-bar-row__amount small {
+  color: #aaa297;
+  font-size: var(--font-caption);
+}
+
+.sub-account-quota-bar.is-warning::-webkit-progress-value {
+  background: #e0a83f;
+}
+.sub-account-quota-bar.is-warning::-moz-progress-bar {
+  background: #e0a83f;
+}
+.sub-account-card__forecast {
+  color: #efbd5f;
+}
+.sub-account-card__forecast.is-danger {
+  color: #ffc0c8;
+}
+.sub-account-badge.is-warning {
+  border-color: #806226;
+  color: #efbd5f;
+}
+.sub-account-badge.is-danger {
+  border-color: #713944;
+  color: #ffc0c8;
 }

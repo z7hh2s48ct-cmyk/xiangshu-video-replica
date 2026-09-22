@@ -2202,6 +2202,7 @@ def confirm_first_frame(
     first_frame_asset_id: str,
     actor: CurrentUser,
     allow_unverified: bool = False,
+    first_frame_candidates_version_id: str | None = None,
 ) -> sqlite3.Row:
     require_not_auditor(
         conn,
@@ -2211,7 +2212,20 @@ def confirm_first_frame(
         entity_id=project_id,
     )
     require_project_access(conn, actor=actor, project_id=project_id, action="first_frame.confirm")
-    candidate_version = current_first_frame_candidates(conn, project_id=project_id)
+    if first_frame_candidates_version_id is None:
+        candidate_version = current_first_frame_candidates(conn, project_id=project_id)
+    else:
+        latest = latest_version(conn, project_id=project_id, kind=FIRST_FRAME_CANDIDATES_KIND)
+        if latest is not None and str(latest["id"]) == first_frame_candidates_version_id:
+            # 显式指向当前（最新）候选版本：保持严格契约，输入新鲜度校验照跑。
+            candidate_version = current_first_frame_candidates(conn, project_id=project_id)
+        else:
+            # 历史候选版本放开：用户显式选择了旧版本里已付费生成的图，只校验
+            # 版本存在且属于本项目；不再要求“仍是最新”或输入未变化——历史图
+            # 天然基于旧输入，「基于旧输入生成」的警示由前端承担。
+            candidate_version = first_frame_candidates_version_by_id(
+                conn, project_id=project_id, version_id=first_frame_candidates_version_id
+            )
     payload = json.loads(str(candidate_version["payload_json"]))
     candidates = payload.get("candidates")
     if not isinstance(candidates, list):
@@ -2520,6 +2534,42 @@ def current_first_frame_candidates(conn: BusinessConnection, *, project_id: str)
         ):
             raise stale_first_frame_inputs()
     return candidates
+
+
+def first_frame_candidates_version_by_id(
+    conn: BusinessConnection, *, project_id: str, version_id: str
+) -> sqlite3.Row:
+    """按显式版本 id 读取首帧候选（历史版本确认/选择的放开路径）。
+
+    与 ``current_first_frame_candidates`` 的差别：不要求该版本仍是最新、也不
+    重跑输入新鲜度校验——历史版本天然基于旧输入。版本存在性、项目归属与
+    候选结构仍校验，损坏/越权记录不会被读成有效确认。
+    """
+    row = conn.execute(
+        """
+        SELECT id, project_id, payload_json
+        FROM versions
+        WHERE id = %s AND project_id = %s AND kind = %s
+        """,
+        (version_id, project_id, FIRST_FRAME_CANDIDATES_KIND),
+    ).fetchone()
+    if row is None:
+        raise first_frame_error(
+            404,
+            "FIRST_FRAME_CANDIDATES_VERSION_NOT_FOUND",
+            "The requested first-frame candidate version does not exist.",
+        )
+    try:
+        payload = json.loads(str(row["payload_json"]))
+    except json.JSONDecodeError as exc:
+        raise first_frame_error(
+            409, "FIRST_FRAME_CANDIDATES_INVALID", "Generate first-frame candidates again."
+        ) from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("candidates"), list):
+        raise first_frame_error(
+            409, "FIRST_FRAME_CANDIDATES_INVALID", "Generate first-frame candidates again."
+        )
+    return cast(sqlite3.Row, row)
 
 
 def require_current_first_frame_inputs(

@@ -325,6 +325,10 @@ function installFetch(options?: {
       }
       return jsonResponse({ fair_queue_enabled: false });
     }
+    if (url.endsWith("/api/control/settings/recharge-packages")) {
+      // 充值套餐管理：默认无档位（用例只验证页面可渲染）。
+      return jsonResponse({ items: [] });
+    }
     if (url.endsWith("/api/control/recharge-orders/202608190001/sync")) {
       return jsonResponse({ ...ordersPage.items[0], status: "PAID" });
     }

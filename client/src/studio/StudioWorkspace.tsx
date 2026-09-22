@@ -27,6 +27,10 @@ import {
 import { BrandIdentity } from "../BrandIdentity";
 import { CustomerCenterPage } from "../customer/CustomerCenterPage";
 import { isInsufficientCredits } from "../insufficientCredits";
+import {
+  discountSourceLabel,
+  formatDiscountZhe,
+} from "../rechargePackageDisplay";
 import { SettingsPanel } from "../SettingsPanel";
 import type { WorkspaceShellProps } from "../workspace-shell";
 import { AnalyticsPage } from "./AnalyticsPage";
@@ -880,6 +884,16 @@ export function StudioWorkspace({
   const videoQuoteReady =
     videoQuoteStatus === "ready" &&
     quoteMatchesInput(videoQuote, currentVideoQuoteInput);
+  // 套餐折扣（后端「取更优」后随报价带出）：费用行标注折后口径。
+  const videoQuoteDiscountZhe = videoQuoteReady
+    ? formatDiscountZhe(videoQuote?.discount_rate)
+    : null;
+  const videoQuoteDiscountSource = videoQuoteReady
+    ? discountSourceLabel(videoQuote?.discount_source)
+    : null;
+  const videoQuoteDiscountNote = videoQuoteDiscountZhe
+    ? `已享${videoQuoteDiscountZhe}优惠${videoQuoteDiscountSource ? `（${videoQuoteDiscountSource}）` : ""}`
+    : null;
   useEffect(() => {
     void videoQuoteRevision;
     if (review || generation !== "视频生成") {
@@ -2245,8 +2259,8 @@ export function StudioWorkspace({
                       : `${(oralPriceFen / 100).toFixed(2)} 元/秒`
                     : generation === "视频生成" && videoQuoteReady
                       ? videoQuote.estimated_credits !== undefined
-                        ? `${videoQuote.estimated_credits} 积分（${videoQuote.unit_credits} 积分/秒 × ${videoQuote.estimated_seconds} 秒）`
-                        : `${(videoQuote.estimated_price_fen / 100).toFixed(2)} 元（${videoQuote.unit_price_fen_per_second} 分/秒 × ${videoQuote.estimated_seconds} 秒）`
+                        ? `${videoQuote.estimated_credits} 积分（${videoQuote.unit_credits} 积分/秒 × ${videoQuote.estimated_seconds} 秒）${videoQuoteDiscountNote ? ` · ${videoQuoteDiscountNote}` : ""}`
+                        : `${(videoQuote.estimated_price_fen / 100).toFixed(2)} 元（${videoQuote.unit_price_fen_per_second} 分/秒 × ${videoQuote.estimated_seconds} 秒）${videoQuoteDiscountNote ? ` · ${videoQuoteDiscountNote}` : ""}`
                       : oralQuoteStatus === "loading" ||
                           videoQuoteStatus === "loading"
                         ? "正在读取服务端报价…"

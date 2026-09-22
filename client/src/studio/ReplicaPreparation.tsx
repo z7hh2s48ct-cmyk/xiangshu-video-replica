@@ -47,6 +47,8 @@ export function ReplicaNarration() {
   };
   const mounted = useRef(true);
   const inFlight = useRef(false);
+  const narrationRef = useRef<HTMLTextAreaElement | null>(null);
+  const narrationChars = Array.from(draft.script.text).length;
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [undo, setUndo] = useState<{
@@ -60,6 +62,15 @@ export function ReplicaNarration() {
       mounted.current = false;
     };
   }, []);
+  // 口播文案框按内容自适应高度：固定大框在短文案时留出一整块空白，长文案又要
+  // 内部滚动。夹在 84–264px 之间（与 CSS 的 min/max-height 同源），超出后才滚动。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 文本变化是重算高度的唯一触发条件，effect 内部靠 scrollHeight 测量实际内容。
+  useEffect(() => {
+    const el = narrationRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(Math.max(el.scrollHeight, 84), 264)}px`;
+  }, [draft.script.text]);
   const rewrite = async () => {
     if (
       review ||
@@ -133,7 +144,10 @@ export function ReplicaNarration() {
   return (
     <Panel className="creation-replica-narration">
       <div className="creation-panel-title-row">
-        <span>口播文案</span>
+        <span className="creation-replica-narration__title">
+          口播文案
+          {narrationChars > 0 ? <small>{narrationChars} 字</small> : null}
+        </span>
         <Button
           variant="outline"
           disabled={
@@ -150,9 +164,10 @@ export function ReplicaNarration() {
         </Button>
       </div>
       <textarea
+        ref={narrationRef}
         aria-label="口播文案"
         className="creation-textarea"
-        rows={10}
+        rows={3}
         readOnly={readOnly}
         value={draft.script.text}
         onChange={(event) => {

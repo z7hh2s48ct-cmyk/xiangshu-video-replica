@@ -224,6 +224,12 @@
   margin-right: auto;
 }
 
+.creation-action-bar .creation-action-note {
+  color: #999b95;
+  font-size: 12px;
+  margin-right: auto;
+}
+
 .creation-action-bar strong,
 .creation-action-bar small {
   display: block;
@@ -848,6 +854,29 @@
   align-items: stretch;
 }
 
+/* 复刻页 ⑧：提示词按钮主次分层——保存类操作留在左侧，右组携带就绪
+   徽标与唯一主按钮「去 AI 视频创作」。 */
+.creation-prompt-actions {
+  align-items: center;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.creation-final-badge {
+  color: #65bd59;
+  font-size: var(--font-label);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* S3 门禁未就绪时的可见原因，与就绪徽标同位；中性色避免误读为错误。 */
+.creation-final-badge.is-pending {
+  color: var(--studio-muted, #a9a9a9);
+  font-weight: 400;
+}
+
 .creation-upload-mini {
   align-self: stretch;
   border: 1px dashed var(--line, #bbb);
@@ -1036,10 +1065,43 @@
   gap: 12px;
 }
 
+/* 「开场衔接」输入框此前沿用浏览器默认宽度（约 20 列），在整栏布局里被压成
+   230px 窄条，与下方全宽的「合成最终提示词」按钮比例失调；这里统一拉满，
+   标签占一行、输入框紧随其下。 */
+.replica-final-controls label:has(> textarea) {
+  display: grid;
+  gap: 6px;
+}
+
+.replica-final-controls textarea {
+  width: 100%;
+  min-height: 88px;
+  resize: vertical;
+}
+
 .replica-final-controls pre {
   max-height: 180px;
   overflow: auto;
   white-space: pre-wrap;
+}
+
+/* 复刻页 ⑧：合成按钮降级为次级样式（全局 button 默认金色主按钮），
+   把「唯一主按钮」让给「去 AI 视频创作」。 */
+.replica-final-compose {
+  background: transparent;
+  border: 1px solid var(--studio-border, #2b2b2b);
+  color: var(--studio-text, #ecece8);
+  font-weight: 500;
+  justify-self: start;
+  min-height: 36px;
+  padding: 0 16px;
+  width: fit-content;
+}
+
+.replica-final-compose:not(:disabled):hover {
+  background: color-mix(in srgb, var(--studio-gold, #e5aa36) 12%, transparent);
+  border-color: var(--studio-gold, #e5aa36);
+  color: var(--studio-gold, #e5aa36);
 }
 
 .replica-preflight {
@@ -1515,6 +1577,76 @@
 .creation-replica > .creation-source-strip {
   margin: 20px;
 }
+/* 复刻页 ①：步骤吸顶导航。sticky top:0 相对 window 滚动生效（页头是
+   absolute，滚动后自然消失）；毛玻璃底避免滚过内容透出干扰阅读。 */
+.replica-steps {
+  align-items: center;
+  backdrop-filter: blur(6px);
+  background: color-mix(in srgb, var(--studio-bg, #080909) 88%, transparent);
+  border: 1px solid var(--studio-border, #2b2b2b);
+  border-radius: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 12px 20px 0;
+  padding: 10px 14px;
+  position: sticky;
+  top: 0;
+  z-index: 6;
+}
+.replica-steps__item {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--studio-muted, #999b95);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: var(--font-label);
+  font-weight: 500;
+  gap: 8px;
+  padding: 2px 4px;
+  white-space: nowrap;
+}
+/* 相邻步骤之间画连接线（对应效果图的 step-line）。 */
+.replica-steps__item + .replica-steps__item::before {
+  background: var(--studio-border, #2b2b2b);
+  content: "";
+  height: 1px;
+  margin-right: 2px;
+  width: 28px;
+}
+.replica-steps__item:not(:disabled):hover {
+  background: transparent;
+  color: var(--studio-text, #ecece8);
+}
+.replica-steps__dot {
+  border: 1px solid var(--studio-border, #2b2b2b);
+  border-radius: 50%;
+  display: grid;
+  font-size: 11px;
+  height: 21px;
+  place-items: center;
+  width: 21px;
+}
+.replica-steps__item.is-done {
+  color: #cfcbc2;
+}
+.replica-steps__item.is-done .replica-steps__dot {
+  background: var(--studio-gold, #e5aa36);
+  border-color: transparent;
+  color: #14100a;
+  font-weight: 700;
+}
+.replica-steps__item.is-current {
+  color: var(--studio-text, #ecece8);
+  font-weight: 600;
+}
+.replica-steps__item.is-current .replica-steps__dot {
+  border-color: var(--studio-gold, #e5aa36);
+  color: var(--studio-gold, #e5aa36);
+  box-shadow: 0 0 0 3px rgb(224 168 63 / 12%);
+}
+
 .creation-replica-flow {
   display: grid;
   gap: 32px;
@@ -1524,10 +1656,12 @@
   display: grid;
   gap: 16px;
   min-width: 0;
-  scroll-margin-top: 20px;
+  /* 吸顶步骤条约占 44px，章节定位时留出它的高度加少量缓冲。 */
+  scroll-margin-top: 72px;
 }
 .creation-workflow-section + .creation-workflow-section {
-  border-top: 1px solid var(--studio-line);
+  /* 修复静默失效：--studio-line 从未定义，此分割线此前根本没画出来。 */
+  border-top: 1px solid var(--studio-border, #2b2b2b);
   padding-top: 28px;
 }
 .creation-workflow-section > h2 {
@@ -1539,6 +1673,32 @@
 .creation-replica-analyze .creation-panel-title-row {
   flex-wrap: wrap;
   overflow-wrap: anywhere;
+}
+/* 复刻页 ②：拆解控制信息卡（时长 / 镜头数 / 末次拆解），填充原本的空白区。 */
+.creation-replica-stats {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 14px;
+}
+.creation-replica-stat {
+  background: color-mix(in srgb, var(--studio-panel, #101111) 86%, transparent);
+  border: 1px solid var(--studio-border, #2b2b2b);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.creation-replica-stat span {
+  color: var(--studio-muted, #999b95);
+  display: block;
+  font-size: var(--font-label);
+  margin-bottom: 6px;
+}
+.creation-replica-stat strong {
+  color: var(--studio-text, #ecece8);
+  font-size: 15px;
+}
+.creation-replica-stat.is-gold strong {
+  color: var(--studio-gold, #e5aa36);
 }
 
 .creation-final-copy {
@@ -1569,6 +1729,51 @@
 .creation-replica .creation-shot-list summary {
   cursor: pointer;
   color: var(--studio-muted);
+}
+/* 分镜表折叠后标题行补时间轴信息（复刻页 UX 优化 2026-09-21）：折叠态看不到
+   镜头内容，起止时间就是判断是否要展开的关键线索。需覆盖
+   .creation-panel-title-row small 的绿色——这里是辅助信息，不是状态徽章。 */
+.creation-shot-list-title {
+  align-items: baseline;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.creation-replica .creation-shot-list-title small {
+  color: var(--studio-muted);
+  font-weight: 400;
+}
+/* 口播文案按内容自适应高度（JS 同步 style.height），覆盖上方 256px 的复刻页
+   统一最小高度；选择器精确到 narration 面板，PromptEditor 的 textarea 不受影响。 */
+.creation-replica .creation-replica-narration .creation-textarea {
+  height: auto;
+  max-height: 264px;
+  min-height: 84px;
+  overflow-y: auto;
+}
+.creation-replica-narration__title {
+  align-items: baseline;
+  display: inline-flex;
+  gap: 8px;
+}
+.creation-replica .creation-replica-narration__title small {
+  color: var(--studio-muted);
+  font-weight: 400;
+}
+/* 中性信息提示（如「模拟输出」）：不是错误，用蓝灰 info 样式与
+   settings-error 的红色报错区分，避免中性说明被误读为失败。 */
+.creation-note-info {
+  background: #131a26;
+  border: 1px solid #2c3648;
+  border-radius: 9px;
+  color: #b9c2d6;
+  font-size: var(--font-label);
+  margin-top: 12px;
+  padding: 9px 12px;
+}
+.creation-note-info::before {
+  color: #8fa6cf;
+  content: "ⓘ ";
 }
 .creation-replacement-grid {
   display: grid;
@@ -1981,6 +2186,36 @@
   grid-template-columns: var(--media-col, 240px) minmax(0, 1fr);
 }
 
+/* 场景形象|置换首帧行：置换首帧面板不再吃满整行剩余宽度（宽视口下它横跨
+   全宽、右栏大片留白，左栏场景图反而挤成细条）。右列上限 700px（复刻页 UX
+   优化 2026-09-21：原 880px 下右列仍偏空、三带被拉散）——minmax 下限为 0，
+   列空间不足时轨道自动收缩，不会溢出。用 min-width 反向包裹：否则本规则与
+   .media-row 同特异性、写在后面会覆盖 ≤900px 的单列降级。 */
+@media (min-width: 901px) {
+  .media-row--scene {
+    grid-template-columns: var(--media-col, 240px) minmax(0, 700px);
+    justify-content: start;
+  }
+}
+
+/* 该行两张主图的显示高度必须跟随行内媒体框（--media-min-h，本行为 480px），
+   而不是复刻页默认的 44dvh 预算（legacy-panels.css 的
+   clamp(260px, 44dvh, 420px)，732 视口下仅 322px）——否则媒体框被抬到
+   480 后图仍停在 322，上下留黑边，场景形象图照旧显小。
+   两条覆盖都限定在 .media-row--scene 行内：源画面行沿用同名的
+   source-frame-current 规则不受影响。
+   场景图再补 object-fit: cover：媒体框已按参考视频画幅取形状，
+   素材比例不同时居中裁切填满，而不是缩成素材自身比例、看着还是细长条。 */
+.creation-replica .media-row--scene .flow-character-row__preview {
+  height: 100%;
+  max-height: none;
+  object-fit: cover;
+}
+
+.creation-replica .media-row--scene .first-frame-current {
+  --image-preview-height: var(--media-min-h, 320px);
+}
+
 /* 刻意保持低特异性：页面级 .studio-panel 规则仍能覆盖这里的布局属性。 */
 .media-row > .studio-panel,
 .media-row > div {
@@ -2052,6 +2287,14 @@
   justify-content: center;
 }
 
+/* 费用提示跟随操作带右侧（原为独立一行左对齐，与按钮列错位）。 */
+.band-act__price {
+  color: var(--studio-muted);
+  font-size: var(--font-label);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
 /* 复刻页第 2 节（置换首帧）：源画面独占一行，下面一行两栏三带对齐。
    选择器带上 .creation-replica 是为了与页面上方
    .creation-workflow-section > .creation-replacement 的特异性持平，
@@ -2093,7 +2336,38 @@
   width: 100%;
 }
 
-/* 三带布局里候选与历史收进折叠区，媒体框高度不受其展开影响。 */
+/* 媒体带 = 预览框 + 候选与历史侧栏：宽视口并排（展开不再撑高媒体带），
+   剩余宽度不足侧栏 280px 基准时整块换行回预览框下方，退化为竖向堆叠。 */
+.first-frame-media-band {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* 不靠 .creation-replacement .media-frame 的 flex 值兜底：若换到别的容器里重用，
+   基础 .media-frame 的 flex: 1 1 auto 会把它横向拉宽、丢掉画幅形状。 */
+.first-frame-media-band > .media-frame {
+  flex: 0 0 auto;
+}
+
+.first-frame-media-band > .first-frame-band-extras,
+.first-frame-media-band > .creation-review-candidates {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+
+/* 侧栏与预览框同高：与 .media-row .media-frame 的 max-height 同一公式。 */
+.first-frame-band-extras[open] {
+  height: min(
+    var(--media-min-h, 320px),
+    calc((var(--media-col, 240px) - 42px) / var(--row-ratio, 0.5625))
+  );
+  overflow-y: auto;
+}
+
+/* 三带布局里候选与历史收进折叠侧栏，媒体框高度不受其展开影响。 */
 .first-frame-band-extras > summary {
   width: fit-content;
   color: #b6afa2;

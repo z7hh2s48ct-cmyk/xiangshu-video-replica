@@ -35,9 +35,10 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 # HEAD_REVISION 取链尾：20260921T0000_merge_wallet_actor_and_billing_metadata 把
 # CUSTOMER-CENTER-V2-20260919（sub_accounts → wallet_actor）与 main
 # （oral_soft_delete → merge_parallel_heads → add_api_metadata_to_billing_ops）
-# 两条并行链线性化，保持 alembic 单头。
+# 两条并行链线性化，保持 alembic 单头；20260922T1200_recharge_packages（充值套餐）
+# 叠加在其上，20260921T1200_sub_account_quotas（Phase 3a 月度额度表）重挂为链尾。
 # 迁移后 alembic 版本头即该值，9 处 assert version == HEAD_REVISION 依赖此值。
-HEAD_REVISION = "20260921T0000_merge_wallet_actor_and_billing_metadata"
+HEAD_REVISION = "20260921T1200_sub_account_quotas"
 
 
 def test_viral_script_cache_migration_preserves_results_without_task_foreign_keys(

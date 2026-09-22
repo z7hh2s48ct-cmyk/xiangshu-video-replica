@@ -53,8 +53,10 @@ from app.payment_provider import (
     get_payment_provider,
 )
 from app.permissions import require_not_auditor
+from app.recharge_packages import RechargePackage, build_package_snapshot, read_package
 from app.security_rate_limit import _server_now, client_ip_from_request
 from app.settings import SettingsRepository, effective_customer_billing_settings
+from app.sub_account_quota import read_quota_used
 from app.usage_billing import resolve_wallet_owner
 from app.wallet_routes import WalletResponse, WalletTransactionPage, WalletTransactionResponse
 from app.wechat_native_client import (
@@ -82,6 +84,9 @@ class CreateRechargeOrderRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     amount_fen: StrictInt
+    # 套餐下单（客户通道）：指名管理员配置的档位；amount_fen 必须等于套餐金额，
+    # credits/权益以套餐为准并冻结进 package_snapshot_json。不选套餐时保持自定义金额。
+    package_id: str | None = None
 
 
 class RechargeOrderResponse(BaseModel):
@@ -143,6 +148,12 @@ class CustomerProfileResponse(BaseModel):
     account_type: str = "MASTER"
     parent_user_id: str | None = None
     parent_display_name: str | None = None
+    # Phase 3a monthly quota view: only a sub-account session carries these
+    # (a master owns the wallet and is never capped, so it answers null/null).
+    # A sub-account without a quota row answers null for the cap while
+    # ``quota_used_credits`` still reports the month's consumption.
+    monthly_quota_credits: int | None = None
+    quota_used_credits: int | None = None
 
 
 class UpdateCustomerProfileRequest(BaseModel):
@@ -176,6 +187,7 @@ def _stage_recharge_preconditions(
     amount_fen: int,
     provider: PaymentProvider,
     customer_user_id: str | None = None,
+    validate_amount: bool = True,
 ) -> tuple[dict[str, int], MerchantConfig, DeploymentConfig]:
     """Billing settings + amount validation + provider configuration, shared."""
     settings_repo = SettingsRepository(conn)
@@ -206,7 +218,19 @@ def _stage_recharge_preconditions(
                 "points_per_yuan": credit_config.points_per_yuan,
                 "credit_price_version": price_version,
             }
-    validate_recharge_amount(amount_fen, billing)
+    if validate_amount:
+        validate_recharge_amount(amount_fen, billing)
+    elif amount_fen < billing["min_recharge_fen"]:
+        # 套餐单豁免步长/整除校验，但生效起充额下限仍生效：低于起充额的套餐
+        # 不得在客户价格调整后被下单（数据库 CHECK 会直接拒绝，必须在路由层
+        # 先给出 422 语义而不是 500）。
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "RECHARGE_PACKAGE_BELOW_MINIMUM",
+                "message": "该套餐金额低于当前起充金额，请选择其他档位。",
+            },
+        )
     try:
         merchant = provider.load_merchant_config(conn)
         deployment = provider.load_deployment_config()
@@ -229,14 +253,26 @@ def _insert_recharge_order(
     merchant: MerchantConfig,
     deployment: DeploymentConfig,
     provider: PaymentProvider,
+    package: RechargePackage | None = None,
 ) -> RechargeOrderResponse:
-    """Insert one PENDING recharge order and build its payment form."""
+    """Insert one PENDING recharge order and build its payment form.
+
+    ``package`` 非空时为套餐订单：credits 逐字取套餐（赠送口径），并冻结
+    ``package_snapshot_json``；套餐金额已由调用方校验等于订单金额。
+    """
     charged_unit_price_fen = billing["charged_unit_price_fen"]
-    credits = (
-        amount_fen * billing["points_per_yuan"] // 100
-        if "points_per_yuan" in billing
-        else amount_fen // charged_unit_price_fen
-    )
+    if package is not None:
+        credits = package.credits
+        package_snapshot_json: str | None = json.dumps(
+            build_package_snapshot(package), ensure_ascii=False
+        )
+    else:
+        credits = (
+            amount_fen * billing["points_per_yuan"] // 100
+            if "points_per_yuan" in billing
+            else amount_fen // charged_unit_price_fen
+        )
+        package_snapshot_json = None
     if not 1 <= credits <= INT4_MAX_FEN:
         raise HTTPException(
             422, detail={"code": "INVALID_RECHARGE_AMOUNT", "message": "充值积分超出允许范围。"}
@@ -253,6 +289,9 @@ def _insert_recharge_order(
     )
     extra_column = ", credit_pricing_snapshot_json" if conn.is_postgres else ""
     extra_value = ", %s" if conn.is_postgres else ""
+    # 套餐列随套餐迁移仅在 PG 泳道存在（客户通道本就是 PG-only）。
+    package_column = ", package_id, package_snapshot_json" if conn.is_postgres else ""
+    package_value = ", %s, %s" if conn.is_postgres else ""
     # Native QR is obtained after the local order commits; never call a paid
     # gateway while holding the wallet transaction or its idempotency envelope.
     payment_form = (
@@ -273,9 +312,10 @@ def _insert_recharge_order(
             "    channel, status, pricing_scope,\n"
             "    base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot,\n"
             "    min_recharge_fen_snapshot, recharge_step_fen_snapshot,\n"
-            f"    amount_fen, credits{extra_column}\n"
+            f"    amount_fen, credits{extra_column}"
+            f"{package_column}\n"
             ") VALUES (%s, %s, %s, %s, NULL, %s, 'PENDING', %s, "
-            f"%s, %s, %s, %s, %s, %s{extra_value})\n",
+            f"%s, %s, %s, %s, %s, %s{extra_value}{package_value})\n",
             (
                 str(uuid4()),
                 user_id,
@@ -290,7 +330,12 @@ def _insert_recharge_order(
                 amount_fen,
                 credits,
             )
-            + ((price_snapshot,) if conn.is_postgres else ()),
+            + ((price_snapshot,) if conn.is_postgres else ())
+            + (
+                ((package.id if package is not None else None), package_snapshot_json)
+                if conn.is_postgres
+                else ()
+            ),
         )
     set_current_trace_fields(user_id=user_id, order_id=merchant_order_no)
     return RechargeOrderResponse(
@@ -345,6 +390,14 @@ def create_recharge_order(
                             "message": (
                                 "Customer accounts must use /api/customer/recharge-orders."
                             ),
+                        },
+                    )
+                if payload.package_id is not None:
+                    raise HTTPException(
+                        status_code=422,
+                        detail={
+                            "code": "RECHARGE_PACKAGE_UNAVAILABLE",
+                            "message": "充值套餐仅支持客户通道下单。",
                         },
                     )
                 billing, merchant, deployment = _stage_recharge_preconditions(
@@ -427,7 +480,11 @@ def create_customer_recharge_order(
         )
     key_digests = idempotency_key_digests(idempotency_key)
     key_digest = key_digests[0]
-    req_hash = request_hash({"amount_fen": str(payload.amount_fen)})
+    # 套餐选择必须进指纹：同金额不同套餐的 credits/权益不同（重放不得串档）。
+    fingerprint_fields = {"amount_fen": str(payload.amount_fen)}
+    if payload.package_id is not None:
+        fingerprint_fields["package_id"] = payload.package_id
+    req_hash = request_hash(fingerprint_fields)
     try:
         aead_key_version, aead_key = highest_customer_aead_key()
     except IdempotencyKeyError:
@@ -506,11 +563,32 @@ def create_customer_recharge_order(
                 selected_provider = (
                     provider if active_provider == "zpay" else get_payment_provider(active_provider)
                 )
+                # 套餐档位：金额由套餐定义（自定义金额保留：不选套餐时走原校验）。
+                package: RechargePackage | None = None
+                if payload.package_id is not None:
+                    package = read_package(conn, payload.package_id)
+                    if package is None or not package.is_active:
+                        raise HTTPException(
+                            status_code=422,
+                            detail={
+                                "code": "RECHARGE_PACKAGE_NOT_FOUND",
+                                "message": "充值套餐不存在或已下架，请刷新后重试。",
+                            },
+                        )
+                    if package.amount_fen != payload.amount_fen:
+                        raise HTTPException(
+                            status_code=422,
+                            detail={
+                                "code": "RECHARGE_PACKAGE_AMOUNT_MISMATCH",
+                                "message": "充值金额与套餐不符，请刷新后重试。",
+                            },
+                        )
                 billing, merchant, deployment = _stage_recharge_preconditions(
                     conn,
                     amount_fen=payload.amount_fen,
                     provider=selected_provider,
                     customer_user_id=user.id,
+                    validate_amount=package is None,
                 )
                 order = _insert_recharge_order(
                     conn,
@@ -522,6 +600,7 @@ def create_customer_recharge_order(
                     merchant=merchant,
                     deployment=deployment,
                     provider=selected_provider,
+                    package=package,
                 )
                 assert envelope_id is not None
                 recovery_expires_at = (
@@ -866,7 +945,12 @@ def _customer_profile(conn: psycopg.Connection, *, user_id: str) -> CustomerProf
                    SELECT parent.display_name
                    FROM users parent
                    WHERE parent.id = u.parent_user_id
-               ) AS parent_display_name
+               ) AS parent_display_name,
+               (
+                   SELECT quota.monthly_credits
+                   FROM sub_account_quotas quota
+                   WHERE quota.user_id = u.id
+               ) AS monthly_quota_credits
         FROM users u
         LEFT JOIN LATERAL (
             SELECT masked_code, status, activated_at
@@ -900,6 +984,8 @@ def _customer_profile(conn: psycopg.Connection, *, user_id: str) -> CustomerProf
         account_type=str(row[8]) if row[8] is not None else "MASTER",
         parent_user_id=str(row[9]) if row[9] is not None else None,
         parent_display_name=str(row[10]) if row[10] is not None else None,
+        monthly_quota_credits=None if row[11] is None else int(str(row[11])),
+        quota_used_credits=read_quota_used(conn, user_id) if row[9] is not None else None,
     )
 
 

@@ -1950,6 +1950,10 @@ describe("customer-visible service errors", () => {
       "PAIRING_UNAVAILABLE",
       "该激活码当前无法用于设备配对，请联系服务人员处理。",
     ],
+    [
+      "SUB_ACCOUNT_QUOTA_EXCEEDED",
+      "本月额度已用完，请联系母账号调整额度后重试。",
+    ],
   ])("localizes customer account error %s", (code, expected) => {
     expect(
       customerVisibleErrorMessage({
@@ -2490,6 +2494,35 @@ describe("generation workflow API", () => {
         shot_card_version_id: "shot-1",
       }),
     ).rejects.toThrow(message);
+  });
+
+  it("配额超限的 403 保留业务代码，可翻译为额度提示而非泛化的无权操作", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        json: async () => ({
+          detail: {
+            code: "SUB_ACCOUNT_QUOTA_EXCEEDED",
+            message:
+              "本月额度已用完（已用 8 / 限额 10 积分），请联系母账号调整额度。",
+          },
+        }),
+      }),
+    );
+    const error = await createScriptVersion("project-1", {
+      source: "custom",
+      text: "口播稿",
+      shot_card_version_id: "shot-1",
+    }).catch((cause: Error) => cause);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as { code?: string }).code).toBe(
+      "SUB_ACCOUNT_QUOTA_EXCEEDED",
+    );
+    expect(customerVisibleErrorMessage(error)).toBe(
+      "本月额度已用完，请联系母账号调整额度后重试。",
+    );
   });
 
   it("参考时长拒绝保留可执行的修复提示", async () => {

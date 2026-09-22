@@ -108,6 +108,18 @@ def main() -> None:
         conn.execute(
             "UPDATE runtime_settings SET active_storage_provider = 'local' WHERE id = 1"
         )
+        # 充值套餐（RECHARGE-PACKAGES-20260922）：充值对话框的档位由管理员配置的套餐
+        # 提供（写死的 100/300/500 预设已移除）；recharge.spec.mjs 点选 100 元档位走
+        # 真实套餐下单链路，需要一行启用套餐。名称以「100 元」开头以匹配该 spec 的
+        # 档位断言；无折扣/赠送到账与基础汇率一致（1 元 = 10 积分）。
+        conn.execute(
+            "INSERT INTO recharge_packages ("
+            " id, name, amount_fen, credits, discount_rate, discount_interfaces,"
+            " sort_order, is_active, version, created_by_user_id, created_at, updated_at)"
+            " VALUES ('e2e-package-100', '100 元档', 10000, 1000, NULL, '[]',"
+            " 0, true, 0, 'admin_e2e', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            " ON CONFLICT (id) DO NOTHING"
+        )
 
     print(f"SEEDED admin_e2e + {len(E2E_CODES)} codes into {dsn.split('@')[-1]}")
     # The runner captures this to set VIDEO_REPLICA_SETTINGS_KEY on the API.

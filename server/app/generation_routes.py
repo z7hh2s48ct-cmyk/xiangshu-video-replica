@@ -103,6 +103,7 @@ from app.script_rewrite import (
     validated_script_rewrite_request,
 )
 from app.storage import StorageBackendUnavailable
+from app.usage_billing import resolve_wallet_owner
 
 router = APIRouter(prefix="/api", tags=["generation"])
 logger = logging.getLogger(__name__)
@@ -767,12 +768,13 @@ def read_generation_price_quote(
     duration_seconds: int = Query(default=8, ge=4, le=15),
     quantity: int = Query(default=1, ge=1),
 ) -> GenerationPriceQuote:
-    del actor
+    # 子账号按母账号钱包计价：套餐权益也随钱包主人（T2.10）。
     return generation_price_quote(
         conn,
         resolution=resolution,
         duration_seconds=duration_seconds,
         quantity=quantity,
+        user_id=resolve_wallet_owner(conn, actor.id),
     )
 
 

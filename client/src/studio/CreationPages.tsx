@@ -185,27 +185,45 @@ function SourceStrip({ source }: { source?: StudioAsset }) {
 }
 
 /**
+ * 场景形象行的媒体基准高度：默认基准（clamp(240px, 34dvh, 360px)）只有
+ * 240~360px，两栏媒体框都偏小。该行抬到 480px——两栏媒体框统一按参考视频
+ * 画幅取形状，列宽不够时由 max-height 反推收窄（见 .media-row .media-frame）。
+ */
+const SCENE_ROW_MIN_HEIGHT = 480;
+
+/**
  * 媒体行：左右两栏的媒体框等高（底部对齐）由 useMediaRowFit 迭代测量保证。
  * 必须独立成组件——hook 不能在循环或条件中调用，每行需各持一个实例。
  */
 function ReplicaMediaRow({
   ratio,
+  minHeight,
+  className,
   children,
 }: {
   ratio: number;
+  /** 覆盖媒体基准高度（默认 clamp(240px, 34dvh, 360px)）。场景形象行需要更大的
+   *  基准来放大小比例素材的显示尺寸。 */
+  minHeight?: number;
+  /** 追加到 .media-row 的修饰类（如 media-row--scene 用于右列限宽）。 */
+  className?: string;
   children: ReactNode;
 }) {
-  const { rowRef, rowStyle } = useMediaRowFit({ ratio });
+  const { rowRef, rowStyle } = useMediaRowFit({ ratio, minHeight });
   return (
-    <div className="media-row" ref={rowRef} style={rowStyle}>
+    <div
+      className={className ? `media-row ${className}` : "media-row"}
+      ref={rowRef}
+      style={rowStyle}
+    >
       {children}
     </div>
   );
 }
 
 /**
- * 面板级比例覆盖：行的 --row-ratio 是给「左栏宽度」算的单一值，两栏素材比例不同时
- * 各面板必须各自覆盖，否则比例小的那栏会被撑出黑边。
+ * 面板级比例覆盖：两栏媒体框都显式钉成参考视频画幅。场景图与首帧的素材比例
+ * 并不相同（竖长场景图 vs 9:16 首帧），跟随素材自身比例会把两栏拉成不同形状。
  */
 function panelRatioStyle(ratio: number): MediaRowStyle {
   return { "--row-ratio": `${ratio}` };
@@ -1134,6 +1152,14 @@ export function CopyPage() {
           </div>
           {hasResult ? (
             <footer className="creation-action-bar">
+              {/* 缺人物不再是拦阻条件：数字人口播页自带「更换 IP」入口，
+                  进入后补选即可。文案链路（爆款视频提取）不携带 ipId，
+                  若在这里拦死，按钮会永久置灰且无任何原因提示。 */}
+              {!person ? (
+                <div className="creation-action-note">
+                  <small>未选择人物 IP，进入数字人口播页后可选择</small>
+                </div>
+              ) : null}
               <Button
                 variant="primary"
                 disabled={
@@ -1157,9 +1183,7 @@ export function CopyPage() {
               </Button>
               <Button
                 variant="primary"
-                disabled={
-                  !state.draft.script.confirmed || !person || oralLengthExceeded
-                }
+                disabled={!state.draft.script.confirmed || oralLengthExceeded}
                 onClick={() => navigate("oral", { returnTo: "copy" })}
               >
                 用于数字人口播
@@ -1248,7 +1272,6 @@ export function ReplicaPage() {
     navigate,
     notify,
     openLive,
-    saveDraft,
     user,
   } = useStudio();
   const readOnly = user.role === "auditor";
@@ -1287,6 +1310,8 @@ export function ReplicaPage() {
   const [shots, setShots] = useState<ShotCard[]>([]);
   const [shotCardVersionId, setShotCardVersionId] = useState<string>();
   const [analysisVersionId, setAnalysisVersionId] = useState<string>();
+  const [analysisVersionCreatedAt, setAnalysisVersionCreatedAt] =
+    useState<string>();
   const [shotsDirty, setShotsDirty] = useState(false);
   const [savingShots, setSavingShots] = useState(false);
   const [shotSaveError, setShotSaveError] = useState("");
@@ -1326,7 +1351,11 @@ export function ReplicaPage() {
     ratio: state.draft.ratio as GenerationRatio,
     shotCardVersionId,
   };
-  const finalReady = finalSnapshot?.inputKey === replicaInputKey(finalInput);
+  // 正文为空时不算就绪：快照还在、文本被清空（或草稿恢复出脱节数据）时，
+  // 「已完成」徽标与「去 AI 视频创作」不能凭空放行一个空交付物。
+  const finalReady =
+    Boolean(promptText.trim()) &&
+    finalSnapshot?.inputKey === replicaInputKey(finalInput);
   // finalSnapshot 只在挂载时读一次草稿：草稿是异步恢复的，挂载时 projectId 还没到，
   // 刷新后草稿里的快照就再也读不进来，「已完成」状态凭空消失。项目 id 变化时补读一次。
   // 不能无差别跟随草稿：改镜头会就地清空快照（不落库），跟随会把清空结果复原。
@@ -1448,6 +1477,7 @@ export function ReplicaPage() {
     setSavingShots(false);
     setShotCardVersionId(undefined);
     setAnalysisVersionId(undefined);
+    setAnalysisVersionCreatedAt(undefined);
     setShotsDirty(false);
     setShotSaveError("");
     setOriginalScript("");
@@ -1562,6 +1592,7 @@ export function ReplicaPage() {
         setAnalysisVersionId(
           shotPayload?.source_analysis_version_id ?? analysisVersion?.id,
         );
+        setAnalysisVersionCreatedAt(analysisVersion?.created_at);
         setShotsDirty(false);
         setShotSaveError("");
         setOriginalScript(original);
@@ -1697,10 +1728,12 @@ export function ReplicaPage() {
       notify("参考视频已上传，继续拆解会恢复已有任务，不重复创建分析。");
       // 上传即进入复刻流程：来源视频已在手，留在原页只是多一次手工跳转。
       if (state.page !== "replica") navigate("replica");
-    } catch {
+    } catch (cause: unknown) {
       if (operation !== uploadOperationRef.current) return;
       restoreSuppressedRef.current = false;
-      notify("参考视频上传失败，请稍后重试。");
+      notify(
+        customerVisibleErrorMessage(cause, "参考视频上传失败，请稍后重试。"),
+      );
     }
   };
 
@@ -1773,8 +1806,19 @@ export function ReplicaPage() {
     setStage("analyzing");
     notify("AI 拆解进行中，离开页面后仍可恢复原任务。");
     try {
+      // 只有任务仍在排队 / 运行中才复用旧任务。SUCCEEDED 却没拿到分镜
+      // （视频过短、无有效镜头）时必须强制重跑，否则「重新拆解」永远复用
+      // 已完成的任务，陷入拿不到分镜的死循环；FAILED 与「已有分镜的显式
+      // 重跑」同样强制新建。
+      const taskInFlight =
+        state.draft.analysisTaskStatus === "PENDING" ||
+        state.draft.analysisTaskStatus === "RUNNING";
       const force =
-        shots.length > 0 || state.draft.analysisTaskStatus === "FAILED";
+        shots.length > 0 ||
+        (!taskInFlight &&
+          Boolean(
+            state.draft.analysisTaskId || state.draft.analysisTaskStatus,
+          ));
       const task =
         !force && state.draft.analysisTaskId
           ? await getAnalysisTask(state.draft.analysisTaskId)
@@ -1792,6 +1836,7 @@ export function ReplicaPage() {
       const analysisVersion = await getLatestProjectAnalysis(projectId).catch(
         () => undefined,
       );
+      setAnalysisVersionCreatedAt(analysisVersion?.created_at);
       const analysisShots: ShotCard[] = analysisVersion
         ? (readAnalysisPayload(analysisVersion)?.shots ?? [])
         : [];
@@ -1926,10 +1971,12 @@ export function ReplicaPage() {
   };
 
   // 复刻链路到此交付提示词；生成与付费在 AI 视频创作页完成。
+  // 与按钮 disabled 同源：上游变化会清空 finalReady，这里兜底挡住把过期稿
+  // 带进生成页的其他调用路径。
   const goToVideoCreation = () => {
     const text = promptTextRef.current;
-    if (!text) {
-      notify("请先合成最终提示词。");
+    if (!finalReady || !text) {
+      notify("请先合成最终提示词，并确保与当前设置一致。");
       return;
     }
     patchDraft({ prompt: text, promptEdited: true });
@@ -2077,6 +2124,38 @@ export function ReplicaPage() {
       notify("复制分镜表失败，请检查剪贴板权限后重试。");
     }
   };
+  // 复刻页 ①：三段式长页的步骤导航，滚动中吸顶可见，点击跳转到对应区块。
+  const replicaSteps = [
+    { id: "replica-step-1", label: "1 视频拆解", done: hasShots },
+    {
+      id: "replica-step-2",
+      label: "2 首帧置换",
+      done: Boolean(state.draft.firstFrameId),
+    },
+    { id: "replica-step-3", label: "3 文案与生成", done: finalReady },
+  ];
+  const currentStepIndex = replicaSteps.findIndex((step) => !step.done);
+  // hash 路由下 href="#…" 会改写页面路由，步骤跳转只用 JS 滚动。
+  const scrollToReplicaStep = (id: string) => {
+    document.getElementById(id)?.scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
+  };
+  // ② 信息卡的「末次拆解」：当天显示「今天 HH:mm」，跨天带月日。
+  const analysisCreatedLabel = (() => {
+    if (!analysisVersionCreatedAt) return "—";
+    const created = new Date(analysisVersionCreatedAt);
+    if (Number.isNaN(created.getTime())) return "—";
+    const time = created.toLocaleTimeString("zh-CN", {
+      hour: "2-digit",
+      hour12: false,
+      minute: "2-digit",
+    });
+    return created.toDateString() === new Date().toDateString()
+      ? `今天 ${time}`
+      : `${created.getMonth() + 1}月${created.getDate()}日 ${time}`;
+  })();
   // 「首帧未就绪」在面板内（有文案没首帧）和面板外（两者都没有）两处出现：
   // 分支结构不同、位置也不同，共用一份文案，免得两处措辞各自漂移。
   const missingFirstFrameHint = (
@@ -2085,8 +2164,30 @@ export function ReplicaPage() {
   return (
     <section className="creation-page creation-replica">
       <CreationNavigation />
+      <nav className="replica-steps" aria-label="复刻步骤导航">
+        {replicaSteps.map((step, index) => (
+          <button
+            key={step.id}
+            type="button"
+            className={
+              step.done
+                ? "replica-steps__item is-done"
+                : index === currentStepIndex
+                  ? "replica-steps__item is-current"
+                  : "replica-steps__item"
+            }
+            aria-current={index === currentStepIndex ? "step" : undefined}
+            onClick={() => scrollToReplicaStep(step.id)}
+          >
+            <span className="replica-steps__dot" aria-hidden="true">
+              {step.done ? "✓" : index + 1}
+            </span>
+            {step.label}
+          </button>
+        ))}
+      </nav>
       <div className="creation-replica-flow">
-        <section className="creation-workflow-section">
+        <section className="creation-workflow-section" id="replica-step-1">
           <h2>1 视频拆解</h2>
           {stage === "source" && !project ? (
             <Panel className="creation-empty-workspace">
@@ -2162,6 +2263,30 @@ export function ReplicaPage() {
                       )}
                     </span>
                   </div>
+                  <div className="creation-replica-stats">
+                    <div className="creation-replica-stat is-gold">
+                      <span>视频时长</span>
+                      <strong>
+                        {sourceDuration > 0
+                          ? `${sourceDuration.toFixed(1)} 秒`
+                          : "—"}
+                      </strong>
+                    </div>
+                    <div className="creation-replica-stat is-gold">
+                      <span>拆解镜头</span>
+                      <strong>
+                        {displayShots.length > 0
+                          ? `${displayShots.length} 个`
+                          : "—"}
+                      </strong>
+                    </div>
+                    <div className="creation-replica-stat">
+                      <span>末次拆解</span>
+                      <strong title={analysisVersionCreatedAt ?? undefined}>
+                        {analysisCreatedLabel}
+                      </strong>
+                    </div>
+                  </div>
                   <div className="creation-upload-row">
                     <Button
                       variant="primary"
@@ -2228,7 +2353,12 @@ export function ReplicaPage() {
               {hasShots && (
                 <Panel className="creation-shot-list">
                   <div className="creation-panel-title-row">
-                    <span>分镜表 · {displayShots.length} 个镜头</span>
+                    <span className="creation-shot-list-title">
+                      分镜表 · {displayShots.length} 个镜头
+                      {sourceDuration > 0 ? (
+                        <small>时间轴 0.0–{sourceDuration.toFixed(1)} 秒</small>
+                      ) : null}
+                    </span>
                     <span className="creation-shot-list-actions">
                       {/* 有已保存版本且无未保存改动，才算「已保存为自定义」。 */}
                       {!shotsDirty && shotCardVersionId ? (
@@ -2255,8 +2385,8 @@ export function ReplicaPage() {
                       {shotSaveError}
                     </p>
                   ) : null}
-                  <details className="creation-shot-details" open>
-                    <summary>编辑完整分镜</summary>
+                  <details className="creation-shot-details">
+                    <summary>展开编辑完整分镜</summary>
                     <ShotCardEditor
                       shots={displayShots}
                       readOnly={readOnly || savingShots}
@@ -2268,14 +2398,14 @@ export function ReplicaPage() {
             </>
           )}
         </section>
-        <section className="creation-workflow-section">
+        <section className="creation-workflow-section" id="replica-step-2">
           <h2>2 首帧置换</h2>
           <ReplicaFirstFrameSection
             ratio={firstFramePreviewRatio}
             videoDurationSeconds={sourceDuration || null}
           />
         </section>
-        <section className="creation-workflow-section">
+        <section className="creation-workflow-section" id="replica-step-3">
           <h2>3 文案与生成</h2>
           {!replicaProjectId || !state.draft.firstFrameId ? (
             <ReplicaPreflightChecklist checks={workflowChecks} />
@@ -2433,13 +2563,39 @@ export function ReplicaPage() {
                         >
                           {savingPrompt ? "保存中…" : "存入我的提示词"}
                         </Button>
-                        <Button
-                          disabled={readOnly || review || !promptText}
-                          onClick={goToVideoCreation}
-                          variant="primary"
-                        >
-                          去 AI 视频创作
-                        </Button>
+                        {/* ⑧ 主次分层：右组携带就绪徽标，「去 AI 视频创作」是唯一主按钮。 */}
+                        <span className="creation-prompt-actions">
+                          {finalReady ? (
+                            <span className="creation-final-badge">
+                              ✓ 已就绪 · 上游一致
+                            </span>
+                          ) : (
+                            // S3 门禁的可见原因：禁用按钮的原生 title 在触屏与
+                            // 键盘操作下不可达，补一个与 title 同源的提示，
+                            // 并用 aria-describedby 关联到按钮。
+                            <span
+                              className="creation-final-badge is-pending"
+                              id="replica-final-gate-hint"
+                            >
+                              请先合成最终提示词，并确保与当前设置一致。
+                            </span>
+                          )}
+                          <Button
+                            aria-describedby={
+                              finalReady ? undefined : "replica-final-gate-hint"
+                            }
+                            disabled={readOnly || review || !finalReady}
+                            onClick={goToVideoCreation}
+                            title={
+                              finalReady
+                                ? undefined
+                                : "请先合成最终提示词，并确保与当前设置一致。"
+                            }
+                            variant="primary"
+                          >
+                            去 AI 视频创作
+                          </Button>
+                        </span>
                       </>
                     )}
                   </div>
@@ -2451,19 +2607,6 @@ export function ReplicaPage() {
           )}
         </section>
       </div>
-      <footer className="creation-action-bar">
-        <strong>复刻工作台</strong>
-        <Button
-          variant="outline"
-          disabled={readOnly}
-          onClick={() => {
-            if (readOnly) return;
-            saveDraft();
-          }}
-        >
-          保存草稿
-        </Button>
-      </footer>
       <input
         accept="video/mp4,video/quicktime"
         aria-label="上传参考视频"
@@ -2507,8 +2650,6 @@ function ReplicaFirstFrameSection({
   const [firstFrameSelection, setFirstFrameSelection] =
     useState<AnalysisVersion | null>(null);
   const [, setLeafBusy] = useState(false);
-  /** 场景形象素材自身的宽高比，由左栏预览图 onLoad 回报；未知时退回首帧比例。 */
-  const [sceneRatio, setSceneRatio] = useState<number | null>(null);
   const referenceMatchInFlightRef = useRef<string | undefined>(undefined);
   const referenceRetryScheduledRef = useRef(false);
   const readOnlyRef = useRef(readOnly);
@@ -2845,11 +2986,15 @@ function ReplicaFirstFrameSection({
               />
             </div>
           </Panel>
-          {/* 与生产分支同构：行的比例取两栏较大者，两侧面板各自覆盖。 */}
-          <ReplicaMediaRow ratio={Math.max(sceneRatio ?? ratio, ratio)}>
+          {/* 与生产分支同构：两栏媒体框都钉成参考视频画幅，不再跟随素材比例。 */}
+          <ReplicaMediaRow
+            className="media-row--scene"
+            minHeight={SCENE_ROW_MIN_HEIGHT}
+            ratio={ratio}
+          >
             <Panel
               className="creation-replacement-step banded"
-              style={panelRatioStyle(sceneRatio ?? ratio)}
+              style={panelRatioStyle(ratio)}
             >
               <div className="creation-panel-title-row">
                 <span>场景形象</span>
@@ -2874,7 +3019,6 @@ function ReplicaFirstFrameSection({
                     asset={reviewScene}
                     alt="审核示例场景图"
                     aspectRatio="adaptive"
-                    onAspectRatioChange={setSceneRatio}
                   />
                 </div>
                 <div className="band-act" />
@@ -2903,27 +3047,29 @@ function ReplicaFirstFrameSection({
                     <option value="9:16">9:16 竖屏</option>
                   </select>
                 </div>
-                <div className="media-frame">
-                  <Media
-                    asset={reviewCandidates[0]?.asset}
-                    alt="审核示例候选 1"
-                    aspectRatio="adaptive"
-                  />
+                <div className="first-frame-media-band">
+                  <div className="media-frame">
+                    <Media
+                      asset={reviewCandidates[0]?.asset}
+                      alt="审核示例候选 1"
+                      aspectRatio="adaptive"
+                    />
+                  </div>
+                  <div className="creation-review-candidates">
+                    {reviewCandidates.map(({ id, asset }, index) => (
+                      <figure key={id}>
+                        <Media
+                          asset={asset}
+                          alt={`审核示例候选 ${index + 1}`}
+                          aspectRatio="adaptive"
+                        />
+                        <figcaption>候选 {index + 1}</figcaption>
+                      </figure>
+                    ))}
+                  </div>
                 </div>
                 <div className="band-act center">
                   <span className="status-note">审核示例</span>
-                </div>
-                <div className="creation-review-candidates">
-                  {reviewCandidates.map(({ id, asset }, index) => (
-                    <figure key={id}>
-                      <Media
-                        asset={asset}
-                        alt={`审核示例候选 ${index + 1}`}
-                        aspectRatio="adaptive"
-                      />
-                      <figcaption>候选 {index + 1}</figcaption>
-                    </figure>
-                  ))}
                 </div>
               </section>
             </Panel>
@@ -2947,19 +3093,23 @@ function ReplicaFirstFrameSection({
               videoDurationSeconds={videoDurationSeconds}
             />
           </Panel>
-          {/* 行上只能有一份 --row-ratio，取两栏较大者，左栏宽度才装得下较宽的那张图；
-              两侧面板各自覆盖回自己的比例。 */}
-          <ReplicaMediaRow ratio={Math.max(sceneRatio ?? ratio, ratio)}>
+          {/* 两栏媒体框统一按参考视频画幅取形状：场景图不再跟随素材自身比例
+              （竖长细条），与首帧一栏同形；行与面板取同一比例，列宽推导
+              与框体高度上限同源。 */}
+          <ReplicaMediaRow
+            className="media-row--scene"
+            minHeight={SCENE_ROW_MIN_HEIGHT}
+            ratio={ratio}
+          >
             <Panel
               className="creation-replacement-step banded"
-              style={panelRatioStyle(sceneRatio ?? ratio)}
+              style={panelRatioStyle(ratio)}
             >
               <div className="creation-panel-title-row">
                 <span>场景形象</span>
               </div>
               <CharacterSelection
                 banded
-                onAspectRatioChange={setSceneRatio}
                 onBusyChange={setLeafBusy}
                 onVersionChange={handleCharacterChange}
                 projectId={projectId}
@@ -3011,7 +3161,7 @@ function ReplicaFirstFrameSection({
           <Hint>
             {firstFrameAssetId
               ? "首帧已确认"
-              : "生成并选定首帧后，可在下方合成提示词。"}
+              : "选定首帧后，可在下方合成提示词。"}
           </Hint>
         </>
       )}

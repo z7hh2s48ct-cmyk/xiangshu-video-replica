@@ -2314,6 +2314,219 @@ def test_first_frame_human_review_records_user_without_fake_qc_pass(
     )[0] == {"available_credits": 1000, "reserved_credits": 0}
 
 
+def _seed_first_frame_asset(dsn: str, asset_id: str) -> None:
+    _exec(
+        dsn,
+        "INSERT INTO assets (id, project_id, kind, storage_uri, sha256, size_bytes,"
+        " content_type, created_by_user_id)"
+        " VALUES (%s, 'proj-1', 'first_frame', %s, %s, 20, 'image/png', 'u1')",
+        (asset_id, f"cos://qa/{asset_id}.png", asset_id + "f" * 60),
+    )
+
+
+def test_first_frame_confirm_accepts_explicit_history_candidates_version(
+    pg_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """置换首帧历史版本放开：显式带上候选版本 id 时，确认不再要求
+    “必须是最新候选集”；selection 记录该历史版本，生成侧（来源绑定与 H3
+    门禁）跟随 selection 指向的版本读取，且历史确认跳过 b5 输入新鲜度检查
+    （基于旧输入的警示由前端承担）。"""
+    from app import first_frames
+    from app.analysis import insert_version
+    from app.auth import CurrentUser
+    from app.generation import confirmed_first_frame_sources, require_confirmed_first_frame
+
+    _seed_base(pg_state)
+    _seed_first_frame_asset(pg_state, "ff-hist")
+    _seed_first_frame_asset(pg_state, "ff-new")
+    actor = CurrentUser(id="u1", username="u1", display_name="User One", role="employee")
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        history = insert_version(
+            conn,
+            project_id="proj-1",
+            asset_id="ff-hist",
+            kind="first_frame_candidates",
+            created_by_user_id="u1",
+            payload={
+                "schema_version": "b5.first-frame.v1",
+                "candidates": [{"asset_id": "ff-hist", "quality": None}],
+            },
+        )
+        insert_version(
+            conn,
+            project_id="proj-1",
+            asset_id="ff-new",
+            kind="first_frame_candidates",
+            created_by_user_id="u1",
+            payload={
+                "schema_version": "b5.first-frame.v1",
+                "candidates": [{"asset_id": "ff-new", "quality": None}],
+            },
+        )
+        row = first_frames.confirm_first_frame(
+            conn,
+            project_id="proj-1",
+            first_frame_asset_id="ff-hist",
+            actor=actor,
+            first_frame_candidates_version_id=str(history["id"]),
+        )
+        stored = json.loads(str(row["payload_json"]))
+        assert stored["first_frame_candidates_version_id"] == str(history["id"])
+        assert stored["first_frame_asset_id"] == "ff-hist"
+
+        sources = confirmed_first_frame_sources(
+            conn, project_id="proj-1", first_frame_asset_id="ff-hist"
+        )
+        assert sources["first_frame_candidates_version_id"] == str(history["id"])
+        assert sources["first_frame_selection_version_id"] == str(row["id"])
+
+        def _stale(*args: Any, **kwargs: Any) -> None:
+            raise first_frames.stale_first_frame_inputs()
+
+        monkeypatch.setattr(first_frames, "current_first_frame_candidates", _stale)
+        # 历史确认不因“当前候选集已过期”被拦：b5 新鲜度检查只作用于指向
+        # 最新候选版本的确认。
+        require_confirmed_first_frame(conn, project_id="proj-1", first_frame_asset_id="ff-hist")
+
+
+def test_first_frame_generation_gate_keeps_b5_freshness_for_latest_selection(
+    pg_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """selection 指向最新候选版本时，b5 输入新鲜度检查保持原判：源画面或
+    人物已变化（最新候选集过期）→ H3 门禁必须 409，不能沉默放行。"""
+    from app import first_frames
+    from app.analysis import insert_version
+
+    _seed_base(pg_state)
+    _seed_first_frame_asset(pg_state, "ff-now")
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        candidates = insert_version(
+            conn,
+            project_id="proj-1",
+            asset_id="ff-now",
+            kind="first_frame_candidates",
+            created_by_user_id="u1",
+            payload={
+                "schema_version": "b5.first-frame.v1",
+                "candidates": [{"asset_id": "ff-now", "quality": None}],
+            },
+        )
+        insert_version(
+            conn,
+            project_id="proj-1",
+            asset_id="ff-now",
+            kind="first_frame_selection",
+            created_by_user_id="u1",
+            payload={
+                "first_frame_candidates_version_id": str(candidates["id"]),
+                "first_frame_asset_id": "ff-now",
+                "review_mode": "HUMAN_CONFIRMATION",
+                "reviewed_by_user_id": "u1",
+            },
+        )
+
+        def _stale(*args: Any, **kwargs: Any) -> None:
+            raise first_frames.stale_first_frame_inputs()
+
+        monkeypatch.setattr(first_frames, "current_first_frame_candidates", _stale)
+        from app.generation import require_confirmed_first_frame
+
+        with pytest.raises(HTTPException) as exc:
+            require_confirmed_first_frame(conn, project_id="proj-1", first_frame_asset_id="ff-now")
+        assert exc.value.detail["code"] == "FIRST_FRAME_CONFIRMATION_REQUIRED"
+
+
+def test_first_frame_confirm_default_path_still_accepts_latest_set_only(
+    pg_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """不带版本的确认保持原契约：只在最新候选集里找 asset，历史图仍报
+    422（客户端必须显式带上目标版本 id 才能确认历史图）。"""
+    from app import first_frames
+    from app.analysis import insert_version
+    from app.auth import CurrentUser
+
+    _seed_base(pg_state)
+    _seed_first_frame_asset(pg_state, "ff-hist")
+    _seed_first_frame_asset(pg_state, "ff-new")
+    actor = CurrentUser(id="u1", username="u1", display_name="User One", role="employee")
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        insert_version(
+            conn,
+            project_id="proj-1",
+            asset_id="ff-hist",
+            kind="first_frame_candidates",
+            created_by_user_id="u1",
+            payload={"candidates": [{"asset_id": "ff-hist", "quality": None}]},
+        )
+        latest = insert_version(
+            conn,
+            project_id="proj-1",
+            asset_id="ff-new",
+            kind="first_frame_candidates",
+            created_by_user_id="u1",
+            payload={"candidates": [{"asset_id": "ff-new", "quality": None}]},
+        )
+        monkeypatch.setattr(
+            first_frames, "current_first_frame_candidates", lambda *args, **kwargs: latest
+        )
+        with pytest.raises(HTTPException) as exc:
+            first_frames.confirm_first_frame(
+                conn, project_id="proj-1", first_frame_asset_id="ff-hist", actor=actor
+            )
+        assert exc.value.detail["code"] == "FIRST_FRAME_CANDIDATE_NOT_FOUND"
+
+
+def test_first_frame_selection_latest_returns_history_confirmation(pg_state: str) -> None:
+    """selection/latest 不再对“指向历史候选版本”的已确认首帧整体 409：
+    读取端直接返回记录本身（过期与否交给生成门禁与前端警示）。"""
+    from app.analysis import insert_version
+    from app.auth import CurrentUser
+    from app.first_frame_routes import read_latest_first_frame_selection
+
+    _seed_base(pg_state)
+    _seed_first_frame_asset(pg_state, "ff-hist")
+    _seed_first_frame_asset(pg_state, "ff-new")
+    actor = CurrentUser(id="u1", username="u1", display_name="User One", role="employee")
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        history = insert_version(
+            conn,
+            project_id="proj-1",
+            asset_id="ff-hist",
+            kind="first_frame_candidates",
+            created_by_user_id="u1",
+            payload={"candidates": [{"asset_id": "ff-hist", "quality": None}]},
+        )
+        insert_version(
+            conn,
+            project_id="proj-1",
+            asset_id="ff-new",
+            kind="first_frame_candidates",
+            created_by_user_id="u1",
+            payload={"candidates": [{"asset_id": "ff-new", "quality": None}]},
+        )
+        selection = insert_version(
+            conn,
+            project_id="proj-1",
+            asset_id="ff-hist",
+            kind="first_frame_selection",
+            created_by_user_id="u1",
+            payload={
+                "first_frame_candidates_version_id": str(history["id"]),
+                "first_frame_asset_id": "ff-hist",
+                "review_mode": "HUMAN_CONFIRMATION",
+                "reviewed_by_user_id": "u1",
+            },
+        )
+        response = read_latest_first_frame_selection("proj-1", conn=conn, actor=actor)
+    assert response is not None
+    assert response.id == str(selection["id"])
+    assert response.payload["first_frame_candidates_version_id"] == str(history["id"])
+
+
 def test_first_frame_async_receipt_is_fenced_and_resumes_original_task(pg_state):
     import json
 

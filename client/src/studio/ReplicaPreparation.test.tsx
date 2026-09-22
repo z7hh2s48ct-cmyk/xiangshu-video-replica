@@ -85,7 +85,8 @@ it("在口播文案区域确认，编辑后须重新确认", () => {
 });
 it("AI 改写覆盖唯一文案框并支持撤销", async () => {
   render(<Harness />);
-  expect(screen.getByLabelText("口播文案")).toHaveAttribute("rows", "10");
+  // ⑦ 口播文案框改为内容自适应高度，起始 3 行（原固定 10 行）。
+  expect(screen.getByLabelText("口播文案")).toHaveAttribute("rows", "3");
   fireEvent.click(screen.getByRole("button", { name: "AI 改写" }));
   await waitFor(() =>
     expect(screen.getByLabelText("口播文案")).toHaveValue("AI 新口播"),

@@ -37,8 +37,9 @@ EXCLUDED_TABLES = frozenset({"alembic_version"})
 # audit, T18/DEV-03; the append-only audited admin adjustments, T23/BILL-02;
 # the per-user fair-queue cursors, T25/041; committed customer-write fencing
 # evidence, T37/042; the admin password-credential registry, T38/043; and the
-# per-customer unit-price overrides, T39/044; and the cost/price ledgers,
-# W8/W10/056/058/059). They have no SQLite counterpart
+# per-customer unit-price overrides, T39/044; the cost/price ledgers,
+# W8/W10/056/058/059; and the administrator-configured recharge packages,
+# 20260922T1200). They have no SQLite counterpart
 # in the T07 import source, so an empty such table on the target is expected;
 # a non-empty one is divergent state and must fail closed.
 PG_ONLY_TABLES: frozenset[str] = frozenset(
@@ -100,6 +101,14 @@ PG_ONLY_TABLES: frozenset[str] = frozenset(
         # （迁移在非 postgresql 方言下 return，SQLite lane 不建表）。T07 导入源无此表，
         # 目标库为空属预期；非空即 divergent，仍 fail closed。
         "content_objects",
+        # 20260921T1200_sub_account_quotas: 子账号月度额度配置（母账号内控限额），
+        # PG-only（守卫同 20260916T1400）。T07 导入源无此表，目标库为空属预期；
+        # 非空即 divergent，仍 fail closed。
+        "sub_account_quotas",
+        # 20260922T1200_recharge_packages: 管理员配置的充值套餐（档位 + 赠送积分 +
+        # 折扣权益）仅在 PG 落地（非 postgresql 方言 return）。T07 导入源无此表，
+        # 目标库为空属预期；非空即 divergent，仍 fail closed。
+        "recharge_packages",
     }
 )
 
@@ -139,7 +148,16 @@ PG_ONLY_COLUMNS: dict[str, frozenset[str]] = {
     # 083_recharge_orders_multi_provider: WeChat Native 支付回执列仅存在于
     # PG（T07 的 SQLite 源 schema 冻结于 042 前基线）。
     "recharge_orders": frozenset(
-        {"prepay_id", "code_url", "transaction_id", "credit_pricing_snapshot_json"}
+        {
+            "prepay_id",
+            "code_url",
+            "transaction_id",
+            "credit_pricing_snapshot_json",
+            # 20260922T1200_recharge_packages: 套餐来源与下单冻结快照仅存在于 PG
+            # （T07 的 SQLite 源 schema 冻结于其前基线）。
+            "package_id",
+            "package_snapshot_json",
+        }
     ),
     # 086_remove_device_slot_constraints: 每用户设备上限列仅存在于 PG
     # （T07 的 SQLite 源 schema 冻结于 042 前基线）。
