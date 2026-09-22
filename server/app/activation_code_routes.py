@@ -126,8 +126,11 @@ FINGERPRINT_UNIQUE_CONSTRAINT = "uq_customer_devices_fingerprint"
 FINGERPRINT_CANONICAL_UNIQUE_CONSTRAINT = "uq_customer_devices_fingerprint_canonical"
 USERS_USERNAME_CONSTRAINT = "users_username_key"
 # CW-073: DEVICE_SLOT_UNIQUE_CONSTRAINT removed — the partial unique index
-# uq_customer_devices_slot was dropped by migration 086.  The device limit
-# is now enforced by the next_free_slot() pre-check against users.max_devices.
+# uq_customer_devices_slot was dropped by migration 086.  That migration
+# installed no replacement cap: there is no device-count limit, and
+# next_free_slot() allocates freely rather than checking users.max_devices
+# (which is a reserved, unenforced column).  See
+# docs/decisions/DEVICE-CAPACITY-POLICY-20260922.md.
 ACTIVATION_CODE_UNIQUE_CONSTRAINTS = frozenset(
     {
         "activation_code_activations_code_id_key",

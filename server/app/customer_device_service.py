@@ -24,10 +24,15 @@ from app.activation_code_service import ActivationKeyError
 DEVICE_FINGERPRINT_HMAC_KEY_ENV = "VIDEO_REPLICA_DEVICE_FINGERPRINT_HMAC_KEY"
 MIN_HMAC_KEY_BYTES = 32
 MAX_KEY_VERSION = 64
-# CW-073: MAX_DEVICE_SLOTS removed — the per-user limit now lives in
-# ``users.max_devices`` (migration 086).  The constant is retained only as
-# the server_default for the migration and for backward-compatible display
-# when the column has not been read yet.
+# CW-073: MAX_DEVICE_SLOTS removed — the per-user column that replaced it,
+# ``users.max_devices`` (migration 086), is a RESERVED column.  Nothing
+# compares it against the bound-device count, so the device count is
+# currently UNLIMITED; the column only feeds the display pair
+# ``device_slots_used / max_devices``.  The constant survives as that
+# column's server_default and as a display fallback when the column has not
+# been read yet — it is NOT a capacity contract, and the value 2 must not be
+# treated as one.  Read docs/decisions/DEVICE-CAPACITY-POLICY-20260922.md
+# before wiring any capacity check here.
 _DEFAULT_MAX_DEVICES = 2
 
 BOUND = "BOUND"
@@ -690,8 +695,10 @@ def consume_pairing_request(
     The caller holds the code-row lock and the current device-row locks (the
     route locks them in that order before the pairing row), so
     ``next_free_slot`` runs under the serialization the §12.2 contract
-    demands; ``None`` means both slots are BOUND (the pairing row stays
-    APPROVED — a freed slot may yet consume it inside the expiry window).
+    demands.  The ``None`` return is vestigial: ``next_free_slot`` allocates
+    the lowest free ordinal and always finds one, so a capped "both slots
+    are BOUND" state does not exist and this function never returns
+    ``None`` — see docs/decisions/DEVICE-CAPACITY-POLICY-20260922.md.
     On success the request flips to ``CONSUMED`` with the binding recorded,
     and the one-time device credential is returned for the route to seal.
 

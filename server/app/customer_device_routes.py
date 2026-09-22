@@ -28,10 +28,11 @@ machine:
   ``201`` with the one-time device credential — sealed in the shared
   envelope engine so a client that lost the 201 replays the same
   ``device_id`` / slot / credential with the same key;
-- two BOUND slots answer 409 ``DEVICE_SLOTS_FULL`` — both before creating
-  a request (fail fast) and at consumption (authoritative; the APPROVED
-  pairing row survives so a freed slot may still consume it inside the
-  expiry window).
+- device count is **unlimited**: migration 086 dropped the two-slot DB
+  constraints and installed no replacement cap, and ``next_free_slot``
+  always allocates the lowest free ordinal.  The 409 ``DEVICE_SLOTS_FULL``
+  guards kept for that old cap are unreachable (see the notes at each raise
+  and docs/decisions/DEVICE-CAPACITY-POLICY-20260922.md).
 
 The approve route authenticates the *first* device's credential. Approving
 is a monotone PENDING → APPROVED flip with no secret in the response, so
@@ -62,7 +63,9 @@ Stable error codes (dev doc §13.2):
 - 400 ``PAIRING_UNAVAILABLE`` — also covers a candidate fingerprint that
   already holds a current binding, so enrollment cannot be used as an
   account-existence oracle;
-- 409 ``DEVICE_SLOTS_FULL`` — both slots are BOUND (third-device block);
+- 409 ``DEVICE_SLOTS_FULL`` — vestigial: written for the pre-086 two-slot
+  cap and unreachable now that the count is unlimited; kept only so the
+  retired pairing path can be removed whole under 任务 B;
 - 409 ``PAIRING_EXPIRED`` / ``PAIRING_ALREADY_CONSUMED`` /
   ``PAIRING_SELF_APPROVAL`` — the one-shot pairing state machine;
 - 409 ``IDEMPOTENCY_CONFLICT`` — the key was spent on a different request
@@ -1185,11 +1188,13 @@ def enroll_second_device(body: DeviceEnrollRequest, request: Request) -> Respons
 
             # §12.2 step 4 (PR #49 Codex review P2): the current device rows
             # are locked *before* the pairing row so the occupancy snapshot
-            # serializes against a concurrent unbind — without this lock a
-            # completing unbind could transiently answer 409 DEVICE_SLOTS_FULL
-            # even though the freed slot was about to be reusable. The shared
-            # lock order is code → devices → pairing (the approve route walks
-            # its tail: devices → pairing), so the two routes cannot deadlock.
+            # serializes against a concurrent unbind.  The 409 that lock was
+            # originally written to avoid is unreachable now that there is no
+            # device cap (docs/decisions/DEVICE-CAPACITY-POLICY-20260922.md),
+            # but the snapshot-before-decide ordering stays correct, and the
+            # shared lock order is code → devices → pairing (the approve route
+            # walks its tail: devices → pairing), so the two routes cannot
+            # deadlock.
             conn.execute(
                 "SELECT slot_no FROM customer_devices "
                 "WHERE activation_code_id = %s AND status = 'BOUND' FOR UPDATE",
@@ -1267,10 +1272,12 @@ def enroll_second_device(body: DeviceEnrollRequest, request: Request) -> Respons
                     server_now=server_now,
                 )
                 if consumed is None:
-                    # Both slots BOUND: the pairing row stays APPROVED so a
-                    # freed slot may still consume it inside the expiry
-                    # window; the rolled-back transaction takes the envelope
-                    # placeholder with it, keeping the key reusable.
+                    # UNREACHABLE (task D, 2026-09-22): consume_pairing_request
+                    # returns None only when next_free_slot does, and that
+                    # always finds a free ordinal — the device count is
+                    # unlimited.  Left in place so the retired pairing path
+                    # can be removed whole under 任务 B; see
+                    # docs/decisions/DEVICE-CAPACITY-POLICY-20260922.md.
                     raise _http(
                         409,
                         "DEVICE_SLOTS_FULL",
@@ -1312,8 +1319,12 @@ def enroll_second_device(body: DeviceEnrollRequest, request: Request) -> Respons
                     headers={REQUEST_ID_HEADER: request_id},
                 )
 
-            # No active pairing: fail fast when both slots are already BOUND
-            # (the third-device block), then create the PENDING request.
+            # No active pairing: create the PENDING request.  The guard below
+            # is UNREACHABLE (task D, 2026-09-22): next_free_slot allocates the
+            # lowest free ordinal and never returns None, so a third device is
+            # not a "third-device block" — the count is unlimited.  Kept only
+            # so the retired pairing path can be removed whole under 任务 B;
+            # see docs/decisions/DEVICE-CAPACITY-POLICY-20260922.md.
             if next_free_slot(conn, code_id) is None:
                 raise _http(
                     409,

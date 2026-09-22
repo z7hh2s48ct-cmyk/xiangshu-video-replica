@@ -1,5 +1,11 @@
-"""T16 / T18 / DEV-01 — two current device slots, credentials and unbind history,
+"""T16 / T18 / DEV-01 — device slots, credentials and unbind history,
 the admin verification lane.
+
+Note on the term "slot": it is an allocation ordinal, NOT a quota.  Device
+count is unlimited (task D, 2026-09-22) — see
+docs/decisions/DEVICE-CAPACITY-POLICY-20260922.md.  Older revisions of this
+docstring described a two-slot cap; migration 086 removed it and nothing
+replaced it.
 
 Fail-first tests for the frozen files ``server/app/customer_device_service.py``
 and ``server/app/customer_device_routes.py`` (code checklist §3.2 / §3.3):
@@ -19,16 +25,17 @@ Contract under test (task list §3 T16 / T18; dev doc §3.2 / §6.1 / §6.2 /
 - the device credential is the long-lived secret returned once at bind time;
   it authenticates device-management requests via ``Authorization: Bearer``
   and only its keyed digest ever reaches the database;
-- ``GET /api/customer/devices`` answers the two-slot status: slot 1 and slot
-  2 each hold at most one currently ``BOUND`` device, plus the unbind history
-  that outlives slot reuse (rows are never deleted — dev doc §3.2);
+- ``GET /api/customer/devices`` lists the caller's currently ``BOUND``
+  devices with their slot ordinals, plus the unbind history that outlives
+  slot reuse (rows are never deleted — dev doc §3.2);
 - ``DELETE /api/customer/devices/{id}`` unbinds one of the caller's own
   devices: the row flips to ``UNBOUND``, the slot becomes reusable, and any
   live session riding that device is revoked atomically (epoch bump + past
   lease + ``LOGOUT`` event);
-- with both slots ``BOUND`` there is no free slot (``next_free_slot`` is
-  ``None``) and PostgreSQL itself refuses a third ``BOUND`` row — the
-  third-device block;
+- device count is unlimited: ``next_free_slot`` always allocates the lowest
+  free ordinal and never returns ``None``, and migration 086 dropped the
+  DB-level two-slot constraints.  The former "third-device block" no longer
+  exists (task D, 2026-09-22 — docs/decisions/DEVICE-CAPACITY-POLICY-20260922.md);
 - stable error codes: 401 ``DEVICE_CREDENTIAL_REQUIRED`` /
   ``DEVICE_CREDENTIAL_INVALID`` / ``DEVICE_REVOKED``, 404 ``DEVICE_NOT_FOUND``
   (missing or foreign device — one answer, no IDOR oracle), 409
@@ -711,14 +718,23 @@ def test_next_free_slot_reports_availability(devices_dsn: str) -> None:
         close_pg_pool()
 
 
-def test_third_bound_row_is_refused_by_the_database(devices_dsn: str) -> None:
-    """The per-user device-limit floor is proven by PostgreSQL itself (086).
+def test_reserved_max_devices_column_has_no_capacity_effect(devices_dsn: str) -> None:
+    """``users.max_devices`` is a reserved column, not a capacity contract.
 
-    CW-073 removed the hard-coded two-slot DB constraints (uq_customer_devices_slot,
-    ck_customer_devices_slot_range); the third-device block now lives in the
-    service layer and is answered with 409 ``DEVICE_SLOTS_FULL`` (locked by the
-    API tests in this module).  What the database itself still refuses outright
-    is a non-positive ``users.max_devices`` — the CHECK 086 installed.
+    Renamed from ``test_third_bound_row_is_refused_by_the_database`` (task D,
+    2026-09-22): that name asserted the opposite of what the test checks.  The
+    database does NOT refuse a third ``BOUND`` row — migration 086 dropped
+    uq_customer_devices_slot and ck_customer_devices_slot_range and installed
+    no replacement cap, and ``next_free_slot`` always finds a free ordinal.
+    (The old docstring also claimed the block "now lives in the service layer
+    and is answered with 409 DEVICE_SLOTS_FULL (locked by the API tests in
+    this module)" — contradicting ``test_third_device_can_request_pairing``
+    further down this same file, and the raise is unreachable.)
+
+    What this test actually pins is the residue 086 did leave: the column
+    exists with its historical default, and the only constraint on it is a
+    non-positive floor.  Nothing reads it to gate a device count.
+    See docs/decisions/DEVICE-CAPACITY-POLICY-20260922.md.
     """
     close_pg_pool()
     try:
@@ -1252,6 +1268,60 @@ def test_third_device_can_request_pairing(client: TestClient) -> None:
     assert response.status_code == 202, response.text
     assert response.json()["status"] == "PENDING"
     assert _count_rows("SELECT COUNT(*) FROM device_pairing_requests") == 1
+
+
+def test_third_device_enroll_consumes_a_third_slot(client: TestClient) -> None:
+    """Task D (2026-09-22): 第三台设备走完 enroll → approve → consume 必须绑定成功.
+
+    设备数无上限：``users.max_devices`` 是预留列、不参与任何准入判断；
+    ``next_free_slot`` 按"最小未占用序号"分配且永不返回 ``None``。
+
+    这是"不限设备"口径的回归钉：若将来有人补上容量检查、并被该列的
+    server_default 2 卡死，这里会第一个变红（同 086 降级守卫的思路——
+    让默认值不能被误当成容量契约）。注意本用例刻意断言
+    ``max_devices`` 仍为 2 而绑定数已达 3，两者并存正是"该列不生效"的证据。
+
+    docs/decisions/DEVICE-CAPACITY-POLICY-20260922.md
+    """
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-cap-1", suffix="cap1")
+    user_id = customer["user_id"]
+    _second_device_row(
+        user_id=user_id,
+        activation_code_id=_code_id_of_user(user_id),
+        device_id=str(uuid.uuid4()),
+        slot_no=2,
+    )
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        before = conn.execute(
+            "SELECT COUNT(*) FROM customer_devices WHERE user_id = %s AND status = 'BOUND'",
+            (user_id,),
+        ).fetchone()
+    assert before == (2,), before
+
+    enroll = _enroll(client, code=FIRST_CODE, fingerprint="fp-cap-3", key="idem-cap-3")
+    assert enroll.status_code == 202, enroll.text
+
+    approval = _approve(client, customer["device_token"], enroll.json()["pairing_request_id"])
+    assert approval.status_code == 200, approval.text
+
+    consume = _enroll(client, code=FIRST_CODE, fingerprint="fp-cap-3", key="idem-cap-3")
+    assert consume.status_code == 201, consume.text
+    credentials = consume.json()
+    assert credentials["device_id"]
+    # 越过默认 max_devices=2 仍然分配到第三个序号。
+    assert credentials["slot_no"] == 3
+
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        bound = conn.execute(
+            "SELECT COUNT(*) FROM customer_devices WHERE user_id = %s AND status = 'BOUND'",
+            (user_id,),
+        ).fetchone()
+        max_devices = conn.execute(
+            "SELECT max_devices FROM users WHERE id = %s", (user_id,)
+        ).fetchone()
+    assert bound == (3,), bound
+    # 该列并未随绑定数增长，也不曾拦下这次绑定——它不参与准入。
+    assert max_devices == (2,), max_devices
 
 
 def test_enroll_consumes_approved_pairing_binds_slot2(client: TestClient) -> None:
