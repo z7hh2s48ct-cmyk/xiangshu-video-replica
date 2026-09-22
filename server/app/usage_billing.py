@@ -551,13 +551,17 @@ def reconcile_operations(conn: BusinessConnection, *, limit: int = 100) -> int:
     ).fetchall()
     for row in stale:
         finish_operation(conn, operation_id=str(row[0]), units=row[1], succeeded=True)
-    # A search page is an atomic delivery: the reservation settles in the same
-    # transaction that persists the page, so a PENDING row past the window means
-    # the page was never delivered. Release it; a retry opens a new billing round
-    # through reserve_search_operation.
+    # A search page and a single-video refresh are both atomic deliveries: the
+    # reservation settles in the same transaction that persists the result, so
+    # a PENDING row past the window means nothing was delivered. Release it; a
+    # retry opens a new billing round through reserve_search_operation.
+    # ``viral_search_refresh`` shares this window so a crash between its
+    # reservation and delivery cannot freeze the reserved credits forever
+    # (launch review H-3).
     searches = conn.execute(
         "SELECT id FROM billing_operations WHERE state='PENDING' "
-        "AND service='viral_search' AND user_id IS NOT NULL AND created_at<now()-interval '30 "
+        "AND service IN ('viral_search', 'viral_search_refresh') AND user_id IS NOT NULL "
+        "AND created_at<now()-interval '30 "
         "minutes' "
         "ORDER BY created_at LIMIT %s",
         (limit,),

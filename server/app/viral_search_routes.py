@@ -47,6 +47,26 @@ from app.viral_tikhub import (
 router = APIRouter(prefix="/api/viral", tags=["viral"])
 
 
+def require_priced_viral_service(conn: Database, service: str, *, error_code: str) -> None:
+    """资费 fail-closed 守卫（上线评审 H-4）。
+
+    ``viral_search`` / ``viral_search_refresh`` 背后是真实的供应商外呼成本；
+    计费目录里 tariff 缺失或未启用时，``calculate_credits`` 的既有语义是
+    0 积分免费放行——漏配即「能搜但不收钱」。这两条链路必须在预留前
+    显式要求已配置、已启用且单价非零的资费，否则拒绝服务。单价 0 与
+    缺失同罪：管理端 tariff 路径允许写入 ``enabled=true + unit_credits=0``
+    （评审 M-1），而 ``calculate_credits`` 对 0 价同样按免费放行。
+    """
+    from app.billing_catalog import read_tariff
+
+    tariff = read_tariff(conn, service)
+    if tariff is None or not tariff.enabled or not tariff.unit_credits:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": error_code, "message": "服务资费未配置，请联系管理员。"},
+        )
+
+
 class ViralSearchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -142,6 +162,7 @@ def search_viral_videos(
                 entity_type="viral_search",
                 entity_id=payload.platform,
             )
+            require_priced_viral_service(conn, SEARCH_SERVICE, error_code="VIRAL_SEARCH_UNPRICED")
             reserve_search_operation(
                 conn, user_id=actor.id, source_id=source_id, request_fingerprint=fingerprint
             )

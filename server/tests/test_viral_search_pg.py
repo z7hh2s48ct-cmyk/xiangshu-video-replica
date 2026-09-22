@@ -527,16 +527,20 @@ def test_search_charges_persists_and_flags_copy(search_client, route_state, monk
 
 
 def test_search_flags_has_copy_on_cache_hit(search_client, route_state, monkeypatch) -> None:
-    """共享文案缓存命中 → hasCopy=True（免费路径 charged=0 不受影响）."""
+    """共享文案缓存命中 → hasCopy=True；``hasCopy`` 是信息性标记，计费照常
+    （原用 0 价种子凑 charged=0 的写法随「0 价=未定价」守卫（评审 M-1）作废）."""
     _patch_search_infra(monkeypatch)
     _use_search_stub(search_client, _SearchStub())
-    headers, _ = account(search_client, "search_copy")
+    headers, uid = account(search_client, "search_copy")
     payload = json.dumps({"text": "已有文案", "duration_sec": 12.0}, ensure_ascii=False)
     with psycopg.connect(route_state) as raw:
         raw.execute(
+            "UPDATE wallets SET available_credits=50, reserved_credits=0 WHERE user_id=%s", (uid,)
+        )
+        raw.execute(
             "INSERT INTO billing_tariffs(service,enabled,unit_credits) "
-            "VALUES('viral_search',true,0) ON CONFLICT (service) "
-            "DO UPDATE SET enabled=true, unit_credits=0"
+            "VALUES('viral_search',true,3) ON CONFLICT (service) "
+            "DO UPDATE SET enabled=true, unit_credits=3"
         )
         raw.execute(
             "INSERT INTO viral_script_cache (platform, video_id, result_json) "
@@ -552,7 +556,7 @@ def test_search_flags_has_copy_on_cache_hit(search_client, route_state, monkeypa
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["items"][0]["hasCopy"] is True
-    assert body["billing"] == {"charged": 0, "unit": "call"}
+    assert body["billing"] == {"charged": 3, "unit": "call"}
 
 
 def test_search_upstream_failure_refunds_and_fails_closed(
@@ -840,6 +844,250 @@ def test_refresh_charges_once_and_returns_updated_video(
                 "SELECT available_credits, reserved_credits FROM wallets WHERE user_id=%s", (uid,)
             ).fetchone()
         ) == (48, 0)
+
+
+def test_refresh_rejects_unsupported_platform_before_reserving(
+    search_refresh_client, route_state
+) -> None:
+    """非抖音平台在预留计费前 422 拒绝（H-3：拿抖音搜索顶替会污染内容池并扣费）。"""
+    _use_refresh_stub(search_refresh_client, _RefreshStub())
+    headers, uid = account(search_refresh_client, "refresh_pf")
+    with psycopg.connect(route_state) as raw:
+        raw.execute(
+            "INSERT INTO viral_videos (platform, video_id, title, author) "
+            "VALUES ('wechat_channels', 'v-wechat-pf', 'W', 'A')",
+        )
+        raw.execute(
+            "UPDATE wallets SET available_credits=50, reserved_credits=0 WHERE user_id=%s", (uid,)
+        )
+        raw.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_credits) "
+            "VALUES('viral_search_refresh',true,2) ON CONFLICT (service) "
+            "DO UPDATE SET enabled=true, unit_credits=2"
+        )
+    response = search_refresh_client.post(
+        "/api/viral/search/refresh",
+        headers={**headers, "Idempotency-Key": "refresh-pf-1"},
+        json={"platform": "wechat_channels", "videoId": "v-wechat-pf"},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "VIRAL_SEARCH_REFRESH_PLATFORM_UNSUPPORTED"
+    with psycopg.connect(route_state) as raw:
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM billing_operations "
+                "WHERE user_id=%s AND service='viral_search_refresh'",
+                (uid,),
+            ).fetchone()[0]
+            == 0
+        )
+        assert tuple(
+            raw.execute(
+                "SELECT available_credits, reserved_credits FROM wallets WHERE user_id=%s", (uid,)
+            ).fetchone()
+        ) == (50, 0)
+
+
+def test_refresh_mismatched_upstream_result_never_pollutes_or_charges(
+    search_refresh_client, route_state, monkeypatch
+) -> None:
+    """上游返回无关视频（video_id 不匹配）→ 503、释放预留、无关数据不入库（H-3）。"""
+
+    class _MismatchedStub(_RefreshStub):
+        def douyin_refresh(self, *, platform: str, video_id: str):
+            return [_viral_seed(platform=platform, video_id="v-unrelated-9x")]
+
+    _patch_refresh_infra(monkeypatch)
+    _use_refresh_stub(search_refresh_client, _MismatchedStub())
+    headers, uid = account(search_refresh_client, "refresh_mis")
+    with psycopg.connect(route_state) as raw:
+        raw.execute(
+            "INSERT INTO viral_videos (platform, video_id, title, author) "
+            "VALUES ('douyin', 'v-mis-1', 'Original', 'Author')",
+        )
+        raw.execute(
+            "UPDATE wallets SET available_credits=50, reserved_credits=0 WHERE user_id=%s", (uid,)
+        )
+        raw.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_credits) "
+            "VALUES('viral_search_refresh',true,2) ON CONFLICT (service) "
+            "DO UPDATE SET enabled=true, unit_credits=2"
+        )
+    response = search_refresh_client.post(
+        "/api/viral/search/refresh",
+        headers={**headers, "Idempotency-Key": "refresh-mis-1"},
+        json={"platform": "douyin", "videoId": "v-mis-1"},
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "VIRAL_SEARCH_REFRESH_UPSTREAM_FAILED"
+    with psycopg.connect(route_state) as raw:
+        assert (
+            raw.execute(
+                "SELECT state FROM billing_operations WHERE user_id=%s "
+                "AND service='viral_search_refresh'",
+                (uid,),
+            ).fetchone()[0]
+            == "FAILED"
+        )
+        assert tuple(
+            raw.execute(
+                "SELECT available_credits, reserved_credits FROM wallets WHERE user_id=%s", (uid,)
+            ).fetchone()
+        ) == (50, 0)
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM viral_videos WHERE video_id='v-unrelated-9x'"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+def test_reconcile_releases_stale_refresh_reservations(client, route_state) -> None:
+    """崩溃残留的 viral_search_refresh PENDING 预留必须被 30 分钟窗口释放（H-3）。"""
+    from app.db_portable import BusinessConnection
+    from app.usage_billing import accept_operation, reconcile_operations
+
+    headers, uid = account(client, "refresh_rec")
+    del headers
+    source_id = f"viral-refresh:{uid}:crash-1"
+    with psycopg.connect(route_state) as raw:
+        raw.execute(
+            "UPDATE wallets SET available_credits=50, reserved_credits=0 WHERE user_id=%s", (uid,)
+        )
+        raw.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_credits) "
+            "VALUES('viral_search_refresh',true,2) ON CONFLICT (service) "
+            "DO UPDATE SET enabled=true, unit_credits=2"
+        )
+        conn = BusinessConnection.postgres(raw)
+        accept_operation(
+            conn,
+            user_id=uid,
+            service="viral_search_refresh",
+            source_id=source_id,
+            units=1,
+        )
+        # 把预留行推到 30 分钟窗口之外，模拟「预留已提交、交付事务未发生」的崩溃
+        # 现场。billing_operations 有不可变事实触发器，沿 dwire 套件先例仅在本
+        # 会话放行 UPDATE，不改共享库触发器定义。
+        raw.execute("SET session_replication_role = replica")
+        raw.execute(
+            "UPDATE billing_operations SET created_at = now() - interval '31 minutes' "
+            "WHERE service='viral_search_refresh' AND source_id=%s AND user_id=%s",
+            (source_id, uid),
+        )
+        raw.execute("SET session_replication_role = DEFAULT")
+        assert reconcile_operations(conn) >= 1
+    with psycopg.connect(route_state) as raw:
+        assert tuple(
+            raw.execute(
+                "SELECT available_credits, reserved_credits FROM wallets WHERE user_id=%s", (uid,)
+            ).fetchone()
+        ) == (50, 0)
+        assert (
+            raw.execute(
+                "SELECT state FROM billing_operations WHERE service='viral_search_refresh' "
+                "AND source_id=%s AND user_id=%s",
+                (source_id, uid),
+            ).fetchone()[0]
+            == "FAILED"
+        )
+
+
+def test_search_unpriced_fails_closed(search_client, route_state) -> None:
+    """资费缺失或停用时搜索必须 503 拒绝，不得 0 积分免费外呼（H-4）。"""
+    _use_search_stub(search_client, _SearchStub())
+    headers, uid = account(search_client, "search_unpriced")
+    with psycopg.connect(route_state) as raw:
+        raw.execute(
+            "UPDATE wallets SET available_credits=50, reserved_credits=0 WHERE user_id=%s", (uid,)
+        )
+        raw.execute("DELETE FROM billing_tariffs WHERE service='viral_search'")
+    missing = search_client.post(
+        "/api/viral/search",
+        headers={**headers, "Idempotency-Key": "search-unpriced-1"},
+        json={"keyword": "农村建房", "platform": "douyin"},
+    )
+    assert missing.status_code == 503
+    assert missing.json()["detail"]["code"] == "VIRAL_SEARCH_UNPRICED"
+    with psycopg.connect(route_state) as raw:
+        raw.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_credits) "
+            "VALUES('viral_search',false,3) ON CONFLICT (service) "
+            "DO UPDATE SET enabled=false, unit_credits=3"
+        )
+    disabled = search_client.post(
+        "/api/viral/search",
+        headers={**headers, "Idempotency-Key": "search-unpriced-2"},
+        json={"keyword": "农村建房", "platform": "douyin"},
+    )
+    assert disabled.status_code == 503
+    assert disabled.json()["detail"]["code"] == "VIRAL_SEARCH_UNPRICED"
+    with psycopg.connect(route_state) as raw:
+        # 评审 M-1：管理端 tariff 路径允许写入 enabled=true + unit_credits=0，
+        # calculate_credits 对 0 价按免费放行——守卫必须把 0 价与缺失同罪。
+        raw.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_credits) "
+            "VALUES('viral_search',true,0) ON CONFLICT (service) "
+            "DO UPDATE SET enabled=true, unit_credits=0"
+        )
+    zero_priced = search_client.post(
+        "/api/viral/search",
+        headers={**headers, "Idempotency-Key": "search-unpriced-3"},
+        json={"keyword": "农村建房", "platform": "douyin"},
+    )
+    assert zero_priced.status_code == 503
+    assert zero_priced.json()["detail"]["code"] == "VIRAL_SEARCH_UNPRICED"
+    with psycopg.connect(route_state) as raw:
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM billing_operations "
+                "WHERE user_id=%s AND service='viral_search'",
+                (uid,),
+            ).fetchone()[0]
+            == 0
+        )
+        assert tuple(
+            raw.execute(
+                "SELECT available_credits, reserved_credits FROM wallets WHERE user_id=%s", (uid,)
+            ).fetchone()
+        ) == (50, 0)
+
+
+def test_refresh_unpriced_fails_closed(search_refresh_client, route_state) -> None:
+    """资费缺失时刷新同样 fail-closed：不留「免费外呼供应商」的口子（H-4）。"""
+    _use_refresh_stub(search_refresh_client, _RefreshStub())
+    headers, uid = account(search_refresh_client, "refresh_unpriced")
+    with psycopg.connect(route_state) as raw:
+        raw.execute(
+            "INSERT INTO viral_videos (platform, video_id, title, author) "
+            "VALUES ('douyin', 'v-unpriced', 'T', 'A')",
+        )
+        raw.execute(
+            "UPDATE wallets SET available_credits=50, reserved_credits=0 WHERE user_id=%s", (uid,)
+        )
+        raw.execute("DELETE FROM billing_tariffs WHERE service='viral_search_refresh'")
+    response = search_refresh_client.post(
+        "/api/viral/search/refresh",
+        headers={**headers, "Idempotency-Key": "refresh-unpriced-1"},
+        json={"platform": "douyin", "videoId": "v-unpriced"},
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "VIRAL_SEARCH_REFRESH_UNPRICED"
+    with psycopg.connect(route_state) as raw:
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM billing_operations "
+                "WHERE user_id=%s AND service='viral_search_refresh'",
+                (uid,),
+            ).fetchone()[0]
+            == 0
+        )
+        assert tuple(
+            raw.execute(
+                "SELECT available_credits, reserved_credits FROM wallets WHERE user_id=%s", (uid,)
+            ).fetchone()
+        ) == (50, 0)
 
 
 @pytest.fixture()
