@@ -320,7 +320,12 @@ export function SessionsPage({
     }
   }
 
+  // 来源类型只决定「允许不允许输入负数」；钱往哪个方向走由输入符号决定——
+  // 退款审批来源 + 正数 = 服务端走正向加款通道，弹窗必须说「增加积分」。
+  // 方向口径按符号判定与 submitAdjustment 成功通知（seconds < 0）同源，
+  // 避免运营确认的方向与账本实际方向相反（上线前检查 P1-2）。
   const isReversalSource = REVERSAL_SOURCE_TYPES.has(sourceType);
+  const isReversalInput = Number(credits) < 0;
 
   return (
     <section aria-label="客户会话" className="admin-sessions admin-panel">
@@ -434,7 +439,7 @@ export function SessionsPage({
           {adjustOpen ? (
             <form className="admin-form" onSubmit={handleAdjustSubmit}>
               <h3>
-                {isReversalSource
+                {isReversalInput
                   ? `为 ${activeUserId} 反向调账（扣减积分）`
                   : `为 ${activeUserId} 后台增加积分`}
               </h3>
@@ -491,7 +496,7 @@ export function SessionsPage({
                 <p className="admin-hint">来源单号自动生成，事由留痕审计。</p>
               )}
               <button type="submit" disabled={adjustConfirmOpen}>
-                {isReversalSource ? "执行反向调账" : "执行后台增加积分"}
+                {isReversalInput ? "执行反向调账" : "执行后台增加积分"}
               </button>
             </form>
           ) : null}
@@ -519,17 +524,17 @@ export function SessionsPage({
       />
       <ConfirmDialog
         busy={submitting}
-        confirmLabel={isReversalSource ? "确认反向调账" : "确认增加积分"}
+        confirmLabel={isReversalInput ? "确认反向调账" : "确认增加积分"}
         description={
           <>
-            {isReversalSource
-              ? `即将为 ${activeUserId} 反向调账 ${credits} 积分（账本扣减）。`
+            {isReversalInput
+              ? `即将为 ${activeUserId} 反向调账 ${Math.abs(Number(credits))} 积分（账本扣减）。`
               : `即将为 ${activeUserId} 增加 ${credits} 积分。`}
             <br />
             事由：{adjustReason.trim()}
             <br />
             来源单号：GRANT-{adjustKey}
-            {isReversalSource ? (
+            {isReversalInput ? (
               <>
                 <br />
                 实际退付在 ZPay 后台办理，以该来源单号对齐留档。
@@ -540,7 +545,7 @@ export function SessionsPage({
         error={writeError}
         level="standard"
         open={adjustConfirmOpen}
-        title={isReversalSource ? "确认反向调账" : "确认后台增加积分"}
+        title={isReversalInput ? "确认反向调账" : "确认后台增加积分"}
         onClose={() => {
           setAdjustConfirmOpen(false);
           setWriteError("");

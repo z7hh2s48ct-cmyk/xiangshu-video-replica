@@ -4506,11 +4506,16 @@ describe("V1.4 内容与运营页面", () => {
       type: "video/mp4",
     });
     Object.defineProperty(bigVideo, "size", { value: 51 * 1024 * 1024 });
+    // 上线前检查 P2-6：音频超限按实际类型报错，不再误称「视频」。
+    const bigAudio = new File([new Uint8Array(4)], "big.mp3", {
+      type: "audio/mpeg",
+    });
+    Object.defineProperty(bigAudio, "size", { value: 51 * 1024 * 1024 });
     const okImage = new File([new Uint8Array(4)], "ok.png", {
       type: "image/png",
     });
     fireEvent.change(screen.getByLabelText("选择上传素材"), {
-      target: { files: [bigImage, bigVideo, okImage] },
+      target: { files: [bigImage, bigVideo, bigAudio, okImage] },
     });
 
     await waitFor(() =>
@@ -4519,6 +4524,7 @@ describe("V1.4 内容与运营页面", () => {
     const queue = screen.getByLabelText("上传队列");
     expect(queue).toHaveTextContent("图片不能超过 10 MB");
     expect(queue).toHaveTextContent("视频不能超过 50 MB");
+    expect(queue).toHaveTextContent("音频不能超过 50 MB");
   });
 
   it("MATERIAL-UX-04：服务端去重复用时提示已复用已有素材", async () => {
@@ -4560,6 +4566,11 @@ describe("V1.4 内容与运营页面", () => {
       ),
     );
     expect(createMaterialUploadIntent).toHaveBeenCalledTimes(1);
+    // 上线前检查 P2-6：秒传复用已有行，服务端 total 不变——本地「共 N 条」
+    // 不虚增（旧实现 +1，要等下一次刷新才纠正）。
+    await waitFor(() =>
+      expect(screen.getByText(/共 0 条/)).toBeInTheDocument(),
+    );
   });
 
   it("MATERIAL-UX-04：拖拽文件到素材页入队上传", async () => {

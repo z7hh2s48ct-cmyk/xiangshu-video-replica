@@ -1,4 +1,10 @@
-import { type FormEvent, useCallback, useEffect, useState } from "react";
+import {
+  type FormEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   CustomerApiError,
   type CustomerSubAccount,
@@ -48,11 +54,18 @@ export function SubAccountManagementPage({
   store,
   onSessionExpired,
   now,
+  isMasterCaller = true,
 }: {
   store: CustomerCredentialStore;
   onSessionExpired: () => void;
   /** 测试注入固定时刻；缺省取渲染时当前时间（月度进度按上海自然月折算）。 */
   now?: Date;
+  /**
+   * 调用方是否母账号。SUB_ADMIN 能进本页（服务端放行列表/额度/权限），
+   * 但创建/改名/密码/角色/停用/删除走 _lock_master 一律 403——对它隐藏这些
+   * 入口，避免「点按钮 → 403 报错」的死路（上线前检查 P1-1）。
+   */
+  isMasterCaller?: boolean;
 }) {
   const [subAccounts, setSubAccounts] = useState<CustomerSubAccount[] | null>(
     null,
@@ -71,6 +84,25 @@ export function SubAccountManagementPage({
     useState<PermissionDraft>(() => permissionDraft(null));
   const [permissionError, setPermissionError] = useState("");
   const [isSavingPermissions, setIsSavingPermissions] = useState(false);
+  // P2-3：设置密码/设置额度改受控弹窗（原 window.prompt 明文回显密码且
+  // 无长度防护）；目标为 null 即关闭。
+  const [passwordTarget, setPasswordTarget] =
+    useState<CustomerSubAccount | null>(null);
+  const [passwordDraft, setPasswordDraft] = useState("");
+  const [passwordError, setPasswordError] = useState("");
+  const [quotaTarget, setQuotaTarget] = useState<CustomerSubAccount | null>(
+    null,
+  );
+  const [quotaDraft, setQuotaDraft] = useState("");
+  // 弹窗聚焦走 ref（a11y：noAutofocus）——与 CustomerConfirmDialog 同姿势。
+  const passwordInputRef = useRef<HTMLInputElement | null>(null);
+  const quotaInputRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (passwordTarget !== null) passwordInputRef.current?.focus();
+  }, [passwordTarget]);
+  useEffect(() => {
+    if (quotaTarget !== null) quotaInputRef.current?.focus();
+  }, [quotaTarget]);
   const { confirm, dialog: confirmDialog } = useCustomerConfirm();
   const [form, setForm] = useState({
     username: "",
@@ -247,17 +279,27 @@ export function SubAccountManagementPage({
   }
 
   async function resetPassword(subAccount: CustomerSubAccount) {
-    const password = window.prompt(
-      `为「${subAccount.display_name}」设置新的登录密码：`,
-    );
-    if (password === null) {
+    setPasswordTarget(subAccount);
+    setPasswordDraft("");
+    setPasswordError("");
+  }
+
+  async function submitPasswordModal(event: FormEvent) {
+    event.preventDefault();
+    const target = passwordTarget;
+    if (target === null) return;
+    const password = passwordDraft;
+    // 与服务端 password_hashing.validate_password_policy 同口径（6–128、
+    // 非纯空白），前端先拦住注定 422 的提交。
+    if (password.trim().length < 6) {
+      setPasswordError("密码至少 6 个字符。");
       return;
     }
-    if (!password) {
-      setError("密码不能为空。");
+    if (password.length > 128) {
+      setPasswordError("密码长度不能超过 128 个字符。");
       return;
     }
-    setBusyId(subAccount.id);
+    setBusyId(target.id);
     setError("");
     setNotice("");
     try {
@@ -265,36 +307,42 @@ export function SubAccountManagementPage({
       if (credential === null) {
         return;
       }
-      await customerSetSubAccountPassword(credential, subAccount.id, password);
+      await customerSetSubAccountPassword(credential, target.id, password);
       setNotice("密码已更新；该子账号的旧登录已失效。");
+      setPasswordTarget(null);
       await reload();
     } catch (cause) {
       if (isSessionFailure(cause)) {
         onSessionExpired();
         return;
       }
-      setError(errorMessage(cause, "设置密码失败，请稍后重试。"));
+      // 失败留在弹窗内可就地修正重试（与权限弹窗同一交互规格）。
+      setPasswordError(errorMessage(cause, "设置密码失败，请稍后重试。"));
     } finally {
       setBusyId(null);
     }
   }
 
   async function setQuota(subAccount: CustomerSubAccount) {
-    const raw = window.prompt(
-      `为「${subAccount.display_name}」设置月度额度（单位：积分）。\n输入整数：0 表示不允许消费；留空表示不限额度。`,
+    setQuotaTarget(subAccount);
+    setQuotaDraft(
       subAccount.monthly_quota_credits === null
         ? ""
         : String(subAccount.monthly_quota_credits),
     );
-    if (raw === null) {
-      return;
-    }
-    const quota = parseQuotaInput(raw);
+    setError("");
+  }
+
+  async function submitQuotaModal(event: FormEvent) {
+    event.preventDefault();
+    const target = quotaTarget;
+    if (target === null) return;
+    const quota = parseQuotaInput(quotaDraft);
     if (quota === undefined) {
       setError("月度额度必须是不超过 10 亿的整数（单位：积分）。");
       return;
     }
-    setBusyId(subAccount.id);
+    setBusyId(target.id);
     setError("");
     setNotice("");
     try {
@@ -302,12 +350,13 @@ export function SubAccountManagementPage({
       if (credential === null) {
         return;
       }
-      await customerSetSubAccountQuota(credential, subAccount.id, quota);
+      await customerSetSubAccountQuota(credential, target.id, quota);
       setNotice(
         quota === null
-          ? `已清除「${subAccount.display_name}」的额度限制。`
-          : `已将「${subAccount.display_name}」的月度额度设为 ${quota} 积分。`,
+          ? `已清除「${target.display_name}」的额度限制。`
+          : `已将「${target.display_name}」的月度额度设为 ${quota} 积分。`,
       );
+      setQuotaTarget(null);
       await reload();
     } catch (cause) {
       if (isSessionFailure(cause)) {
@@ -467,80 +516,82 @@ export function SubAccountManagementPage({
       <header className="sub-accounts-page__header">
         <div>
           <p className="eyebrow">子账号管理</p>
-          <h3>为团队创建子账号</h3>
+          <h3>{isMasterCaller ? "为团队创建子账号" : "管理团队子账号"}</h3>
           <p>
             子账号共享本机构的余额与素材，消费记入母账号账单；每个子账号独立登录、独立设备。
           </p>
         </div>
       </header>
 
-      <form className="sub-accounts-page__create" onSubmit={createSubAccount}>
-        <label>
-          用户名
-          <input
-            autoComplete="off"
-            disabled={isCreating}
-            onChange={(event) =>
-              setForm((current) => ({
-                ...current,
-                username: event.target.value,
-              }))
-            }
-            placeholder="登录账号，全局唯一"
-            value={form.username}
-          />
-        </label>
-        <label>
-          显示名称
-          <input
-            autoComplete="off"
-            disabled={isCreating}
-            onChange={(event) =>
-              setForm((current) => ({
-                ...current,
-                display_name: event.target.value,
-              }))
-            }
-            placeholder="团队里怎么称呼"
-            value={form.display_name}
-          />
-        </label>
-        <label>
-          初始密码（可选）
-          <input
-            autoComplete="new-password"
-            disabled={isCreating}
-            onChange={(event) =>
-              setForm((current) => ({
-                ...current,
-                password: event.target.value,
-              }))
-            }
-            placeholder="留空则稍后设置"
-            type="password"
-            value={form.password}
-          />
-        </label>
-        <label>
-          月度额度（积分，可选）
-          <input
-            autoComplete="off"
-            disabled={isCreating}
-            inputMode="numeric"
-            onChange={(event) =>
-              setForm((current) => ({
-                ...current,
-                monthly_quota: event.target.value,
-              }))
-            }
-            placeholder="留空则不限"
-            value={form.monthly_quota}
-          />
-        </label>
-        <button disabled={isCreating} type="submit">
-          {isCreating ? "正在创建" : "创建子账号"}
-        </button>
-      </form>
+      {isMasterCaller ? (
+        <form className="sub-accounts-page__create" onSubmit={createSubAccount}>
+          <label>
+            用户名
+            <input
+              autoComplete="off"
+              disabled={isCreating}
+              onChange={(event) =>
+                setForm((current) => ({
+                  ...current,
+                  username: event.target.value,
+                }))
+              }
+              placeholder="登录账号，全局唯一"
+              value={form.username}
+            />
+          </label>
+          <label>
+            显示名称
+            <input
+              autoComplete="off"
+              disabled={isCreating}
+              onChange={(event) =>
+                setForm((current) => ({
+                  ...current,
+                  display_name: event.target.value,
+                }))
+              }
+              placeholder="团队里怎么称呼"
+              value={form.display_name}
+            />
+          </label>
+          <label>
+            初始密码（可选）
+            <input
+              autoComplete="new-password"
+              disabled={isCreating}
+              onChange={(event) =>
+                setForm((current) => ({
+                  ...current,
+                  password: event.target.value,
+                }))
+              }
+              placeholder="留空则稍后设置"
+              type="password"
+              value={form.password}
+            />
+          </label>
+          <label>
+            月度额度（积分，可选）
+            <input
+              autoComplete="off"
+              disabled={isCreating}
+              inputMode="numeric"
+              onChange={(event) =>
+                setForm((current) => ({
+                  ...current,
+                  monthly_quota: event.target.value,
+                }))
+              }
+              placeholder="留空则不限"
+              value={form.monthly_quota}
+            />
+          </label>
+          <button disabled={isCreating} type="submit">
+            {isCreating ? "正在创建" : "创建子账号"}
+          </button>
+        </form>
+      ) : null}
 
       {error ? (
         <p className="settings-error" role="alert">
@@ -756,23 +807,27 @@ export function SubAccountManagementPage({
                     </>
                   ) : (
                     <>
-                      <button
-                        disabled={busy}
-                        onClick={() => {
-                          setEditingId(subAccount.id);
-                          setEditDisplayName(subAccount.display_name);
-                        }}
-                        type="button"
-                      >
-                        重命名
-                      </button>
-                      <button
-                        disabled={busy}
-                        onClick={() => void resetPassword(subAccount)}
-                        type="button"
-                      >
-                        设置密码
-                      </button>
+                      {isMasterCaller ? (
+                        <>
+                          <button
+                            disabled={busy}
+                            onClick={() => {
+                              setEditingId(subAccount.id);
+                              setEditDisplayName(subAccount.display_name);
+                            }}
+                            type="button"
+                          >
+                            重命名
+                          </button>
+                          <button
+                            disabled={busy}
+                            onClick={() => void resetPassword(subAccount)}
+                            type="button"
+                          >
+                            设置密码
+                          </button>
+                        </>
+                      ) : null}
                       <button
                         disabled={busy}
                         onClick={() => void setQuota(subAccount)}
@@ -787,30 +842,34 @@ export function SubAccountManagementPage({
                       >
                         设置权限
                       </button>
-                      <button
-                        disabled={busy}
-                        onClick={() => void toggleAdminRole(subAccount)}
-                        type="button"
-                      >
-                        {subAccount.account_type === "SUB_ADMIN"
-                          ? "取消管理员"
-                          : "设为管理员"}
-                      </button>
-                      <button
-                        disabled={busy}
-                        onClick={() => void toggleActive(subAccount)}
-                        type="button"
-                      >
-                        {subAccount.is_active ? "停用" : "启用"}
-                      </button>
-                      <button
-                        className="is-danger"
-                        disabled={busy}
-                        onClick={() => void removeSubAccount(subAccount)}
-                        type="button"
-                      >
-                        删除
-                      </button>
+                      {isMasterCaller ? (
+                        <>
+                          <button
+                            disabled={busy}
+                            onClick={() => void toggleAdminRole(subAccount)}
+                            type="button"
+                          >
+                            {subAccount.account_type === "SUB_ADMIN"
+                              ? "取消管理员"
+                              : "设为管理员"}
+                          </button>
+                          <button
+                            disabled={busy}
+                            onClick={() => void toggleActive(subAccount)}
+                            type="button"
+                          >
+                            {subAccount.is_active ? "停用" : "启用"}
+                          </button>
+                          <button
+                            className="is-danger"
+                            disabled={busy}
+                            onClick={() => void removeSubAccount(subAccount)}
+                            type="button"
+                          >
+                            删除
+                          </button>
+                        </>
+                      ) : null}
                     </>
                   )}
                 </div>
@@ -917,6 +976,99 @@ export function SubAccountManagementPage({
           </section>
         </div>
       ) : null}
+
+      {passwordTarget !== null ? (
+        <div className="sub-account-modal">
+          <form
+            aria-label={`设置密码 ${passwordTarget.display_name}`}
+            aria-modal="true"
+            className="sub-account-modal__panel"
+            role="dialog"
+            onSubmit={(event) => void submitPasswordModal(event)}
+          >
+            <header className="sub-account-modal__header">
+              <h4>设置登录密码</h4>
+              <p>
+                {passwordTarget.display_name}（{passwordTarget.username}）
+              </p>
+            </header>
+            <label className="sub-account-modal__hint">
+              新密码（6–128 个字符，设置后该子账号需用新密码重新登录）
+              <input
+                autoComplete="new-password"
+                onChange={(event) => {
+                  setPasswordDraft(event.target.value);
+                  setPasswordError("");
+                }}
+                ref={passwordInputRef}
+                type="password"
+                value={passwordDraft}
+              />
+            </label>
+            {passwordError ? (
+              <p className="settings-error" role="alert">
+                {passwordError}
+              </p>
+            ) : null}
+            <div className="sub-account-modal__actions">
+              <button disabled={busyId !== null} type="submit">
+                {busyId !== null ? "正在保存" : "保存密码"}
+              </button>
+              <button
+                disabled={busyId !== null}
+                onClick={() => setPasswordTarget(null)}
+                type="button"
+              >
+                取消
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+
+      {quotaTarget !== null ? (
+        <div className="sub-account-modal">
+          <form
+            aria-label={`设置额度 ${quotaTarget.display_name}`}
+            aria-modal="true"
+            className="sub-account-modal__panel"
+            role="dialog"
+            onSubmit={(event) => void submitQuotaModal(event)}
+          >
+            <header className="sub-account-modal__header">
+              <h4>设置月度额度</h4>
+              <p>
+                {quotaTarget.display_name}（{quotaTarget.username}）
+              </p>
+            </header>
+            <p className="sub-account-modal__hint">
+              单位：积分。输入整数：0 表示不允许消费；留空表示不限额度。
+            </p>
+            <label>
+              月度额度
+              <input
+                inputMode="numeric"
+                onChange={(event) => setQuotaDraft(event.target.value)}
+                placeholder="留空则不限"
+                ref={quotaInputRef}
+                value={quotaDraft}
+              />
+            </label>
+            <div className="sub-account-modal__actions">
+              <button disabled={busyId !== null} type="submit">
+                {busyId !== null ? "正在保存" : "保存额度"}
+              </button>
+              <button
+                disabled={busyId !== null}
+                onClick={() => setQuotaTarget(null)}
+                type="button"
+              >
+                取消
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -947,10 +1099,10 @@ function parseQuotaInput(raw: string): number | null | undefined {
 
 /** 会话失效（401/403 围栏拒绝）统一收敛：停用/权限错误交给上层退回登录。 */
 function isSessionFailure(cause: unknown): boolean {
-  return (
-    cause instanceof CustomerApiError &&
-    (cause.status === 401 || cause.status === 403)
-  );
+  // 403 是权限拒绝（如 SUB_ADMIN 触达母账号专属操作），不是会话失效：
+  // 它必须落在页面错误区展示服务端文案，绝不能触发 onSessionExpired 把
+  // 在线用户踢回登录页（上线前检查 P1-1）。会话失效只有 401。
+  return cause instanceof CustomerApiError && cause.status === 401;
 }
 
 function errorMessage(error: unknown, fallback: string): string {

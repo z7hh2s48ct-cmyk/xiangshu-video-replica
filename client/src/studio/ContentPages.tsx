@@ -142,8 +142,18 @@ const UPLOAD_FILE_LIMIT = 50 * 1024 * 1024;
 
 function uploadSizeError(file: File): string | undefined {
   const isImage = file.type.startsWith("image/");
+  // 上线前检查 P2-6：非图片不只视频——音频超限时按实际类型报错，
+  // 未知类型兜底为「文件」，不再把音频误称为「视频」。
+  const noun = isImage
+    ? "图片"
+    : file.type.startsWith("audio/")
+      ? "音频"
+      : file.type.startsWith("video/")
+        ? "视频"
+        : "文件";
+  const limitLabel = isImage ? "10 MB" : "50 MB";
   if (file.size > (isImage ? UPLOAD_IMAGE_LIMIT : UPLOAD_FILE_LIMIT)) {
-    return isImage ? "图片不能超过 10 MB" : "视频不能超过 50 MB";
+    return `${noun}不能超过 ${limitLabel}`;
   }
   return undefined;
 }
@@ -2763,7 +2773,10 @@ function MaterialsPageContent() {
             .slice(0, pageSize),
           page: 1,
           page_size: pageSize,
-          total: (current?.total ?? 0) + 1,
+          // 上线前检查 P2-6：秒传（upload_required === false）复用已有行，
+          // 服务端 total 不变——本地计数 +1 会短暂虚增，等刷新才纠正。
+          total:
+            (current?.total ?? 0) + (intent.upload_required === false ? 0 : 1),
         }));
       }
       notify(`素材“${completed.title}”已上传，云端可用`);

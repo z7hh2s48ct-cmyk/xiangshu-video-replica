@@ -40,7 +40,9 @@ export type WorkspaceShellProps = {
     profile: CustomerProfile | null;
     profileLoadError: string;
     store: CustomerCredentialStore;
-    onSessionExpired: () => void;
+    /** 可选 notice 随本地过期落到「登录已过期」终屏（P2-2：改密/退出所有
+     * 设备成功后的分情况说明，替代通用文案）。 */
+    onSessionExpired: (notice?: string) => void;
     /** CW-062：会话身份（母账号 / 子账号 + 所属母账号），供个人中心身份
      * 徽章与子账号管理入口判定；设备凭据恢复时可能为 null（身份未知）。 */
     identity?: CustomerStoredIdentity | null;

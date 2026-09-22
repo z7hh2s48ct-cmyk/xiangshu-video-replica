@@ -965,7 +965,7 @@ test("Token 列表没读到时，撤销全部 Token 不报数字（不拿 0 冒�
   ).toBeVisible();
 });
 
-test("退出所有设备 logs the user out once the server confirms", async () => {
+test("退出所有设备 lands on the expired terminal with the reason notice (preflight P2-2)", async () => {
   const account = setup();
   render(<CustomerCenterPage account={account} />);
   await screen.findByText("125");
@@ -975,7 +975,12 @@ test("退出所有设备 logs the user out once the server confirms", async () =
   const dialog = await screen.findByRole("dialog", { name: "退出所有设备？" });
   fireEvent.click(screen.getByRole("checkbox"));
   fireEvent.click(within(dialog).getByRole("button", { name: "退出所有设备" }));
-  await waitFor(() => expect(account.onLogout).toHaveBeenCalledTimes(1));
+  // P2-2：会话已被服务端撤销——本地过期并携带说明到终屏，不再发注定 401
+  // 的二次 logout（旧实现 onLogout 的 EXPIRED 事件会抢先切屏吞掉说明）。
+  await waitFor(() =>
+    expect(account.onSessionExpired).toHaveBeenCalledTimes(1),
+  );
+  expect(account.onLogout).not.toHaveBeenCalled();
 });
 
 test("expired default recovery reloads existing credentials instead of looping on the expired key", async () => {
@@ -992,5 +997,27 @@ test("expired default recovery reloads existing credentials instead of looping o
   expect(await screen.findByRole("alert")).toHaveTextContent("恢复窗口已结束");
   fireEvent.click(screen.getByRole("button", { name: "重新加载" }));
   expect(await screen.findByText("默认 Token")).toBeVisible();
+  expect(mocks.initialize).toHaveBeenCalledTimes(1);
+});
+
+test("403 on default initialization is remembered: no replay on reload (preflight P2-6)", async () => {
+  // 上线前检查 P2-6：allow_api_keys=false 的子账号列表恒无 default key、
+  // 初始化恒 403——本次挂载内不得重放注定失败的 POST。
+  const account = setup();
+  mocks.list.mockResolvedValue({ items: [], total: 0 });
+  mocks.initialize.mockRejectedValue(
+    new CustomerApiError({
+      message: "权限受限：该子账号不允许创建 API Token。",
+      status: 403,
+      code: "API_KEYS_NOT_ALLOWED",
+    }),
+  );
+  render(<CustomerCenterPage account={account} />);
+  expect(await screen.findByRole("alert")).toHaveTextContent("权限受限");
+  fireEvent.click(screen.getByRole("button", { name: "重新加载" }));
+  // 重新加载后列表重读（list 第二次被调），但 initialize 不再重放。
+  await waitFor(() =>
+    expect(mocks.list.mock.calls.length).toBeGreaterThanOrEqual(2),
+  );
   expect(mocks.initialize).toHaveBeenCalledTimes(1);
 });

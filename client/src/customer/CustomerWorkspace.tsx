@@ -48,7 +48,8 @@ export function CustomerWorkspace({
   onManualHeartbeat?: () => void;
   onLogout: () => Promise<CustomerLogoutOutcome>;
   store: CustomerCredentialStore;
-  onSessionExpired: () => void;
+  /** 可选 notice 随本地过期落到终屏（P2-2：改密/退出所有设备成功后的说明）。 */
+  onSessionExpired: (notice?: string) => void;
   /** 设备管理页"绑定第二台设备"的页内导航（F-01 review：不得用 <a href> 整页重载）。 */
   onPairDevice?: () => void;
 }) {

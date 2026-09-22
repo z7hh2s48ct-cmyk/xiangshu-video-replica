@@ -42,6 +42,7 @@ import {
 } from "./ContentPages";
 import {
   CopyPage,
+  normalizeCustomerDuration,
   OralPage,
   ReplacementPage,
   ReplicaPage,
@@ -194,10 +195,9 @@ function quoteMatchesInput(
 function videoQuoteInput(draft: StudioDraft): GenerationQuoteInput {
   return {
     resolution: draft.resolution === "2K" ? "2K" : "768P",
-    duration_seconds:
-      draft.duration >= 4 && draft.duration <= 15
-        ? Math.round(draft.duration)
-        : 8,
+    // P1-4：非法时长钳位（与复刻路径同口径），不再静默回落 8 秒——
+    // 报价与提交同源归一，用户看到的时长即实际生成时长。
+    duration_seconds: normalizeCustomerDuration(draft.duration),
     quantity: draft.count === 2 || draft.count === 4 ? draft.count : 1,
   };
 }
@@ -868,10 +868,8 @@ export function StudioWorkspace({
   );
 
   // 视频生成确认弹窗：按分辨率/时长/条数拉取按秒报价；草稿参数变化自动刷新。
-  const videoDuration =
-    state.draft.duration >= 4 && state.draft.duration <= 15
-      ? Math.round(state.draft.duration)
-      : 8;
+  // P1-4：与提交/报价同源钳位（4–15），三处不得再出现「非法 → 8」旁路。
+  const videoDuration = normalizeCustomerDuration(state.draft.duration);
   const videoResolution: GenerationQuoteInput["resolution"] =
     state.draft.resolution === "2K" ? "2K" : "768P";
   const videoCount =
@@ -1122,10 +1120,7 @@ export function StudioWorkspace({
             ? (draft.tailFrameId ?? null)
             : null,
         reference_asset_ids: mode === "r2v" ? draft.referenceIds : [],
-        output_duration_seconds:
-          draft.duration >= 4 && draft.duration <= 15
-            ? Math.round(draft.duration)
-            : 8,
+        output_duration_seconds: normalizeCustomerDuration(draft.duration),
         resolution:
           draft.resolution === "2K" ? ("2K" as const) : ("768P" as const),
         ratio: resolveSubmittedRatio(mode, draft.ratio),
