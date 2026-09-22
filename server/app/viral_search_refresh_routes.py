@@ -20,6 +20,7 @@ from app.media_routes import api_base_url, get_media_storage
 from app.permissions import require_not_auditor
 from app.usage_billing import finish_source
 from app.viral_search import archive_search_covers
+from app.viral_search_routes import require_priced_viral_service
 from app.viral_store import get_viral_video, update_viral_cover, upsert_viral_videos
 from app.viral_tikhub import (
     ViralSourceClient,
@@ -108,6 +109,17 @@ def refresh_viral_video(
                 "message": "Idempotency-Key 请求头无效。",
             },
         )
+    # 上线评审 H-3：刷新按「视频 ID 当关键词跑抖音通用搜索」模拟实现，只能服务
+    # 抖音且必须精确匹配返回的 video_id；视频号没有 detail→ViralVideo 的映射链路，
+    # 拿抖音搜索顶替会把无关视频写进内容池并按成功扣费。其它平台在预留计费前拒绝。
+    if payload.platform != "douyin":
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "VIRAL_SEARCH_REFRESH_PLATFORM_UNSUPPORTED",
+                "message": "该平台的视频刷新暂不支持。",
+            },
+        )
     with db.write() as (conn, actor):
         with conn:
             require_not_auditor(
@@ -155,6 +167,9 @@ def refresh_viral_video(
                         "message": "数据源暂不可用，请联系管理员。",
                     },
                 )
+            require_priced_viral_service(
+                conn, REFRESH_SERVICE, error_code="VIRAL_SEARCH_REFRESH_UNPRICED"
+            )
             source_id = f"viral-refresh:{actor.id}:{key}"
             fingerprint = f"{payload.platform}:{payload.videoId}:{key}"
             # 预留计费
@@ -185,9 +200,16 @@ def refresh_viral_video(
         with billing_context(source_id):
             # 重新外呼获取最新数据
             videos = client.douyin_refresh(platform=payload.platform, video_id=payload.videoId)
-            if not videos or len(videos) == 0:
-                raise ViralSourceError(f"No data returned for {payload.platform}:{payload.videoId}")
-            enriched_video = videos[0]
+            # 搜索是按「ID 当关键词」模拟的：只有返回列表里精确命中请求的
+            # video_id 才算拿到本视频的数据；任何其它结果都是无关视频，
+            # 绝不能入库或结算（走下方 ViralSourceError 释放预留）。
+            enriched_video = next(
+                (video for video in videos if video.video_id == payload.videoId), None
+            )
+            if enriched_video is None:
+                raise ViralSourceError(
+                    f"No matching record returned for {payload.platform}:{payload.videoId}"
+                )
     except ViralSourceError as exc:
         # 外呼失败释放预留
         with db.write() as (fail_conn, _fail_actor):

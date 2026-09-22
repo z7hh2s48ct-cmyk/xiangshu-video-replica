@@ -66,7 +66,7 @@ QUOTA_DB = "t_sub_account_quota"
 
 # 链尾：本分支的 20260923T1200_admin_refund_adjustment 按手册 §3 重挂于
 # main 链尾（20260922T2200_material_preference_tags）之上，故链尾为该值。
-_HEAD_REVISION = "20260923T1200_admin_refund_adjustment"
+_HEAD_REVISION = "20260923T1800_re_add_h3_extended_modes_rollout_compat"
 # _PRIOR_REVISION 是本迁移自身的 down_revision，用于降级断言。
 # 合并 main 后 1200 重挂到 20260922T1200_recharge_packages（手册 §3）；Phase 3b
 # permissions 与其后的 analysis 三迁移（failure_diagnostic / request_id /

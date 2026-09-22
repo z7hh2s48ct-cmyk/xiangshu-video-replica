@@ -79,9 +79,9 @@ REPO_ROOT = SERVER_DIR.parent
 # 本分支的 20260922T1500_viral_search_discoveries（爆款视频搜索发现记录表）
 # 按手册 §3 重挂于链尾：tables/primary_keys +1、columns +9、unique_constraints +1
 # （五列身份约束）、两个非 partial 查询索引；全 Text 列，无 FK/CHECK/jsonb/timestamptz 增量。
-# 合并 main 后：本分支的 20260923T1200_admin_refund_adjustment 按手册 §3 重挂于
-# main 链尾（20260922T2200_material_preference_tags）之上，故链尾为该值。
-HEAD_REVISION = "20260923T1200_admin_refund_adjustment"
+# 合并 main 后：本分支的 20260923T1800_re_add_h3_extended_modes_rollout_compat 追加于
+# main 链尾（20260923T1200_admin_refund_adjustment）之上，故链尾为该值。
+HEAD_REVISION = "20260923T1800_re_add_h3_extended_modes_rollout_compat"
 
 # 最后一个已发布（受支持）起点。其后的 056…090 与本迁移尚未随任何受支持版本发布，
 # 故冻结范围止于此——把未发布 revision 也纳入哈希会让每次新增迁移都必须改常量，
@@ -133,8 +133,11 @@ HEAD_SCHEMA_COUNTS = {
     # 两条线上各加一项，且互不相干，故两边都要取：
     #   check_constraints 322 → 323：本分支新增 ck_admin_adjustments_order_required
     #   columns           1219 → 1220：main 的 material_preferences.tags_json
+    # 20260923T1800 重加 runtime_settings.h3_extended_modes_enabled 部署兼容垫片
+    # （旧镜像在 MIGRATE→ROLL 混合窗口与镜像回滚时仍 SELECT 该列）：
+    #   columns           1220 → 1221；digest 重算（见下）。
     "check_constraints": 323,
-    "columns": 1220,
+    "columns": 1221,
     "foreign_keys": 193,
     "identity_columns": 0,
     "jsonb_columns": 6,
@@ -324,13 +327,17 @@ HEAD_TABLE_NAMES = (
 #   admin_adjustments.recharge_order_id 放开 NOT NULL 不属于本矩阵口径的计数项
 #   （只影响 is_nullable，不进 inventory digest），但它的 CHECK 伙伴会进。
 #   digest 随之重算——约束文本变了，digest 必然变，这不是漂移。
+# - 20260923T1800_re_add_h3_extended_modes_rollout_compat（上线评审 Fix5）：把 0000
+#   DROP 掉的 runtime_settings.h3_extended_modes_enabled 以部署兼容垫片形式重加
+#   （旧镜像在 MIGRATE→ROLL 混合窗口与镜像回滚时仍 SELECT 该列；新代码零读者，
+#   见 test_independent_creation 的源码级回归锁）——columns +1=1221；digest 重算。
 # digest/counts 以 scripts/ci/migration_manifest.py --print-schema 于 postgres:16 重算
 # （合并后的新 head：sub_account_permissions + 三个 analysis 迁移 + viral 搜索发现表
 #  + main 的 MATERIAL-UX tags_json 列 + 本分支的 REFUND 调账迁移，串成一条单 head 链）。
 #  两侧原来的 digest 都不能用——本分支那条是接在 viral 之后的旧链、main 那条只到
 #  MATERIAL-UX，合并后 head 变成接在 MATERIAL-UX 之后的本分支迁移，约束文本随之变化，
 #  digest 必然要重算。由 scripts/ci/migration_manifest.py --print-schema 在 PG 上重算后粘贴。
-HEAD_SCHEMA_DIGEST = "5acb67bf0cc6998f3179731784f62168779c924231118bdb31e8be50dc9096ac"
+HEAD_SCHEMA_DIGEST = "c9dcb178f65a9d229c6646d9ed65cd117d8a1b3b2352e9e8fb5769230c5c142b"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20260923T1200_admin_refund_adjustment"
+      "20260923T1800_re_add_h3_extended_modes_rollout_compat"
     ],
     "parents": {
       "001_core": null,
@@ -135,9 +135,10 @@
       "20260922T2000_analysis_task_attempts": "20260922T1600_analysis_task_request_id",
       "20260922T2200_material_preference_tags": "20260922T1500_viral_search_discoveries",
       "20260923T0000_open_h3_extended_modes": "20260922T2000_analysis_task_attempts",
-      "20260923T1200_admin_refund_adjustment": "20260922T2200_material_preference_tags"
+      "20260923T1200_admin_refund_adjustment": "20260922T2200_material_preference_tags",
+      "20260923T1800_re_add_h3_extended_modes_rollout_compat": "20260923T1200_admin_refund_adjustment"
     },
-    "revision_count": 119
+    "revision_count": 120
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -627,6 +628,10 @@
     "20260923T1200_admin_refund_adjustment": {
       "file": "versions/20260923T1200_admin_refund_adjustment.py",
       "sha256": "d31eff3ef4c8e16d1fe34266c3f4714f3daa9111f875f6b7baef2efa8283c7ed"
+    },
+    "20260923T1800_re_add_h3_extended_modes_rollout_compat": {
+      "file": "versions/20260923T1800_re_add_h3_extended_modes_rollout_compat.py",
+      "sha256": "aa7c41648f4286831edf99ca81e78d4e7cbafe38c9a379efb60172fc9fa0f87a"
     }
   },
   "task": "MIGRATION-GUARD-20260912"

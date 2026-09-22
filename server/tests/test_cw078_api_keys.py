@@ -155,6 +155,12 @@ def _clean_cw078(dsn: str) -> None:
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute("DELETE FROM customer_api_keys WHERE user_id LIKE %s", (like,))
         conn.execute("DELETE FROM audit_logs WHERE actor_user_id LIKE %s", (like,))
+        conn.execute("DELETE FROM customer_devices WHERE user_id LIKE %s", (like,))
+        conn.execute(
+            "DELETE FROM activation_codes WHERE id LIKE %s OR bound_user_id LIKE %s",
+            (like, like),
+        )
+        conn.execute("DELETE FROM activation_code_batches WHERE id LIKE %s", (like,))
         conn.execute("DELETE FROM recharge_orders WHERE user_id LIKE %s", (like,))
         conn.execute("DELETE FROM wallets WHERE user_id LIKE %s", (like,))
         conn.execute("DELETE FROM users WHERE id LIKE %s", (like,))
@@ -796,6 +802,90 @@ def test_whitelist_recharge_status_is_404_for_a_missing_order(
 
     assert resp.status_code == 404
     assert resp.json()["detail"]["code"] == "RECHARGE_ORDER_NOT_FOUND"
+
+
+def test_api_key_lane_fenced_when_master_deactivated(client: TestClient, pg_dsn: str) -> None:
+    """封禁母账号后，子账号名下的存量 API key 必须随之失效（上线评审 H-2）。
+
+    会话泳道逐请求复核母账号存活性（deactivating the master freezes every
+    session riding under it）；API-Key 泳道此前只查属主自身，构成组织封禁旁路。
+    """
+    master = _new_user("banm")
+    sub = _new_user("bans")
+    with psycopg.connect(pg_dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO users (id, username, display_name, role, registration_source, "
+            "account_type, parent_user_id, password_hash) VALUES (%s, %s, %s, 'customer', "
+            "'self_register', 'MASTER', NULL, 'cw078-not-a-real-hash')",
+            (master, master, f"CW078 {master}"),
+        )
+        conn.execute(
+            "INSERT INTO users (id, username, display_name, role, registration_source, "
+            "account_type, parent_user_id) VALUES (%s, %s, %s, 'customer', "
+            "'admin_create', 'SUB', %s)",
+            (sub, sub, f"CW078 {sub}", master),
+        )
+    plaintext, _ = _seed_key(pg_dsn, sub)
+
+    assert client.get(RECHARGE_LIST_PATH, headers=_bearer(plaintext)).status_code == 200
+
+    with psycopg.connect(pg_dsn, autocommit=True) as conn:
+        conn.execute("UPDATE users SET is_active = 0 WHERE id = %s", (master,))
+
+    resp = client.get(RECHARGE_LIST_PATH, headers=_bearer(plaintext))
+    assert resp.status_code == 401
+    assert resp.json()["detail"]["code"] == "API_KEY_INVALID"
+
+
+def test_api_key_lane_fenced_when_bound_activation_code_suspended(
+    client: TestClient, pg_dsn: str
+) -> None:
+    """激活码被管理端 SUSPENDED 后，该账号名下的 API key 必须失效（与会话泳道同链）。"""
+    owner = _new_user("code")
+    batch_id = f"{CW078}batch-{uuid4().hex[:8]}"
+    code_id = f"{CW078}code-{uuid4().hex[:8]}"
+    device_id = f"{CW078}dev-{uuid4().hex[:8]}"
+    with psycopg.connect(pg_dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO users (id, username, display_name, role, registration_source) "
+            "VALUES (%s, %s, %s, 'customer', 'activation_code')",
+            (owner, owner, f"CW078 {owner}"),
+        )
+        conn.execute(
+            "INSERT INTO activation_code_batches (id, name, face_value_fen, "
+            "unit_price_fen_snapshot, credits_snapshot, quantity, activation_expires_at, "
+            "created_by_user_id) VALUES (%s, 'cw078', 100, 100, 100, 1, "
+            "'2030-01-01T00:00:00+00:00', %s)",
+            (batch_id, owner),
+        )
+        conn.execute(
+            "INSERT INTO activation_codes (id, batch_id, code_digest, digest_key_version, "
+            "masked_code, status, issued_at, bound_user_id, activated_at) VALUES "
+            "(%s, %s, %s, 1, 'CW07-****', 'ACTIVE', '2026-01-01T00:00:00+00:00', %s, "
+            "'2026-01-01T00:00:00+00:00')",
+            (code_id, batch_id, uuid4().hex, owner),
+        )
+        conn.execute(
+            "INSERT INTO customer_devices (id, activation_code_id, user_id, slot_no, "
+            "display_name, platform, fingerprint_hmac, fingerprint_key_version, "
+            "token_digest, token_key_version, status) VALUES "
+            "(%s, %s, %s, 1, 'cw078', 'windows', %s, 1, %s, 1, 'BOUND')",
+            (device_id, code_id, owner, uuid4().hex, uuid4().hex),
+        )
+    plaintext, _ = _seed_key(pg_dsn, owner)
+
+    assert client.get(RECHARGE_LIST_PATH, headers=_bearer(plaintext)).status_code == 200
+
+    with psycopg.connect(pg_dsn, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE activation_codes SET status = 'SUSPENDED', "
+            "suspended_at = '2026-01-02T00:00:00+00:00' WHERE id = %s",
+            (code_id,),
+        )
+
+    resp = client.get(RECHARGE_LIST_PATH, headers=_bearer(plaintext))
+    assert resp.status_code == 401
+    assert resp.json()["detail"]["code"] == "API_KEY_INVALID"
 
 
 def test_whitelist_without_credential_requires_a_session(client: TestClient) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, InvalidOperation
 from typing import Literal, cast
 
@@ -212,8 +213,17 @@ def retail_snapshot(
     record_basis_points: int | None = None
     record_source: str | None = None
     if user_id is not None and permitted and conn.is_postgres:
+        # SES-01：valid_from 由 DB 侧 clock_timestamp() 写入，生效判断必须同源
+        # 取 DB 时钟；用应用墙钟会在进程时钟落后时漏掉刚授予的套餐权益，
+        # 让客户按原价被预扣（上线评审 H-1）。SELECT 无 FROM 恒返回一行，
+        # None 分支仅为类型收窄（不可达）。
+        now_row = conn.raw.execute("SELECT clock_timestamp()").fetchone()
+        at_time = now_row[0] if now_row is not None else datetime.now(UTC)
         record = get_best_discount(
-            conn.raw, user_id=user_id, interface_key=interface_for_service(service)
+            conn.raw,
+            user_id=user_id,
+            interface_key=interface_for_service(service),
+            at_time=at_time,
         )
         if record is not None:
             record_rate = record.discount_rate

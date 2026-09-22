@@ -576,16 +576,62 @@ def _verify_api_key_in_transaction(conn: psycopg.Connection, principal: ApiKeyUs
 
     A revoke or account disable committed after the early lookup cannot enter
     business work. Concurrent changes wait for already accepted work to finish.
+
+    The lane honours the same authority chain as the session fence
+    (``verify_session_context``): a deactivated master fences every credential
+    riding under it, and a suspended/revoked activation code fences the account
+    it authenticates. Without the parent and code checks a banned master's
+    sub-account keys would keep charging the frozen wallet.
+
+    The code check is deliberately account-wide (any BOUND device on a
+    non-ACTIVE code denies), which is stricter than the session fence's
+    per-session code check. Today the two are equivalent because
+    ``uq_activation_codes_bound_user_current`` pins one live code per user;
+    if that invariant is ever relaxed (multi-code accounts), revisit this
+    predicate — a stale BOUND row from a revoked code would otherwise lock
+    a legitimate account out of every API key.
     """
     owner = conn.execute(
-        "SELECT is_active, role FROM users WHERE id = %s FOR SHARE", (principal.user_id,)
+        "SELECT u.is_active, u.role, "
+        "(u.parent_user_id IS NULL OR p.is_active = 1) AS parent_ok, "
+        "NOT EXISTS ("
+        " SELECT 1 FROM customer_devices d"
+        " JOIN activation_codes c ON c.id = d.activation_code_id"
+        " WHERE d.user_id = u.id AND d.status = 'BOUND' AND c.status <> 'ACTIVE'"
+        ") AS codes_ok "
+        "FROM users u LEFT JOIN users p ON p.id = u.parent_user_id "
+        "WHERE u.id = %s FOR SHARE OF u",
+        (principal.user_id,),
     ).fetchone()
     key = conn.execute(
         "SELECT revoked_at, scopes FROM customer_api_keys "
         "WHERE id = %s AND user_id = %s FOR UPDATE",
         (principal.key_id, principal.user_id),
     ).fetchone()
-    if owner is None or not owner[0] or owner[1] != "customer" or key is None or key[0]:
+    if (
+        owner is None
+        or not owner[0]
+        or owner[1] != "customer"
+        or not owner[2]
+        or not owner[3]
+        or key is None
+        or key[0]
+    ):
+        # 授权链被拒（母账号封禁 / 激活码吊销）时留一条可诊断的 warn：
+        # 对外仍是单一失败答案 API_KEY_INVALID，但「API 客户端批量 401」
+        # 的报障需要服务端证据（key 自身吊销走上面的通用分支，不在此列）。
+        if (
+            owner is not None
+            and owner[0]
+            and owner[1] == "customer"
+            and (not owner[2] or not owner[3])
+        ):
+            logger.warning(
+                "api-key lane denied by authority chain: user_id=%s parent_ok=%s codes_ok=%s",
+                principal.user_id,
+                owner[2],
+                owner[3],
+            )
         raise HTTPException(
             401, detail={"code": "API_KEY_INVALID", "message": "Token 已失效或账号不可用。"}
         )

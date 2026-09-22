@@ -35,12 +35,16 @@ domain's own contract and stay covered by ``test_generation.py``; this file owns
 the independent-creation database baseline plus its two dedicated routes per CW-010.
 
 Migration findings (SQLite → PostgreSQL):
-- ``runtime_settings.h3_extended_modes_enabled`` no longer exists: migration
-  ``20260923T0000_open_h3_extended_modes`` drops it, and the gate it carried was
-  removed from ``app.independent`` outright. T2V / R2V / last_frame are now
-  unconditionally open, so the cases below no longer have to flip a flag before
-  submitting. ``extended_modes_enabled`` stays on the capabilities payload (the
-  client type contract) but is reported ``True`` unconditionally.
+- ``runtime_settings.h3_extended_modes_enabled`` carries no gate anymore: migration
+  ``20260923T0000_open_h3_extended_modes`` dropped it and removed the gate from
+  ``app.independent`` outright; ``20260923T1800`` re-adds the column purely as a
+  rollout-compat shim (old images still SELECT it during the MIGRATE→ROLL window
+  and after an image rollback) — no code path may read it again, which
+  ``test_no_code_path_reads_the_retired_gate_column`` locks at source level.
+  T2V / R2V / last_frame are now unconditionally open, so the cases below no
+  longer have to flip a flag before submitting. ``extended_modes_enabled`` stays
+  on the capabilities payload (the client type contract) but is reported ``True``
+  unconditionally.
 - ``operation_cost_rates`` FK-references ``users`` (ON DELETE SET NULL), so
   ``TRUNCATE users CASCADE`` clears the migration-seeded rate defaults that
   ``snapshot_generation_rates`` reads on the PG lane; the seed captures and
@@ -419,25 +423,25 @@ def test_capabilities_report_extended_modes_enabled_by_default(scene: str) -> No
     assert caps.max_quantity >= 1
 
 
-def test_gate_column_is_dropped_so_no_flag_can_close_extended_modes(
-    scene: str,
-) -> None:
-    """回归锁：门禁列必须保持不存在，「永远开放」不会被悄悄撤销。
+def test_no_code_path_reads_the_retired_gate_column() -> None:
+    """回归锁：门禁列虽以部署兼容垫片形式留在库里，但任何代码都不得再读它。
 
-    直接对 ``information_schema`` 断言，比断言 capabilities 更能拦住
-    「把列加回来并重新接上 gating」这种回流——capabilities 的 True 可能只是
-    硬编码，列回来了却没人读。
+    20260923T1800 重加 ``runtime_settings.h3_extended_modes_enabled`` 只是为了
+    MIGRATE→ROLL 混合窗口与镜像回滚兼容（旧镜像仍 SELECT 该列）；新代码读它
+    即意味着门禁回流。源码级断言比 information_schema 断言更能拦住
+    「列回来并被重新接上 gating」——capabilities 的 True 可能只是硬编码，
+    列回来了却没人读才是要守住的不变量。
     """
-    with pg_transaction() as raw:
-        columns = {
-            row[0]
-            for row in raw.execute(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_name = 'runtime_settings'"
-            ).fetchall()
-        }
+    from pathlib import Path
 
-    assert "h3_extended_modes_enabled" not in columns
+    app_dir = Path(__file__).resolve().parents[1] / "app"
+    offenders = [
+        path.relative_to(app_dir).as_posix()
+        for path in app_dir.rglob("*.py")
+        if "h3_extended_modes" in path.read_text(encoding="utf-8")
+    ]
+
+    assert offenders == []
 
 
 def test_capabilities_route_serves_http_contract_on_pg(scene: str) -> None:
