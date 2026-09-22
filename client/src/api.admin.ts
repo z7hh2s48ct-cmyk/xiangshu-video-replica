@@ -131,14 +131,26 @@ export type WechatSelfCheckResult = {
   message: string;
   platform_certificates?: number;
 };
-/** 真实调一次微信 /v3/certificates 验证已保存的商户三件套（只读探测）。 */
+/**
+ * 真实调一次微信 /v3/certificates 验证已保存的商户三件套（只读探测）.
+ *
+ * 服务端确实只读：不落库、不动平台证书缓存（`account_admin_routes.py:336-341`）。
+ * 但它是控制面的 **POST**，而该车道的 POST 强制 CSRF——缺 `X-Admin-CSRF` 会被
+ * `admin_auth_routes.py` 以 403 `ADMIN_CSRF_REQUIRED` 拒掉。所以这里必须走
+ * `adminWrite`（它会带该头）；该路由不消费请求体，`confirm`/`reason`/
+ * `Idempotency-Key` 随之发出但不被读取（`deleteSubAccount` 同例）。
+ *
+ * 原先这里是裸 `requestControl` + `{ method: "POST" }`，**不带任何 CSRF 头**，
+ * 生产环境必然 403——只因为 `PaymentSettingsSection.test.tsx` 把本模块整个 mock
+ * 掉了，才一直没被测试拦住。
+ */
 export async function selfCheckWechatNative(): Promise<WechatSelfCheckResult> {
-  const response = await requestControl(
+  return adminWrite<WechatSelfCheckResult>(
     "/api/control/settings/customer-payments/wechat-native/self-check",
-    { method: "POST" },
+    {},
+    "微信商户凭据自检",
+    "凭据自检失败",
   );
-  if (!response.ok) throw await parseActivationError(response, "凭据自检失败");
-  return response.json();
 }
 export function updateCustomerPaymentBilling(
   input: Omit<BillingSettings, "charged_unit_price_fen">,

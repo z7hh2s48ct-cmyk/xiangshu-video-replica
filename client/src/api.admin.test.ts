@@ -29,6 +29,7 @@ import {
   revokeActivationCode,
   revokeCustomerSession,
   revokeDeviceCredential,
+  selfCheckWechatNative,
   suspendActivationCode,
   unbindDevice,
   updateCustomerUnitPrice,
@@ -560,8 +561,8 @@ describe("admin activation API adapter", () => {
   it("reconciles a first-frame task through the CSRF-carrying admin write lane", async () => {
     // 该端点声明 requestBody?: never，也不跑写契约——但 POST 仍受 CSRF 门禁。
     // 走裸 requestControl 不带 CSRF 头会被服务端 403 ADMIN_CSRF_REQUIRED
-    // （本仓库已有同类缺陷先例：selfCheckWechatNative）。这条用例钉住它必须
-    // 经 adminWrite，防止有人日后"因为不需要 body"而把它简化掉。
+    // （当时点名的同类缺陷就是 selfCheckWechatNative，本次一并修掉。）
+    // 这条用例钉住它必须经 adminWrite，防止有人日后"因为不需要 body"而简化掉。
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     await signIn(fetchMock);
@@ -581,6 +582,36 @@ describe("admin activation API adapter", () => {
       CSRF_TOKEN_TEXT,
     );
     expect(new Headers(last[1].headers).get("Idempotency-Key")).toBeTruthy();
+  });
+
+  it("sends the WeChat credential self-check with the CSRF header", async () => {
+    // 该端点是控制面的 POST，缺 X-Admin-CSRF 会被服务端 403 ADMIN_CSRF_REQUIRED
+    // 拒掉。原先这里是裸 requestControl + {method:"POST"}，一个 CSRF 头都不带，
+    // 生产必然失败——只因为 PaymentSettingsSection.test.tsx 把整个模块 mock 掉，
+    // 才一直没暴露。这条钉住它必须经 adminWrite。
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await signIn(fetchMock);
+    fetchMock.mockImplementationOnce(() =>
+      jsonResponse({
+        ok: true,
+        code: null,
+        message: "商户凭据有效",
+        platform_certificates: 3,
+      }),
+    );
+
+    const result = await selfCheckWechatNative();
+
+    expect(result.platform_certificates).toBe(3);
+    const last = fetchMock.mock.calls.at(-1) as [string, RequestInit];
+    expect(last[0]).toBe(
+      "http://127.0.0.1:8000/api/control/settings/customer-payments/wechat-native/self-check",
+    );
+    expect(last[1].method).toBe("POST");
+    expect(new Headers(last[1].headers).get("X-Admin-CSRF")).toBe(
+      CSRF_TOKEN_TEXT,
+    );
   });
 
   it("generates codes for a batch and downloads the one-time export", async () => {

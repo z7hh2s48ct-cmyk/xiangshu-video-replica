@@ -30,6 +30,7 @@ server/tests/test_postgres_migrations.py
 server/tests/test_prompt_optimizer.py
 server/tests/test_publish_credentials.py
 server/tests/test_signed_thumbnail_grant.py
+server/tests/test_sql_pagination.py
 server/tests/test_sub_account_permissions.py
 server/tests/test_usage_billing.py
 server/tests/test_viral_search_pg.py

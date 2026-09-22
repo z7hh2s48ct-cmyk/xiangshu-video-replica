@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from fastapi import HTTPException
 
 from app.db_portable import BusinessConnection
+from app.sql_pagination import PAGE_CLAUSE
 
 # A delivered request that took the customer's credits always ran a provider call.
 # Recording none is missing evidence, not proof the call was free: pricing the
@@ -80,7 +81,7 @@ def operation_rows(
             WHERE (parent.id=o.id OR (o.collection_batch_id IS NOT NULL
               AND parent.id=o.source_id AND parent.collection_batch_id=o.collection_batch_id))
             AND a.provider=%s))
-        ORDER BY COALESCE(o.completed_at,o.created_at) DESC,o.id DESC LIMIT %s OFFSET %s
+        ORDER BY COALESCE(o.completed_at,o.created_at) DESC,o.id DESC {PAGE_CLAUSE}
     """,
         (
             lower,
@@ -191,7 +192,7 @@ def source_action_rows(
         LEFT JOIN calls c ON c.operation_id=o.id
         GROUP BY o.user_id,o.source_id,u.username
         ORDER BY max(COALESCE(o.completed_at,o.created_at)) DESC,o.source_id DESC
-        LIMIT %s OFFSET %s
+        {PAGE_CLAUSE}
     """,
         (
             lower,

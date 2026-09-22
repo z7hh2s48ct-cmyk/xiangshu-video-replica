@@ -104,6 +104,7 @@ from app.customer_session_service import (
 )
 from app.db_pg import pg_transaction
 from app.ops_metrics import get_or_create_request_id
+from app.sql_pagination import PAGE_CLAUSE, page_bounds
 
 logger = logging.getLogger(__name__)
 
@@ -1073,8 +1074,7 @@ def list_activation_codes(
     filtering a fixed first page.
     """
     response.headers["Cache-Control"] = "no-store"
-    bounded_limit = max(0, min(limit, MAX_LIST_LIMIT))
-    bounded_offset = max(0, offset)
+    bounded_limit, bounded_offset = page_bounds(limit, offset, max_limit=MAX_LIST_LIMIT)
     clauses: list[str] = []
     params: list[object] = []
     display_status = (
@@ -1115,7 +1115,7 @@ def list_activation_codes(
                 f"FROM activation_codes AS code "
                 f"JOIN activation_code_batches AS batch ON batch.id = code.batch_id "
                 f"LEFT JOIN users AS customer ON customer.id = code.bound_user_id "
-                f"{where} ORDER BY code.id LIMIT %s OFFSET %s",
+                f"{where} ORDER BY code.id {PAGE_CLAUSE}",
                 (*params, bounded_limit, bounded_offset),
             ).fetchall()
             code_ids = [str(row[0]) for row in rows]

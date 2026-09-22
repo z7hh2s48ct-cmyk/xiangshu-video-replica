@@ -62,6 +62,7 @@ from app.media_tools import (
     validate_image_decodable,
 )
 from app.permissions import require_not_auditor, require_project_access, write_audit
+from app.sql_pagination import PAGE_CLAUSE
 from app.storage import (
     StorageAdapter,
     StorageBackendUnavailable,
@@ -774,7 +775,7 @@ def list_simple_library_page(
         FROM person_identities AS identity
         {where_clause}
         ORDER BY identity.created_at DESC, identity.id DESC
-        LIMIT %s OFFSET %s
+        {PAGE_CLAUSE}
         """,
         tuple(parameters),
     ).fetchall()
@@ -1703,7 +1704,7 @@ def list_simple_scene_looks_page(
                     AND published_version.status = 'PUBLISHED'
               )
             ORDER BY persona.created_at DESC, persona.id
-            LIMIT %s OFFSET %s
+            {PAGE_CLAUSE}
         ),
         latest_versions AS (
             SELECT persona.persona_id, persona.name,

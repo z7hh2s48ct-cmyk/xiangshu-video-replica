@@ -59,6 +59,7 @@ from app.customer_device_service import (
     server_now_utc,
 )
 from app.db_pg import pg_transaction
+from app.sql_pagination import PAGE_CLAUSE, page_bounds
 
 logger = logging.getLogger(__name__)
 
@@ -97,8 +98,7 @@ def list_devices(
     offset: int = 0,
 ) -> dict[str, object]:
     """List devices with display metadata only — digests never leave the store."""
-    bounded_limit = max(0, min(limit, MAX_LIST_LIMIT))
-    bounded_offset = max(0, offset)
+    bounded_limit, bounded_offset = page_bounds(limit, offset, max_limit=MAX_LIST_LIMIT)
     clauses: list[str] = []
     params: list[object] = []
     if status:
@@ -134,7 +134,7 @@ def list_devices(
                 "JOIN users u ON u.id = cd.user_id "
                 "LEFT JOIN activation_codes ac ON ac.id = cd.activation_code_id "
                 "LEFT JOIN customer_session_state css ON css.device_id = cd.id "
-                f"{where} ORDER BY cd.bound_at DESC LIMIT %s OFFSET %s",
+                f"{where} ORDER BY cd.bound_at DESC {PAGE_CLAUSE}",
                 (*params, bounded_limit, bounded_offset),
             ).fetchall()
             summary_row = conn.execute(

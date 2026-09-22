@@ -191,6 +191,30 @@ describe("ConfirmDialog", () => {
     vi.unstubAllGlobals();
   });
 
+  it("keeps Tab inside the dialog", () => {
+    // `aria-modal="true"` 只是一句承诺：只加属性并不拦 Tab，键盘用户仍能一路
+    // Tab 到对话框背后的页面控件上（2026-09-12 评审 P3 的 a11y 缺口）。这条钉住
+    // 首尾回绕。Harness 里另有一个对话框外的「重新打开」按钮，用来确认回绕只在
+    // 对话框内部进行。
+    render(<Harness level="reason" onConfirm={vi.fn()} />);
+
+    const reasonInput = screen.getByLabelText("操作原因");
+    const cancel = screen.getByRole("button", { name: "取消" });
+    expect(
+      screen.getByRole("button", { name: "重新打开" }),
+    ).toBeInTheDocument();
+
+    // 最后一个可聚焦元素继续 Tab → 回绕到第一个。
+    cancel.focus();
+    fireEvent.keyDown(cancel, { key: "Tab" });
+    expect(document.activeElement).toBe(reasonInput);
+
+    // 第一个 Shift+Tab → 回绕到最后一个。
+    reasonInput.focus();
+    fireEvent.keyDown(reasonInput, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(cancel);
+  });
+
   it("requires a reason before confirming", () => {
     const onConfirm = vi.fn();
     render(<Harness level="reason" onConfirm={onConfirm} />);

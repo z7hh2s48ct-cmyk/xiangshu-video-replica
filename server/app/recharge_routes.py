@@ -69,6 +69,7 @@ from app.permissions import require_not_auditor
 from app.recharge_packages import RechargePackage, build_package_snapshot, read_package
 from app.security_rate_limit import _server_now, client_ip_from_request
 from app.settings import SettingsRepository, effective_customer_billing_settings
+from app.sql_pagination import PAGE_CLAUSE
 from app.sub_account_permissions import SERVICE_FEATURE
 from app.sub_account_quota import read_quota_used
 from app.usage_billing import resolve_wallet_owner
@@ -1311,10 +1312,10 @@ def list_customer_wallet_transactions(
                    END
             """
             + from_sql
-            + """
+            + f"""
             ORDER BY (wt.ledger_sequence IS NULL), wt.ledger_sequence DESC,
                      wt.created_at DESC, wt.id DESC
-            LIMIT %s OFFSET %s
+            {PAGE_CLAUSE}
             """,
             [*params, limit, offset],
         ).fetchall()
@@ -1619,13 +1620,13 @@ def list_customer_recharge_orders(
         assert total_row is not None
         total = int(total_row[0])
         rows = business_conn.execute(
-            """
+            f"""
             SELECT id, user_id, merchant_order_no, provider, provider_trade_no,
                    channel, status, amount_fen, credits, notify_digest, created_at, paid_at
             FROM recharge_orders
             WHERE user_id = %s
             ORDER BY created_at DESC, id DESC
-            LIMIT %s OFFSET %s
+            {PAGE_CLAUSE}
             """,
             (user_id, limit, offset),
         ).fetchall()
@@ -1654,14 +1655,14 @@ def list_recharge_orders(
         ).fetchone()[0]
     )
     rows = conn.execute(
-        """
+        f"""
         SELECT
             id, user_id, merchant_order_no, provider, provider_trade_no, channel, status,
             amount_fen, credits, notify_digest, created_at, paid_at
         FROM recharge_orders
         WHERE user_id = %s
         ORDER BY created_at DESC, id DESC
-        LIMIT %s OFFSET %s
+        {PAGE_CLAUSE}
         """,
         (actor.id, limit, offset),
     ).fetchall()

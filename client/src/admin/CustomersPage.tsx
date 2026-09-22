@@ -142,6 +142,10 @@ function clearPendingGrantForAttempt(
   return clearPendingGrant(operatorId, userId);
 }
 
+// 页大小是常量，不是状态：原写法把它放进 useState 却从不改它，等于把常量
+// 伪装成状态（2026-09-12 评审 P3 的「伪状态反模式」）。
+const PAGE_SIZE = 20;
+
 export function CustomersPage({
   embedded = false,
   operatorId = "standalone-admin",
@@ -152,7 +156,6 @@ export function CustomersPage({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [offset, setOffset] = useState(0);
-  const [pageSize] = useState(20);
   const [total, setTotal] = useState(0);
   const [usernameDraft, setUsernameDraft] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -189,7 +192,7 @@ export function CustomersPage({
       setLoading(true);
       setError("");
       const response = await listCustomers({
-        limit: pageSize,
+        limit: PAGE_SIZE,
         offset,
         username_filter: filters.username || undefined,
         status: filters.status === "all" ? undefined : filters.status,
@@ -211,7 +214,7 @@ export function CustomersPage({
     } finally {
       if (sequence === requestId.current) setLoading(false);
     }
-  }, [filters, offset, pageSize]);
+  }, [filters, offset]);
 
   useEffect(() => {
     loadCustomers();
@@ -485,7 +488,7 @@ export function CustomersPage({
           </div>
 
           <Pagination
-            limit={pageSize}
+            limit={PAGE_SIZE}
             noun="位"
             offset={offset}
             total={total}

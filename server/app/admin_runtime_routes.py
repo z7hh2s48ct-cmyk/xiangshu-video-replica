@@ -38,6 +38,7 @@ from app.admin_write_contract import (
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
 from app.settings import DEFAULT_BILLING_SETTINGS, DEFAULT_RUNTIME_SETTINGS
+from app.sql_pagination import PAGE_CLAUSE
 from app.viral_keywords import ViralKeywordConfig
 
 router = APIRouter(prefix="/api/control", tags=["admin-runtime"])
@@ -223,24 +224,23 @@ def update_viral_runtime(
     actor: AdminWriter,
 ) -> dict[str, object]:
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
-        updated = conn.execute(
+        # 单例行必须用 upsert：原先「先 UPDATE 再看 rowcount 补 INSERT」在并发
+        # 首写下两个请求都会走 INSERT，撞 id 主键 → 500（2026-09-12 评审 P3
+        # 记载的 "runtime upsert 非原子"）。ON CONFLICT DO UPDATE 由 PG 在一条
+        # 语句里保证原子，不再有窗口。
+        conn.execute(
             """
-            UPDATE viral_runtime_controls
-            SET collection_enabled = %s, import_enabled = %s,
-                updated_by_user_id = %s, updated_at = CURRENT_TIMESTAMP
-            WHERE id = 1
+            INSERT INTO viral_runtime_controls (
+                id, collection_enabled, import_enabled, updated_by_user_id
+            ) VALUES (1, %s, %s, %s)
+            ON CONFLICT (id) DO UPDATE SET
+                collection_enabled = EXCLUDED.collection_enabled,
+                import_enabled = EXCLUDED.import_enabled,
+                updated_by_user_id = EXCLUDED.updated_by_user_id,
+                updated_at = CURRENT_TIMESTAMP
             """,
             (int(payload.collection_enabled), int(payload.import_enabled), actor.user_id),
         )
-        if updated.rowcount != 1:
-            conn.execute(
-                """
-                INSERT INTO viral_runtime_controls (
-                    id, collection_enabled, import_enabled, updated_by_user_id
-                ) VALUES (1, %s, %s, %s)
-                """,
-                (int(payload.collection_enabled), int(payload.import_enabled), actor.user_id),
-            )
         if payload.keywords is not None:
             conn.execute(
                 "UPDATE viral_runtime_controls SET keywords_json=%s WHERE id=1",
@@ -410,7 +410,7 @@ def read_collected_viral_videos(
             LEFT JOIN viral_refresh_tasks r ON r.platform=v.platform AND r.sort='latest'
                 AND r.collection_config_json::jsonb->>'kind'='single_archive'
                 AND r.collection_config_json::jsonb->>'video_id'=v.video_id
-            WHERE {filters} ORDER BY v.created_at DESC,v.platform,v.video_id LIMIT %s OFFSET %s""",
+            WHERE {filters} ORDER BY v.created_at DESC,v.platform,v.video_id {PAGE_CLAUSE}""",
             (*params, limit, offset),
         ).fetchall()
     items = []
@@ -818,38 +818,35 @@ def update_queue_mode(
     """
 
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
-        updated = conn.execute(
+        # 同 viral 那处的理由：单例行「先 UPDATE 再补 INSERT」在并发首写下会
+        # 双双 INSERT 撞主键 500，改成一条 upsert。首次落库仍按文档化的默认值
+        # 播种（这一段 INSERT 的列清单就是默认值来源），已存在则只翻转开关，
+        # 不覆盖其它运行参数。
+        conn.execute(
             """
-            UPDATE runtime_settings
-            SET fair_queue_enabled = %s,
-                updated_by_user_id = %s,
+            INSERT INTO runtime_settings (
+                id, max_generation_count_per_batch, max_concurrent_h3_tasks,
+                internal_base_unit_price_fen, min_recharge_fen, recharge_step_fen,
+                active_storage_provider, fair_queue_enabled, updated_by_user_id,
+                created_at, updated_at
+            ) VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s,
+                      CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT (id) DO UPDATE SET
+                fair_queue_enabled = EXCLUDED.fair_queue_enabled,
+                updated_by_user_id = EXCLUDED.updated_by_user_id,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = 1
             """,
-            (payload.fair_queue_enabled, actor.user_id),
+            (
+                DEFAULT_RUNTIME_SETTINGS["max_generation_count_per_batch"],
+                DEFAULT_RUNTIME_SETTINGS["max_concurrent_h3_tasks"],
+                DEFAULT_BILLING_SETTINGS["internal_base_unit_price_fen"],
+                DEFAULT_BILLING_SETTINGS["min_recharge_fen"],
+                DEFAULT_BILLING_SETTINGS["recharge_step_fen"],
+                DEFAULT_RUNTIME_SETTINGS["active_storage_provider"],
+                payload.fair_queue_enabled,
+                actor.user_id,
+            ),
         )
-        if updated.rowcount == 0:
-            conn.execute(
-                """
-                INSERT INTO runtime_settings (
-                    id, max_generation_count_per_batch, max_concurrent_h3_tasks,
-                    internal_base_unit_price_fen, min_recharge_fen, recharge_step_fen,
-                    active_storage_provider, fair_queue_enabled, updated_by_user_id,
-                    created_at, updated_at
-                ) VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s,
-                          CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                """,
-                (
-                    DEFAULT_RUNTIME_SETTINGS["max_generation_count_per_batch"],
-                    DEFAULT_RUNTIME_SETTINGS["max_concurrent_h3_tasks"],
-                    DEFAULT_BILLING_SETTINGS["internal_base_unit_price_fen"],
-                    DEFAULT_BILLING_SETTINGS["min_recharge_fen"],
-                    DEFAULT_BILLING_SETTINGS["recharge_step_fen"],
-                    DEFAULT_RUNTIME_SETTINGS["active_storage_provider"],
-                    payload.fair_queue_enabled,
-                    actor.user_id,
-                ),
-            )
         conn.execute(
             """
             INSERT INTO audit_logs (

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -1210,6 +1211,55 @@ def test_live_sessions_overview_lists_all_users_sessions(client: TestClient):
 
 
 @pytest.mark.pg
+def test_queue_mode_cold_start_write_survives_concurrency(
+    admin_app: FastAPI, route_state: str
+) -> None:
+    """冷启动并发首写不得撞主键 500（2026-09-12 评审 P3「runtime upsert 非原子」）.
+
+    原先的实现是「UPDATE ... WHERE id = 1，rowcount==0 再 INSERT」。当
+    ``runtime_settings`` 行尚不存在时，两个并发请求都会看到 rowcount==0 并各自
+    INSERT，后到者撞上 id 主键 → 500。现在是一条
+    ``INSERT ... ON CONFLICT (id) DO UPDATE``，由 PG 在同一语句里保证原子。
+
+    制造冷启动（删掉那一行）后用屏障同时发两个写请求：两边都必须 200。
+    并行写入用 bash 侧无法复现，只能靠线程 + 屏障把窗口打开——旧实现下这条
+    会稳定地在其中一个线程上拿到 500。
+
+    route_state 每个用例都会经 ``TRUNCATE ... users CASCADE`` 连带清掉
+    ``runtime_settings`` 再重播，故本用例删行不会泄漏到后续用例。
+    """
+    with psycopg.connect(_t34_dsn(), autocommit=True) as conn:
+        conn.execute("DELETE FROM runtime_settings WHERE id = 1")
+
+    barrier = threading.Barrier(2)
+    responses: dict[int, object] = {}
+
+    def writer(index: int) -> None:
+        with TestClient(admin_app) as thread_client:
+            headers = _admin_session(thread_client)
+            barrier.wait(timeout=10)
+            responses[index] = _queue_mode_write(
+                thread_client, headers, True, key=f"queue-race-{index}"
+            )
+
+    threads = [threading.Thread(target=writer, args=(index,)) for index in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+
+    assert len(responses) == 2, responses
+    for index, response in responses.items():
+        assert response.status_code == 200, (index, response.text)
+
+    with psycopg.connect(_t34_dsn(), autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT fair_queue_enabled FROM runtime_settings WHERE id = 1"
+        ).fetchone()
+    assert row is not None, "冷启动首写必须把单例行建出来"
+    assert bool(row[0]) is True, row
+
+
 def test_admin_viral_discoveries_daily_summary(client: TestClient, route_state: str) -> None:
     """运营侧每日汇总：关键词热度分组 + 客户/视频去重 + 日期校验 + 鉴权."""
     headers = _admin_session(client)

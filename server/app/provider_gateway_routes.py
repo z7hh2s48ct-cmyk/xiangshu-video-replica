@@ -21,6 +21,7 @@ from app.admin_auth_routes import AdminReader, AdminWriter
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
 from app.provider_gateway import ProviderGateway
+from app.sql_pagination import PAGE_CLAUSE
 
 router = APIRouter(prefix="/api/admin/providers", tags=["provider-gateway"])
 
@@ -161,7 +162,7 @@ def get_provider_usage_history(
 
         # Query usage records
         result = conn.execute(
-            """
+            f"""
             SELECT wt.id, wt.user_id, wt.description as provider_endpoint,
                    CAST(wt.available_delta AS INTEGER) as cost_credits,
                    wt.created_at as timestamp
@@ -170,7 +171,7 @@ def get_provider_usage_history(
               AND wt.created_at >= %s
               AND wt.description LIKE %s
             ORDER BY wt.created_at DESC
-            LIMIT %s OFFSET %s
+            {PAGE_CLAUSE}
         """,
             (start_date_str, f"{provider_name}:%", limit, offset),
         ).fetchall()

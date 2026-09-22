@@ -1313,6 +1313,47 @@ def test_customer_production_control_routes_keep_auditors_read_only(
     assert blocked.json()["detail"]["code"] == "AUDITOR_READ_ONLY"
 
 
+# B3 (2026-09-22 review): the two fund-ledger CSV exports were the only control
+# exports still riding the read-level ``ControlUser`` adapter, so on the
+# customer-production lane an auditor could pull the entire ledger in bulk
+# while ``customers.csv`` (AdminWriter) answered 403. Bulk export is a
+# data-egress action, not a view: all three now require write-level authority.
+LEDGER_EXPORT_PATHS = ("/api/control/recharge-orders.csv", "/api/control/wallet-transactions.csv")
+
+
+@pytestmark_pg
+@pytest.mark.parametrize("path", LEDGER_EXPORT_PATHS)
+def test_customer_production_ledger_csv_exports_deny_auditors(
+    customer_production_control_client: TestClient,
+    path: str,
+) -> None:
+    client = customer_production_control_client
+    exchange = password_admin_session(client, "auditor_u")
+    assert exchange.status_code == 201, exchange.text
+
+    denied = client.get(path)
+    assert denied.status_code == 403, denied.text
+    assert denied.json()["detail"]["code"] == "AUDITOR_READ_ONLY"
+
+    # Positive control: the same route answers the admin role, so the 403 above
+    # is the role gate and not a blanket refusal of the export.
+    client.cookies.clear()
+    admin = password_admin_session(client, "admin_u")
+    assert admin.status_code == 201, admin.text
+    allowed = client.get(path)
+    assert allowed.status_code == 200, allowed.text
+    assert allowed.headers["content-type"].startswith("text/csv")
+    # The response shape is unchanged by the B3 gate: same headers as before.
+    assert "X-Export-Total" in allowed.headers
+
+    # No fallback lane: with the session cookie gone the export must not accept
+    # the retired proxy token (customer production ignores it entirely).
+    client.cookies.clear()
+    rejected = client.get(path, headers={"X-Control-Proxy-Token": "legacy-token"})
+    assert rejected.status_code == 401, rejected.text
+    assert rejected.json()["detail"]["code"] == "ADMIN_SESSION_INVALID"
+
+
 @pytest.mark.parametrize(
     ("method", "path", "payload"),
     [

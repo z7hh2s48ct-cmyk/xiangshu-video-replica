@@ -28,7 +28,7 @@ from app.admin_write_contract import (
 )
 from app.auth import Database, Role
 from app.billing_catalog import SERVICES
-from app.control_auth import ControlUser
+from app.control_auth import ControlUser, ControlWriter
 from app.csv_export import spreadsheet_safe_cell
 from app.db_portable import BusinessConnection
 from app.failure_runbook import failure_advice
@@ -50,6 +50,7 @@ from app.settings import (
     remove_cos_lifecycle_rules,
     require_supported_provider,
 )
+from app.sql_pagination import PAGE_CLAUSE
 from app.zpay import deployment_config_from_environment
 
 router = APIRouter(prefix="/api/control", tags=["control"])
@@ -612,7 +613,7 @@ def list_accounts(
 ) -> AccountWalletPage:
     total = int(conn.execute("SELECT COUNT(*) FROM users").fetchone()[0])
     rows = conn.execute(
-        """
+        f"""
         SELECT
             users.id,
             users.username,
@@ -629,7 +630,7 @@ def list_accounts(
          AND internal_access_tokens.revoked_at IS NULL
         GROUP BY users.id, wallets.available_credits, wallets.reserved_credits
         ORDER BY users.username, users.id
-        LIMIT %s OFFSET %s
+        {PAGE_CLAUSE}
         """,
         (limit, offset),
     ).fetchall()
@@ -703,7 +704,7 @@ def list_recharge_orders(
         JOIN users ON users.id = orders.user_id
         {where}
         ORDER BY orders.created_at DESC, orders.id DESC
-        LIMIT %s OFFSET %s
+        {PAGE_CLAUSE}
         """,  # noqa: S608
         (*params, limit, offset),
     ).fetchall()
@@ -780,7 +781,7 @@ def list_wallet_transactions(
         {where}
         ORDER BY (tx.ledger_sequence IS NULL), tx.ledger_sequence DESC,
                  tx.created_at DESC, tx.id DESC
-        LIMIT %s OFFSET %s
+        {PAGE_CLAUSE}
         """,  # noqa: S608
         (*params, limit, offset),
     ).fetchall()
@@ -1863,7 +1864,11 @@ def update_control_billing_settings(
 @router.get("/recharge-orders.csv")
 def export_recharge_orders_csv(
     conn: Database,
-    actor: ControlUser,
+    # B3 (2026-09-22 review): bulk export is a data-egress action, not a view —
+    # it requires write-level authority (auditor 403 AUDITOR_READ_ONLY), the
+    # same policy customers.csv already applied. Auditors keep their read-only
+    # views of these rows on the pages; only the one-shot full dump is removed.
+    actor: ControlWriter,
     status: OrderStatus | None = None,
     user_id: str | None = None,
     username: str | None = None,
@@ -1947,7 +1952,9 @@ def export_recharge_orders_csv(
 @router.get("/wallet-transactions.csv")
 def export_wallet_transactions_csv(
     conn: Database,
-    actor: ControlUser,
+    # B3 (2026-09-22 review): same write-level gate as recharge-orders.csv —
+    # one GET pulls the whole wallet ledger out of the platform in bulk.
+    actor: ControlWriter,
     user_id: str | None = None,
     type: TransactionType | None = None,
     username: str | None = None,

@@ -243,6 +243,10 @@ def _customer_session(client: TestClient, route_state: str) -> str:
 ADMIN_WRITE_AUTHORITIES = {
     "get_admin_writer",
     "get_control_route_user",
+    # B3 (2026-09-22 review): bulk exports are GET routes that carry a
+    # write-level dependency — the gate follows the route's intent, not its
+    # HTTP method, so the CSV dumps stay on this axis.
+    "get_control_writer",
     "require_settings_admin",
     "get_character_admin",
 }

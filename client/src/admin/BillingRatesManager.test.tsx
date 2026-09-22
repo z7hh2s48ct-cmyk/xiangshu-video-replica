@@ -56,7 +56,9 @@ test("cost-only configuration leaves the customer tariff absent and disabled", a
     target: { value: "0.000125" },
   });
   expect(screen.queryByLabelText("调整原因")).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "确认并保存" }));
+  // 2026-09-12 评审 P2 之后：按钮拆成「保存」（校验）→ 确认框「确认并保存」（落库）。
+  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+  fireEvent.click(await screen.findByRole("button", { name: "确认并保存" }));
   await waitFor(() =>
     expect(adminWrite).toHaveBeenCalledWith(
       "/api/control/billing/tariff",
@@ -87,13 +89,17 @@ test("enabling a tariff requires an explicit price and preserves the key after a
   );
   fireEvent.click(screen.getByLabelText("启用用户扣分"));
   expect(screen.queryByLabelText("调整原因")).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "确认并保存" }));
+  // 校验不过时连确认框都不该出现：格式错误当场报，不必先弹框。
+  fireEvent.click(screen.getByRole("button", { name: "保存" }));
   expect(adminWrite).not.toHaveBeenCalled();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("售价（积分 / 秒）"), {
     target: { value: "0.25" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "确认并保存" }));
+  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+  fireEvent.click(await screen.findByRole("button", { name: "确认并保存" }));
   await screen.findByText("请求结果未知");
+  // 失败留在确认框内，就地重试沿用同一幂等键。
   fireEvent.click(screen.getByRole("button", { name: "确认并保存" }));
   await waitFor(() => expect(adminWrite).toHaveBeenCalledTimes(2));
   expect(vi.mocked(adminWrite).mock.calls[1]).toEqual(
@@ -126,7 +132,8 @@ test("cost credits use the current exchange ratio while sale credits stay unchan
   fireEvent.change(screen.getByLabelText("售价（积分 / 秒）"), {
     target: { value: "40" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "确认并保存" }));
+  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+  fireEvent.click(await screen.findByRole("button", { name: "确认并保存" }));
   await waitFor(() =>
     expect(adminWrite).toHaveBeenCalledWith(
       "/api/control/billing/tariff",
@@ -212,7 +219,8 @@ test("platform subjects list supplier cost separately and never charge customers
     within(platform).queryByLabelText("售价（积分 / 次）"),
   ).not.toBeInTheDocument();
   expect(screen.queryByLabelText("启用用户扣分")).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "确认并保存" }));
+  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+  fireEvent.click(await screen.findByRole("button", { name: "确认并保存" }));
   await waitFor(() =>
     expect(adminWrite).toHaveBeenCalledWith(
       "/api/control/billing/tariff",
@@ -317,7 +325,8 @@ test("saving unchanged credit displays preserves the original sub-cent cost", as
   await screen.findByText("0.00000003");
   fireEvent.click(screen.getByRole("button", { name: "配置 视频生成 · 768P" }));
   expect(screen.getByLabelText("售价（积分 / 秒）")).toHaveValue("1");
-  fireEvent.click(screen.getByRole("button", { name: "确认并保存" }));
+  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+  fireEvent.click(await screen.findByRole("button", { name: "确认并保存" }));
   await waitFor(() =>
     expect(adminWrite).toHaveBeenCalledWith(
       "/api/control/billing/tariff",
@@ -519,4 +528,37 @@ test("a stale history response never replaces the newly selected subject", async
   expect(
     screen.getByRole("table", { name: "数字人口播价目版本历史" }),
   ).toBeInTheDocument();
+});
+
+test("holds the tariff write behind an explicit confirmation", async () => {
+  // 2026-09-12 评审 P2：按钮写着"确认并保存"，保存却是直接落库。这条钉住
+  // "确认过才写"，并顺带钉住取消路径不产生任何写入。
+  render(<BillingRatesManager />);
+  fireEvent.click(
+    await screen.findByRole("button", { name: "配置 视频生成 · 768P" }),
+  );
+  fireEvent.change(screen.getByLabelText("售价（积分 / 秒）"), {
+    target: { value: "2" },
+  });
+  fireEvent.click(screen.getByLabelText("启用用户扣分"));
+  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+  const dialog = await screen.findByRole("dialog");
+  // 确认框要把"改了什么"和"审计将记录什么原因"都摊开，避免盲确认。
+  expect(dialog).toHaveTextContent("售价（积分）：未配置 → 2");
+  expect(dialog).toHaveTextContent("收费状态：启用");
+  expect(dialog).toHaveTextContent(
+    "审计原因将记录为「配置视频生成 · 768P成本与售价」",
+  );
+  expect(adminWrite).not.toHaveBeenCalled();
+
+  // 编辑表单里也有一个「取消」，这里要点确认框里的那个。
+  fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  expect(adminWrite).not.toHaveBeenCalled();
+  // 取消不丢草稿：重新点保存还能拿回同一个确认框。
+  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+  expect(await screen.findByRole("dialog")).toBeInTheDocument();
 });

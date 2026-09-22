@@ -14,6 +14,7 @@ from app.billing_catalog import retail_snapshot
 from app.billing_reports import date_bounds
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
+from app.sql_pagination import PAGE_CLAUSE
 from app.usage_billing import accept_operation, complete_attempt, finish_operation
 
 # Source HTTP calls use bounded timeouts. This ceiling also fences a late response
@@ -145,7 +146,7 @@ def collection_batch_rows(
 ) -> list[dict[str, Any]]:
     lower, upper = date_bounds(start, end)
     rows = conn.execute(
-        """WITH requests AS (
+        f"""WITH requests AS (
           SELECT collection_batch_id AS batch_id,count(*) AS request_count,
             count(*) FILTER(WHERE state='SUCCEEDED' AND actual_units=1) AS confirmed_count,
             count(*) FILTER(WHERE state='FAILED') AS uncertain_count,
@@ -186,7 +187,7 @@ def collection_batch_rows(
         FROM viral_collection_batches b LEFT JOIN requests r ON r.batch_id=b.id
         LEFT JOIN members m ON m.batch_id=b.id LEFT JOIN charges c ON c.batch_id=b.id
         LEFT JOIN costs k ON k.batch_id=b.id WHERE b.created_at>=%s AND b.created_at<%s
-        ORDER BY b.created_at DESC,b.id DESC LIMIT %s OFFSET %s""",
+        ORDER BY b.created_at DESC,b.id DESC {PAGE_CLAUSE}""",
         (lower, upper, limit, offset),
     ).fetchall()
     result = []
@@ -217,12 +218,12 @@ def collection_charge_rows(
     return [
         dict(row)
         for row in conn.execute(
-            """SELECT c.*,u.username,COALESCE(o.charged_credits,0) AS charged_credits,
+            f"""SELECT c.*,u.username,COALESCE(o.charged_credits,0) AS charged_credits,
             o.revenue_fen,count(*) OVER() AS total_count
         FROM viral_collection_charges c JOIN billing_operations p ON p.id=c.request_id
         JOIN users u ON u.id=c.user_id LEFT JOIN billing_operations o ON o.id=c.operation_id
         WHERE p.collection_batch_id=%s ORDER BY c.created_at DESC,c.request_id,c.user_id
-        LIMIT %s OFFSET %s""",
+        {PAGE_CLAUSE}""",
             (batch_id, limit, offset),
         ).fetchall()
     ]

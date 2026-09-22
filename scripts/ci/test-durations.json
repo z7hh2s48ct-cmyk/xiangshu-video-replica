@@ -89,6 +89,7 @@
     "server/tests/test_viral_tikhub.py": 0.05,
     "server/tests/test_wallet_billing_service.py": 6.06,
     "server/tests/test_wallet_routes.py": 2.53,
-    "server/tests/test_worker_crash_recovery.py": 6.97
+    "server/tests/test_worker_crash_recovery.py": 6.97,
+    "server/tests/test_sql_pagination.py": 0.02
   }
 }

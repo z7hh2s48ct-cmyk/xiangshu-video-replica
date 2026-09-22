@@ -169,6 +169,26 @@ export function OverviewPage({
       tone: "danger",
       tab: "rates",
     },
+    {
+      // 2026-09-18 匹配梳理 P3：/dashboard/summary 一直在返回这两个字段，
+      // 总览却从未展示。它们直接决定"今天的数字能不能信"：
+      // pending_count 是仍处 PENDING 的计费操作数（billing_reports.py:174），
+      // unknown_revenue_count 是收入无法确定的操作数（同文件 :322）。
+      key: "pendingOps",
+      label: "今日操作待结算",
+      count: today.pending_operations ?? 0,
+      tone: "info",
+      tab: "funds",
+      hint: "当日金额尚未定稿",
+    },
+    {
+      key: "unknownRevenue",
+      label: "今日收入未确定",
+      count: today.unknown_revenue_operations ?? 0,
+      tone: "warn",
+      tab: "funds",
+      hint: "毛利可能偏低",
+    },
   ];
 
   return (

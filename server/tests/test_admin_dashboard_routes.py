@@ -648,3 +648,42 @@ def test_dashboard_surfaces_analysis_failures_with_upstream_reasons(
         with psycopg.connect(dashboard_pg_dsn, autocommit=True) as conn:
             conn.execute("DELETE FROM analysis_tasks WHERE id LIKE 'dash-analysis-%'")
             conn.execute("DELETE FROM assets WHERE id = 'dash-analysis-asset'")
+
+
+def test_reconciliation_counts_per_bucket_not_just_the_total(
+    admin_headers: dict[str, str], client: TestClient, dashboard_pg_dsn: str
+) -> None:
+    """桶间搬移必须被发现：总览的口径要与资金页的对账一致.
+
+    先前总览比的是「可用 + 冻结」两桶**之和**，而
+    ``/api/control/billing-reconciliation`` 是**逐桶**比（`control_routes.py`
+    的 available_total / reserved_total 分桶聚合）。于是当钱包是
+    available=5/reserved=5、账本仍是 available_total=10/reserved_total=0 时，
+    两桶之和都等于 10 → 总览报 0 而资金页报 1（2026-09-12 评审 P2 记载的
+    「对账 todo 与 reconciliation 计数口径微差」）。
+
+    钱从哪个桶出账正是对账要抓的东西，漏报比误报危险。这条用例构造的正是
+    「两桶之和相等、分桶不等」这一唯一能区分两种口径的状态 —— 若把实现改回
+    求和比较，它会立刻变红。
+
+    模块级夹具共用同一个库，故结束前把钱包改回原值。
+    """
+    with psycopg.connect(dashboard_pg_dsn, autocommit=True) as conn:
+        before = conn.execute(
+            "SELECT available_credits, reserved_credits FROM wallets WHERE user_id = 'cust_1'"
+        ).fetchone()
+        assert before == (10, 0), before
+        try:
+            conn.execute(
+                "UPDATE wallets SET available_credits = 5, reserved_credits = 5 "
+                "WHERE user_id = 'cust_1'"
+            )
+            response = client.get("/api/control/dashboard/summary", headers=admin_headers)
+            assert response.status_code == 200, response.text
+            assert response.json()["todos"]["reconciliation_problems"] == 1
+        finally:
+            conn.execute(
+                "UPDATE wallets SET available_credits = %s, reserved_credits = %s "
+                "WHERE user_id = 'cust_1'",
+                before,
+            )

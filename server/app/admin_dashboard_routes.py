@@ -198,10 +198,23 @@ def dashboard_summary(_actor: AdminReader) -> dict[str, Any]:
                 conn,
                 """
                 SELECT
+                  -- 逐桶比，与 /api/control/billing-reconciliation 的
+                  -- wallet_mismatch_count 同口径（control_routes.py 的
+                  -- available_total/reserved_total 分桶聚合）。这里原先比的是
+                  -- 「两桶之和」，于是桶间搬移（例如记了 RESERVE 却没同步钱包）
+                  -- 两边的和仍然相等 → 对账异常被漏报，总览显示 0 而资金页报
+                  -- 不一致（2026-09-12 评审 P2 记载的「对账 todo 与
+                  -- reconciliation 计数口径微差」）。
                   (SELECT count(*) FROM wallets w
-                     WHERE w.available_credits + w.reserved_credits <>
-                           COALESCE((SELECT SUM(available_delta + reserved_delta)
-                             FROM wallet_transactions wt WHERE wt.user_id = w.user_id), 0))
+                     LEFT JOIN (
+                         SELECT user_id,
+                                SUM(available_delta) AS available_total,
+                                SUM(reserved_delta) AS reserved_total
+                         FROM wallet_transactions
+                         GROUP BY user_id
+                     ) AS ledger ON ledger.user_id = w.user_id
+                     WHERE w.available_credits <> COALESCE(ledger.available_total, 0)
+                        OR w.reserved_credits <> COALESCE(ledger.reserved_total, 0))
                 + (SELECT count(*) FROM recharge_orders o
                      WHERE o.status = 'PAID' AND NOT EXISTS (
                          SELECT 1 FROM wallet_transactions wt

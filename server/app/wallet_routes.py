@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict
 
 from app.auth import AuthenticatedUser, Database
 from app.settings import DEFAULT_BILLING_SETTINGS
+from app.sql_pagination import PAGE_CLAUSE
 
 router = APIRouter(prefix="/api/wallet", tags=["wallet"])
 
@@ -237,14 +238,14 @@ def list_wallet_transactions(
         ).fetchone()[0]
     )
     rows = conn.execute(
-        """
+        f"""
         SELECT
             id, user_id, type, available_delta, reserved_delta,
             recharge_order_id, task_id, oral_task_id, billing_round, created_at
         FROM wallet_transactions
         WHERE user_id = %s
         ORDER BY created_at DESC, id DESC
-        LIMIT %s OFFSET %s
+        {PAGE_CLAUSE}
         """,
         (actor.id, limit, offset),
     ).fetchall()

@@ -35,6 +35,7 @@ export function ConfirmDialog({
   const [localError, setLocalError] = useState("");
   const reasonInputRef = useRef<HTMLInputElement | null>(null);
   const confirmButtonRef = useRef<HTMLButtonElement | null>(null);
+  const dialogRef = useRef<HTMLFormElement | null>(null);
 
   useEffect(() => {
     if (!open) {
@@ -65,6 +66,27 @@ export function ConfirmDialog({
       window.removeEventListener("keydown", onKeyDown);
     };
   }, [busy, onClose, open]);
+
+  // 焦点圈闭：`aria-modal="true"` 承诺对话框外的内容不可交互，但只加这个属性
+  // 并不会拦住 Tab —— 键盘用户仍能一路 Tab 到对话框背后的页面控件上，看不见
+  // 焦点在哪。Esc 与遮罩点击此前已实现，缺的是这一层（2026-09-12 评审 P3 的
+  // a11y 缺口）。圈闭在首尾两个可聚焦元素之间回绕。
+  function trapFocus(event: React.KeyboardEvent<HTMLFormElement>) {
+    if (event.key !== "Tab") return;
+    const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+    );
+    if (!focusable || focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
 
   if (!open) {
     return null;
@@ -108,7 +130,11 @@ export function ConfirmDialog({
         aria-modal="true"
         className="admin-dialog"
         onClick={(event) => event.stopPropagation()}
-        onKeyDown={(event) => event.stopPropagation()}
+        onKeyDown={(event) => {
+          event.stopPropagation();
+          trapFocus(event);
+        }}
+        ref={dialogRef}
         role="dialog"
         aria-label={title}
         onSubmit={submit}

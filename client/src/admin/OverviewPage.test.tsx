@@ -17,6 +17,9 @@ const summaryPayload = {
     active_customers: 89,
     recharge_fen: 485000,
     recharge_orders: 12,
+    // 2026-09-18 匹配梳理 P3：这两个字段后端一直返回，此前总览未展示。
+    pending_operations: 4,
+    unknown_revenue_operations: 1,
   },
   trend: [
     { day: "2026-08-30", succeeded: 210, failed: 28, cost_fen: 39000 },
@@ -115,6 +118,19 @@ describe("OverviewPage", () => {
     const failedTasks = screen.getByText("失败任务待处理").closest("li");
     fireEvent.click(within(failedTasks as HTMLElement).getByRole("button"));
     expect(onNavigate).toHaveBeenCalledWith("failedGenerationRecords");
+
+    // 2026-09-18 匹配梳理 P3：这两个字段后端一直在返回，总览此前只字未提。
+    // 它们决定"今天的数字能不能信"，所以摆进待办并可一键去处理。
+    const pendingOps = screen.getByText("今日操作待结算").closest("li");
+    expect(pendingOps).toHaveTextContent("4");
+    expect(pendingOps).toHaveTextContent("当日金额尚未定稿");
+    fireEvent.click(within(pendingOps as HTMLElement).getByRole("button"));
+    expect(onNavigate).toHaveBeenCalledWith("funds");
+
+    const unknownRevenue = screen.getByText("今日收入未确定").closest("li");
+    expect(unknownRevenue).toHaveTextContent("1");
+    fireEvent.click(within(unknownRevenue as HTMLElement).getByRole("button"));
+    expect(onNavigate).toHaveBeenCalledWith("funds");
 
     // 拆解失败单列一行，并把最集中的上游原因摆在行上。
     expect(screen.getByText("拆解失败待排查")).toBeInTheDocument();

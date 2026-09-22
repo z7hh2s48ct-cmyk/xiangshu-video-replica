@@ -151,12 +151,15 @@ function priceChange(item: AuditLogItem) {
  * 筛选只在提交时生效：输入框改动不触发请求（整改清单 评估登记 5 的
  * "输入即加载 + 点击再发一次"重复请求问题在此收口）。
  */
+// 页大小是常量，不是状态：原写法把它放进 useState 却从不改它，等于把常量
+// 伪装成状态（2026-09-12 评审 P3 的「伪状态反模式」）。
+const PAGE_SIZE = 20;
+
 export function AuditEventsPage() {
   const [items, setItems] = useState<AuditLogItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [offset, setOffset] = useState(0);
-  const [pageSize] = useState(20);
   const [total, setTotal] = useState(0);
   const [actorDraft, setActorDraft] = useState("");
   const [targetDraft, setTargetDraft] = useState("");
@@ -181,7 +184,7 @@ export function AuditEventsPage() {
         eventType: filters.eventType || undefined,
         createdFrom: filters.from || undefined,
         createdTo: filters.to || undefined,
-        limit: pageSize,
+        limit: PAGE_SIZE,
         offset,
       });
       setItems(response.items);
@@ -195,7 +198,7 @@ export function AuditEventsPage() {
     } finally {
       setLoading(false);
     }
-  }, [filters, offset, pageSize]);
+  }, [filters, offset]);
 
   useEffect(() => {
     void loadLog();
@@ -353,7 +356,7 @@ export function AuditEventsPage() {
 
       <Pagination
         disabled={loading}
-        limit={pageSize}
+        limit={PAGE_SIZE}
         offset={offset}
         total={total}
         onPageChange={setOffset}

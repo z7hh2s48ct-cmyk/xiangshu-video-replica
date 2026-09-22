@@ -42,6 +42,7 @@ from app.admin_auth_routes import AdminReader
 from app.admin_dates import append_admin_date_filters, utc_timestamp_sql
 from app.api_errors import http_error as _http
 from app.db_pg import MissingDatabaseConfigError, pg_transaction
+from app.sql_pagination import PAGE_CLAUSE, page_bounds
 
 router = APIRouter(prefix="/api/control", tags=["admin-audit"])
 
@@ -171,8 +172,7 @@ def list_audit_log(
 
     Both admin and auditor roles can access this endpoint (read-only).
     """
-    bounded_limit = max(0, min(limit, MAX_LIST_LIMIT))
-    bounded_offset = max(0, offset)
+    bounded_limit, bounded_offset = page_bounds(limit, offset, max_limit=MAX_LIST_LIMIT)
 
     clauses: list[str] = []
     params: list[object] = []
@@ -217,11 +217,21 @@ def list_audit_log(
                 LEFT JOIN users tu ON tu.id = ev.target_user_id
                 {where}
                 ORDER BY ev.created_at DESC, ev.event_id
-                LIMIT %s OFFSET %s
+                {PAGE_CLAUSE}
                 """,
                 (*params, bounded_limit, bounded_offset),
             ).fetchall()
 
+            # A12 评估结论（docs/evidence/ADMIN-AUDIT-COUNT-A12-20260922.md）：
+            # total 必须精确，所以这里把 _UNION_SQL 再展开一次——与上面的列表同
+            # FROM、同 JOIN、同一个 `where` 字符串（users.id 是主键，连接不放大行
+            # 数），两者行集恒等，实测 count 与列表全量取回的行数逐项相等。
+            # 该 COUNT 也不是本端点的瓶颈：6 表 85.5 万行 / UNION 45.5 万行下
+            # COUNT 38–79 ms，同一数据的列表查询 314–766 ms。单语句"共享一次扫描"
+            # （COUNT(*) OVER () / MATERIALIZED CTE）实测更慢且 limit=0、offset 越界
+            # 时拿不到 total；缓存/近似计数违反精确性红线。真正的杠杆是第 3 源
+            # （customer_session_events 全表扫只留 1/2000 行）的 partial index，需要
+            # 新迁移（迁移链同步成本见该文档 §3.1），触发线见 §4。
             total_row = conn.execute(
                 f"""
                 SELECT COUNT(*) FROM ({_UNION_SQL}) AS ev(

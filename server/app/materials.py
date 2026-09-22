@@ -48,6 +48,7 @@ from app.media_tools import (
     resolve_media_binary,
 )
 from app.permissions import require_asset_access, require_not_auditor, write_audit
+from app.sql_pagination import PAGE_CLAUSE
 from app.storage import (
     StorageAdapter,
     StorageBackendUnavailable,
@@ -739,7 +740,7 @@ def _read_rows(
             parameters.extend([source_type, source_id])
     pagination = ""
     if limit is not None:
-        pagination = "LIMIT %s OFFSET %s"
+        pagination = PAGE_CLAUSE
         parameters.extend([limit, offset])
     return conn.execute(
         _candidate_cte()

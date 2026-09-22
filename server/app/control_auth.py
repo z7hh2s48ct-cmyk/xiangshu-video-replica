@@ -81,8 +81,9 @@ def get_control_route_user(
     customer production the very same operational routes must instead use the
     per-operator ``admin_session`` cookie established by the ASX1 exchange.
     That preserves CSRF and auditor read-only enforcement for every legacy
-    account, billing and export endpoint without ever reviving the retired
-    shared control identity.
+    account and billing endpoint without ever reviving the retired shared
+    control identity.  Bulk exports do not ride this read-level adapter: they
+    take :func:`get_control_writer` instead (see its docstring).
     """
     if not _is_customer_production():
         return get_control_user(conn, proxy_token)
@@ -95,6 +96,46 @@ def get_control_route_user(
     admin_actor = get_admin_actor(request)
     if request.method.upper() in _WRITE_METHODS:
         get_admin_writer(admin_actor)
+    return CurrentUser(
+        id=admin_actor.user_id,
+        username=admin_actor.username,
+        display_name=admin_actor.display_name,
+        role=cast(Role, admin_actor.role),
+    )
+
+
+def get_control_writer(
+    request: Request,
+    conn: Database,
+    proxy_token: Annotated[str | None, Header(alias="X-Control-Proxy-Token")] = None,
+) -> CurrentUser:
+    """Resolve the control-plane actor for one bulk export — write-level role.
+
+    A CSV export is a **data-egress action, not a view**: one request pulls the
+    entire (filtered) ledger off the platform in bulk, and the auditor's
+    read-only views of those very same rows are untouched by gating it here —
+    what the auditor loses is only the one-shot full dump.  The policy is
+    therefore uniform with ``customers.csv`` (``AdminWriter``): the role that
+    may mutate control data is the role that may extract it in bulk.  The
+    reverse — leaving exports on the read path — would newly hand auditors a
+    bulk form of customer PII/ledger data, so it is the strictly more exposing
+    choice.
+
+    Note the gate is the *route's* intent, not its HTTP verb: these endpoints
+    are GET, so the read-level :func:`get_control_route_user` would let an
+    auditor through on the customer-production lane purely because of the
+    method (the internal lane already requires an active ``admin`` actor, see
+    :func:`get_control_user`).
+    """
+    if not _is_customer_production():
+        # Internal P0 keeps the proxy-token identity; get_control_user already
+        # refuses any actor whose role is not ``admin``.
+        return get_control_user(conn, proxy_token)
+
+    from app.admin_auth_routes import get_admin_actor, get_admin_writer
+
+    admin_actor = get_admin_actor(request)
+    get_admin_writer(admin_actor)
     return CurrentUser(
         id=admin_actor.user_id,
         username=admin_actor.username,
@@ -118,3 +159,5 @@ def _valid_sha256_digest(value: str) -> bool:
 
 
 ControlUser = Annotated[CurrentUser, Depends(get_control_route_user)]
+# Bulk exports (CSV dumps) — write-level authority on the read path.
+ControlWriter = Annotated[CurrentUser, Depends(get_control_writer)]

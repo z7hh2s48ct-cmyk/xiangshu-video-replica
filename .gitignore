@@ -82,3 +82,7 @@ e2e/customer/run/
 
 # Playwright MCP 受控浏览器会话产物（截图/快照日志）
 .playwright-mcp/
+
+# 本地 PR 创建辅助脚本（各 worktree 自用，不入库；凭据只走环境变量）
+/create-*-pr.py
+/create-admin-prs.py

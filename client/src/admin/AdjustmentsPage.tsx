@@ -27,12 +27,15 @@ import {
  * This page is typically accessed from the customer detail view; the userId
  * prop is passed by the parent component.
  */
+// 页大小是常量，不是状态：原写法把它放进 useState 却从不改它，等于把常量
+// 伪装成状态（2026-09-12 评审 P3 的「伪状态反模式」）。
+const PAGE_SIZE = 20;
+
 export function AdjustmentsPage({ userId }: { userId?: string }) {
   const [adjustments, setAdjustments] = useState<AdjustmentListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [offset, setOffset] = useState(0);
-  const [pageSize] = useState(20);
   const [total, setTotal] = useState(0);
   const [actorUsername, setActorUsername] = useState("");
   const [targetUsername, setTargetUsername] = useState("");
@@ -43,12 +46,12 @@ export function AdjustmentsPage({ userId }: { userId?: string }) {
       setLoading(true);
       setError("");
       const response = userId
-        ? await listAdminAdjustments(userId, { limit: pageSize, offset })
+        ? await listAdminAdjustments(userId, { limit: PAGE_SIZE, offset })
         : await listAllAdminAdjustments({
             actorUsername: actorUsername || undefined,
             targetUsername: targetUsername || undefined,
             sourceDocumentType: sourceType || undefined,
-            limit: pageSize,
+            limit: PAGE_SIZE,
             offset,
           });
       setAdjustments(response.items);
@@ -62,7 +65,7 @@ export function AdjustmentsPage({ userId }: { userId?: string }) {
     } finally {
       setLoading(false);
     }
-  }, [actorUsername, offset, pageSize, sourceType, targetUsername, userId]);
+  }, [actorUsername, offset, sourceType, targetUsername, userId]);
 
   useEffect(() => {
     loadAdjustments();
@@ -189,7 +192,7 @@ export function AdjustmentsPage({ userId }: { userId?: string }) {
           </DataTable>
 
           <Pagination
-            limit={pageSize}
+            limit={PAGE_SIZE}
             offset={offset}
             total={total}
             onPageChange={setOffset}

@@ -32,6 +32,7 @@ from app.internal_billing import finalize_oral_billing, reserve_oral_billing
 from app.media_routes import get_media_storage, storage_for_asset
 from app.media_tools import inspect_media_bytes
 from app.permissions import require_asset_access, require_not_auditor, write_audit
+from app.sql_pagination import PAGE_CLAUSE, page_bounds
 from app.storage import StorageAdapter
 
 logger = logging.getLogger(__name__)
@@ -1559,13 +1560,13 @@ def list_oral_tasks(
         (actor.id,),
     ).fetchone()
     rows = conn.execute(
-        """
+        f"""
         SELECT * FROM oral_tasks
         WHERE owner_user_id = %s
         ORDER BY created_at DESC
-        LIMIT %s OFFSET %s
+        {PAGE_CLAUSE}
         """,
-        (actor.id, max(1, min(100, limit)), max(0, offset)),
+        (actor.id, *page_bounds(limit, offset, max_limit=100, min_limit=1)),
     ).fetchall()
     return [dict(row) for row in rows], int(total_row["total"] if total_row else 0)
 

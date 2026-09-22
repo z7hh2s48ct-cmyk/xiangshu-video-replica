@@ -55,6 +55,7 @@ of falling back to legacy control identity (the T12/T18 precedent).
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from collections.abc import Callable
 from typing import Literal, Never, cast
@@ -94,8 +95,14 @@ from app.security_rate_limit import (
     rate_limit_window_seconds,
 )
 from app.settings import apply_customer_unit_price
+from app.sql_pagination import PAGE_CLAUSE, page_bounds
 
 router = APIRouter(prefix="/api/control", tags=["admin-customers"])
+
+# 本模块自己的 logger。2026-09-12 评审 P3 记载的「跨路由借 logger」曾在这里
+# 函数体内 `from app.admin_activation_routes import logger` —— 借来的 logger
+# 打的是别模块的名字，日志来源会被误标，也平白多一条模块依赖。
+logger = logging.getLogger(__name__)
 
 
 def _sqlite_lane() -> bool:
@@ -711,8 +718,6 @@ def create_admin_adjustment(
         )
 
         # Log (no sensitive data in logs)
-        from app.admin_activation_routes import logger
-
         logger.info(
             "admin adjustment created: adjustment=%s order=%s user=%s "
             "credits=%d direction=%s actor=%s request=%s",
@@ -778,8 +783,7 @@ def list_admin_adjustments(
     sort: Literal["asc", "desc"] = "asc",
 ) -> dict[str, object]:
     """List all adjustments for a target user (audit trail for operators and auditors)."""
-    bounded_limit = max(0, min(limit, MAX_LIST_LIMIT))
-    bounded_offset = max(0, offset)
+    bounded_limit, bounded_offset = page_bounds(limit, offset, max_limit=MAX_LIST_LIMIT)
     order_by = "aa.created_at DESC, aa.id DESC" if sort == "desc" else "aa.created_at, aa.id"
 
     try:
@@ -795,7 +799,7 @@ def list_admin_adjustments(
                 {_ADJUSTMENT_ORDER_AND_LEDGER_JOINS}
                 WHERE aa.target_user_id = %s
                 ORDER BY {order_by}
-                LIMIT %s OFFSET %s
+                {PAGE_CLAUSE}
                 """,  # noqa: S608 -- direction is selected from the Literal above.
                 (user_id, bounded_limit, bounded_offset),
             ).fetchall()
@@ -847,8 +851,7 @@ def list_all_admin_adjustments(
 ) -> dict[str, object]:
     """List adjustment records across customers with deterministic ledger balances."""
     del actor
-    bounded_limit = max(0, min(limit, MAX_LIST_LIMIT))
-    bounded_offset = max(0, offset)
+    bounded_limit, bounded_offset = page_bounds(limit, offset, max_limit=MAX_LIST_LIMIT)
     clauses: list[str] = []
     params: list[object] = []
     if actor_username.strip():
@@ -895,7 +898,7 @@ def list_all_admin_adjustments(
                            prev.ledger_sequence <= tx.ledger_sequence)
                 ) ledger_balance ON TRUE
                 {where}
-                ORDER BY aa.created_at DESC, aa.id DESC LIMIT %s OFFSET %s
+                ORDER BY aa.created_at DESC, aa.id DESC {PAGE_CLAUSE}
                 """,  # noqa: S608
                 (*params, bounded_limit, bounded_offset),
             ).fetchall()
@@ -982,8 +985,9 @@ def list_customers(
     retired for the management-wide ``limit/offset`` + ``{items,total,…}``
     envelope, so every admin list paginates the same way.
     """
-    bounded_limit = max(1, min(limit, MAX_CUSTOMER_PAGE_SIZE))
-    bounded_offset = max(0, offset)
+    bounded_limit, bounded_offset = page_bounds(
+        limit, offset, max_limit=MAX_CUSTOMER_PAGE_SIZE, min_limit=1
+    )
 
     clauses: list[str] = [
         "(aca.code_id IS NOT NULL OR (u.role = 'customer' AND "
@@ -1071,7 +1075,7 @@ def list_customers(
                 ") spend ON spend.user_id = aca.user_id "
                 f"{where} "
                 "ORDER BY aca.activated_at, aca.id "
-                "LIMIT %s OFFSET %s",
+                f"{PAGE_CLAUSE}",
                 (*params, bounded_limit, bounded_offset),
             ).fetchall()
             total_row = conn.execute(

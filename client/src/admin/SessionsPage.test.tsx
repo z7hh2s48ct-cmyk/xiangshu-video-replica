@@ -68,6 +68,31 @@ describe("SessionsPage", () => {
     );
   });
 
+  it("renders every platform through the shared vocabulary", async () => {
+    // 本页曾私刻一份平台字典，且只列了 windows/macos/linux —— ios/android 落到
+    // `?? platform` 兜底，运营看到的是英文码 "ios"/"android"（2026-09-12 评审
+    // P3 记载的 platformLabel 与词典分叉）。现在统一走 ui/vocabulary。
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      jsonResponse({
+        items: [
+          { ...sessionItem, session_id: "sess-ios", platform: "ios" },
+          { ...sessionItem, session_id: "sess-android", platform: "android" },
+        ],
+        total: 2,
+        limit: 50,
+        offset: 0,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    render(<SessionsPage />);
+
+    expect(await screen.findByText("iOS")).toBeInTheDocument();
+    expect(screen.getByText("Android")).toBeInTheDocument();
+    // 兜底路径不再被走到：裸平台码不该出现在界面上。
+    expect(screen.queryByText("ios")).toBeNull();
+    expect(screen.queryByText("android")).toBeNull();
+  });
+
   it("loads the requested customer automatically", async () => {
     const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
       jsonResponse(sessionList()),

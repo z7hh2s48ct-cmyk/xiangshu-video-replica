@@ -21,6 +21,7 @@ from app.admin_write_contract import AdminWriteContract, transaction_now_iso, wr
 from app.api_errors import http_error as _http
 from app.customer_session_service import revoke_session
 from app.db_pg import MissingDatabaseConfigError, pg_transaction
+from app.sql_pagination import PAGE_CLAUSE, page_bounds
 
 router = APIRouter(prefix="/api/control", tags=["admin-sessions"])
 logger = logging.getLogger(__name__)
@@ -93,13 +94,12 @@ def list_live_sessions(
     across all users instead of one — the console "今日概览/会话" entry point
     so operators no longer need to know a customer id upfront.
     """
-    bounded_limit = max(0, min(limit, MAX_LIST_LIMIT))
-    bounded_offset = max(0, offset)
+    bounded_limit, bounded_offset = page_bounds(limit, offset, max_limit=MAX_LIST_LIMIT)
 
     try:
         with pg_transaction() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT css.session_id, css.user_id, u.username,
                        css.device_id, css.session_epoch,
                        css.lease_until, css.last_heartbeat_at,
@@ -111,7 +111,7 @@ def list_live_sessions(
                 WHERE cd.status = 'BOUND'
                   AND css.lease_until::timestamptz > clock_timestamp()
                 ORDER BY css.created_at DESC, css.session_id
-                LIMIT %s OFFSET %s
+                {PAGE_CLAUSE}
                 """,
                 (bounded_limit, bounded_offset),
             ).fetchall()
@@ -181,8 +181,7 @@ def list_customer_sessions(
     pattern) rather than deleting it, so a row's existence alone is not a
     live session.
     """
-    bounded_limit = max(0, min(limit, MAX_LIST_LIMIT))
-    bounded_offset = max(0, offset)
+    bounded_limit, bounded_offset = page_bounds(limit, offset, max_limit=MAX_LIST_LIMIT)
 
     clauses: list[str] = [
         "css.user_id = %s",
@@ -217,7 +216,7 @@ def list_customer_sessions(
                 JOIN users u ON u.id = css.user_id
                 {where}
                 ORDER BY css.created_at DESC, css.session_id
-                LIMIT %s OFFSET %s
+                {PAGE_CLAUSE}
                 """,
                 (*params, bounded_limit, bounded_offset),
             ).fetchall()

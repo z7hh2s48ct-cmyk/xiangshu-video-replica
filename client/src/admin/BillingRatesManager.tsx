@@ -2,7 +2,48 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import { adminRead, adminWrite } from "../api.admin";
 import { costInCredits, creditsToCost } from "./billingAmounts";
 import { type BillingService, billingUnit } from "./billingTypes";
+import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { formatDateTime } from "./ui/vocabulary";
+
+/**
+ * 一次已通过校验、等待运营确认的费率写入。
+ *
+ * 2026-09-12 管理端评审 P2：保存按钮写着"确认并保存"，但 save() 直接落库，
+ * 页面对运营承诺的二次确认并不存在。校验仍在提交时立刻完成（格式错误当场报错、
+ * 不必点两次），确认只覆盖"校验通过 → 真正写库"这一步。
+ */
+type PendingTariffSave = {
+  payload: {
+    service: string;
+    expected_version: number;
+    expected_pricing_version: number;
+    tariff: {
+      enabled: boolean;
+      unit_credits: string | null;
+      unit_cost_fen: string | null;
+      unit_rounding: "ceil" | "exact";
+    };
+  };
+  reason: string;
+  costRounded: boolean;
+  summary: string;
+};
+
+function describeTariff(
+  service: BillingService,
+  next: {
+    unit_credits: string | null;
+    unit_cost_fen: string | null;
+    enabled: boolean;
+  },
+  currentCostCredits: string,
+): string {
+  const before = service.tariff.unit_credits ?? "未配置";
+  const after = next.unit_credits ?? "未配置";
+  const beforeCost = currentCostCredits || "未配置";
+  const afterCost = next.unit_cost_fen ?? "未配置";
+  return `售价（积分）：${before} → ${after}；成本（积分）：${beforeCost} → ${afterCost}；收费状态：${next.enabled ? "启用" : "停用"}。`;
+}
 
 type Catalog = {
   services: BillingService[];
@@ -58,6 +99,9 @@ export function BillingRatesManager({
   const [history, setHistory] = useState<TariffHistory>();
   const [historyBusy, setHistoryBusy] = useState(false);
   const [historyError, setHistoryError] = useState("");
+  const [pendingSave, setPendingSave] = useState<PendingTariffSave>();
+  // 写入失败留在确认框里（运营就地重试），与页面级的读取错误分开。
+  const [saveError, setSaveError] = useState("");
   const saving = useRef(false);
   const historyRequest = useRef("");
   const costInput = useRef<HTMLInputElement>(null);
@@ -132,7 +176,8 @@ export function BillingRatesManager({
         if (historyRequest.current === token) setHistoryBusy(false);
       });
   }
-  async function save(event: React.FormEvent) {
+  // 校验留在提交时立即完成：格式错误当场报错，不必先弹框再让运营发现填错。
+  function save(event: React.FormEvent) {
     event.preventDefault();
     if (!selected || !catalog || readOnly || saving.current) return;
     if (!catalog.pricing) {
@@ -142,6 +187,7 @@ export function BillingRatesManager({
     let storedPrice: string | null;
     let storedCost: string | null;
     let costRounded = false;
+    let originalCredits = "";
     try {
       if (selected.customer_charge_allowed) {
         if (price && !/^\d+(\.\d{1,6})?$/.test(price))
@@ -151,11 +197,11 @@ export function BillingRatesManager({
         // 平台科目不向客户收费：售价与启用状态在此收敛，服务端守卫会再次拒绝。
         storedPrice = null;
       }
-      const original = costInCredits(
+      originalCredits = costInCredits(
         selected.tariff.unit_cost_fen,
         catalog.pricing.points_per_yuan,
       );
-      if (cost === original) storedCost = selected.tariff.unit_cost_fen;
+      if (cost === originalCredits) storedCost = selected.tariff.unit_cost_fen;
       else if (!cost) storedCost = null;
       else {
         const converted = creditsToCost(
@@ -182,15 +228,37 @@ export function BillingRatesManager({
         unit_rounding: rounding,
       },
     };
-    const reason = selected.customer_charge_allowed
-      ? `配置${selected.name}成本与售价`
-      : `配置${selected.name}成本`;
+    setError("");
+    setSaveError("");
+    // 校验通过 ≠ 已保存：交给确认框，运营看过改了什么再落库。
+    setPendingSave({
+      payload,
+      reason: selected.customer_charge_allowed
+        ? `配置${selected.name}成本与售价`
+        : `配置${selected.name}成本`,
+      costRounded,
+      summary: describeTariff(
+        selected,
+        {
+          unit_credits: storedPrice,
+          unit_cost_fen: storedCost,
+          enabled: payload.tariff.enabled,
+        },
+        originalCredits,
+      ),
+    });
+  }
+
+  async function commitSave() {
+    if (!pendingSave || saving.current) return;
+    const { payload, reason, costRounded } = pendingSave;
     const fingerprint = JSON.stringify([payload, reason]);
+    // 同一次提交的重试沿用同一个幂等键；改了内容才换新键。
     if (retry.current?.fingerprint !== fingerprint)
       retry.current = { fingerprint, key: crypto.randomUUID() };
     saving.current = true;
     setBusy(true);
-    setError("");
+    setSaveError("");
     try {
       const result = await adminWrite<Catalog>(
         "/api/control/billing/tariff",
@@ -202,6 +270,7 @@ export function BillingRatesManager({
       );
       setCatalog(result);
       setSelected(undefined);
+      setPendingSave(undefined);
       setNotice(
         costRounded
           ? "已保存，成本已按支持的精度四舍五入。"
@@ -209,7 +278,8 @@ export function BillingRatesManager({
       );
       retry.current = undefined;
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "保存失败");
+      // 失败留在确认框内，运营可就地重试（幂等键复用）。
+      setSaveError(cause instanceof Error ? cause.message : "保存失败");
     } finally {
       saving.current = false;
       setBusy(false);
@@ -379,7 +449,7 @@ export function BillingRatesManager({
             <td colSpan={8}>
               <div className="billing-rates-editor__actions">
                 <button type="submit" disabled={busy || readOnly}>
-                  {busy ? "正在保存…" : "确认并保存"}
+                  {busy ? "保存中…" : "保存"}
                 </button>
                 <button
                   type="button"
@@ -612,7 +682,7 @@ export function BillingRatesManager({
                                   type="submit"
                                   disabled={busy || readOnly}
                                 >
-                                  {busy ? "正在保存…" : "确认并保存"}
+                                  {busy ? "保存中…" : "保存"}
                                 </button>
                                 <button
                                   type="button"
@@ -662,6 +732,34 @@ export function BillingRatesManager({
           )}
         </form>
       )}
+
+      {/* 2026-09-12 评审 P2：保存按钮承诺了"二次确认"却直接落库，这里补上。
+          standard 级——该写入的审计原因由页面按科目名自动生成，不额外要求运营
+          手填（那会改变既有审计内容）；框内先把"改了什么"和"将记录什么原因"
+          摊开，避免盲确认。 */}
+      <ConfirmDialog
+        busy={busy}
+        confirmLabel="确认并保存"
+        description={
+          pendingSave ? (
+            <>
+              {pendingSave.summary}
+              <br />
+              审计原因将记录为「{pendingSave.reason}」。
+            </>
+          ) : undefined
+        }
+        error={saveError}
+        level="standard"
+        open={pendingSave !== undefined}
+        title={selected ? `确认调整「${selected.name}」费率` : "确认调整费率"}
+        onClose={() => {
+          if (busy) return;
+          setPendingSave(undefined);
+          setSaveError("");
+        }}
+        onConfirm={() => void commitSave()}
+      />
     </section>
   );
 }

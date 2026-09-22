@@ -11,6 +11,7 @@ from app.auth import CurrentUser
 from app.db_portable import BusinessConnection
 from app.materials import list_materials
 from app.simple_character import list_simple_library_page
+from app.sql_pagination import PAGE_CLAUSE
 
 SearchKind = Literal["video", "script", "person", "material"]
 
@@ -116,7 +117,7 @@ def search_studio(
         total = int(row["total"])
         rows = conn.execute(
             f"SELECT {columns} FROM {source} WHERE {predicate} "
-            "ORDER BY content.updated_at DESC, id DESC, platform DESC LIMIT %s OFFSET %s",
+            f"ORDER BY content.updated_at DESC, id DESC, platform DESC {PAGE_CLAUSE}",
             (*parameters, page_size, (page - 1) * page_size),
         ).fetchall()
         items = [

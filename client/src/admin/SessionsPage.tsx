@@ -19,7 +19,11 @@ import "./admin-sessions.css";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
-import { ADJUSTMENT_SOURCE_LABELS, labelFrom } from "./ui/vocabulary";
+import {
+  ADJUSTMENT_SOURCE_LABELS,
+  labelFrom,
+  platformLabel,
+} from "./ui/vocabulary";
 
 const PAGE_SIZE = 50;
 const SOURCE_DOCUMENT_OPTIONS = [
@@ -30,6 +34,11 @@ const SOURCE_DOCUMENT_OPTIONS = [
   "LEDGER_CORRECTION",
 ] as const;
 
+// 平台名一律走共享词典（ui/vocabulary.ts 的 PLATFORM_LABELS）。这里曾私刻一份
+// 且只列了 windows/macos/linux，ios/android 落到 `?? platform` 兜底 —— 运营
+// 看到的是英文码 "ios"/"android" 而非 "iOS"/"Android"（2026-09-12 评审 P3
+// 记载的 platformLabel 与词典分叉）。合并 origin/main 的 B1（#216）时该副本
+// 一并删除：共享词典是它的严格超集，留着会与顶部 import 撞名。
 /**
  * B1（SOP §10 第 2 步）：这几个来源单类型可以做**反向调账**（负数）。
  *
@@ -37,15 +46,6 @@ const SOURCE_DOCUMENT_OPTIONS = [
  * 输入框要不要挡住负号，以及给运营看什么提示。其余来源类型维持正向（>= 1）。
  */
 const REVERSAL_SOURCE_TYPES = new Set(["REFUND_APPROVAL", "LEDGER_CORRECTION"]);
-
-function platformLabel(platform: string) {
-  const labels: Record<string, string> = {
-    windows: "Windows",
-    macos: "macOS",
-    linux: "Linux",
-  };
-  return labels[platform.toLowerCase()] ?? platform;
-}
 
 function secondsBetween(later: string | number, earlier: string | number) {
   return Math.max(
