@@ -337,6 +337,11 @@ export function Media({
         ) : (
           <span>完整口播音频 · {asset.duration || "待读取时长"}</span>
         )}
+        {asset.url && (
+          <span className="studio-media-duration">
+            {asset.duration || "音频"}
+          </span>
+        )}
       </div>
     );
   if (
@@ -363,11 +368,12 @@ export function Media({
           onError?.(asset.kind === "image" ? asset.url : asset.poster)
         }
         overlay={
-          // 判据是「有没有封面」而不是「有没有播放地址」：视频有地址却没有封面
-          // 时，浏览器靠 preload=metadata 碰运气出首帧，出不来就是一整块深色
-          // 空框、不着一字。服务端已改成按需派生首帧，这里兜住抽帧确实失败的
-          // 那些，让瓦片至少有可见状态。
-          asset.kind === "video" && !asset.poster ? (
+          // 时长角标常显：同款多视频在瓦片里主要靠时长区分，有封面的瓦片同样
+          // 需要（MATERIAL-UX-02；此前时长只在无封面兜底时出现）。
+          // 「视频预览图」兜底文案仍只在无封面时出现——封面已可见时不再叠加
+          // 占位标记（ui.test.tsx「封面已就位时不叠加占位标记」）。发布草稿卡
+          // 与封面选项场景由 CSS 兜底隐藏。
+          asset.kind === "video" && (asset.duration || !asset.poster) ? (
             <span className="studio-media-duration">
               <Icon name="play" size={14} />
               {asset.duration || "视频预览图"}

@@ -171,7 +171,7 @@ export function VideoPreview({
 
   return (
     <div
-      className={`video-preview ${className}`}
+      className={`video-preview ${fitContainer ? "video-preview--fit " : ""}${className}`}
       style={
         frameRatio && !fitContainer
           ? {

@@ -358,4 +358,67 @@ describe("VideoPreview", () => {
     fireEvent.seeked(video);
     expect(drawImage).toHaveBeenCalledTimes(2);
   });
+
+  it("marks container-fitted previews so host-sized tiles keep the whole frame", () => {
+    // 素材瓦片的盒子由宿主网格决定（显式行高），页面级 cover 规则会在视窗里
+    // 裁掉竖屏素材的中段。fit 类让宿主场景的前景回到 contain（完整显示）。
+    const { container } = render(
+      <VideoPreview alt="素材预览" fitContainer poster="/thumb.jpg" />,
+    );
+    const root = container.firstElementChild;
+    expect(root).toHaveClass("video-preview", "video-preview--fit");
+    expect(root).not.toHaveAttribute("style");
+  });
+
+  it("leaves fixed-ratio previews outside the fit mode", () => {
+    const { container } = render(
+      <VideoPreview alt="固定比例" poster="/thumb.jpg" />,
+    );
+    expect(container.firstElementChild).not.toHaveClass("video-preview--fit");
+  });
+
+  it("keeps the duration badge on video tiles that already carry a poster", () => {
+    const { container } = render(
+      <Media
+        alt="带封面的视频"
+        fitContainer
+        asset={{
+          id: "video-with-poster",
+          name: "同款视频",
+          kind: "video",
+          url: "/clip.mp4",
+          poster: "/thumb.jpg",
+          duration: "00:12",
+          group: "项目",
+          source: "上传",
+          saved: true,
+        }}
+      />,
+    );
+    expect(
+      container.querySelector(".studio-media-duration")?.textContent,
+    ).toContain("00:12");
+  });
+
+  it("shows the duration badge on playable audio tiles", () => {
+    const { container } = render(
+      <Media
+        alt="口播音频"
+        fitContainer
+        asset={{
+          id: "audio-1",
+          name: "口播",
+          kind: "audio",
+          url: "/oral.mp3",
+          duration: "00:24",
+          group: "口播成片",
+          source: "素材库",
+          saved: true,
+        }}
+      />,
+    );
+    expect(
+      container.querySelector(".studio-media-duration")?.textContent,
+    ).toContain("00:24");
+  });
 });

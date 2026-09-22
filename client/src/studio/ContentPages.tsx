@@ -2606,18 +2606,26 @@ function MaterialsPageContent() {
           <div className="content-asset-grid">
             {currentAssets.map((asset) => {
               const authId = asset.previewAssetId ?? asset.assetId ?? "";
-              // MATERIAL-THUMBS-B：带封面的视频瓦片用 img 展示缩略图（懒加载），
-              // 不再让浏览器经服务端代理流式拉原视频；点开详情仍加载可播放视频。
+              // MATERIAL-THUMBS-B / MATERIAL-UX-02：带封面的视频瓦片用 img 展示
+              // 缩略图（懒加载），不再让浏览器经服务端代理流式拉原视频；图片瓦片
+              // 同样走派生缩略图（单张手机照片可达 10MB）；点开详情仍用原图/原视频。
               const thumbnailUrl =
-                asset.kind === "video" ? thumbnailUrls[authId] : undefined;
+                asset.kind === "video" || asset.kind === "image"
+                  ? thumbnailUrls[authId]
+                  : undefined;
               return (
                 <AssetCard
                   key={asset.id}
                   asset={{
                     ...asset,
-                    url: thumbnailUrl
-                      ? undefined
-                      : (asset.url ?? previewStates[asset.id]?.url),
+                    url:
+                      asset.kind === "image"
+                        ? (thumbnailUrl ??
+                          asset.url ??
+                          previewStates[asset.id]?.url)
+                        : thumbnailUrl
+                          ? undefined
+                          : (asset.url ?? previewStates[asset.id]?.url),
                     poster: thumbnailUrl ?? asset.poster,
                   }}
                   selected={selected?.id === asset.id}

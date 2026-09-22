@@ -1031,7 +1031,8 @@ class DownloadUrlItem(BaseModel):
     size_bytes: int | None = None
     content_type: str | None = None
     error_code: str | None = None
-    # MATERIAL-THUMBS-B：带缩略图键的视频资产额外签出的 7 天缩略图 URL。
+    # MATERIAL-THUMBS-B / MATERIAL-UX-02：带缩略图键的视频/图片资产额外签出的
+    # 7 天缩略图 URL。
     thumbnail_url: str | None = None
 
 
@@ -1100,12 +1101,12 @@ def _signed_thumbnail_url(
     row: sqlite3.Row,
     asset_id: str,
 ) -> str | None:
-    """MATERIAL-THUMBS-B：为带缩略图键的视频签出 7 天缩略图对象 URL。
+    """MATERIAL-THUMBS-B / MATERIAL-UX-02：为带缩略图键的视频/图片签出 7 天缩略图对象 URL。
 
     属主校验已在 ``_grant_download_for_asset`` 完成；此处只读元数据派生键，
-    签名走与原视频完全相同的通道。无键/非视频/存储异常一律 None。
+    签名走与原对象完全相同的通道。音频与其他类型一律 None。
     """
-    if row["content_type"] is None or not str(row["content_type"]).startswith("video/"):
+    if row["content_type"] is None or not str(row["content_type"]).startswith(("video/", "image/")):
         return None
     try:
         metadata = json.loads(str(row["metadata_json"] or "{}"))
@@ -1126,8 +1127,10 @@ def _signed_thumbnail_url(
             # 必然全量重拉）。字节搬运交给对象存储，应用只负责签名。
             #
             # 代价：这条地址不受 session_epoch 即时吊销约束，在
-            # THUMBNAIL_URL_EXPIRES_IN 内持续有效。缩略图是 480px 首帧派生物，
-            # 按低敏感度接受该窗口；原视频与人物图仍走可吊销的代理通道。
+            # THUMBNAIL_URL_EXPIRES_IN 内持续有效。缩略图是 480px 派生物
+            # （视频首帧或图片单帧缩放），按低敏感度接受该窗口；原视频与人物
+            # 原图仍走可吊销的代理通道（MATERIAL-UX-02：图片缩略图与视频
+            # 缩略图同属派生小图，一并直连，原图不变）。
             return storage.create_download_intent(
                 thumbnail_key, expires_in=THUMBNAIL_URL_EXPIRES_IN, can_read=True
             ).url

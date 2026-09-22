@@ -338,9 +338,9 @@
 .content-asset {
   align-content: start;
   display: grid;
-  grid-template-rows: 140px 24px 18px 22px;
+  grid-template-rows: 160px 24px 18px 22px;
   gap: 8px;
-  min-height: 252px;
+  min-height: 272px;
   min-width: 0;
   overflow: hidden;
   position: relative;
@@ -361,18 +361,19 @@
   outline-offset: 2px;
 }
 .content-asset img {
-  height: 140px;
+  height: 160px;
   border-radius: 7px;
 }
 .content-asset .studio-media {
   align-items: center;
+  aspect-ratio: auto;
   background: #0d0e0e;
   border-radius: 7px;
   display: flex;
-  height: 140px;
+  height: 160px;
   justify-content: center;
   margin: 0;
-  max-height: 140px;
+  max-height: 160px;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
@@ -1599,12 +1600,12 @@ span.viral-card-cover-empty.content-player-viral-poster {
 
 /* Material cards are fixed-height thumbnails. */
 .content-asset--video {
-  grid-template-rows: 140px 24px 18px 22px;
+  grid-template-rows: 160px 24px 18px 22px;
 }
 .content-asset--video .studio-media.video-preview {
   width: 100%;
-  height: 140px;
-  max-height: 140px;
+  height: 160px;
+  max-height: 160px;
   aspect-ratio: auto;
   margin: 0;
 }

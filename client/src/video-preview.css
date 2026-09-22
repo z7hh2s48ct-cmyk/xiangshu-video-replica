@@ -33,6 +33,14 @@
   background: transparent;
 }
 
+/* Fit mode：盒子尺寸由宿主决定（素材网格用显式行高定盒），这里只把被页面级
+   cover 规则裁成封面的前景拉回 contain——素材以竖屏为主，cover 在横向视窗里
+   只剩中段。比例由宿主规则决定，本类不声明 aspect-ratio，避免与首帧选择器
+   等场景各自的 9:16 宿主规则争优先级。 */
+.video-preview--fit.video-preview.video-preview > .video-preview__foreground {
+  object-fit: contain;
+}
+
 .video-preview.video-preview > .video-preview__backdrop {
   z-index: 0;
   object-fit: cover;

@@ -27,7 +27,11 @@ from app.content_store import (
     retain_existing_content_object,
 )
 from app.db_portable import BusinessConnection
-from app.material_thumbs import extract_thumbnail_jpeg, store_video_thumbnail
+from app.material_thumbs import (
+    extract_image_thumbnail_jpeg,
+    extract_thumbnail_jpeg,
+    store_video_thumbnail,
+)
 from app.media import (
     MAX_UPLOAD_BYTES,
     UPLOAD_INTENT_EXPIRES_IN,
@@ -1104,6 +1108,12 @@ def probe_material_upload(
                 503, "MATERIAL_VIDEO_PROBE_UNAVAILABLE", "视频校验服务暂不可用，请稍后重试。"
             ) from exc
         thumbnail_jpeg = extract_thumbnail_jpeg(content)
+    if prepared.media_type == "image":
+        # MATERIAL-UX-02：图片素材复用同一抽帧派生（ffmpeg 把单帧图缩成
+        # ≤960×480 的 JPEG，超宽合成图也有宽度上界）；网格瓦片因此不再直拉
+        # 原图（手机照片可达 10MB/张）。失败返回 None 只损失缩略图，上传结果
+        # 不受影响。
+        thumbnail_jpeg = extract_image_thumbnail_jpeg(content)
     if prepared.media_type == "audio" and prepared.audio_purpose is not None:
         if prepared.audio_purpose == "voice_clone":
             try:
@@ -1166,8 +1176,9 @@ def attach_video_thumbnail(
     thumbnail_jpeg: bytes,
     storage: StorageAdapter,
 ) -> None:
-    """MATERIAL-THUMBS-B：持久化完成后把首帧缩略图落到最终对象旁并记键.
+    """MATERIAL-THUMBS-B / MATERIAL-UX-02：持久化完成后把缩略图落到最终对象旁并记键.
 
+    视频与图片素材共用本链路（ffmpeg 对单帧图片同样能产出 JPEG 缩略图）。
     必须在写事务之外调用（存储 PUT 是外部 I/O）；dedup 可能改写最终对象键，
     因此读取持久化后的 storage_uri 派生缩略图键。任何失败只损失缩略图。
     """
@@ -1176,10 +1187,14 @@ def attach_video_thumbnail(
     ).fetchone()
     if row is None or row["content_type"] is None:
         return
-    if not str(row["content_type"]).startswith("video/"):
+    content_type = str(row["content_type"])
+    if not content_type.startswith(("video/", "image/")):
         return
     key = store_video_thumbnail(
-        storage, storage_key_from_uri(str(row["storage_uri"])), thumbnail_jpeg
+        storage,
+        storage_key_from_uri(str(row["storage_uri"])),
+        thumbnail_jpeg,
+        is_image=content_type.startswith("image/"),
     )
     if key is None:
         return
