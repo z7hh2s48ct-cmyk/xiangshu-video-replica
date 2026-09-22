@@ -24,6 +24,10 @@ const api = vi.hoisted(() => ({
   getLatestScriptVersion: vi.fn(),
   getLatestScriptRewriteTask: vi.fn(async () => null),
   getLatestProjectFirstFrameSelection: vi.fn(async () => null),
+  cancelAnalysisTask: vi.fn(),
+  startVideoAnalysis: vi.fn(),
+  getAnalysisTask: vi.fn(),
+  waitForAnalysisTask: vi.fn(),
   getAssetDownloadUrl: vi.fn(async (assetId: string) => ({
     url: `https://signed.example/${assetId}.mp4`,
   })),
@@ -137,6 +141,10 @@ beforeEach(() => {
   api.getLatestScriptVersion
     .mockReset()
     .mockResolvedValue({ version: null, stale: false });
+  api.cancelAnalysisTask.mockReset();
+  api.startVideoAnalysis.mockReset();
+  api.getAnalysisTask.mockReset();
+  api.waitForAnalysisTask.mockReset();
 });
 
 describe("复刻页重来入口", () => {
@@ -203,5 +211,100 @@ describe("复刻页重来入口", () => {
 
     await screen.findByRole("button", { name: "更换来源视频" });
     expect(screen.getByRole("button", { name: "开始新的复刻" })).toBeDisabled();
+  });
+
+  it("重来前取消旧的排队中拆解任务，否则它继续计费又看不到结果", async () => {
+    const value = studio();
+    value.state = {
+      ...value.state,
+      draft: {
+        ...value.state.draft,
+        analysisTaskId: "task-old",
+        analysisTaskStatus: "PENDING",
+      },
+    };
+    // S8：挂载即自动接回在途任务，重来是在这份忙碌态下发生的取消式出口。
+    api.getAnalysisTask.mockResolvedValue({
+      id: "task-old",
+      status: "PENDING",
+    });
+    api.waitForAnalysisTask.mockImplementation(() => new Promise(() => {}));
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "开始新的复刻" }),
+    );
+
+    await waitFor(() =>
+      expect(api.cancelAnalysisTask).toHaveBeenCalledWith("task-old"),
+    );
+    expect(value.patchDraft).toHaveBeenCalledWith(
+      expect.objectContaining({
+        analysisTaskId: undefined,
+        analysisTaskStatus: undefined,
+      }),
+    );
+  });
+
+  it("旧任务已是终态时重来不调用取消", async () => {
+    const value = studio();
+    value.state = {
+      ...value.state,
+      draft: {
+        ...value.state.draft,
+        analysisTaskId: "task-done",
+        analysisTaskStatus: "SUCCEEDED",
+      },
+    };
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "开始新的复刻" }),
+    );
+
+    await waitFor(() =>
+      expect(value.discardSavedDraft).toHaveBeenCalledTimes(1),
+    );
+    expect(api.cancelAnalysisTask).not.toHaveBeenCalled();
+  });
+
+  it("取消失败不阻断清空", async () => {
+    const value = studio();
+    value.state = {
+      ...value.state,
+      draft: {
+        ...value.state.draft,
+        analysisTaskId: "task-old",
+        analysisTaskStatus: "RUNNING",
+      },
+    };
+    // S8：挂载即自动接回在途任务，重来是在这份忙碌态下发生的取消式出口。
+    api.getAnalysisTask.mockResolvedValue({
+      id: "task-old",
+      status: "RUNNING",
+    });
+    api.waitForAnalysisTask.mockImplementation(() => new Promise(() => {}));
+    api.cancelAnalysisTask.mockRejectedValue(new Error("网络错误"));
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "开始新的复刻" }),
+    );
+
+    await waitFor(() =>
+      expect(api.cancelAnalysisTask).toHaveBeenCalledWith("task-old"),
+    );
+    await waitFor(() =>
+      expect(value.patchDraft).toHaveBeenCalledWith(
+        expect.objectContaining({
+          projectId: undefined,
+          analysisTaskId: undefined,
+          analysisTaskStatus: undefined,
+        }),
+      ),
+    );
   });
 });

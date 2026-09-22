@@ -15,6 +15,7 @@ import {
   createVideoUploadIntent,
   defaultBatchProvider,
   deleteGenerationBatch,
+  deleteProject,
   deletePublishAccount,
   deleteStudioDraft,
   downloadMaterialAsset,
@@ -962,35 +963,42 @@ export async function uploadWorkbenchSourceVideo(
 }> {
   const base = file.name.replace(/\.(mp4|mov)$/i, "").trim();
   const project = await createProject((base || file.name).slice(0, 120));
-  const intent = await createVideoUploadIntent(project.id, file, purpose);
-  let analysisTaskId: string | undefined;
-  let analysisTaskStatus: string | undefined;
-  let assetId = intent.asset_id;
-  if (intent.upload_required !== false) {
-    await uploadReferenceVideo(intent, file, onProgress, signal);
-    const completed = await completeVideoUpload(intent.asset_id);
-    assetId = completed.asset_id;
-    analysisTaskId = completed.analysis_task_id ?? undefined;
-    analysisTaskStatus = completed.analysis_task_status ?? undefined;
+  try {
+    const intent = await createVideoUploadIntent(project.id, file, purpose);
+    let analysisTaskId: string | undefined;
+    let analysisTaskStatus: string | undefined;
+    let assetId = intent.asset_id;
+    if (intent.upload_required !== false) {
+      await uploadReferenceVideo(intent, file, onProgress, signal);
+      const completed = await completeVideoUpload(intent.asset_id);
+      assetId = completed.asset_id;
+      analysisTaskId = completed.analysis_task_id ?? undefined;
+      analysisTaskStatus = completed.analysis_task_status ?? undefined;
+    }
+    const uploadedProject: Project = {
+      ...project,
+      reference_asset_id: assetId,
+      reference_upload_status: "READY",
+    };
+    // 上传路径不经过 loadProjects，拿不到签名预览地址；缺了它左栏来源视频只能退化成
+    // 纯文字占位。取不到地址与 loadProjects 的降级一致，不阻断已经成功的上传。
+    const url = await signedUrl(assetId, getAssetDownloadUrl).catch(
+      () => undefined,
+    );
+    return {
+      projectId: project.id,
+      assetId,
+      project: uploadedProject,
+      asset: projectAsset(uploadedProject, url),
+      analysisTaskId,
+      analysisTaskStatus,
+    };
+  } catch (cause: unknown) {
+    // 失败上传不留孤儿项目：项目只为这次上传而建，上传没成行就只是项目
+    // 列表里的一个空壳。清理是尽力而为，不掩盖原始错误。
+    await deleteProject(project.id).catch(() => {});
+    throw cause;
   }
-  const uploadedProject: Project = {
-    ...project,
-    reference_asset_id: assetId,
-    reference_upload_status: "READY",
-  };
-  // 上传路径不经过 loadProjects，拿不到签名预览地址；缺了它左栏来源视频只能退化成
-  // 纯文字占位。取不到地址与 loadProjects 的降级一致，不阻断已经成功的上传。
-  const url = await signedUrl(assetId, getAssetDownloadUrl).catch(
-    () => undefined,
-  );
-  return {
-    projectId: project.id,
-    assetId,
-    project: uploadedProject,
-    asset: projectAsset(uploadedProject, url),
-    analysisTaskId,
-    analysisTaskStatus,
-  };
 }
 
 function oralTask(row: OralTaskRecord): StudioTask {

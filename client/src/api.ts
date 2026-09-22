@@ -2412,6 +2412,7 @@ async function pollGenerationReconcileOperation(
   operationId: string,
 ): Promise<GenerationReconcileOperation> {
   const deadline = Date.now() + 10 * 60_000;
+  const nextDelay = createPollBackoff();
   while (Date.now() < deadline) {
     const operation = await getGenerationReconcileOperation(operationId);
     if (operation.status === "SUCCEEDED") {
@@ -2420,7 +2421,7 @@ async function pollGenerationReconcileOperation(
     if (operation.status === "FAILED") {
       throw new Error(operation.error_message || "任务对账失败，请重新提交。");
     }
-    await waitForPoll();
+    await waitForPoll(nextDelay());
   }
   throw new Error("任务仍在后台对账，请稍后返回查看。");
 }
@@ -2991,6 +2992,25 @@ export async function getAnalysisTask(taskId: string): Promise<AnalysisTask> {
   );
 }
 
+/**
+ * 取消排队中 / 运行中的拆解任务并即时释放预留积分（S11 换源场景）。
+ * 已是终态的任务原样返回：已交付的结果不会因晚到的取消被作废。
+ */
+export async function cancelAnalysisTask(
+  taskId: string,
+): Promise<AnalysisTask> {
+  const errorPrefix = "取消视频拆解任务失败";
+  try {
+    return await requestApiJson<AnalysisTask>(
+      `/api/analysis-tasks/${encodeURIComponent(taskId)}/cancel`,
+      errorPrefix,
+      { method: "POST" },
+    );
+  } catch (error) {
+    throw analysisRequestError(error, errorPrefix);
+  }
+}
+
 export async function waitForAnalysisTask(
   taskId: string,
   onUpdate?: (task: AnalysisTask) => void,
@@ -3020,6 +3040,7 @@ export async function waitForAnalysisTask(
 
 async function pollAnalysisTask(taskId: string): Promise<AnalysisTask> {
   const deadline = Date.now() + 20 * 60_000;
+  const nextDelay = createPollBackoff();
   while (Date.now() < deadline) {
     const task = await getAnalysisTask(taskId);
     for (const observer of analysisTaskObservers.get(taskId) ?? []) {
@@ -3035,7 +3056,7 @@ async function pollAnalysisTask(taskId: string): Promise<AnalysisTask> {
     if (task.status === "FAILED") {
       throw new Error(task.error_message || "视频拆解失败，请重新提交。");
     }
-    await waitForPoll();
+    await waitForPoll(nextDelay());
   }
   throw new Error("视频拆解仍在后台进行，请稍后返回项目列表查看。");
 }
@@ -3219,6 +3240,7 @@ async function pollScriptRewriteTask(
   taskId: string,
 ): Promise<ScriptRewriteTask> {
   const deadline = Date.now() + 10 * 60_000;
+  const nextDelay = createPollBackoff();
   while (Date.now() < deadline) {
     const task = await getScriptRewriteTask(taskId);
     if (task.status === "SUCCEEDED") {
@@ -3230,7 +3252,7 @@ async function pollScriptRewriteTask(
     if (task.status === "FAILED" || task.status === "SUBMISSION_UNCERTAIN") {
       throw new ScriptRewriteTaskError(task);
     }
-    await waitForPoll();
+    await waitForPoll(nextDelay());
   }
   throw new Error("AI 改写仍在后台执行，请稍后返回查看。");
 }
@@ -3338,6 +3360,28 @@ function createRequestKey(prefix: string): string {
     globalThis.crypto?.randomUUID?.() ??
     `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   return `${prefix}-${suffix}`;
+}
+
+const POLL_BASE_MS = 1_500;
+const POLL_GROWTH = 1.5;
+const POLL_MAX_MS = 30_000;
+const POLL_JITTER = 0.2;
+
+/**
+ * S12：轮询退避。任务早期状态变化快，首个间隔保持基准 1.5s；此后按 1.5 倍
+ * 指数增长、封顶 30s，并附 ±20% 抖动，避免多客户端同频轮询在服务端形成尖峰。
+ * 20 分钟窗口下请求数从固定间隔的约 800 次降到几十次；首个间隔不抖动，
+ * 保证初期进度刷新节奏稳定可预期。
+ */
+function createPollBackoff(): () => number {
+  let attempt = 0;
+  return () => {
+    const delay = Math.min(POLL_BASE_MS * POLL_GROWTH ** attempt, POLL_MAX_MS);
+    attempt += 1;
+    if (attempt === 1) return delay;
+    const jitter = 1 - POLL_JITTER + Math.random() * POLL_JITTER * 2;
+    return Math.round(delay * jitter);
+  };
 }
 
 function waitForPoll(delayMs = 1_500): Promise<void> {
@@ -3558,6 +3602,7 @@ async function pollCharacterSheetTask(
 ): Promise<CharacterSheetTask> {
   // 场景造型最坏要两轮生成加质检（约 16 分钟），轮询死线留足余量。
   const deadline = Date.now() + 30 * 60_000;
+  const nextDelay = createPollBackoff();
   while (Date.now() < deadline) {
     const task = await getCharacterSheetTask(taskId);
     onTask(task);
@@ -3567,7 +3612,7 @@ async function pollCharacterSheetTask(
     if (task.status === "FAILED" || task.status === "SUBMISSION_UNCERTAIN") {
       throw new Error(task.error_message || "人物生成失败，请重新提交。");
     }
-    await waitForPoll();
+    await waitForPoll(nextDelay());
   }
   throw new Error("人物生成仍在后台进行，请稍后返回人物库查看。");
 }
@@ -3845,6 +3890,7 @@ export async function waitForSourceFrameTask(
 
 async function pollSourceFrameTask(taskId: string): Promise<SourceFrameTask> {
   const deadline = Date.now() + 10 * 60_000;
+  const nextDelay = createPollBackoff();
   while (Date.now() < deadline) {
     const task = await getSourceFrameTask(taskId);
     if (task.status === "SUCCEEDED") {
@@ -3853,7 +3899,7 @@ async function pollSourceFrameTask(taskId: string): Promise<SourceFrameTask> {
     if (task.status === "FAILED") {
       throw new SourceFrameTaskFailedError(task);
     }
-    await waitForPoll();
+    await waitForPoll(nextDelay());
   }
   throw new Error("候选源画面仍在后台提取，请稍后返回查看。");
 }
@@ -4066,6 +4112,7 @@ async function pollFirstFrameTask(
   // 供应商生成和归档的等待上限为 30 分钟；超时后任务仍在云端继续，
   // 重新进入项目会通过 active-or-latest 接上。
   const deadline = Date.now() + 30 * 60_000;
+  const nextDelay = createPollBackoff();
   while (Date.now() < deadline) {
     const task = await getFirstFrameTask(taskId);
     onTaskUpdate(task);
@@ -4075,7 +4122,7 @@ async function pollFirstFrameTask(
     if (task.status === "FAILED" || task.status === "SUBMISSION_UNCERTAIN") {
       throw new Error(task.error_message || "首帧生成失败，请重新提交。");
     }
-    await waitForPoll();
+    await waitForPoll(nextDelay());
   }
   throw new Error("首帧仍在后台生成，请稍后返回项目查看。");
 }

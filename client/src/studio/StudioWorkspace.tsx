@@ -1353,7 +1353,10 @@ export function StudioWorkspace({
     setLivePanel(undefined);
     window.scrollTo?.({ top: 0 });
   };
-  const patchDraft = (patch: Partial<StudioDraft>) => {
+  const patchDraft = (
+    patch: Partial<StudioDraft>,
+    options?: { persistNow?: boolean },
+  ) => {
     if (currentUserRoleRef.current === "auditor") return;
     if (Object.hasOwn(patch, "ipId") && patch.ipId !== state.draft.ipId)
       notify(
@@ -1386,6 +1389,27 @@ export function StudioWorkspace({
       }
       return { ...previous, draft: next };
     });
+    // persistNow：跳转类调用（复刻页「去 AI 视频创作」）要求立即落库——
+    // 用户下一屏就可能刷新或退出，这份草稿不能停在 2 秒防抖窗口里。
+    // 与自动保存共用同一条云草稿队列；先清掉排队中的旧防抖保存，避免它
+    // 携带更旧的快照稍后回写。保存失败保留 touched 标记，后续编辑仍会兜底。
+    if (options?.persistNow && !review) {
+      const accountId = currentUser.id;
+      const permissionGeneration = permissionGenerationRef.current;
+      const draft = patchStudioDraft(state.draft, patch);
+      window.clearTimeout(draftSaveTimerRef.current);
+      draftSaveTimerRef.current = undefined;
+      void persistCloudDraftForScope(draft, accountId, () =>
+        Boolean(
+          saveMountedRef.current &&
+            currentUserRoleRef.current !== "auditor" &&
+            permissionGenerationRef.current === permissionGeneration,
+        ),
+      ).catch(() => {
+        if (mountedRef.current)
+          notify("云端草稿保存失败，内容仍在本机，请稍后继续编辑。");
+      });
+    }
   };
   const extractionDraftId = state.draft.id;
   const extractionProjectId = state.draft.projectId;

@@ -3350,6 +3350,70 @@ describe("startVideoAnalysis", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("backs off polling instead of hammering a fixed 1.5s interval", async () => {
+    vi.useFakeTimers();
+    const running = { id: "analysis-task-backoff", status: "RUNNING" };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => running });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pending = waitForAnalysisTask("analysis-task-backoff");
+    // 先挂好终局断言：推进到死线时 rejection 必须已有 handler，否则会报 unhandled。
+    const timeoutExpectation = expect(pending).rejects.toThrow("仍在后台");
+    // 60 秒窗口：固定 1.5s 间隔会打约 40 次；指数退避后应骤降到 10 次上下。
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(12);
+
+    // 推进到 20 分钟死线：总量仍应远低于固定间隔的约 800 次，并以可读错误收尾。
+    await vi.advanceTimersByTimeAsync(20 * 60_000);
+    await timeoutExpectation;
+    expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(80);
+  });
+
+  it("backs off script rewrite polling with the same policy", async () => {
+    vi.useFakeTimers();
+    const running = { id: "script-rewrite-backoff", status: "RUNNING" };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => running });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pending = waitForScriptRewriteTask("script-rewrite-backoff");
+    // 先挂好终局断言：推进到死线时 rejection 必须已有 handler，否则会报 unhandled。
+    const timeoutExpectation = expect(pending).rejects.toThrow("仍在后台");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(12);
+
+    // 改写任务死线 10 分钟：走完仍应保持低频，并以可读错误收尾。
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    await timeoutExpectation;
+    expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(70);
+  });
+
+  it("returns a success from a backed-off poll within the early window", async () => {
+    vi.useFakeTimers();
+    const running = { id: "analysis-task-backoff-ok", status: "RUNNING" };
+    const succeeded = {
+      id: "analysis-task-backoff-ok",
+      status: "SUCCEEDED",
+      result_version_id: "av-backoff-ok",
+    };
+    let calls = 0;
+    const fetchMock = vi.fn(async () => {
+      calls += 1;
+      return { ok: true, json: async () => (calls < 6 ? running : succeeded) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = waitForAnalysisTask("analysis-task-backoff-ok");
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    await expect(result).resolves.toEqual(succeeded);
+    // 前五次退避间隔累计约 20 秒，第 6 次查询即可在 30 秒窗口内看到终态。
+    expect(calls).toBe(6);
+  });
+
   it("reports analysis status without allowing a UI callback to stop polling", async () => {
     vi.useFakeTimers();
     const running = { id: "analysis-task-status", status: "RUNNING" };

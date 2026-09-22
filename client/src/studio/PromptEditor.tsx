@@ -273,6 +273,9 @@ export function ReplicaFinalPromptControls({
   async function compose() {
     if (busy || readOnly || blockingChecks.length > 0) return;
     operation.current += 1;
+    // S6：清空前的终稿与候选稿留档——重新合成失败时本次没有产出新稿，
+    // 不能把用户手里已经就绪的稿子被一次失败的尝试抹掉。
+    const previous = { pending, snapshot };
     setPending(null);
     setBusy(true);
     onPrepared(null);
@@ -328,6 +331,12 @@ export function ReplicaFinalPromptControls({
         if (code === "TIMELINE_CONFIRMATION_REQUIRED")
           setCompressionConflictKey(start.key);
         setMessage(error instanceof Error ? error.message : "最终合成失败");
+        // S6：失败回滚到进入合成前的状态（输入已变化时旧快照不再适用，不回滚）。
+        if (current.current.key === start.key) {
+          if (previous.snapshot?.inputKey === start.key)
+            onPrepared(previous.snapshot);
+          if (previous.pending) setPending(previous.pending);
+        }
       }
     } finally {
       if (mounted.current) setBusy(false);

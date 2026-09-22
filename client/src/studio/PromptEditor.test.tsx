@@ -223,6 +223,35 @@ describe("最终提示词后置", () => {
     fireEvent.click(compose);
     await waitFor(() => expect(api.compile).toHaveBeenCalledOnce());
   });
+  it("重新合成失败时回滚原有终稿，不弄丢已就绪的稿子", async () => {
+    // 回归：compose() 入口先 onPrepared(null) 再发起请求，失败后不回滚，
+    // 用户手里原本「已就绪」的终稿被一次失败的重新合成抹掉，只能重来。
+    api.compile
+      .mockResolvedValueOnce({
+        id: "final",
+        payload: { prompt_text: "第一稿" },
+      })
+      .mockRejectedValueOnce(new Error("合成服务暂不可用"));
+    render(<FinalHarness />);
+    fireEvent.click(screen.getByLabelText("采用这份文案"));
+    fireEvent.click(screen.getByRole("button", { name: "合成最终提示词" }));
+    await waitFor(() =>
+      expect(screen.getByLabelText("最终正文")).toHaveValue("第一稿"),
+    );
+    expect(screen.getByText(/已就绪/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "重新合成" }));
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent("合成服务暂不可用"),
+    );
+
+    // 失败的这次没有产出新稿：原来的终稿必须回滚成「已就绪」，
+    // 按钮也要回到「重新合成」，而不是把用户打回「待合成」。
+    expect(screen.getByText(/已就绪/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "重新合成" }),
+    ).toBeInTheDocument();
+  });
   it("迟到合成只作为候选展示，不能覆盖等待期间的人工修改", async () => {
     let finish: ((value: unknown) => void) | undefined;
     api.compile.mockReturnValue(

@@ -192,6 +192,10 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
         # 缩略图键/批量缩略图签名矩阵 (test_material_thumbs.py), migrated to
         # alembic head and truncated per test.
         "matthumbs_test",
+        # S11 ANALYSIS-CANCEL-20260921 取消拆解任务：dedicated database for the
+        # 取消语义/计费释放/晚到结果拦截矩阵 (test_analysis_task_cancel.py),
+        # migrated to alembic head and truncated per test.
+        "analysis_cancel_test",
     }
 )
 

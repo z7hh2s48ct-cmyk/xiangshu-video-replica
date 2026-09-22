@@ -9,9 +9,11 @@ import {
   type AnalysisTask,
   type AnalysisVersion,
   type CharacterReferenceSelection,
+  cancelAnalysisTask,
   capturePromptSession,
   customerVisibleErrorMessage,
   type GenerationRatio,
+  type GenerationVersionState,
   getAnalysisTask,
   getAssetDownloadUrl,
   getLatestGenerationPrompt,
@@ -139,6 +141,68 @@ async function getProjectAnalysisOrNull(
       return null;
     throw cause;
   }
+}
+
+// S14（恢复容错）：历史接口局部失败时的降级空态，语义等同「该项目尚无该版本」。
+const EMPTY_GENERATION_VERSION_STATE: GenerationVersionState = {
+  stale: false,
+  stale_reasons: [],
+  version: null,
+};
+
+// S10（本地预检）：参考视频的硬性门槛，与 server/app/media.py 同源
+// （MAX_UPLOAD_BYTES = 50MB，MIN/MAX_DURATION_SECONDS = 4.0 / 15.0，
+// DURATION_ROUNDING_TOLERANCE_SECONDS = 0.1）。超限文件不必整段上传完、
+// 等服务端 ffprobe 才拒绝；取整容差同样对齐，本地预检不比服务端更严。
+const MAX_REPLICA_SOURCE_BYTES = 50 * 1024 * 1024;
+const MIN_REPLICA_SOURCE_SECONDS = 4;
+const MAX_REPLICA_SOURCE_SECONDS = 15;
+const REPLICA_DURATION_TOLERANCE_SECONDS = 0.1;
+
+// S11（换源稳定性）：换源 / 重来前取消旧的排队中 / 运行中拆解任务，服务端在
+// 取消事务里即时释放预留积分；否则旧任务既看不到结果又继续计费。取消是尽力
+// 而为——任何失败都不得挡住换源 / 清空这一主操作，服务端对账仍会兜底结算。
+async function cancelPreviousAnalysisTask(
+  taskId: string | undefined,
+  status: string | undefined,
+): Promise<void> {
+  if (!taskId || (status !== "PENDING" && status !== "RUNNING")) return;
+  try {
+    await cancelAnalysisTask(taskId);
+  } catch {
+    // 静默：换源是主操作，取消只是清理。
+  }
+}
+
+// S13（画幅对齐）：复刻页没有画幅控件，draft.ratio 若不跟随真实输出画幅，
+// 最终提示词编译与 AI 优化上下文就会停在 createDraft 的内置默认 9:16 上，
+// 而首帧默认「跟随原视频」——源视频是横屏时两边直接对不上。媒体上报的
+// 真实宽高比在这里归一到最近的受支持画幅。取对数距离：1.78 到 2.33 与
+// 0.56 的差距按比例衡量，跨横竖比较不失真。
+const SOURCE_RATIO_OPTIONS: ReadonlyArray<{
+  ratio: GenerationRatio;
+  aspect: number;
+}> = [
+  { ratio: "21:9", aspect: 21 / 9 },
+  { ratio: "16:9", aspect: 16 / 9 },
+  { ratio: "4:3", aspect: 4 / 3 },
+  { ratio: "1:1", aspect: 1 },
+  { ratio: "3:4", aspect: 3 / 4 },
+  { ratio: "9:16", aspect: 9 / 16 },
+];
+
+function nearestSourceRatio(aspect: number): GenerationRatio {
+  if (!Number.isFinite(aspect) || aspect <= 0) return "9:16";
+  let best: GenerationRatio = "9:16";
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const option of SOURCE_RATIO_OPTIONS) {
+    const distance = Math.abs(Math.log(aspect / option.aspect));
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = option.ratio;
+    }
+  }
+  return best;
 }
 
 function findSource(
@@ -1321,14 +1385,17 @@ export function ReplicaPage() {
     useState<AnalysisTask["status"]>();
   const [analysisError, setAnalysisError] = useState("");
   const [analysisElapsed, setAnalysisElapsed] = useState(0);
+  // S8（拆解进度跨会话恢复）：接回的任务用服务端 created_at 当等待起点，
+  // 跨会话已等过的分钟数不会从 0 重来；拿到任务前保持 undefined，回落本机起点。
+  const analysisWaitStartedRef = useRef<number | undefined>(undefined);
   useEffect(() => {
     if (!analysisBusy) return;
     const started = Date.now();
     setAnalysisElapsed(0);
-    const timer = window.setInterval(
-      () => setAnalysisElapsed(Math.floor((Date.now() - started) / 1000)),
-      1000,
-    );
+    const timer = window.setInterval(() => {
+      const base = analysisWaitStartedRef.current ?? started;
+      setAnalysisElapsed(Math.max(0, Math.floor((Date.now() - base) / 1000)));
+    }, 1000);
     return () => window.clearInterval(timer);
   }, [analysisBusy]);
   const [promptText, setPromptText] = useState(state.draft.prompt);
@@ -1394,6 +1461,16 @@ export function ReplicaPage() {
   const latestDraftRef = useRef(state.draft);
   const patchDraftRef = useRef(patchDraft);
   const replicaOperationRef = useRef(0);
+  // S8：挂载期自动接回在途拆解任务（定义 startAnalysis 后立即回填）。
+  const startAnalysisRef = useRef<() => Promise<void>>(async () => {});
+  // S8：同一 taskId 只自动接回一次——StrictMode 双执行、状态刷新都不重复触发。
+  const autoResumeTaskRef = useRef<string | undefined>(undefined);
+  // S8：拆解会话号。换源 / 重来会前进一位并立即释放忙碌态：旧会话迟到收尾
+  // （取消失败时轮询可能还要跑很久）不得再把界面按在“拆解中”。
+  const analysisSessionRef = useRef(0);
+  // 历史恢复的在途标记走 ref 镜像：挂载期自动接回要在同一个 effect 批次里
+  // 判断恢复是否还在途（state 更新要到下一轮渲染才可见）。
+  const restoreBusyRef = useRef(false);
   const replicaContextRef = useRef("");
   replicaContextRef.current = JSON.stringify({
     draftId: state.draft.id,
@@ -1435,6 +1512,7 @@ export function ReplicaPage() {
   useEffect(
     () => () => {
       analysisProjectRef.current = undefined;
+      analysisSessionRef.current += 1;
       uploadOperationRef.current += 1;
       uploadAbortRef.current?.abort();
       restoreOperationRef.current += 1;
@@ -1492,10 +1570,19 @@ export function ReplicaPage() {
   // 只能「更换来源视频」（得先有个新文件）。这里把绑定连同云端存的上次内容
   // 一起清掉，页面才真的回到起点。
   const startFreshReplica = () => {
-    if (readOnly || analysisBusy) return;
+    if (readOnly) return;
+    // S11：清空绑定前取消旧的排队中 / 运行中任务（含跨会话恢复的 PENDING/
+    // RUNNING 草稿），否则任务继续计费且结果再也看不到。
+    const previousTaskId = state.draft.analysisTaskId;
+    const previousTaskStatus = state.draft.analysisTaskStatus;
+    // S8：重来接管会话——旧会话号前进一位并立即释放忙碌态，旧任务迟到的
+    // 轮询收尾不能再把重来后的界面按在“拆解中”。
+    analysisSessionRef.current += 1;
+    setAnalysisBusy(false);
     restoreOperationRef.current += 1;
     restoredProjectIdRef.current = undefined;
     restoreSuppressedRef.current = false;
+    restoreBusyRef.current = false;
     setRestoreBusy(false);
     setRestoreError("");
     resetReplicaState();
@@ -1518,6 +1605,7 @@ export function ReplicaPage() {
       scriptEdited: false,
     });
     discardSavedDraft();
+    void cancelPreviousAnalysisTask(previousTaskId, previousTaskStatus);
     notify("已清空本次复刻，上传新的参考视频即可重新开始。");
   };
 
@@ -1528,17 +1616,51 @@ export function ReplicaPage() {
       const operation = ++restoreOperationRef.current;
       const promptVersionAtStart = promptEditVersionRef.current;
       restoredProjectIdRef.current = target.id;
+      restoreBusyRef.current = true;
       setRestoreBusy(true);
       setRestoreError("");
       try {
-        const [shotVersion, analysisVersion, promptState, scriptState] =
-          await Promise.all([
+        // S14：四个历史接口分开结算——任一项失败只降级该项，不再连累已经拿到的
+        // 分镜 / 文案 / 提示词（此前 Promise.all 任一失败，整页只剩错误提示）。
+        const [shotResult, analysisResult, promptResult, scriptResult] =
+          await Promise.allSettled([
             getLatestProjectShotCards(target.id),
             getProjectAnalysisOrNull(target.id),
             getLatestGenerationPrompt(target.id),
             getLatestScriptVersion(target.id),
           ]);
         if (operation !== restoreOperationRef.current) return;
+
+        // 分镜是历史恢复的主体：它失败仍走「整体失败 + 重试」路径。
+        if (shotResult.status === "rejected") {
+          restoredProjectIdRef.current = undefined;
+          setRestoreError(
+            customerVisibleErrorMessage(
+              shotResult.reason,
+              "历史分镜读取失败，请重试。",
+            ),
+          );
+          return;
+        }
+
+        const shotVersion = shotResult.value;
+        const analysisVersion =
+          analysisResult.status === "fulfilled" ? analysisResult.value : null;
+        const promptState =
+          promptResult.status === "fulfilled"
+            ? promptResult.value
+            : EMPTY_GENERATION_VERSION_STATE;
+        const scriptState =
+          scriptResult.status === "fulfilled"
+            ? scriptResult.value
+            : EMPTY_GENERATION_VERSION_STATE;
+        const partialFailures: string[] = [];
+        if (analysisResult.status === "rejected")
+          partialFailures.push("视频拆解");
+        if (promptResult.status === "rejected")
+          partialFailures.push("视频生成提示词");
+        if (scriptResult.status === "rejected")
+          partialFailures.push("口播文案");
 
         const shotPayload = shotVersion
           ? (shotVersion.payload as ShotCardPayload)
@@ -1608,6 +1730,12 @@ export function ReplicaPage() {
           scriptEdited: keepLocalScript,
         });
         setStage("ready");
+        // S14：局部失败时告知缺了哪一块，并保留「重试读取历史分镜」入口补齐。
+        if (partialFailures.length > 0) {
+          setRestoreError(
+            `部分历史内容读取失败（${partialFailures.join("、")}），已恢复其余内容，可重试补齐。`,
+          );
+        }
       } catch (cause: unknown) {
         if (operation !== restoreOperationRef.current) return;
         restoredProjectIdRef.current = undefined;
@@ -1615,7 +1743,10 @@ export function ReplicaPage() {
           customerVisibleErrorMessage(cause, "历史分镜读取失败，请重试。"),
         );
       } finally {
-        if (operation === restoreOperationRef.current) setRestoreBusy(false);
+        if (operation === restoreOperationRef.current) {
+          restoreBusyRef.current = false;
+          setRestoreBusy(false);
+        }
       }
     },
     [],
@@ -1653,11 +1784,57 @@ export function ReplicaPage() {
   const replicaProjectId = state.draft.projectId;
   const replicaDuration = normalizeCustomerDuration(state.draft.duration);
 
+  // S13：真实画幅一到手就把草稿画幅对齐过去。首帧已选时以首帧图片为准
+  // （i2v 由首帧决定画面比例，用户在首帧面板显式选过 9:16 也要跟随），
+  // 否则跟随参考视频；值没变就不写草稿，避免无谓的 inputKey 抖动。
+  const alignDraftRatio = (aspect: number) => {
+    if (readOnly || review) return;
+    const aligned = nearestSourceRatio(aspect);
+    if (latestDraftRef.current.ratio !== aligned)
+      patchDraft({ ratio: aligned });
+  };
+
   const handleUpload = async (file: File) => {
     if (review || readOnly) {
       notify("审核示例不上传视频。");
       return;
     }
+    // S10：选文件后先本地预检，避免整段文件传完、服务端 ffprobe 后才被拒绝。
+    // 元数据探测失败只放行——服务端仍会兜底校验，不能因本地读不了就挡住上传。
+    // 预检是异步的：先记下当前上传会话，期间用户若已改选来源（「选择已有项目」
+    // / 换源等会推进会话号），本次选择在预检完成后整体作废，不抢占新会话。
+    const sessionAtPick = uploadOperationRef.current;
+    if (file.size > MAX_REPLICA_SOURCE_BYTES) {
+      notify("参考视频不能超过 50 MB，请压缩后再上传。");
+      return;
+    }
+    let duration: number | undefined;
+    try {
+      duration = await readVideoDuration(file);
+    } catch {
+      duration = undefined;
+    }
+    if (typeof duration === "number") {
+      if (
+        duration >
+        MAX_REPLICA_SOURCE_SECONDS + REPLICA_DURATION_TOLERANCE_SECONDS
+      ) {
+        notify("参考视频时长不能超过 15 秒，请裁剪后再上传。");
+        return;
+      }
+      if (
+        duration <
+        MIN_REPLICA_SOURCE_SECONDS - REPLICA_DURATION_TOLERANCE_SECONDS
+      ) {
+        notify("参考视频时长不能少于 4 秒，请更换素材。");
+        return;
+      }
+    }
+    if (uploadOperationRef.current !== sessionAtPick) return;
+    // S11：先记下旧任务的 id / 状态，等上传成功、确认真的换源后再取消；
+    // 上传失败时旧任务原样保留，用户仍能看到它的进度或结果。
+    const previousTaskId = state.draft.analysisTaskId;
+    const previousTaskStatus = state.draft.analysisTaskStatus;
     const operation = ++uploadOperationRef.current;
     promptSaveOperationRef.current += 1;
     setSavingPrompt(false);
@@ -1668,17 +1845,33 @@ export function ReplicaPage() {
     uploadAbortRef.current = abortController;
     notify("正在上传参考视频…");
     try {
+      // 进度事件每秒可达数十次：按整十档节流，避免逐条 notify 把整棵树
+      // 拖进重渲染。档位只前进不后退，进度回调乱序时也保持单调。
+      let notifiedStep = -1;
       const uploaded = await uploadWorkbenchSourceVideo(
         file,
         (percent) => {
-          if (operation === uploadOperationRef.current)
-            notify(`参考视频上传中 ${percent}%`);
+          if (operation !== uploadOperationRef.current) return;
+          const step = Math.min(
+            100,
+            Math.max(0, Math.floor(percent / 10) * 10),
+          );
+          if (step <= notifiedStep) return;
+          notifiedStep = step;
+          notify(`参考视频上传中 ${step}%`);
         },
         abortController.signal,
       );
       if (operation !== uploadOperationRef.current) return;
+      // S11：换源在即，取消旧的排队中 / 运行中拆解任务并即时释放预留积分。
+      await cancelPreviousAnalysisTask(previousTaskId, previousTaskStatus);
       restoreOperationRef.current += 1;
+      restoreBusyRef.current = false;
       setRestoreBusy(false);
+      // S8：换源接管会话——立即释放旧会话的忙碌态，旧任务迟到的轮询收尾
+      // （取消失败时可能还要跑很久）不再占着新项目的拆解入口。
+      analysisSessionRef.current += 1;
+      setAnalysisBusy(false);
       resetReplicaState();
       setPromptText("");
       promptTextRef.current = "";
@@ -1749,6 +1942,7 @@ export function ReplicaPage() {
     restoreSuppressedRef.current = false;
     restoreOperationRef.current += 1;
     restoredProjectIdRef.current = undefined;
+    restoreBusyRef.current = false;
     setRestoreBusy(false);
     resetReplicaState();
     setPromptText("");
@@ -1789,9 +1983,20 @@ export function ReplicaPage() {
       notify("请先上传或选择来源视频。");
       return;
     }
+    // S9：重新拆解完成会整体覆盖分镜表并清掉未保存标记，等待期里手改的镜头
+    // （动作、口播等）会被静默替换。有未保存修改时先让用户明确取舍。
+    if (
+      shotsDirty &&
+      !window.confirm(
+        "分镜有未保存的修改，重新拆解完成后会覆盖这些修改。确定继续？如需保留，请先点“保存为自定义”。",
+      )
+    ) {
+      return;
+    }
     restoreOperationRef.current += 1;
     restoredProjectIdRef.current = projectId;
     restoreSuppressedRef.current = false;
+    restoreBusyRef.current = false;
     setRestoreBusy(false);
     setRestoreError("");
     analysisProjectRef.current = projectId;
@@ -1800,22 +2005,26 @@ export function ReplicaPage() {
       analysisProjectRef.current === projectId &&
       latestDraftRef.current.projectId === projectId &&
       sessionCurrent();
+    // S8：会话号 + 等待起点。手动启动与挂载期自动接回共用这一条路径。
+    const session = ++analysisSessionRef.current;
+    analysisWaitStartedRef.current = undefined;
     setAnalysisBusy(true);
     setAnalysisError("");
     setAnalysisStatus(undefined);
     setStage("analyzing");
     notify("AI 拆解进行中，离开页面后仍可恢复原任务。");
     try {
-      // 只有任务仍在排队 / 运行中才复用旧任务。SUCCEEDED 却没拿到分镜
-      // （视频过短、无有效镜头）时必须强制重跑，否则「重新拆解」永远复用
-      // 已完成的任务，陷入拿不到分镜的死循环；FAILED 与「已有分镜的显式
-      // 重跑」同样强制新建。
+      // 在途任务一律复用（跨会话自动接回也走这条分支）：已有分镜只说明上一版
+      // 结果还在，不代表可以重复提交——新建会为同一份拆解计费两次。SUCCEEDED
+      // 却没拿到分镜（视频过短、无有效镜头）时必须强制重跑，否则「重新拆解」
+      // 永远复用已完成的任务，陷入拿不到分镜的死循环；FAILED 与「已有分镜的
+      // 显式重跑」同样强制新建。
       const taskInFlight =
         state.draft.analysisTaskStatus === "PENDING" ||
         state.draft.analysisTaskStatus === "RUNNING";
       const force =
-        shots.length > 0 ||
-        (!taskInFlight &&
+        !taskInFlight &&
+        (shots.length > 0 ||
           Boolean(
             state.draft.analysisTaskId || state.draft.analysisTaskStatus,
           ));
@@ -1826,6 +2035,13 @@ export function ReplicaPage() {
       if (!isCurrentAnalysis()) return;
       patchDraft({ analysisTaskId: task.id, analysisTaskStatus: task.status });
       setAnalysisStatus(task.status);
+      // S8：接回的任务以服务端 created_at 为等待起点（本机时钟偏差由计时端钳零）。
+      const createdAtMs = task.created_at
+        ? Date.parse(task.created_at)
+        : Number.NaN;
+      analysisWaitStartedRef.current = Number.isFinite(createdAtMs)
+        ? createdAtMs
+        : undefined;
       await waitForAnalysisTask(task.id, (updated) => {
         if (isCurrentAnalysis()) setAnalysisStatus(updated.status);
       });
@@ -1909,9 +2125,49 @@ export function ReplicaPage() {
       if (isInsufficientCredits(cause)) openLive("wallet");
     } finally {
       // 守卫提前返回时也要解除忙碌态，否则按钮会永久停在“拆解中”。
-      setAnalysisBusy(false);
+      // 已被换源 / 重来接管（会话号前进）时不清：忙碌指示已属于新会话。
+      if (analysisSessionRef.current === session) setAnalysisBusy(false);
     }
   };
+  startAnalysisRef.current = startAnalysis;
+
+  // S8（拆解进度跨会话恢复）：应用重启 / 重新进入后，草稿里排队中 / 运行中的
+  // 任务此前没有任何消费者——界面退回「启动 AI 拆解」，而任务其实在服务端照跑。
+  // 挂载后自动接回：走 startAnalysis 的在途分支（getAnalysisTask + 等待终态），
+  // 不新建任务、也不重复计费。要等历史恢复结束再跑——本 effect 声明在恢复
+  // effect 之后，同一批次里先由它发起恢复并把 restoreBusyRef 置位，因此守卫
+  // 必须读 ref 镜像让路（state 要到下一轮渲染才可见；只读 state 会放行接回，
+  // startAnalysis 前进 restoreOperationRef 把在途恢复静默作废）；restoreBusy
+  // 同时保留：恢复结束置回 false 时触发本 effect 重跑，接回才真正开始。
+  useEffect(() => {
+    if (
+      review ||
+      readOnly ||
+      analysisBusy ||
+      restoreBusy ||
+      restoreBusyRef.current
+    )
+      return;
+    if (restoreSuppressedRef.current) return;
+    const taskId = state.draft.analysisTaskId;
+    const taskStatus = state.draft.analysisTaskStatus;
+    if (!taskId || (taskStatus !== "PENDING" && taskStatus !== "RUNNING"))
+      return;
+    if (autoResumeTaskRef.current === taskId) return;
+    if (!project || !(state.draft.sourceAssetId ?? project.reference_asset_id))
+      return;
+    autoResumeTaskRef.current = taskId;
+    void startAnalysisRef.current();
+  }, [
+    analysisBusy,
+    project,
+    readOnly,
+    restoreBusy,
+    review,
+    state.draft.analysisTaskId,
+    state.draft.analysisTaskStatus,
+    state.draft.sourceAssetId,
+  ]);
 
   // customName 为空串时按日期自动命名：供「存入我的提示词」一键直存。
   const saveAsCustomPrompt = async (customName: string) => {
@@ -1979,7 +2235,9 @@ export function ReplicaPage() {
       notify("请先合成最终提示词，并确保与当前设置一致。");
       return;
     }
-    patchDraft({ prompt: text, promptEdited: true });
+    // 立即持久化：跳转后用户可能立刻刷新或退出，这份交付稿不能只停在
+    // 2 秒防抖窗口里。
+    patchDraft({ prompt: text, promptEdited: true }, { persistNow: true });
     navigate("video");
     notify("最终提示词已带入 AI 视频创作页。");
   };
@@ -2099,6 +2357,10 @@ export function ReplicaPage() {
       id: "workflow-script",
       label: "口播文案",
       passed: state.draft.script.confirmed,
+      // 与合成控件同口径：口播确认只作建议（#165 已明确“只提醒，不阻止合成
+      // 最终提示词”）。页面级清单把它算成硬性缺失会让用户先被告知“还差
+      // 这一项”，进到合成区却发现不确认也能合成。
+      blocking: false,
       reason: state.draft.script.text.trim()
         ? "请在口播文案区域点击“确认”。"
         : "请确认本视频无口播。",
@@ -2243,9 +2505,11 @@ export function ReplicaPage() {
                       asset={source}
                       alt="参考视频"
                       className="creation-replica-video__media"
-                      onAspectRatioChange={(ratio) =>
-                        setSourceRatio({ source: sourceMediaKey, ratio })
-                      }
+                      onAspectRatioChange={(ratio) => {
+                        setSourceRatio({ source: sourceMediaKey, ratio });
+                        // 首帧已选时它的真实比例优先，源视频只在没有首帧时兜底。
+                        if (!state.draft.firstFrameId) alignDraftRatio(ratio);
+                      }}
                       presentation="video"
                       aspectRatio="adaptive"
                     />
@@ -2299,15 +2563,18 @@ export function ReplicaPage() {
                           ? "重新拆解"
                           : "启动 AI 拆解"}
                     </Button>
+                    {/* S8：换源 / 重来是拆解进行中的取消式出口（S11 保证它们
+                        会取消在途任务），不能被忙碌态锁死；只有拆解按钮自身
+                        禁用，防重复提交。 */}
                     <Button
-                      disabled={readOnly || analysisBusy}
+                      disabled={readOnly}
                       variant="outline"
                       onClick={() => uploadInputRef.current?.click()}
                     >
                       更换来源视频
                     </Button>
                     <Button
-                      disabled={readOnly || analysisBusy}
+                      disabled={readOnly}
                       variant="quiet"
                       onClick={startFreshReplica}
                     >
@@ -2426,12 +2693,13 @@ export function ReplicaPage() {
                       alt="已选首帧"
                       aspectRatio="adaptive"
                       className="creation-final-preview__media"
-                      onAspectRatioChange={(ratio) =>
+                      onAspectRatioChange={(ratio) => {
                         setFirstFrameRatio({
                           source: firstFrameMediaKey,
                           ratio,
-                        })
-                      }
+                        });
+                        alignDraftRatio(ratio);
+                      }}
                     />
                   </div>
                 </Panel>

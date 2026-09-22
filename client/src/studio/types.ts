@@ -360,7 +360,10 @@ export type StudioContextValue = {
   retryReferenceAssets?: () => void;
   draftSaveStatus?: "idle" | "dirty" | "saving" | "saved" | "error";
   navigate: (page: StudioPage, patch?: Partial<StudioState>) => void;
-  patchDraft: (patch: Partial<StudioDraft>) => void;
+  patchDraft: (
+    patch: Partial<StudioDraft>,
+    options?: { persistNow?: boolean },
+  ) => void;
   patchState: (patch: Partial<StudioState>) => void;
   updateData: (update: (data: StudioData) => StudioData) => void;
   notify: (message: string) => void;

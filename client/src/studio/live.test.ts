@@ -21,11 +21,14 @@ const api = vi.hoisted(() => ({
   archiveGenerationTask: vi.fn(),
   compileGenerationPrompt: vi.fn(),
   createGenerationBatch: vi.fn(),
+  createProject: vi.fn(),
   createScriptVersion: vi.fn(),
   createScriptFromAudioTask: vi.fn(),
+  createVideoUploadIntent: vi.fn(),
   getScriptFromAudioTask: vi.fn(),
   getLatestScriptFromAudioTask: vi.fn(),
   completeMaterialUpload: vi.fn(),
+  completeVideoUpload: vi.fn(),
   defaultBatchProvider: vi.fn(async () => "metaso"),
   lockGenerationPrompt: vi.fn(),
   reviseGenerationPrompt: vi.fn(),
@@ -41,6 +44,7 @@ const api = vi.hoisted(() => ({
   getLatestProjectShotCards: vi.fn(),
   getStudioDraft: vi.fn(),
   deleteStudioDraft: vi.fn(),
+  deleteProject: vi.fn(),
   listStudioSavedScripts: vi.fn(),
   saveStudioSavedScript: vi.fn(),
   getStudioAnalytics: vi.fn(async () => null),
@@ -65,6 +69,7 @@ const api = vi.hoisted(() => ({
   retryOralTaskArchive: vi.fn(),
   resolveMaterials: vi.fn(),
   uploadMaterial: vi.fn(),
+  uploadReferenceVideo: vi.fn(),
 }));
 
 vi.mock("../api", () => api);
@@ -2120,5 +2125,66 @@ describe("爆款视频封面地址", () => {
     expect(live.studioVideoFromViral({ ...item, coverUrl: null }).poster).toBe(
       "",
     );
+  });
+});
+
+describe("uploadWorkbenchSourceVideo 失败清理", () => {
+  const file = new File(["bytes"], "断线素材.mp4", { type: "video/mp4" });
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  /** 预置「项目已建、上传在途」的上传链路 mock。 */
+  function mockUploadStart(projectId: string, assetId: string) {
+    api.createProject.mockResolvedValue({ id: projectId, name: "断线素材" });
+    api.createVideoUploadIntent.mockResolvedValue({
+      asset_id: assetId,
+      project_id: projectId,
+      method: "PUT",
+      url: "https://upload.example/put",
+      headers: {},
+      expires_at: null,
+    });
+    api.deleteProject.mockResolvedValue(undefined);
+  }
+
+  it("上传失败时删除刚创建的项目，不留孤儿项目", async () => {
+    mockUploadStart("p-orphan", "a-orphan");
+    api.uploadReferenceVideo.mockRejectedValue(new Error("网络中断"));
+
+    await expect(
+      live.uploadWorkbenchSourceVideo(file, () => {}),
+    ).rejects.toThrow("网络中断");
+
+    expect(api.deleteProject).toHaveBeenCalledExactlyOnceWith("p-orphan");
+  });
+
+  it("清理失败不掩盖原始上传错误", async () => {
+    mockUploadStart("p-orphan", "a-orphan");
+    api.uploadReferenceVideo.mockRejectedValue(new Error("网络中断"));
+    api.deleteProject.mockRejectedValue(new Error("删除项目失败"));
+
+    await expect(
+      live.uploadWorkbenchSourceVideo(file, () => {}),
+    ).rejects.toThrow("网络中断");
+  });
+
+  it("上传成功时保留项目，不做多余清理", async () => {
+    mockUploadStart("p-ok", "a-ok");
+    api.uploadReferenceVideo.mockResolvedValue(undefined);
+    api.completeVideoUpload.mockResolvedValue({
+      asset_id: "a-ok",
+      project_id: "p-ok",
+      status: "READY",
+      analysis_task_id: null,
+      analysis_task_status: null,
+    });
+    api.getAssetDownloadUrl.mockResolvedValue({ url: "/signed/a-ok.mp4" });
+
+    const result = await live.uploadWorkbenchSourceVideo(file, () => {});
+
+    expect(result.projectId).toBe("p-ok");
+    expect(api.deleteProject).not.toHaveBeenCalled();
   });
 });

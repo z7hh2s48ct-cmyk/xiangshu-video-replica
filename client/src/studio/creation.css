@@ -2183,7 +2183,16 @@
   display: grid;
   gap: 20px;
   align-items: stretch;
-  grid-template-columns: var(--media-col, 240px) minmax(0, 1fr);
+}
+
+/* 两列模板只在 ≥901px 生效：≤900px 依赖 @media (max-width: 900px) 的单列
+   降级。反向包裹不是洁癖——模板与降级规则同特异性（都是 .media-row），
+   无条件写在后面会把降级整条覆盖：882 视口下媒体行仍是两列（245+348）、
+   媒体缩到 204×362 就是这么来的。 */
+@media (min-width: 901px) {
+  .media-row {
+    grid-template-columns: var(--media-col, 240px) minmax(0, 1fr);
+  }
 }
 
 /* 场景形象|置换首帧行：置换首帧面板不再吃满整行剩余宽度（宽视口下它横跨
@@ -2205,11 +2214,15 @@
    两条覆盖都限定在 .media-row--scene 行内：源画面行沿用同名的
    source-frame-current 规则不受影响。
    场景图再补 object-fit: cover：媒体框已按参考视频画幅取形状，
-   素材比例不同时居中裁切填满，而不是缩成素材自身比例、看着还是细长条。 */
+   素材比例不同时裁切填满，而不是缩成素材自身比例、看着还是细长条。 */
 .creation-replica .media-row--scene .flow-character-row__preview {
   height: 100%;
   max-height: none;
   object-fit: cover;
+  /* 极端竖长素材（515×1378）盖到 9:16 要藏 33.6% 高度：默认 50% 50%
+     上下等分，可见窗口常落在纯色中段；向上朝 25% 取景保住人像上半身，
+     与文件内既有取景偏移（20%~28%）同风格。 */
+  object-position: center 25%;
 }
 
 .creation-replica .media-row--scene .first-frame-current {

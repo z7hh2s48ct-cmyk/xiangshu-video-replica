@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import {
   fireEvent,
   render,
@@ -22,6 +23,7 @@ const replicaApi = vi.hoisted(() => ({
   selectCharacterReferences: vi.fn(),
   startVideoAnalysis: vi.fn(),
   getAnalysisTask: vi.fn(),
+  cancelAnalysisTask: vi.fn(),
   waitForAnalysisTask: vi.fn(),
   getLatestProjectShotCards: vi.fn(),
   getLatestProjectAnalysis: vi.fn(async () => ({ id: "av-x", payload: {} })),
@@ -383,6 +385,131 @@ describe("V1.4 创作页面", () => {
     asset.url = "/next.mp4";
     view.rerender(<ReplicaPage />);
     expect(row.style.getPropertyValue("--row-ratio")).toBe(String(9 / 16));
+  });
+
+  it("源视频画幅到达后对齐草稿画幅，编译上下文不再停在默认 9:16", () => {
+    const value = studio({ review: false });
+    value.state = {
+      ...value.state,
+      draft: {
+        ...value.state.draft,
+        firstFrameId: undefined,
+        ratio: "9:16",
+      },
+    };
+    value.data.assets.push({
+      id: "source-1",
+      name: "来源视频",
+      kind: "video" as const,
+      url: "/landscape.mp4",
+      group: "项目",
+      source: "上传",
+      saved: true,
+    });
+    useStudio.mockReturnValue(value);
+    const view = render(<ReplicaPage />);
+    const video = view.container.querySelector(".creation-replica-video video");
+    if (!video) throw new Error("replica source preview missing");
+    Object.defineProperties(video, {
+      videoWidth: { value: 1920 },
+      videoHeight: { value: 1080 },
+    });
+    fireEvent.loadedMetadata(video);
+    expect(value.patchDraft).toHaveBeenCalledWith({ ratio: "16:9" });
+  });
+
+  it("已选首帧的图片比例优先于源视频，草稿画幅跟随首帧", () => {
+    const value = studio({ review: false });
+    value.state = {
+      ...value.state,
+      draft: {
+        ...value.state.draft,
+        firstFrameId: "ff-1",
+        ratio: "1:1",
+      },
+    };
+    value.data.assets.push(
+      {
+        id: "source-1",
+        name: "来源视频",
+        kind: "video" as const,
+        url: "/landscape.mp4",
+        group: "项目",
+        source: "上传",
+        saved: true,
+      },
+      {
+        id: "ff-1",
+        name: "新首帧",
+        kind: "image" as const,
+        url: "/portrait.png",
+        group: "项目",
+        source: "人物置换",
+        saved: true,
+      },
+    );
+    useStudio.mockReturnValue(value);
+    const view = render(<ReplicaPage />);
+    const sourceVideo = view.container.querySelector(
+      ".creation-replica-video video",
+    );
+    if (!sourceVideo) throw new Error("replica source preview missing");
+    Object.defineProperties(sourceVideo, {
+      videoWidth: { value: 1920 },
+      videoHeight: { value: 1080 },
+    });
+    fireEvent.loadedMetadata(sourceVideo);
+    expect(value.patchDraft).not.toHaveBeenCalledWith({ ratio: "16:9" });
+
+    const frameImage = view.container.querySelector(
+      ".creation-final-preview img",
+    );
+    if (!frameImage) throw new Error("first frame preview missing");
+    Object.defineProperties(frameImage, {
+      naturalWidth: { value: 1080 },
+      naturalHeight: { value: 1920 },
+    });
+    fireEvent.load(frameImage);
+    expect(value.patchDraft).toHaveBeenCalledWith({ ratio: "9:16" });
+  });
+
+  it("审计员只读查看时不对齐草稿画幅", () => {
+    const value = studio({
+      review: false,
+      user: {
+        id: "auditor-1",
+        username: "auditor-1",
+        display_name: "审计员",
+        role: "auditor",
+      },
+    });
+    value.state = {
+      ...value.state,
+      draft: {
+        ...value.state.draft,
+        firstFrameId: undefined,
+        ratio: "9:16",
+      },
+    };
+    value.data.assets.push({
+      id: "source-1",
+      name: "来源视频",
+      kind: "video" as const,
+      url: "/landscape.mp4",
+      group: "项目",
+      source: "上传",
+      saved: true,
+    });
+    useStudio.mockReturnValue(value);
+    const view = render(<ReplicaPage />);
+    const video = view.container.querySelector(".creation-replica-video video");
+    if (!video) throw new Error("replica source preview missing");
+    Object.defineProperties(video, {
+      videoWidth: { value: 1920 },
+      videoHeight: { value: 1080 },
+    });
+    fireEvent.loadedMetadata(video);
+    expect(value.patchDraft).not.toHaveBeenCalledWith({ ratio: "16:9" });
   });
 
   it("提取原文后不显示二创编辑框或终稿按钮", () => {
@@ -3333,7 +3460,12 @@ describe("视频复刻（模块①）", () => {
   beforeEach(() => {
     useStudio.mockReset();
     replicaApi.startVideoAnalysis.mockClear();
-    replicaApi.getAnalysisTask.mockClear();
+    replicaApi.getAnalysisTask.mockReset();
+    replicaApi.cancelAnalysisTask.mockReset();
+    // S10 本地预检会探测参考视频时长：上一个用例残留的「超长」mock 会误拦截
+    // 后续上传用例，这里显式清回默认（未设置时探测得 undefined，预检跳过）。
+    replicaLive.readVideoDuration.mockReset();
+    replicaApi.waitForAnalysisTask.mockReset();
     replicaApi.getLatestProjectShotCards.mockReset();
     replicaApi.getLatestProjectAnalysis.mockReset();
     replicaApi.getLatestGenerationPrompt.mockReset();
@@ -3397,6 +3529,31 @@ describe("视频复刻（模块①）", () => {
     const checklist = screen.getByRole("region", { name: "生成前检查" });
     expect(checklist).toHaveTextContent("来源视频");
     expect(checklist).toHaveTextContent("请先上传参考视频或选择已有项目");
+  });
+
+  it("生成前检查把口播确认计入建议项，与合成控件放开口径一致", async () => {
+    // 回归：合成控件在 #165 明确放开（“口播尚未确认时只提醒，不阻止合成最终
+    // 提示词”），页面级清单却把它算成硬性「还需完成」——同一件事两处口径相反，
+    // 用户先被告知“还差这一项”，进到合成区却发现不确认也能合成。
+    const value = replicaStudio();
+    value.state = {
+      ...value.state,
+      draft: {
+        ...value.state.draft,
+        firstFrameId: undefined,
+        script: { ...value.state.draft.script, confirmed: false },
+      },
+    };
+    mockAnalysisSuccess();
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+
+    // 先等挂载期历史恢复落地，检查项口径才是终态。
+    await screen.findByText(/已拆解/);
+    const checklist = screen.getByRole("region", { name: "生成前检查" });
+    const item = within(checklist).getByText("口播文案").closest("li");
+    expect(item).toHaveClass("is-warning");
+    expect(checklist).toHaveTextContent("还需完成 2 项 · 1 项建议");
   });
 
   function replicaStudio(_legacyStep?: 1 | 3) {
@@ -3713,6 +3870,86 @@ describe("视频复刻（模块①）", () => {
     finishSave?.({ id: "late-shot-version" });
     await Promise.resolve();
     expect(value.notify).not.toHaveBeenCalledWith("分镜已保存。");
+  });
+
+  it("分镜有未保存修改时重新拆解先确认，取消则不发起", async () => {
+    // 回归：重新拆解完成会整体 setShots 覆盖分镜表并清掉 dirty，本地手改的
+    // 镜头（动作、口播等）会被静默替换；点击入口此前不看 shotsDirty。
+    const value = replicaStudio();
+    mockSavedReplicaVersions();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    replicaApi.startVideoAnalysis.mockResolvedValue({
+      id: "task-1",
+      status: "RUNNING",
+    });
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+    await screen.findByText("已保存为自定义 ✓");
+    fireEvent.change(screen.getByLabelText("s1 动作"), {
+      target: { value: "本地改动的动作" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "重新拆解" }));
+
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining("未保存"));
+    expect(replicaApi.startVideoAnalysis).not.toHaveBeenCalled();
+    // 取消后编辑原样保留，分镜没有被清空。
+    expect(screen.getByLabelText("s1 动作")).toHaveValue("本地改动的动作");
+  });
+
+  it("确认放弃未保存修改后照常发起重新拆解", async () => {
+    const value = replicaStudio();
+    mockSavedReplicaVersions();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    replicaApi.startVideoAnalysis.mockResolvedValue({
+      id: "task-1",
+      status: "RUNNING",
+    });
+    replicaApi.waitForAnalysisTask.mockResolvedValue({
+      id: "task-1",
+      status: "SUCCEEDED",
+    });
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+    await screen.findByText("已保存为自定义 ✓");
+    fireEvent.change(screen.getByLabelText("s1 动作"), {
+      target: { value: "本地改动的动作" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "重新拆解" }));
+
+    expect(window.confirm).toHaveBeenCalledWith(
+      expect.stringContaining("未保存"),
+    );
+    await waitFor(() =>
+      expect(replicaApi.startVideoAnalysis).toHaveBeenCalled(),
+    );
+    // 确认继续后流程照常走完：拆解结果覆盖分镜并回到「已保存」态。
+    await screen.findByText("已保存为自定义 ✓");
+  });
+
+  it("分镜没有未保存修改时重新拆解不弹确认", async () => {
+    const value = replicaStudio();
+    mockSavedReplicaVersions();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    replicaApi.startVideoAnalysis.mockResolvedValue({
+      id: "task-1",
+      status: "RUNNING",
+    });
+    replicaApi.waitForAnalysisTask.mockResolvedValue({
+      id: "task-1",
+      status: "SUCCEEDED",
+    });
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+    await screen.findByText("已保存为自定义 ✓");
+
+    fireEvent.click(screen.getByRole("button", { name: "重新拆解" }));
+
+    await waitFor(() =>
+      expect(replicaApi.startVideoAnalysis).toHaveBeenCalled(),
+    );
+    expect(confirmSpy).not.toHaveBeenCalled();
   });
 
   function mockSavedReplicaVersions() {
@@ -4054,6 +4291,59 @@ describe("视频复刻（模块①）", () => {
     expect(replicaApi.startVideoAnalysis).not.toHaveBeenCalled();
   });
 
+  it("单个历史接口读取失败时仍展示分镜，并可重试补齐", async () => {
+    const value = replicaStudio();
+    mockSavedReplicaVersions();
+    // S14：提示词接口失败不应连累分镜、文案与拆解分析的恢复。
+    replicaApi.getLatestGenerationPrompt.mockRejectedValueOnce(
+      new Error("读取视频生成提示词失败（500）"),
+    );
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+
+    expect((await screen.findAllByDisplayValue(/院落/)).length).toBeGreaterThan(
+      0,
+    );
+    expect(screen.getByLabelText("最终提示词")).toHaveValue("");
+    expect(
+      await screen.findByText(/部分历史内容读取失败（视频生成提示词）/),
+    ).toBeInTheDocument();
+
+    // 重试补齐失败项：提示词恢复为已保存版本，局部失败提示消失。
+    fireEvent.click(screen.getByRole("button", { name: "重试读取历史分镜" }));
+    await waitFor(() =>
+      expect(screen.getByLabelText("最终提示词")).toHaveValue(
+        "保存的复刻 Prompt",
+      ),
+    );
+    expect(screen.queryByText(/部分历史内容读取失败/)).toBeNull();
+  });
+
+  it("拆解分析读取失败时仍展示已保存的分镜与文案", async () => {
+    const value = replicaStudio();
+    mockSavedReplicaVersions();
+    replicaApi.getLatestProjectAnalysis.mockRejectedValueOnce(
+      new Error("读取视频拆解失败（500）"),
+    );
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+
+    expect((await screen.findAllByDisplayValue(/院落/)).length).toBeGreaterThan(
+      0,
+    );
+    expect(
+      await screen.findByText(/部分历史内容读取失败（视频拆解）/),
+    ).toBeInTheDocument();
+    // 拆解失败只影响“原文案”字段：二创文案仍按已保存版本恢复。
+    await waitFor(() =>
+      expect(value.patchDraft).toHaveBeenCalledWith(
+        expect.objectContaining({
+          script: expect.objectContaining({ text: "保存的二创终稿" }),
+        }),
+      ),
+    );
+  });
+
   async function openReplicaAndAnalyze(
     options: { existingShotCards?: boolean } = {},
   ) {
@@ -4137,6 +4427,175 @@ describe("视频复刻（模块①）", () => {
     ).toBeInTheDocument();
   });
 
+  /** 空项目复刻页：只显示「上传参考视频」入口，用于上传本地预检用例。 */
+  function openReplicaUpload() {
+    const value = studio({ review: false });
+    value.state = {
+      ...value.state,
+      page: "replica",
+      draft: {
+        ...value.state.draft,
+        projectId: undefined,
+        sourceId: undefined,
+      },
+    };
+    value.data = { ...value.data, projects: [] };
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+    return value;
+  }
+
+  /** 注入一个本地文件并触发上传 input 的 change。 */
+  function pickUploadFile(name: string, size?: number) {
+    fireEvent.click(screen.getByRole("button", { name: "上传参考视频" }));
+    const input = document.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement;
+    const file = new File([], name);
+    if (size !== undefined)
+      Object.defineProperty(file, "size", { value: size });
+    Object.defineProperty(input, "files", { value: [file] });
+    fireEvent.change(input);
+  }
+
+  it("上传本地预检：超过 50 MB 的参考视频直接拦截，不发上传请求", async () => {
+    // 回归：超过服务端 MAX_UPLOAD_BYTES(50MB) 的文件此前要整段传完、服务端
+    // ffprobe 后才被拒绝，白付一次大文件传输。选文件后本地立即拦截。
+    const value = openReplicaUpload();
+    replicaLive.uploadWorkbenchSourceVideo.mockClear();
+
+    pickUploadFile("big.mp4", 50 * 1024 * 1024 + 1);
+
+    await waitFor(() =>
+      expect(value.notify).toHaveBeenCalledWith(
+        "参考视频不能超过 50 MB，请压缩后再上传。",
+      ),
+    );
+    expect(replicaLive.uploadWorkbenchSourceVideo).not.toHaveBeenCalled();
+    // 大小已能判定超限就不必再探测媒体元数据。
+    expect(replicaLive.readVideoDuration).not.toHaveBeenCalled();
+  });
+
+  it("上传本地预检：超过 15 秒的参考视频选完文件就拦截", async () => {
+    const value = openReplicaUpload();
+    replicaLive.uploadWorkbenchSourceVideo.mockClear();
+    replicaLive.readVideoDuration.mockResolvedValue(20);
+
+    pickUploadFile("long.mp4");
+
+    await waitFor(() =>
+      expect(value.notify).toHaveBeenCalledWith(
+        "参考视频时长不能超过 15 秒，请裁剪后再上传。",
+      ),
+    );
+    expect(replicaLive.uploadWorkbenchSourceVideo).not.toHaveBeenCalled();
+  });
+
+  it("上传本地预检：少于 4 秒的参考视频同样拦截", async () => {
+    const value = openReplicaUpload();
+    replicaLive.uploadWorkbenchSourceVideo.mockClear();
+    replicaLive.readVideoDuration.mockResolvedValue(2);
+
+    pickUploadFile("short.mp4");
+
+    await waitFor(() =>
+      expect(value.notify).toHaveBeenCalledWith(
+        "参考视频时长不能少于 4 秒，请更换素材。",
+      ),
+    );
+    expect(replicaLive.uploadWorkbenchSourceVideo).not.toHaveBeenCalled();
+  });
+
+  it("上传本地预检：15.05 秒在服务端取整容差内，不误拦", async () => {
+    // media.py validate_duration 放行 MAX+0.1=15.1：取整后的边角素材服务端可收，
+    // 本地预检不能比服务端更严（与 media.py 同源需含 DURATION_ROUNDING_TOLERANCE）。
+    const value = openReplicaUpload();
+    replicaLive.uploadWorkbenchSourceVideo.mockClear();
+    replicaLive.readVideoDuration.mockResolvedValue(15.05);
+    replicaLive.uploadWorkbenchSourceVideo.mockResolvedValue({
+      projectId: "project-upload-tol",
+      assetId: "asset-upload-tol",
+    });
+
+    pickUploadFile("borderline.mp4");
+
+    await waitFor(() =>
+      expect(replicaLive.uploadWorkbenchSourceVideo).toHaveBeenCalled(),
+    );
+    expect(value.notify).not.toHaveBeenCalledWith(
+      expect.stringContaining("不能超过"),
+    );
+  });
+
+  it("上传本地预检：3.95 秒在服务端取整容差内，不误拦", async () => {
+    const value = openReplicaUpload();
+    replicaLive.uploadWorkbenchSourceVideo.mockClear();
+    replicaLive.readVideoDuration.mockResolvedValue(3.95);
+    replicaLive.uploadWorkbenchSourceVideo.mockResolvedValue({
+      projectId: "project-upload-tol-2",
+      assetId: "asset-upload-tol-2",
+    });
+
+    pickUploadFile("borderline-short.mp4");
+
+    await waitFor(() =>
+      expect(replicaLive.uploadWorkbenchSourceVideo).toHaveBeenCalled(),
+    );
+    expect(value.notify).not.toHaveBeenCalledWith(
+      expect.stringContaining("不能少于"),
+    );
+  });
+
+  it("本地时长探测失败时放行上传，由服务端兜底校验", async () => {
+    const value = openReplicaUpload();
+    replicaLive.uploadWorkbenchSourceVideo.mockClear();
+    replicaLive.readVideoDuration.mockRejectedValue(
+      new Error("无法读取视频时长"),
+    );
+    replicaLive.uploadWorkbenchSourceVideo.mockResolvedValue({
+      projectId: "project-upload-1",
+      assetId: "asset-upload-1",
+    });
+
+    pickUploadFile("unknown.mp4");
+
+    await waitFor(() =>
+      expect(replicaLive.uploadWorkbenchSourceVideo).toHaveBeenCalled(),
+    );
+    expect(value.notify).not.toHaveBeenCalledWith(
+      expect.stringContaining("不能超过"),
+    );
+    expect(value.notify).not.toHaveBeenCalledWith(
+      expect.stringContaining("不能少于"),
+    );
+  });
+
+  it("上传进度通知按整十档节流，不让每个进度事件触发全树重渲染", async () => {
+    // 回归：XHR 进度事件可达每秒数十次，逐条 notify 会把整棵树拖进重渲染。
+    const value = openReplicaUpload();
+    replicaLive.uploadWorkbenchSourceVideo.mockClear();
+    replicaLive.readVideoDuration.mockResolvedValue(8);
+    replicaLive.uploadWorkbenchSourceVideo.mockImplementation(
+      async (_file: File, onProgress: (percent: number) => void) => {
+        for (let percent = 1; percent <= 100; percent += 1) onProgress(percent);
+        return { projectId: "project-upload-1", assetId: "asset-upload-1" };
+      },
+    );
+
+    pickUploadFile("progress.mp4");
+
+    await waitFor(() =>
+      expect(replicaLive.uploadWorkbenchSourceVideo).toHaveBeenCalled(),
+    );
+    const progressNotices = vi
+      .mocked(value.notify)
+      .mock.calls.map(([message]) => message)
+      .filter((message) => message.startsWith("参考视频上传中"));
+    // 100 个进度事件此前逐条通知；现在只保留 0/10/…/100 共 11 个档位。
+    expect(progressNotices).toHaveLength(11);
+    expect(progressNotices.at(-1)).toBe("参考视频上传中 100%");
+  });
+
   it("上传 B 项目时清空 A 项目的 Prompt，并阻止重渲染重启 A 的恢复", async () => {
     const initial = replicaStudio();
     initial.state = {
@@ -4184,6 +4643,8 @@ describe("视频复刻（模块①）", () => {
     ) as HTMLInputElement;
     Object.defineProperty(input, "files", { value: [new File([], "b.mp4")] });
     fireEvent.change(input);
+    // S10：上传前先做本地预检（异步探测时长），等上传真正发起再切换渲染。
+    await waitFor(() => expect(resolveUpload).toBeDefined());
 
     current = { ...initial, patchDraft: vi.fn() };
     view.rerender(<ReplicaPage />);
@@ -4260,12 +4721,15 @@ describe("视频复刻（模块①）", () => {
     ) as HTMLInputElement;
     Object.defineProperty(input, "files", { value: [new File([], "a.mp4")] });
     fireEvent.change(input);
+    // S10：预检（异步探测时长）完成后上传才真正发起；等发起了再切项目，
+    // 才能验证 abort 落在本次上传信号上、回执被会话号作废。
+    await waitFor(() => expect(resolveUpload).toBeDefined());
     fireEvent.change(screen.getByLabelText("选择已有项目"), {
       target: { value: "project-1" },
     });
 
     expect(
-      replicaLive.uploadWorkbenchSourceVideo.mock.calls[0]?.[2]?.aborted,
+      replicaLive.uploadWorkbenchSourceVideo.mock.calls.at(-1)?.[2]?.aborted,
     ).toBe(true);
     await waitFor(() =>
       expect(value.patchDraft).toHaveBeenCalledWith(
@@ -4281,6 +4745,357 @@ describe("视频复刻（模块①）", () => {
     await Promise.resolve();
     expect(value.patchDraft).not.toHaveBeenCalledWith(
       expect.objectContaining({ projectId: "late-project" }),
+    );
+  });
+
+  it("上传本地预检期间切换到已有项目，放弃这次上传不发请求", async () => {
+    // 回归：预检是异步的（探测时长），期间用户可能已改选已有项目——预检
+    // 完成后不能再启动上传，晚到的回执也不得覆盖用户的新选择。
+    const value = studio({ review: false });
+    value.state = {
+      ...value.state,
+      page: "replica",
+      draft: {
+        ...value.state.draft,
+        projectId: undefined,
+        sourceId: undefined,
+      },
+    };
+    value.data = {
+      ...value.data,
+      projects: [
+        {
+          id: "project-1",
+          owner_user_id: "user-1",
+          name: "已有项目",
+          status: "READY",
+          reference_asset_id: "asset-1",
+          reference_upload_status: "READY",
+          analysis_status: "READY",
+        },
+      ],
+    };
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+    replicaLive.uploadWorkbenchSourceVideo.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "上传参考视频" }));
+    const input = document.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement;
+    Object.defineProperty(input, "files", { value: [new File([], "a.mp4")] });
+    fireEvent.change(input);
+    fireEvent.change(screen.getByLabelText("选择已有项目"), {
+      target: { value: "project-1" },
+    });
+
+    await waitFor(() =>
+      expect(value.patchDraft).toHaveBeenCalledWith(
+        expect.objectContaining({ projectId: "project-1" }),
+      ),
+    );
+    // 预检完成（微任务）及后续宏任务后，上传都不应启动。
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(replicaLive.uploadWorkbenchSourceVideo).not.toHaveBeenCalled();
+  });
+
+  it("换源上传成功后取消旧的运行中拆解任务，再绑定新项目", async () => {
+    const value = replicaStudio();
+    value.state = {
+      ...value.state,
+      draft: {
+        ...value.state.draft,
+        analysisTaskId: "task-old",
+        analysisTaskStatus: "RUNNING",
+      },
+    };
+    // S8：挂载即自动接回在途任务；换源正是发生在这份忙碌态下的取消式出口。
+    replicaApi.getAnalysisTask.mockResolvedValue({
+      id: "task-old",
+      status: "RUNNING",
+    });
+    replicaApi.waitForAnalysisTask.mockImplementation(
+      () => new Promise(() => {}),
+    );
+    replicaLive.uploadWorkbenchSourceVideo.mockResolvedValue({
+      projectId: "project-upload-2",
+      assetId: "asset-upload-2",
+    });
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "更换来源视频" }));
+    const input = document.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement;
+    Object.defineProperty(input, "files", { value: [new File([], "b.mp4")] });
+    fireEvent.change(input);
+
+    await waitFor(() =>
+      expect(replicaApi.cancelAnalysisTask).toHaveBeenCalledWith("task-old"),
+    );
+    expect(value.patchDraft).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "project-upload-2",
+        analysisTaskId: undefined,
+        analysisTaskStatus: undefined,
+      }),
+    );
+  });
+
+  it("旧任务已是终态时换源不调用取消", async () => {
+    const value = replicaStudio();
+    value.state = {
+      ...value.state,
+      draft: {
+        ...value.state.draft,
+        analysisTaskId: "task-done",
+        analysisTaskStatus: "SUCCEEDED",
+      },
+    };
+    replicaLive.uploadWorkbenchSourceVideo.mockResolvedValue({
+      projectId: "project-upload-3",
+      assetId: "asset-upload-3",
+    });
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "更换来源视频" }));
+    const input = document.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement;
+    Object.defineProperty(input, "files", { value: [new File([], "c.mp4")] });
+    fireEvent.change(input);
+
+    await waitFor(() =>
+      expect(value.patchDraft).toHaveBeenCalledWith(
+        expect.objectContaining({ projectId: "project-upload-3" }),
+      ),
+    );
+    expect(replicaApi.cancelAnalysisTask).not.toHaveBeenCalled();
+  });
+
+  it("取消旧任务失败不阻断换源", async () => {
+    const value = replicaStudio();
+    value.state = {
+      ...value.state,
+      draft: {
+        ...value.state.draft,
+        analysisTaskId: "task-old",
+        analysisTaskStatus: "PENDING",
+      },
+    };
+    // S8：挂载即自动接回在途任务，换源是在这份忙碌态下发生的。
+    replicaApi.getAnalysisTask.mockResolvedValue({
+      id: "task-old",
+      status: "PENDING",
+    });
+    replicaApi.waitForAnalysisTask.mockImplementation(
+      () => new Promise(() => {}),
+    );
+    replicaApi.cancelAnalysisTask.mockRejectedValue(new Error("网络错误"));
+    replicaLive.uploadWorkbenchSourceVideo.mockResolvedValue({
+      projectId: "project-upload-4",
+      assetId: "asset-upload-4",
+    });
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "更换来源视频" }));
+    const input = document.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement;
+    Object.defineProperty(input, "files", { value: [new File([], "d.mp4")] });
+    fireEvent.change(input);
+
+    await waitFor(() =>
+      expect(replicaApi.cancelAnalysisTask).toHaveBeenCalledWith("task-old"),
+    );
+    await waitFor(() =>
+      expect(value.patchDraft).toHaveBeenCalledWith(
+        expect.objectContaining({ projectId: "project-upload-4" }),
+      ),
+    );
+  });
+
+  it("重开页面时自动接回草稿里在途的拆解任务，不重复创建", async () => {
+    const value = replicaStudio();
+    value.state = {
+      ...value.state,
+      draft: {
+        ...value.state.draft,
+        analysisTaskId: "task-live",
+        analysisTaskStatus: "RUNNING",
+      },
+    };
+    // 上一版的历史分镜仍在：接回不能被它误判成「显式重跑」而新建任务。
+    mockAnalysisSuccess({ existingShotCards: true });
+    replicaApi.getAnalysisTask.mockResolvedValue({
+      id: "task-live",
+      status: "RUNNING",
+      created_at: new Date().toISOString(),
+    });
+    let finish!: (task: { id: string; status: string }) => void;
+    replicaApi.waitForAnalysisTask.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+
+    // 自动进入进度态：复用原任务，不再退回「启动 AI 拆解」。
+    expect(
+      await screen.findByText(/正在分析视频画面与口播/),
+    ).toBeInTheDocument();
+    expect(replicaApi.getAnalysisTask).toHaveBeenCalledWith("task-live");
+    expect(replicaApi.startVideoAnalysis).not.toHaveBeenCalled();
+
+    // 任务完成后落在同一条完成路径上。
+    finish({ id: "task-live", status: "SUCCEEDED" });
+    await waitFor(() =>
+      expect(value.notify).toHaveBeenCalledWith(
+        "拆解完成。请确认文案和置换首帧，再合成最终提示词。",
+      ),
+    );
+  });
+
+  it("自动接回在途任务前先落挂载期历史恢复，不把在途恢复静默作废", async () => {
+    // 回归：自动接回 effect 与历史恢复 effect 同批执行，守卫只读 state 会放行
+    // 接回，startAnalysis 前进 restoreOperationRef 后，在途恢复在 allSettled
+    // 落地时被静默丢弃——历史分镜 / 提示词 / 文案与 S14 局部失败提示全部落空。
+    const value = replicaStudio();
+    value.state = {
+      ...value.state,
+      draft: {
+        ...value.state.draft,
+        analysisTaskId: "task-live",
+        analysisTaskStatus: "RUNNING",
+      },
+    };
+    mockAnalysisSuccess({ existingShotCards: true });
+    replicaApi.getAnalysisTask.mockResolvedValue({
+      id: "task-live",
+      status: "RUNNING",
+      created_at: new Date().toISOString(),
+    });
+    replicaApi.waitForAnalysisTask.mockImplementation(
+      () => new Promise(() => {}),
+    );
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+
+    // 恢复先落地：草稿按历史回填（restore 专属的 patchDraft 形状）。
+    await waitFor(() =>
+      expect(value.patchDraft).toHaveBeenCalledWith(
+        expect.objectContaining({
+          projectId: "project-1",
+          sourceAssetId: "asset-1",
+          script: expect.objectContaining({
+            original: "这栋房子的采光设计非常好",
+          }),
+        }),
+      ),
+    );
+    // 恢复结束后接回照常开始：复用原任务，不新建。
+    expect(
+      await screen.findByText(/正在分析视频画面与口播/),
+    ).toBeInTheDocument();
+    expect(replicaApi.getAnalysisTask).toHaveBeenCalledWith("task-live");
+    expect(replicaApi.startVideoAnalysis).not.toHaveBeenCalled();
+  });
+
+  it("草稿里的拆解任务已是终态时重开页面不自动接回", async () => {
+    const value = replicaStudio();
+    value.state = {
+      ...value.state,
+      draft: {
+        ...value.state.draft,
+        analysisTaskId: "task-done",
+        analysisTaskStatus: "SUCCEEDED",
+      },
+    };
+    mockAnalysisSuccess();
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+
+    // 等挂载期的历史恢复落地，再确认没有自动接回。
+    await screen.findByText(/已拆解/);
+    expect(replicaApi.getAnalysisTask).not.toHaveBeenCalled();
+    expect(replicaApi.startVideoAnalysis).not.toHaveBeenCalled();
+  });
+
+  it("只读账号重开页面不自动接回在途拆解任务", async () => {
+    const value = replicaStudio();
+    value.user = { ...value.user, role: "auditor" };
+    value.state = {
+      ...value.state,
+      draft: {
+        ...value.state.draft,
+        analysisTaskId: "task-live",
+        analysisTaskStatus: "RUNNING",
+      },
+    };
+    mockAnalysisSuccess();
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+
+    await screen.findByText(/已拆解/);
+    expect(replicaApi.getAnalysisTask).not.toHaveBeenCalled();
+  });
+
+  it("自动接回期间换源仍可用，并取消在途任务、释放忙碌态", async () => {
+    const value = replicaStudio();
+    value.state = {
+      ...value.state,
+      draft: {
+        ...value.state.draft,
+        analysisTaskId: "task-live",
+        analysisTaskStatus: "RUNNING",
+      },
+    };
+    mockAnalysisSuccess();
+    replicaApi.getAnalysisTask.mockResolvedValue({
+      id: "task-live",
+      status: "RUNNING",
+      created_at: new Date().toISOString(),
+    });
+    replicaApi.waitForAnalysisTask.mockImplementation(
+      () => new Promise(() => {}),
+    );
+    replicaLive.uploadWorkbenchSourceVideo.mockResolvedValue({
+      projectId: "project-upload-9",
+      assetId: "asset-upload-9",
+    });
+    useStudio.mockReturnValue(value);
+    render(<ReplicaPage />);
+
+    expect(
+      await screen.findByText(/正在分析视频画面与口播/),
+    ).toBeInTheDocument();
+    // 拆解按钮防重复提交仍禁用；换源 / 重来是取消式出口，不能被忙碌态锁死。
+    expect(
+      screen.getByRole("button", { name: "AI 拆解进行中…" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "更换来源视频" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "开始新的复刻" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "更换来源视频" }));
+    const input = document.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement;
+    Object.defineProperty(input, "files", { value: [new File([], "f.mp4")] });
+    fireEvent.change(input);
+
+    await waitFor(() =>
+      expect(replicaApi.cancelAnalysisTask).toHaveBeenCalledWith("task-live"),
+    );
+    // 换源接管后旧会话立即收工：旧任务轮询收尾（可能很久）不再占着忙碌态。
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "启动 AI 拆解" }),
+      ).toBeEnabled(),
     );
   });
 
@@ -4483,7 +5298,7 @@ describe("视频复刻（模块①）", () => {
     );
   });
 
-  it("去 AI 视频创作：带入最终提示词并切换页面", async () => {
+  it("去 AI 视频创作：带入最终提示词、立即持久化并切换页面", async () => {
     const value = await openReplicaAndAnalyze();
     await prepareFinalReplica();
 
@@ -4491,6 +5306,7 @@ describe("视频复刻（模块①）", () => {
 
     expect(value.patchDraft).toHaveBeenCalledWith(
       expect.objectContaining({ prompt: "最终新稿" }),
+      { persistNow: true },
     );
     expect(value.navigate).toHaveBeenCalledWith("video");
   });
@@ -4630,5 +5446,118 @@ describe("视频复刻（模块①）", () => {
     ).toHaveAttribute("data-read-only", "true");
     expect(value.patchDraft).not.toHaveBeenCalled();
     expect(replicaApi.selectCharacterReferences).not.toHaveBeenCalled();
+  });
+});
+
+interface ScannedCssRule {
+  selector: string;
+  body: string;
+  /** 外层 @media 条件（形如 "@media (max-width: 900px)"），顶层规则为 null。 */
+  media: string | null;
+}
+
+/** 极简 CSS 扫描：只覆盖 creation.css 用到的形态（顶层规则 + 一层 @media 嵌套）。 */
+function scanCssRules(source: string): ScannedCssRule[] {
+  const rules: ScannedCssRule[] = [];
+  const mediaStack: string[] = [];
+  let index = 0;
+  while (index < source.length) {
+    const brace = source.indexOf("{", index);
+    const close = source.indexOf("}", index);
+    if (close !== -1 && (brace === -1 || close < brace)) {
+      // 收尾括号先出现：关闭最近的 @media 块。
+      mediaStack.pop();
+      index = close + 1;
+      continue;
+    }
+    if (brace === -1) break;
+    const head = source.slice(index, brace).trim();
+    if (head.startsWith("@")) {
+      mediaStack.push(head);
+      index = brace + 1;
+      continue;
+    }
+    const bodyEnd = source.indexOf("}", brace);
+    if (bodyEnd === -1) break;
+    if (head) {
+      rules.push({
+        selector: head,
+        body: source.slice(brace + 1, bodyEnd),
+        media: mediaStack.at(-1) ?? null,
+      });
+    }
+    index = bodyEnd + 1;
+  }
+  return rules;
+}
+
+/** @media 条件在指定视口宽度下是否生效；识别不了的按生效处理（宁严勿漏）。 */
+function mediaApplies(condition: string | null, viewport: number): boolean {
+  if (!condition) return true;
+  const max = /max-width:\s*([\d.]+)px/.exec(condition);
+  if (max) return viewport <= Number(max[1]);
+  const min = /min-width:\s*([\d.]+)px/.exec(condition);
+  if (min) return viewport >= Number(min[1]);
+  return true;
+}
+
+/**
+ * 复算层叠胜负：媒体查询不加特异性，基础规则与 @media 里的规则同特异性，
+ * 谁在源文件里靠后谁生效。返回指定视口下以 classNames 为类名的元素最终
+ * 生效的 grid-template-columns（只认精确类名选择器，不含后代/组合选择器）。
+ */
+function resolveGridTemplate(
+  css: string,
+  viewport: number,
+  classNames: string[],
+): string | null {
+  const wanted = new Set(classNames.map((name) => `.${name}`));
+  let winner: string | null = null;
+  for (const rule of scanCssRules(css)) {
+    if (!mediaApplies(rule.media, viewport)) continue;
+    const selectors = rule.selector.split(",").map((part) => part.trim());
+    if (!selectors.some((selector) => wanted.has(selector))) continue;
+    const value = /grid-template-columns:\s*([^;]+);/.exec(rule.body)?.[1];
+    if (value) winner = value.trim();
+  }
+  return winner;
+}
+
+describe("creation.css 布局契约（复刻页）", () => {
+  // jsdom 不评估 @media，媒体查询下的层叠胜负只能回到源文件层面复算。
+  const css = readFileSync("src/studio/creation.css", "utf8").replace(
+    /\/\*[\s\S]*?\*\//g,
+    "",
+  );
+
+  it("882 视口下媒体行降级单列：两列模板只在 ≥901px 生效", () => {
+    // 回归：两列模板曾无条件写在 ≤900px 降级规则之后，同特异性下把降级整条
+    // 覆盖——882 视口下媒体行仍是两列（245+348），媒体缩到 204×362。
+    expect(resolveGridTemplate(css, 882, ["media-row"])).toBe("1fr");
+    expect(
+      resolveGridTemplate(css, 882, ["media-row", "media-row--scene"]),
+    ).toBe("1fr");
+    // 边界两侧：900 属降级，901 回桌面两列。
+    expect(resolveGridTemplate(css, 900, ["media-row"])).toBe("1fr");
+    expect(resolveGridTemplate(css, 901, ["media-row"])).toBe(
+      "var(--media-col, 240px) minmax(0, 1fr)",
+    );
+  });
+
+  it("桌面视口保持比例驱动两列，场景行右列上限 700px 优先", () => {
+    expect(resolveGridTemplate(css, 1440, ["media-row"])).toBe(
+      "var(--media-col, 240px) minmax(0, 1fr)",
+    );
+    expect(
+      resolveGridTemplate(css, 1440, ["media-row", "media-row--scene"]),
+    ).toBe("var(--media-col, 240px) minmax(0, 700px)");
+  });
+
+  it("场景形象图 cover 裁切时朝上取景，极端竖长素材不再只剩中段", () => {
+    // 515×1378 的素材盖到 9:16 要藏 33.6% 高度：默认 50% 50% 上下等分，
+    // 可见窗口容易落在纯色中段；向上取景保住人像上半身。
+    expect(css).toMatch(
+      /\.creation-replica \.media-row--scene \.flow-character-row__preview\s*\{[^}]*object-position:\s*center 25%;/,
+    );
   });
 });

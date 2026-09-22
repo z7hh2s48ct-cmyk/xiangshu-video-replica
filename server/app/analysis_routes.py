@@ -464,6 +464,16 @@ def read_analysis_task(
     return analysis_task_response(row)
 
 
+@router.post("/analysis-tasks/{task_id}/cancel", response_model=AnalysisTaskResponse)
+def cancel_project_analysis_task(
+    task_id: str,
+    db: BusinessDbDep,
+) -> AnalysisTaskResponse:
+    with db.write() as (conn, actor):
+        row = cancel_analysis_task(conn, task_id=task_id, actor=actor)
+        return analysis_task_response(row)
+
+
 @router.get("/analysis/{analysis_id}", response_model=VersionResponse)
 def read_analysis(
     analysis_id: str,
@@ -1078,6 +1088,80 @@ def fail_analysis_task(
 
     finish_source(conn, lease.id, units=0, succeeded=False)
     conn.commit()
+
+
+def cancel_analysis_task(
+    conn: BusinessConnection,
+    *,
+    task_id: str,
+    actor: CurrentUser,
+) -> sqlite3.Row:
+    """Cancel a queued or running analysis task and release the reservation.
+
+    Switching the source video used to leave the old task running (and paying)
+    on the server with its result unreachable from the UI (S11). Ownership and
+    role checks mirror the source-frame cancel; unlike it, a ``RUNNING`` task
+    is cancellable too — the whole point is to stop a multi-minute analysis
+    the user no longer wants.
+
+    ``ck_analysis_tasks_status`` accepts only PENDING/RUNNING/SUCCEEDED/FAILED,
+    so — exactly like ``cancel_source_frame_task`` — a cancelled task is
+    recorded as FAILED with ``error_code='ANALYSIS_TASK_CANCELLED'`` (the
+    desktop maps that code to「已取消」instead of a generic failure). The late
+    worker result is intercepted by ``complete_analysis_task``'s
+    ``status='RUNNING' AND locked_by`` CAS, so nothing is published or settled
+    twice. The reservation is released here, in the same transaction: the
+    operation leaves PENDING with a cancelled settlement, so
+    ``reconcile_operations`` never re-settles it and the user is never charged.
+    """
+    row = load_analysis_task(conn, task_id)
+    project_id = str(row["project_id"])
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="analysis.task.cancel",
+        entity_type="analysis_task",
+        entity_id=task_id,
+    )
+    require_project_access(
+        conn,
+        actor=actor,
+        project_id=project_id,
+        action="analysis.task.cancel",
+    )
+    if str(row["status"]) not in {"PENDING", "RUNNING"}:
+        # Terminal tasks answer with the current fact: a delivered result is
+        # never voided by a late cancel, and a replayed cancel stays idempotent.
+        return row
+    now_text = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+    updated = conn.execute(
+        """
+        UPDATE analysis_tasks
+        SET status = 'FAILED', error_code = 'ANALYSIS_TASK_CANCELLED',
+            error_message_redacted = '拆解任务已取消，可以重新开始。',
+            failure_phase = NULL, retryable = 1,
+            locked_by = NULL, locked_until = NULL,
+            completed_at = %s, updated_at = %s
+        WHERE id = %s AND status IN ('PENDING', 'RUNNING')
+        RETURNING *
+        """,
+        (now_text, now_text, task_id),
+    ).fetchone()
+    if updated is None:
+        # A concurrent completion/failure won the race: report its durable fact.
+        return load_analysis_task(conn, task_id)
+    write_audit(
+        conn,
+        actor=actor,
+        action="analysis.task_cancelled",
+        entity_type="analysis_task",
+        entity_id=task_id,
+        metadata={"project_id": project_id, "asset_id": str(row["asset_id"])},
+    )
+    from app.usage_billing import finish_source
+
+    finish_source(conn, task_id, units=0, succeeded=False, cancelled=True)
+    return cast(sqlite3.Row, updated)
 
 
 def load_task_actor(conn: BusinessConnection, user_id: str) -> CurrentUser:
