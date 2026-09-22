@@ -23,6 +23,16 @@ cd /opt/video-replica/app/server
 .venv/bin/python -c \
     'from app.db_pg import resolve_database_config, validate_customer_production; validate_customer_production(resolve_database_config())'
 
+# DDL such as a CHECK rebuild takes an ACCESS EXCLUSIVE lock. Acquire it fast
+# or fail fast: a migration queued behind peak wallet traffic blocks every
+# wallet request behind itself for as long as it waits. PGOPTIONS reaches
+# Alembic's libpq sessions without touching the DSN; re-run at low peak if
+# this aborts on lock contention. Set the variable to 0 to opt out.
+MIGRATION_LOCK_TIMEOUT="${VIDEO_REPLICA_MIGRATION_LOCK_TIMEOUT:-5s}"
+if [ "$MIGRATION_LOCK_TIMEOUT" != "0" ]; then
+    export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c lock_timeout=$MIGRATION_LOCK_TIMEOUT"
+fi
+
 # Not exec'd: a post-upgrade head check has to run in this same shell. `exec`
 # replaces the process, so anything written after it would never execute.
 flock -n "$LOCK_FILE" .venv/bin/alembic upgrade head
