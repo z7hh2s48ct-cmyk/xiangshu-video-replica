@@ -67,7 +67,7 @@ PERMISSIONS_DB = "t_sub_account_permission"
 
 # 链尾：本分支的 20260923T1200_admin_refund_adjustment 按手册 §3 重挂于
 # main 链尾（20260922T2200_material_preference_tags）之上，故链尾为该值。
-_HEAD_REVISION = "20260923T1200_admin_refund_adjustment"
+_HEAD_REVISION = "20260923T1800_re_add_h3_extended_modes_rollout_compat"
 _PRIOR_REVISION = "20260921T1200_sub_account_quotas"
 
 

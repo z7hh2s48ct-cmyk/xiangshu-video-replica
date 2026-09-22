@@ -44,7 +44,7 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 # 20260922T2000_analysis_task_attempts 新建失败历史表 analysis_task_attempts；
 # 20260922T2200_material_preference_tags 为素材偏好表增加标签列 tags_json（MATERIAL-UX-05）。
 # 迁移后 alembic 版本头即该值，9 处 assert version == HEAD_REVISION 依赖此值。
-HEAD_REVISION = "20260923T1200_admin_refund_adjustment"
+HEAD_REVISION = "20260923T1800_re_add_h3_extended_modes_rollout_compat"
 
 
 def test_viral_script_cache_migration_preserves_results_without_task_foreign_keys(
@@ -2377,7 +2377,7 @@ def test_pg_refund_downgrade_guard_and_shape_round_trip() -> None:
             command.downgrade(config, previous)
         with psycopg.connect(dsn) as conn:
             assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == (
-                "20260923T1200_admin_refund_adjustment",
+                "20260923T1800_re_add_h3_extended_modes_rollout_compat",
             )
             assert conn.execute(
                 "SELECT available_delta FROM wallet_transactions WHERE id = 't54-refund'"
