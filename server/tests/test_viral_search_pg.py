@@ -1010,6 +1010,9 @@ def test_search_unpriced_fails_closed(search_client, route_state) -> None:
     )
     assert missing.status_code == 503
     assert missing.json()["detail"]["code"] == "VIRAL_SEARCH_UNPRICED"
+    # 三种原因的处置完全不同（去配置 / 去启用 / 去改单价），文案必须分得开：
+    # 笼统报「未配置」会让已经配过的人反复检查同一个地方。
+    assert "尚未配置" in missing.json()["detail"]["message"]
     with psycopg.connect(route_state) as raw:
         raw.execute(
             "INSERT INTO billing_tariffs(service,enabled,unit_credits) "
@@ -1023,6 +1026,7 @@ def test_search_unpriced_fails_closed(search_client, route_state) -> None:
     )
     assert disabled.status_code == 503
     assert disabled.json()["detail"]["code"] == "VIRAL_SEARCH_UNPRICED"
+    assert "已停用" in disabled.json()["detail"]["message"]
     with psycopg.connect(route_state) as raw:
         # 评审 M-1：管理端 tariff 路径允许写入 enabled=true + unit_credits=0，
         # calculate_credits 对 0 价按免费放行——守卫必须把 0 价与缺失同罪。
@@ -1038,6 +1042,8 @@ def test_search_unpriced_fails_closed(search_client, route_state) -> None:
     )
     assert zero_priced.status_code == 503
     assert zero_priced.json()["detail"]["code"] == "VIRAL_SEARCH_UNPRICED"
+    # 这条最容易被误判成「我明明配了」：界面填 0 也算配过。文案必须点破是单价问题。
+    assert "单价为 0" in zero_priced.json()["detail"]["message"]
     with psycopg.connect(route_state) as raw:
         assert (
             raw.execute(

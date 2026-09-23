@@ -107,6 +107,23 @@ test("enabling a tariff requires an explicit price and preserves the key after a
   );
 });
 
+test("enabling a tariff rejects a zero price instead of storing a state the server refuses", async () => {
+  render(<BillingRatesManager />);
+  fireEvent.click(
+    await screen.findByRole("button", { name: "配置 视频生成 · 768P" }),
+  );
+  fireEvent.click(screen.getByLabelText("启用用户扣分"));
+  // "0" 能过格式校验（^\d+(\.\d{1,6})?$），但服务端 fail-closed 守卫把单价 0
+  // 判为「资费未配置」并 503：放它入库只会让「明明配了却用不了」拖到运行时才发现。
+  fireEvent.change(screen.getByLabelText("售价（积分 / 秒）"), {
+    target: { value: "0" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+  expect(await screen.findByText(/大于 0 的售价/)).toBeInTheDocument();
+  expect(adminWrite).not.toHaveBeenCalled();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
 test("auditors can read tariff rows but cannot open the write form", async () => {
   render(<BillingRatesManager readOnly />);
   expect(

@@ -211,8 +211,13 @@ export function BillingRatesManager({
         storedCost = converted.value;
         costRounded = !converted.exact;
       }
-      if (selected.customer_charge_allowed && enabled && storedPrice === null)
-        throw new Error("启用收费必须填写售价。");
+      if (selected.customer_charge_allowed && enabled) {
+        if (storedPrice === null) throw new Error("启用收费必须填写售价。");
+        // 单价 0 与未配置同罪：服务端 fail-closed 守卫会把 0 判为「资费未配置」
+        // 并 503。放它入库只会让「明明配了却用不了」拖到运行时才暴露。
+        if (Number(storedPrice) <= 0)
+          throw new Error("启用收费必须填写大于 0 的售价（0 与未配置同罪）。");
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "金额格式不正确。");
       return;

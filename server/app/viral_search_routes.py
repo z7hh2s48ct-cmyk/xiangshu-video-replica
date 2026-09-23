@@ -60,11 +60,22 @@ def require_priced_viral_service(conn: Database, service: str, *, error_code: st
     from app.billing_catalog import read_tariff
 
     tariff = read_tariff(conn, service)
-    if tariff is None or not tariff.enabled or not tariff.unit_credits:
-        raise HTTPException(
-            status_code=503,
-            detail={"code": error_code, "message": "服务资费未配置，请联系管理员。"},
-        )
+    # 三种拒绝原因必须分开报：它们的管理端处置完全不同（去配置 / 去启用 / 去改单价），
+    # 笼统报「未配置」会让已经配过的人反复检查同一个地方。
+    if tariff is None:
+        reason = "尚未配置"
+    elif not tariff.enabled:
+        reason = "已停用"
+    elif not tariff.unit_credits:
+        # 单价 0 与缺失同罪：calculate_credits 对 0 价按免费放行，而管理端
+        # tariff 路径允许写入 enabled=true + 单价 0（评审 M-1），所以这里必须拒绝。
+        reason = "单价为 0"
+    else:
+        return
+    raise HTTPException(
+        status_code=503,
+        detail={"code": error_code, "message": f"服务资费{reason}，请联系管理员。"},
+    )
 
 
 class ViralSearchRequest(BaseModel):
