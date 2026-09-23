@@ -8,6 +8,9 @@ import {
   ensureViralCache,
   formatCacheBytes,
   listViralCache,
+  listViralCacheTasks,
+  pauseViralCache,
+  resumeViralCache,
   useViralCacheProgress,
   viralCacheKey,
 } from "./viralCache";
@@ -91,9 +94,42 @@ describe("viralCache 桥接", () => {
         "cached",
         "downloading",
         "failed",
+        "paused",
         "queued",
       ]);
       expect(CACHE_BADGE_LABELS.failed).toContain("可重试");
+      expect(CACHE_BADGE_LABELS.paused).toBe("已暂停");
+    });
+  });
+
+  describe("下载管理命令", () => {
+    beforeEach(() => {
+      core.isTauri.mockReturnValue(true);
+      core.invoke.mockReset();
+    });
+    afterEach(() => {
+      core.isTauri.mockReturnValue(false);
+    });
+
+    it("读取任务快照并透传错误与速度", async () => {
+      const failed = cacheProgress("failed", "源站返回 403");
+      core.invoke.mockResolvedValue([failed]);
+      await expect(listViralCacheTasks()).resolves.toEqual([failed]);
+      expect(core.invoke).toHaveBeenCalledWith("viral_cache_tasks");
+    });
+
+    it("暂停与继续只传任务身份，不接触或刷新计费直链", async () => {
+      core.invoke.mockResolvedValue(undefined);
+      await pauseViralCache("wechat_channels", "opaque/id");
+      await resumeViralCache("wechat_channels", "opaque/id");
+      expect(core.invoke).toHaveBeenNthCalledWith(1, "viral_cache_pause", {
+        platform: "wechat_channels",
+        videoId: "opaque/id",
+      });
+      expect(core.invoke).toHaveBeenNthCalledWith(2, "viral_cache_resume", {
+        platform: "wechat_channels",
+        videoId: "opaque/id",
+      });
     });
   });
 

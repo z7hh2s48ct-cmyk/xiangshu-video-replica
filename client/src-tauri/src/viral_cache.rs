@@ -13,15 +13,18 @@
 //! 只负责取用，不自行刷新——刷新失败由界面提示用户重试。
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 
 use crate::viral_decrypt::{decrypt_head, is_encrypted_mp4, KEYSTREAM_SIZE};
 
@@ -50,6 +53,7 @@ const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Appl
 pub enum CacheState {
     Queued,
     Downloading,
+    Paused,
     Cached,
     Failed,
 }
@@ -95,6 +99,13 @@ struct Entry {
     started_at: Instant,
 }
 
+#[derive(Default)]
+struct TaskControl {
+    paused: AtomicBool,
+    started: AtomicBool,
+    resumed: Notify,
+}
+
 /// Tauri 托管的缓存服务。`permits` 限制同时在下载的视频数；`statuses` 是内存
 /// 视图，真值仍以文件系统为准。
 pub struct ViralCache {
@@ -102,6 +113,7 @@ pub struct ViralCache {
     client: reqwest::Client,
     permits: Arc<Semaphore>,
     statuses: Arc<Mutex<HashMap<String, Entry>>>,
+    controls: Arc<Mutex<HashMap<String, Arc<TaskControl>>>>,
 }
 
 impl ViralCache {
@@ -115,6 +127,7 @@ impl ViralCache {
             client,
             permits: Arc::new(Semaphore::new(VIDEO_CONCURRENCY)),
             statuses: Arc::new(Mutex::new(HashMap::new())),
+            controls: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -151,12 +164,26 @@ impl ViralCache {
     }
 
     fn status_of(&self, key: &CacheKey) -> Option<CacheProgress> {
-        self.statuses
+        let progress = self
+            .statuses
             .lock()
             .ok()
-            .and_then(|map| map.get(&key.storage_id()).map(|e| e.progress.clone()))
+            .and_then(|map| map.get(&key.storage_id()).map(|e| e.progress.clone()))?;
+        if progress.state == CacheState::Cached && !self.video_path(key).is_file() {
+            if let Ok(mut statuses) = self.statuses.lock() {
+                if statuses
+                    .get(&key.storage_id())
+                    .is_some_and(|entry| entry.progress.state == CacheState::Cached)
+                {
+                    statuses.remove(&key.storage_id());
+                }
+            }
+            return None;
+        }
+        Some(progress)
     }
 
+    #[cfg(test)]
     fn remember(&self, progress: CacheProgress) {
         let started_at = self
             .statuses
@@ -174,10 +201,102 @@ impl ViralCache {
             );
         }
     }
+
+    /// 原子认领单个缓存键。状态与控制器在锁内一起登记，因此并发 ensure 只有一个
+    /// 能成为真正的 writer；其余调用看到 active 状态后直接复用现有任务。
+    fn claim_task(&self, key: &CacheKey) -> Result<Option<Arc<TaskControl>>, String> {
+        let mut statuses = self
+            .statuses
+            .lock()
+            .map_err(|_| "缓存任务状态锁已损坏".to_string())?;
+        if statuses
+            .get(&key.storage_id())
+            .is_some_and(|entry| is_active_state(entry.progress.state))
+        {
+            return Ok(None);
+        }
+        let control = Arc::new(TaskControl::default());
+        let mut controls = self
+            .controls
+            .lock()
+            .map_err(|_| "缓存任务控制锁已损坏".to_string())?;
+        controls.insert(key.storage_id(), control.clone());
+        statuses.insert(
+            key.storage_id(),
+            Entry {
+                progress: CacheProgress {
+                    platform: key.platform.clone(),
+                    video_id: key.video_id.clone(),
+                    state: CacheState::Queued,
+                    downloaded_bytes: 0,
+                    total_bytes: None,
+                    speed_bytes_per_second: 0,
+                    error: None,
+                },
+                started_at: Instant::now(),
+            },
+        );
+        Ok(Some(control))
+    }
+
+    fn remove_control_if_same(&self, key: &CacheKey, expected: &Arc<TaskControl>) {
+        if let Ok(mut controls) = self.controls.lock() {
+            let matches = controls
+                .get(&key.storage_id())
+                .is_some_and(|current| Arc::ptr_eq(current, expected));
+            if matches {
+                controls.remove(&key.storage_id());
+            }
+        }
+    }
 }
 
+#[cfg(test)]
 fn progress_key(progress: &CacheProgress) -> String {
     format!("{}:{}", progress.platform, progress.video_id)
+}
+
+fn is_active_state(state: CacheState) -> bool {
+    matches!(
+        state,
+        CacheState::Queued | CacheState::Downloading | CacheState::Paused
+    )
+}
+
+fn replace_active_progress_if_current(
+    statuses: &Mutex<HashMap<String, Entry>>,
+    controls: &Mutex<HashMap<String, Arc<TaskControl>>>,
+    key: &CacheKey,
+    expected: &Arc<TaskControl>,
+    progress: CacheProgress,
+) -> bool {
+    let Ok(mut statuses) = statuses.lock() else {
+        return false;
+    };
+    let storage_id = key.storage_id();
+    let Some(existing) = statuses.get(&storage_id) else {
+        return false;
+    };
+    if !is_active_state(existing.progress.state) {
+        return false;
+    }
+    let started_at = existing.started_at;
+    let is_current = controls.lock().is_ok_and(|controls| {
+        controls
+            .get(&storage_id)
+            .is_some_and(|current| Arc::ptr_eq(current, expected))
+    });
+    if !is_current {
+        return false;
+    }
+    statuses.insert(
+        storage_id,
+        Entry {
+            progress,
+            started_at,
+        },
+    );
+    true
 }
 
 /// 把任意 id 编码成安全的单层文件名。
@@ -228,6 +347,59 @@ pub fn segment_ranges(total: u64) -> Vec<(u64, u64)> {
 /// 从 `Content-Range: bytes 0-0/12345` 里取出总长度。
 pub fn content_range_total(value: &str) -> Option<u64> {
     value.rsplit('/').next()?.trim().parse::<u64>().ok()
+}
+
+fn validate_content_range(
+    value: &str,
+    expected_start: u64,
+    expected_end: u64,
+    expected_total: u64,
+) -> Result<(), String> {
+    let value = value
+        .strip_prefix("bytes ")
+        .ok_or_else(|| format!("分段响应缺少有效 Content-Range：{value}"))?;
+    let (range, total) = value
+        .split_once('/')
+        .ok_or_else(|| format!("分段响应缺少有效 Content-Range：{value}"))?;
+    let (start, end) = range
+        .split_once('-')
+        .ok_or_else(|| format!("分段响应缺少有效 Content-Range：{value}"))?;
+    let parsed = (
+        start.trim().parse::<u64>(),
+        end.trim().parse::<u64>(),
+        total.trim().parse::<u64>(),
+    );
+    if parsed != (Ok(expected_start), Ok(expected_end), Ok(expected_total)) {
+        return Err(format!(
+            "源站返回了错误分段：期望 bytes {expected_start}-{expected_end}/{expected_total}，实际 {value}"
+        ));
+    }
+    Ok(())
+}
+
+async fn try_join_all<F>(futures: Vec<F>) -> Result<(), String>
+where
+    F: Future<Output = Result<(), String>>,
+{
+    let mut futures: Vec<Pin<Box<F>>> = futures.into_iter().map(Box::pin).collect();
+    std::future::poll_fn(|context| {
+        let mut index = 0;
+        while index < futures.len() {
+            match futures[index].as_mut().poll(context) {
+                Poll::Ready(Ok(())) => {
+                    drop(futures.swap_remove(index));
+                }
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending => index += 1,
+            }
+        }
+        if futures.is_empty() {
+            Poll::Ready(Ok(()))
+        } else {
+            Poll::Pending
+        }
+    })
+    .await
 }
 
 /// §13-1 默认缓存上限 20 GB（数值可调）。
@@ -300,9 +472,23 @@ struct Job<'a> {
     last_bytes: AtomicU64,
     total: AtomicU64,
     last_emit: Mutex<Instant>,
+    statuses: Arc<Mutex<HashMap<String, Entry>>>,
+    controls: Arc<Mutex<HashMap<String, Arc<TaskControl>>>>,
+    control: Arc<TaskControl>,
 }
 
 impl Job<'_> {
+    async fn wait_if_paused(&self) {
+        loop {
+            let resumed = self.control.resumed.notified();
+            if !self.control.paused.load(Ordering::Acquire) {
+                break;
+            }
+            self.emit(CacheState::Paused, None, true);
+            resumed.await;
+        }
+    }
+
     fn emit(&self, state: CacheState, error: Option<String>, force: bool) {
         let total = match self.total.load(Ordering::Relaxed) {
             0 => None,
@@ -325,18 +511,24 @@ impl Job<'_> {
             }
             *last = Instant::now();
         }
-        let _ = self.app.emit(
-            "viral-cache-progress",
-            CacheProgress {
-                platform: self.key.platform.clone(),
-                video_id: self.key.video_id.clone(),
-                state,
-                downloaded_bytes: downloaded,
-                total_bytes: total,
-                speed_bytes_per_second: speed,
-                error,
-            },
-        );
+        let progress = CacheProgress {
+            platform: self.key.platform.clone(),
+            video_id: self.key.video_id.clone(),
+            state,
+            downloaded_bytes: downloaded,
+            total_bytes: total,
+            speed_bytes_per_second: speed,
+            error,
+        };
+        if replace_active_progress_if_current(
+            &self.statuses,
+            &self.controls,
+            self.key,
+            &self.control,
+            progress.clone(),
+        ) {
+            let _ = self.app.emit("viral-cache-progress", progress);
+        }
     }
 
     fn headers(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -352,6 +544,7 @@ impl Job<'_> {
                 .await
                 .map_err(|error| format!("无法创建缓存目录：{error}"))?;
         }
+        self.wait_if_paused().await;
         self.emit(CacheState::Downloading, None, true);
 
         let probe = self
@@ -376,20 +569,20 @@ impl Job<'_> {
             .and_then(content_range_total);
 
         if status == reqwest::StatusCode::PARTIAL_CONTENT {
-            if let Some(total) = ranged_total {
-                if total > 0 {
-                    self.total.store(total, Ordering::Relaxed);
-                    self.download_segmented(total).await?;
-                    return self.finish().await;
-                }
-            }
+            let total = ranged_total
+                .filter(|total| *total > 0)
+                .ok_or_else(|| "分段探测响应缺少有效文件总长度".to_string())?;
+            self.total.store(total, Ordering::Relaxed);
+            self.download_segmented(total).await?;
+            return self.finish().await;
         }
 
         // 源站忽略了 Range（返回 200），探测响应本身就是完整内容，直接复用。
-        if let Some(length) = probe.content_length() {
+        let expected_bytes = probe.content_length();
+        if let Some(length) = expected_bytes {
             self.total.store(length, Ordering::Relaxed);
         }
-        self.write_stream(probe, 0).await?;
+        self.write_stream(probe, 0, expected_bytes).await?;
         self.finish().await
     }
 
@@ -403,34 +596,56 @@ impl Job<'_> {
             .map_err(|error| format!("无法预分配空间：{error}"))?;
         drop(file);
 
-        let ranges = segment_ranges(total);
-        let mut handles = Vec::with_capacity(ranges.len());
-        for (start, end) in ranges {
-            let request = self.headers(
-                self.client
-                    .get(self.url)
-                    .header(reqwest::header::RANGE, format!("bytes={start}-{end}")),
-            );
-            let response = request
-                .send()
-                .await
-                .map_err(|error| format!("分段请求失败：{error}"))?;
-            if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
-                return Err(format!(
-                    "源站未按分段响应（HTTP {}）",
-                    response.status().as_u16()
-                ));
-            }
-            handles.push(self.write_stream(response, start));
-        }
-        for handle in handles {
-            handle.await?;
+        let downloads = segment_ranges(total)
+            .into_iter()
+            .map(|range| self.download_segment(range, total))
+            .collect();
+        try_join_all(downloads).await?;
+        let downloaded = self.downloaded.load(Ordering::Relaxed);
+        if downloaded != total {
+            return Err(format!(
+                "下载文件长度不完整：期望 {total} 字节，实际 {downloaded} 字节"
+            ));
         }
         Ok(())
     }
 
+    async fn download_segment(&self, range: (u64, u64), total: u64) -> Result<(), String> {
+        self.wait_if_paused().await;
+        let (start, end) = range;
+        let response = self
+            .headers(
+                self.client
+                    .get(self.url)
+                    .header(reqwest::header::RANGE, format!("bytes={start}-{end}")),
+            )
+            .send()
+            .await
+            .map_err(|error| format!("分段请求失败：{error}"))?;
+        if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+            return Err(format!(
+                "源站未按分段响应（HTTP {}）",
+                response.status().as_u16()
+            ));
+        }
+        let content_range = response
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| "分段响应缺少 Content-Range".to_string())?;
+        validate_content_range(content_range, start, end, total)?;
+        self.write_stream(response, start, Some(end - start + 1))
+            .await?;
+        Ok(())
+    }
+
     /// 把一个响应体顺序写到 `offset` 起始的位置，并累计进度。
-    async fn write_stream(&self, response: reqwest::Response, offset: u64) -> Result<(), String> {
+    async fn write_stream(
+        &self,
+        response: reqwest::Response,
+        offset: u64,
+        expected_bytes: Option<u64>,
+    ) -> Result<u64, String> {
         let mut file = tokio::fs::OpenOptions::new()
             .write(true)
             .open(&self.part)
@@ -440,11 +655,21 @@ impl Job<'_> {
             .await
             .map_err(|error| format!("无法定位写入偏移：{error}"))?;
         let mut response = response;
+        let mut written = 0u64;
         while let Some(chunk) = response
             .chunk()
             .await
             .map_err(|error| format!("读取源站数据失败：{error}"))?
         {
+            self.wait_if_paused().await;
+            self.emit(CacheState::Downloading, None, false);
+            written = written.saturating_add(chunk.len() as u64);
+            if expected_bytes.is_some_and(|expected| written > expected) {
+                return Err(format!(
+                    "源站分段长度超出范围：期望最多 {} 字节，实际已收到 {written} 字节",
+                    expected_bytes.unwrap_or_default()
+                ));
+            }
             file.write_all(&chunk)
                 .await
                 .map_err(|error| format!("写入缓存失败：{error}"))?;
@@ -455,7 +680,13 @@ impl Job<'_> {
         file.flush()
             .await
             .map_err(|error| format!("刷新缓存失败：{error}"))?;
-        Ok(())
+        if expected_bytes.is_some_and(|expected| written != expected) {
+            return Err(format!(
+                "源站分段长度不完整：期望 {} 字节，实际 {written} 字节",
+                expected_bytes.unwrap_or_default()
+            ));
+        }
+        Ok(written)
     }
 
     /// 落盘后本地解密（仅视频号且确实加密时），再原子改名。
@@ -509,6 +740,7 @@ async fn ensure(
     key: CacheKey,
     url: String,
     decode_key: Option<String>,
+    control: Arc<TaskControl>,
 ) -> Result<PathBuf, String> {
     let final_path = cache.video_path(&key);
     if final_path.is_file() {
@@ -520,16 +752,7 @@ async fn ensure(
         .acquire_owned()
         .await
         .map_err(|_| "缓存队列已关闭".to_string())?;
-
-    cache.remember(CacheProgress {
-        platform: key.platform.clone(),
-        video_id: key.video_id.clone(),
-        state: CacheState::Queued,
-        downloaded_bytes: 0,
-        total_bytes: None,
-        speed_bytes_per_second: 0,
-        error: None,
-    });
+    control.started.store(true, Ordering::Release);
 
     let part = cache.part_path(&key);
     let job = Job {
@@ -544,6 +767,9 @@ async fn ensure(
         last_bytes: AtomicU64::new(0),
         total: AtomicU64::new(0),
         last_emit: Mutex::new(Instant::now() - PROGRESS_INTERVAL),
+        statuses: cache.statuses.clone(),
+        controls: cache.controls.clone(),
+        control,
     };
 
     let mut last_error = String::from("下载失败");
@@ -553,18 +779,6 @@ async fn ensure(
         let _ = tokio::fs::remove_file(&part).await;
         match job.run().await {
             Ok(path) => {
-                cache.remember(CacheProgress {
-                    platform: key.platform.clone(),
-                    video_id: key.video_id.clone(),
-                    state: CacheState::Cached,
-                    downloaded_bytes: job.downloaded.load(Ordering::Relaxed),
-                    total_bytes: match job.total.load(Ordering::Relaxed) {
-                        0 => None,
-                        value => Some(value),
-                    },
-                    speed_bytes_per_second: 0,
-                    error: None,
-                });
                 drop(permit);
                 return Ok(path);
             }
@@ -578,15 +792,6 @@ async fn ensure(
     }
 
     let _ = tokio::fs::remove_file(&part).await;
-    cache.remember(CacheProgress {
-        platform: key.platform.clone(),
-        video_id: key.video_id.clone(),
-        state: CacheState::Failed,
-        downloaded_bytes: job.downloaded.load(Ordering::Relaxed),
-        total_bytes: None,
-        speed_bytes_per_second: 0,
-        error: Some(last_error.clone()),
-    });
     job.emit(CacheState::Failed, Some(last_error.clone()), true);
     drop(permit);
     Err(last_error)
@@ -609,6 +814,13 @@ pub async fn viral_cache_ensure(
     if url.trim().is_empty() {
         return Err("缺少可下载的媒体地址".to_string());
     }
+    let key = CacheKey { platform, video_id };
+    if cache.video_path(&key).is_file() {
+        return Ok(());
+    }
+    let Some(control) = cache.claim_task(&key)? else {
+        return Ok(());
+    };
     // 入队即返回：真正下载交给后台队列按并发上限推进，界面靠事件更新进度。
     // 这里把共享字段克隆进任务，而不是把 State 的借用带过去（它会随命令返回失效）。
     let owned = ViralCache {
@@ -616,11 +828,29 @@ pub async fn viral_cache_ensure(
         client: cache.client.clone(),
         permits: cache.permits.clone(),
         statuses: cache.statuses.clone(),
+        controls: cache.controls.clone(),
     };
-    let key = CacheKey { platform, video_id };
     let app_handle = app.clone();
+    let cleanup_key = key.clone();
+    let cleanup_control = control.clone();
     tauri::async_runtime::spawn(async move {
-        let _ = ensure(&owned, &app_handle, key, url, decode_key).await;
+        if let Err(error) = ensure(&owned, &app_handle, key, url, decode_key, control).await {
+            if let Some(mut progress) = owned.status_of(&cleanup_key) {
+                progress.state = CacheState::Failed;
+                progress.speed_bytes_per_second = 0;
+                progress.error = Some(error);
+                if replace_active_progress_if_current(
+                    &owned.statuses,
+                    &owned.controls,
+                    &cleanup_key,
+                    &cleanup_control,
+                    progress.clone(),
+                ) {
+                    let _ = app_handle.emit("viral-cache-progress", progress);
+                }
+            }
+        }
+        owned.remove_control_if_same(&cleanup_key, &cleanup_control);
     });
     Ok(())
 }
@@ -631,15 +861,19 @@ pub fn viral_cache_status(
     cache: tauri::State<'_, ViralCache>,
     items: Vec<CacheKey>,
 ) -> Vec<CacheProgress> {
+    cache_statuses(&cache, items)
+}
+
+fn cache_statuses(cache: &ViralCache, items: Vec<CacheKey>) -> Vec<CacheProgress> {
     items
         .into_iter()
-        .map(|key| {
+        .filter_map(|key| {
             let final_path = cache.video_path(&key);
             if final_path.is_file() {
                 let bytes = std::fs::metadata(&final_path)
                     .map(|meta| meta.len())
                     .unwrap_or(0);
-                return CacheProgress {
+                return Some(CacheProgress {
                     platform: key.platform.clone(),
                     video_id: key.video_id.clone(),
                     state: CacheState::Cached,
@@ -647,19 +881,129 @@ pub fn viral_cache_status(
                     total_bytes: Some(bytes),
                     speed_bytes_per_second: 0,
                     error: None,
-                };
+                });
             }
-            cache.status_of(&key).unwrap_or(CacheProgress {
-                platform: key.platform,
-                video_id: key.video_id,
-                state: CacheState::Queued,
-                downloaded_bytes: 0,
-                total_bytes: None,
-                speed_bytes_per_second: 0,
-                error: None,
-            })
+            cache.status_of(&key)
         })
         .collect()
+}
+
+fn has_active_task(cache: &ViralCache, key: &CacheKey) -> bool {
+    cache
+        .status_of(key)
+        .is_some_and(|progress| is_active_state(progress.state))
+}
+
+fn has_active_tasks_for_platform(cache: &ViralCache, platform: Option<&str>) -> bool {
+    cache.statuses.lock().is_ok_and(|statuses| {
+        statuses.values().any(|entry| {
+            is_active_state(entry.progress.state)
+                && platform.is_none_or(|platform| entry.progress.platform == platform)
+        })
+    })
+}
+
+fn cache_task_snapshot(cache: &ViralCache) -> Vec<CacheProgress> {
+    let Ok(mut statuses) = cache.statuses.lock() else {
+        return Vec::new();
+    };
+    statuses.retain(|_, entry| {
+        if entry.progress.state != CacheState::Cached {
+            return true;
+        }
+        cache
+            .video_path(&CacheKey {
+                platform: entry.progress.platform.clone(),
+                video_id: entry.progress.video_id.clone(),
+            })
+            .is_file()
+    });
+    let mut tasks: Vec<(Instant, CacheProgress)> = statuses
+        .values()
+        .map(|entry| (entry.started_at, entry.progress.clone()))
+        .collect();
+    tasks.sort_by_key(|(started_at, _)| *started_at);
+    tasks.into_iter().map(|(_, progress)| progress).collect()
+}
+
+/// 下载管理面板使用的任务快照，包含排队、下载、暂停、失败与本会话已完成任务。
+#[tauri::command]
+pub fn viral_cache_tasks(cache: tauri::State<'_, ViralCache>) -> Vec<CacheProgress> {
+    cache_task_snapshot(&cache)
+}
+
+#[tauri::command]
+pub fn viral_cache_pause(
+    app: AppHandle,
+    cache: tauri::State<'_, ViralCache>,
+    platform: String,
+    video_id: String,
+) -> Result<(), String> {
+    let key = CacheKey { platform, video_id };
+    let mut progress = cache
+        .status_of(&key)
+        .filter(|progress| is_active_state(progress.state))
+        .ok_or_else(|| "缓存任务已结束或不存在".to_string())?;
+    let control = cache
+        .controls
+        .lock()
+        .ok()
+        .and_then(|controls| controls.get(&key.storage_id()).cloned())
+        .ok_or_else(|| "缓存任务已结束或不存在".to_string())?;
+    control.paused.store(true, Ordering::Release);
+    progress.state = CacheState::Paused;
+    progress.speed_bytes_per_second = 0;
+    if !replace_active_progress_if_current(
+        &cache.statuses,
+        &cache.controls,
+        &key,
+        &control,
+        progress.clone(),
+    ) {
+        control.paused.store(false, Ordering::Release);
+        return Err("缓存任务已结束或不存在".to_string());
+    }
+    let _ = app.emit("viral-cache-progress", progress);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn viral_cache_resume(
+    app: AppHandle,
+    cache: tauri::State<'_, ViralCache>,
+    platform: String,
+    video_id: String,
+) -> Result<(), String> {
+    let key = CacheKey { platform, video_id };
+    let mut progress = cache
+        .status_of(&key)
+        .filter(|progress| is_active_state(progress.state))
+        .ok_or_else(|| "缓存任务已结束或不存在".to_string())?;
+    let control = cache
+        .controls
+        .lock()
+        .ok()
+        .and_then(|controls| controls.get(&key.storage_id()).cloned())
+        .ok_or_else(|| "缓存任务已结束或不存在".to_string())?;
+    control.paused.store(false, Ordering::Release);
+    control.resumed.notify_waiters();
+    progress.state = if control.started.load(Ordering::Acquire) {
+        CacheState::Downloading
+    } else {
+        CacheState::Queued
+    };
+    progress.speed_bytes_per_second = 0;
+    if !replace_active_progress_if_current(
+        &cache.statuses,
+        &cache.controls,
+        &key,
+        &control,
+        progress.clone(),
+    ) {
+        return Err("缓存任务已结束或不存在".to_string());
+    }
+    let _ = app.emit("viral-cache-progress", progress);
+    Ok(())
 }
 
 /// 已缓存列表 + 各条占用。索引即文件系统，因此直接遍历目录。
@@ -725,6 +1069,9 @@ pub async fn viral_cache_delete(
     video_id: String,
 ) -> Result<(), String> {
     let key = CacheKey { platform, video_id };
+    if has_active_task(&cache, &key) {
+        return Err("缓存任务仍在运行，请等待完成后再删除".to_string());
+    }
     let path = cache.video_path(&key);
     if path.is_file() {
         tokio::fs::remove_file(&path)
@@ -745,17 +1092,29 @@ pub async fn viral_cache_clear(
     platform: Option<String>,
 ) -> Result<(), String> {
     let root = cache.root.clone();
-    let target = match (scope.as_str(), platform) {
-        ("platform", Some(platform)) => root.join(safe_segment(&platform)),
-        _ => root,
+    let platform = match scope.as_str() {
+        "all" => None,
+        "platform" => Some(platform.ok_or_else(|| "按平台清理时必须指定平台".to_string())?),
+        _ => return Err("未知的缓存清理范围".to_string()),
     };
+    if has_active_tasks_for_platform(&cache, platform.as_deref()) {
+        return Err("仍有缓存任务在运行，请等待完成后再清理".to_string());
+    }
+    let target = platform
+        .as_deref()
+        .map(|platform| root.join(safe_segment(platform)))
+        .unwrap_or(root);
     if target.is_dir() {
         tokio::fs::remove_dir_all(&target)
             .await
             .map_err(|error| format!("清理缓存失败：{error}"))?;
     }
     if let Ok(mut map) = cache.statuses.lock() {
-        map.clear();
+        if let Some(platform) = platform.as_deref() {
+            map.retain(|_, entry| entry.progress.platform != platform);
+        } else {
+            map.clear();
+        }
     }
     Ok(())
 }
@@ -919,6 +1278,7 @@ fn decode_segment(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::task::Context;
 
     #[test]
     fn safe_segment_escapes_path_separators() {
@@ -971,6 +1331,201 @@ mod tests {
         assert_eq!(content_range_total("bytes 0-0/131072"), Some(131_072));
         assert_eq!(content_range_total("bytes 0-0/*"), None);
         assert_eq!(content_range_total("nonsense"), None);
+    }
+
+    #[test]
+    fn content_range_must_match_the_requested_segment() {
+        assert!(validate_content_range("bytes 10-19/100", 10, 19, 100).is_ok());
+        assert!(validate_content_range("bytes 0-19/100", 10, 19, 100).is_err());
+        assert!(validate_content_range("bytes 10-20/100", 10, 19, 100).is_err());
+        assert!(validate_content_range("bytes 10-19/99", 10, 19, 100).is_err());
+        assert!(validate_content_range("nonsense", 10, 19, 100).is_err());
+    }
+
+    struct ConcurrentProbe {
+        arrivals: Arc<AtomicU64>,
+        arrived: bool,
+    }
+
+    impl Future for ConcurrentProbe {
+        type Output = Result<(), String>;
+
+        fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+            if !self.arrived {
+                self.arrived = true;
+                self.arrivals.fetch_add(1, Ordering::SeqCst);
+                context.waker().wake_by_ref();
+            }
+            if self.arrivals.load(Ordering::SeqCst) >= 2 {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+
+    #[test]
+    fn segment_futures_are_polled_concurrently() {
+        let arrivals = Arc::new(AtomicU64::new(0));
+        let futures = vec![
+            ConcurrentProbe {
+                arrivals: arrivals.clone(),
+                arrived: false,
+            },
+            ConcurrentProbe {
+                arrivals: arrivals.clone(),
+                arrived: false,
+            },
+        ];
+        tauri::async_runtime::block_on(try_join_all(futures)).unwrap();
+        assert_eq!(arrivals.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn unknown_items_are_not_reported_as_queued() {
+        let root = std::env::temp_dir().join(format!(
+            "viral-cache-status-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let cache = ViralCache::new(root);
+        let statuses = cache_statuses(
+            &cache,
+            vec![CacheKey {
+                platform: "douyin".to_string(),
+                video_id: "never-enqueued".to_string(),
+            }],
+        );
+        assert!(statuses.is_empty());
+    }
+
+    #[test]
+    fn active_tasks_block_overlapping_delete_or_clear() {
+        let cache = ViralCache::new(std::env::temp_dir().join("viral-cache-active-test"));
+        let key = CacheKey {
+            platform: "douyin".to_string(),
+            video_id: "active".to_string(),
+        };
+        cache.claim_task(&key).unwrap().unwrap();
+
+        assert!(has_active_task(&cache, &key));
+        assert!(has_active_tasks_for_platform(&cache, None));
+        assert!(has_active_tasks_for_platform(&cache, Some("douyin")));
+        assert!(!has_active_tasks_for_platform(
+            &cache,
+            Some("wechat_channels")
+        ));
+    }
+
+    #[test]
+    fn cached_state_disappears_when_the_file_is_gone() {
+        let cache = ViralCache::new(std::env::temp_dir().join("viral-cache-stale-test"));
+        let key = CacheKey {
+            platform: "douyin".to_string(),
+            video_id: "deleted".to_string(),
+        };
+        cache.remember(CacheProgress {
+            platform: key.platform.clone(),
+            video_id: key.video_id.clone(),
+            state: CacheState::Cached,
+            downloaded_bytes: 100,
+            total_bytes: Some(100),
+            speed_bytes_per_second: 0,
+            error: None,
+        });
+
+        assert!(cache.status_of(&key).is_none());
+        assert!(cache_task_snapshot(&cache).is_empty());
+    }
+
+    #[test]
+    fn concurrent_claims_only_start_one_task_per_key() {
+        let cache = Arc::new(ViralCache::new(
+            std::env::temp_dir().join("viral-cache-claim-test"),
+        ));
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let mut threads = Vec::new();
+        for _ in 0..8 {
+            let cache = cache.clone();
+            let barrier = barrier.clone();
+            threads.push(std::thread::spawn(move || {
+                let key = CacheKey {
+                    platform: "douyin".to_string(),
+                    video_id: "same-video".to_string(),
+                };
+                barrier.wait();
+                cache.claim_task(&key).unwrap().is_some()
+            }));
+        }
+        let claimed = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .filter(|claimed| *claimed)
+            .count();
+        assert_eq!(claimed, 1);
+    }
+
+    #[test]
+    fn old_task_cannot_overwrite_or_remove_a_new_retry() {
+        let cache = ViralCache::new(std::env::temp_dir().join("viral-cache-retry-test"));
+        let key = CacheKey {
+            platform: "douyin".to_string(),
+            video_id: "retry".to_string(),
+        };
+        let old = cache.claim_task(&key).unwrap().unwrap();
+        cache.remember(CacheProgress {
+            platform: key.platform.clone(),
+            video_id: key.video_id.clone(),
+            state: CacheState::Failed,
+            downloaded_bytes: 0,
+            total_bytes: None,
+            speed_bytes_per_second: 0,
+            error: Some("old failed".to_string()),
+        });
+        let new = cache.claim_task(&key).unwrap().unwrap();
+
+        let old_failed = CacheProgress {
+            platform: key.platform.clone(),
+            video_id: key.video_id.clone(),
+            state: CacheState::Failed,
+            downloaded_bytes: 12,
+            total_bytes: None,
+            speed_bytes_per_second: 0,
+            error: Some("late old failure".to_string()),
+        };
+        assert!(!replace_active_progress_if_current(
+            &cache.statuses,
+            &cache.controls,
+            &key,
+            &old,
+            old_failed,
+        ));
+        assert_eq!(cache.status_of(&key).unwrap().state, CacheState::Queued);
+
+        let new_downloading = CacheProgress {
+            platform: key.platform.clone(),
+            video_id: key.video_id.clone(),
+            state: CacheState::Downloading,
+            downloaded_bytes: 1,
+            total_bytes: Some(10),
+            speed_bytes_per_second: 1,
+            error: None,
+        };
+        assert!(replace_active_progress_if_current(
+            &cache.statuses,
+            &cache.controls,
+            &key,
+            &new,
+            new_downloading,
+        ));
+        cache.remove_control_if_same(&key, &old);
+        let current = cache
+            .controls
+            .lock()
+            .unwrap()
+            .get(&key.storage_id())
+            .cloned();
+        assert!(current.is_some_and(|control| Arc::ptr_eq(&control, &new)));
     }
 
     use std::collections::HashSet;

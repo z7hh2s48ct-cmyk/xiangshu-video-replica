@@ -13,7 +13,12 @@ import { fetchViralVideoSource, type ViralPlatform } from "../api";
  * - 进度事件驱动、不轮询。
  */
 
-export type ViralCacheState = "queued" | "downloading" | "cached" | "failed";
+export type ViralCacheState =
+  | "queued"
+  | "downloading"
+  | "paused"
+  | "cached"
+  | "failed";
 
 export type ViralCacheProgress = {
   platform: string;
@@ -57,6 +62,7 @@ export function cacheProgressRatio(
 export const CACHE_BADGE_LABELS: Record<ViralCacheState, string> = {
   queued: "排队中",
   downloading: "缓存中",
+  paused: "已暂停",
   cached: "已缓存",
   failed: "缓存失败（可重试）",
 };
@@ -98,6 +104,28 @@ export async function viralCacheStatus(
 export async function listViralCache(): Promise<ViralCachedItem[]> {
   if (!cacheAvailable()) return [];
   return invoke<ViralCachedItem[]>("viral_cache_list");
+}
+
+/** 当前会话的缓存任务快照，供下载管理面板首次打开时打底。 */
+export async function listViralCacheTasks(): Promise<ViralCacheProgress[]> {
+  if (!cacheAvailable()) return [];
+  return invoke<ViralCacheProgress[]>("viral_cache_tasks");
+}
+
+export async function pauseViralCache(
+  platform: string,
+  videoId: string,
+): Promise<void> {
+  if (!cacheAvailable()) return;
+  await invoke("viral_cache_pause", { platform, videoId });
+}
+
+export async function resumeViralCache(
+  platform: string,
+  videoId: string,
+): Promise<void> {
+  if (!cacheAvailable()) return;
+  await invoke("viral_cache_resume", { platform, videoId });
 }
 
 export async function deleteViralCache(
