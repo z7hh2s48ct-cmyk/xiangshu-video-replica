@@ -24,6 +24,8 @@ const {
   getViralImportTask,
   listViralFavorites,
   listViralVideos,
+  newViralSearchKey,
+  searchViralVideos,
   saveViralFavorite,
   removeViralFavorite,
   listMaterials,
@@ -63,6 +65,8 @@ const {
   getViralImportTask: vi.fn(),
   listViralFavorites: vi.fn(),
   listViralVideos: vi.fn(),
+  searchViralVideos: vi.fn(),
+  newViralSearchKey: vi.fn(() => "viral-search-key"),
   saveViralFavorite: vi.fn(),
   removeViralFavorite: vi.fn(),
   listMaterials: vi.fn(),
@@ -131,6 +135,8 @@ vi.mock("../api", () => ({
   getViralImportTask,
   listViralFavorites,
   listViralVideos,
+  newViralSearchKey,
+  searchViralVideos,
   saveViralFavorite,
   removeViralFavorite,
   listMaterials,
@@ -441,6 +447,10 @@ describe("V1.4 内容与运营页面", () => {
     getViralImportTask.mockReset();
     listViralFavorites.mockReset();
     listViralVideos.mockReset();
+    // mockReset 会清掉实现，幂等键生成器要补回默认值。
+    searchViralVideos.mockReset();
+    newViralSearchKey.mockReset();
+    newViralSearchKey.mockImplementation(() => "viral-search-key");
     saveViralFavorite.mockReset();
     removeViralFavorite.mockReset();
     listViralVideos.mockResolvedValue({
@@ -2316,6 +2326,229 @@ describe("V1.4 内容与运营页面", () => {
     expect(listViralVideos).not.toHaveBeenCalledWith("douyin", "hot", {
       limit: 12,
       cursor: "cursor-3",
+    });
+  });
+
+  describe("爆款视频关键词搜索（服务端，按次计费）", () => {
+    function searchResponse(
+      items: ViralVideoItem[],
+      overrides: {
+        cursor?: string | null;
+        hasMore?: boolean;
+        charged?: number;
+      } = {},
+    ) {
+      return {
+        items,
+        cursor: overrides.cursor ?? null,
+        hasMore: overrides.hasMore ?? false,
+        billing: { charged: overrides.charged ?? 1, unit: "call" },
+      };
+    }
+
+    function submitKeyword(keyword: string) {
+      fireEvent.change(screen.getByRole("textbox", { name: "搜索视频标题" }), {
+        target: { value: keyword },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    }
+
+    it("提交关键词走服务端搜索并用结果整体替换列表", async () => {
+      const base = studio({ review: false });
+      searchViralVideos.mockResolvedValue(
+        searchResponse([
+          viralItem(90, { title: "庭院爆款 90", videoId: "native-dy-90" }),
+        ]),
+      );
+      render(<StatefulViralPage value={base} />);
+
+      submitKeyword("庭院");
+
+      expect(await screen.findByText("庭院爆款 90")).toBeInTheDocument();
+      // 结果替换浏览列表，而不是叠加在已加载卡片之上。
+      expect(screen.queryByText("农村建房预算，别只盯着主体")).toBeNull();
+      expect(searchViralVideos).toHaveBeenCalledWith("庭院", "douyin", {
+        cursor: undefined,
+        idempotencyKey: "viral-search-key",
+      });
+    });
+
+    it("只输入不提交不发起外呼（按次计费不得随击键触发）", async () => {
+      const base = studio({ review: false });
+      searchViralVideos.mockResolvedValue(searchResponse([]));
+      render(<StatefulViralPage value={base} />);
+
+      fireEvent.change(screen.getByRole("textbox", { name: "搜索视频标题" }), {
+        target: { value: "预算" },
+      });
+
+      expect(searchViralVideos).not.toHaveBeenCalled();
+      // 输入框仍保留免费的本浏览过滤，手感不受影响。
+      expect(
+        screen.getByText("农村建房预算，别只盯着主体"),
+      ).toBeInTheDocument();
+    });
+
+    it("提交搜索表单（回车走的就是这条路径）触发服务端搜索", async () => {
+      const base = studio({ review: false });
+      searchViralVideos.mockResolvedValue(searchResponse([viralItem(92)]));
+      render(<StatefulViralPage value={base} />);
+
+      const input = screen.getByRole("textbox", { name: "搜索视频标题" });
+      fireEvent.change(input, { target: { value: "庭院" } });
+      // <search> 的隐式 role 在当前 dom-accessibility-api 里尚未映射，
+      // 因此按结构取表单；浏览器里回车触发的正是同一个 submit 事件。
+      const form = input.closest("form");
+      if (!form) throw new Error("搜索框应位于 form 内");
+      fireEvent.submit(form);
+
+      expect(await screen.findByText("乡墅参考 92")).toBeInTheDocument();
+      expect(searchViralVideos).toHaveBeenCalledTimes(1);
+    });
+
+    it("失败重试复用同一幂等键，同一次尝试不重复扣费", async () => {
+      const base = studio({ review: false });
+      newViralSearchKey
+        .mockReturnValueOnce("key-1")
+        .mockReturnValueOnce("key-2");
+      searchViralVideos
+        .mockRejectedValueOnce(new Error("上游超时"))
+        .mockResolvedValueOnce(searchResponse([viralItem(93)]));
+      render(<StatefulViralPage value={base} />);
+
+      submitKeyword("庭院");
+      expect(await screen.findByRole("alert")).toHaveTextContent("上游超时");
+
+      fireEvent.click(screen.getByRole("button", { name: "重试" }));
+
+      expect(await screen.findByText("乡墅参考 93")).toBeInTheDocument();
+      expect(searchViralVideos).toHaveBeenCalledTimes(2);
+      const [first, second] = searchViralVideos.mock.calls;
+      expect(first[2].idempotencyKey).toBe("key-1");
+      expect(second[2].idempotencyKey).toBe("key-1");
+      // 重试没有申请新键，因此不会被服务端当成新一轮计费。
+      expect(newViralSearchKey).toHaveBeenCalledTimes(1);
+    });
+
+    it("重新发起搜索换新幂等键（新的计费轮次）", async () => {
+      const base = studio({ review: false });
+      newViralSearchKey
+        .mockReturnValueOnce("key-1")
+        .mockReturnValueOnce("key-2");
+      searchViralVideos.mockResolvedValue(searchResponse([viralItem(94)]));
+      render(<StatefulViralPage value={base} />);
+
+      submitKeyword("庭院");
+      await screen.findByText("乡墅参考 94");
+      submitKeyword("预算");
+      await waitFor(() => expect(searchViralVideos).toHaveBeenCalledTimes(2));
+
+      const [first, second] = searchViralVideos.mock.calls;
+      expect(first[2].idempotencyKey).toBe("key-1");
+      expect(second[2].idempotencyKey).toBe("key-2");
+    });
+
+    it("加载下一页换新幂等键并带上游标（每页各计一次）", async () => {
+      const base = studio({ review: false });
+      newViralSearchKey
+        .mockReturnValueOnce("key-1")
+        .mockReturnValueOnce("key-2");
+      searchViralVideos
+        .mockResolvedValueOnce(
+          searchResponse([viralItem(95)], { cursor: "c-2", hasMore: true }),
+        )
+        .mockResolvedValueOnce(searchResponse([viralItem(96)]));
+      render(<StatefulViralPage value={base} />);
+
+      submitKeyword("庭院");
+      await screen.findByText("乡墅参考 95");
+
+      fireEvent.click(
+        await screen.findByRole("button", { name: "加载下一页（按次计费）" }),
+      );
+
+      expect(await screen.findByText("乡墅参考 96")).toBeInTheDocument();
+      const [first, second] = searchViralVideos.mock.calls;
+      expect(first[2].idempotencyKey).toBe("key-1");
+      expect(second[2].idempotencyKey).toBe("key-2");
+      expect(second[2].cursor).toBe("c-2");
+    });
+
+    it("余额不足打开钱包并提示，不展示结果", async () => {
+      const base = studio({ review: false });
+      const openLive = vi.fn();
+      searchViralVideos.mockRejectedValue(
+        Object.assign(new Error("积分不足"), {
+          code: "INSUFFICIENT_CREDITS",
+        }),
+      );
+      render(<StatefulViralPage value={{ ...base, openLive }} />);
+
+      submitKeyword("庭院");
+
+      expect(await screen.findByRole("alert")).toHaveTextContent("余额不足");
+      expect(openLive).toHaveBeenCalledWith("wallet");
+    });
+
+    it("数据源未配置时给出可读提示", async () => {
+      const base = studio({ review: false });
+      searchViralVideos.mockRejectedValue(
+        Object.assign(new Error("服务端原文"), {
+          code: "VIRAL_SEARCH_UNAVAILABLE",
+        }),
+      );
+      render(<StatefulViralPage value={base} />);
+
+      submitKeyword("庭院");
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "爆款视频数据源暂不可用，请联系管理员。",
+      );
+    });
+
+    it("返回爆款列表清空搜索态并恢复完整浏览列表", async () => {
+      const base = studio({ review: false });
+      searchViralVideos.mockResolvedValue(searchResponse([viralItem(97)]));
+      render(<StatefulViralPage value={base} />);
+
+      submitKeyword("庭院");
+      await screen.findByText("乡墅参考 97");
+
+      fireEvent.click(screen.getByRole("button", { name: "返回爆款列表" }));
+
+      // 搜索态与关键词一并清掉：不匹配关键词的浏览条目重新出现。
+      expect(
+        screen.getByText("农村建房预算，别只盯着主体"),
+      ).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "返回爆款列表" })).toBeNull();
+      // 搜到的视频已由服务端落库、并同步进本地内容池，因此仍留在浏览列表中。
+      expect(screen.getByText("乡墅参考 97")).toBeInTheDocument();
+    });
+
+    it("切平台作废在途搜索，迟到结果不再点亮搜索态", async () => {
+      const base = studio({ review: false });
+      fetchViralVideoStatistics.mockResolvedValue({ items: [] });
+      let resolveSearch:
+        | ((value: ReturnType<typeof searchResponse>) => void)
+        | undefined;
+      searchViralVideos.mockReturnValue(
+        new Promise((resolve) => {
+          resolveSearch = resolve;
+        }),
+      );
+      render(<StatefulViralPage value={base} />);
+
+      submitKeyword("庭院");
+      fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
+
+      await act(async () => {
+        resolveSearch?.(
+          searchResponse([viralItem(98, { title: "迟到的庭院结果" })]),
+        );
+      });
+
+      expect(screen.queryByText("迟到的庭院结果")).toBeNull();
+      expect(screen.queryByRole("button", { name: "返回爆款列表" })).toBeNull();
     });
   });
 

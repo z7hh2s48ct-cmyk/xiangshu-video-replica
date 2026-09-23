@@ -35,6 +35,14 @@
   padding: 0 14px;
   background: #0d0e0e;
 }
+/* <search> 只做语义外壳，真正的输入行是里面的 form。 */
+.content-search form {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
 .content-search input,
 .content-page input,
 .content-page textarea {
@@ -44,6 +52,27 @@
   border: 0;
   outline: 0;
   font: inherit;
+}
+/* 提交按钮与图标都是 flex:none，输入框必须能收缩，否则窄屏会被挤出容器。 */
+.content-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.content-search button {
+  flex: none;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid #3a3b37;
+  border-radius: 7px;
+  background: #1a1b19;
+  color: #ecece8;
+  font: inherit;
+  font-size: var(--font-label);
+  cursor: pointer;
+}
+.content-search button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 .content-filters,
 .content-card-actions,
@@ -1835,6 +1864,10 @@
 .viral-media-status {
   margin: 8px 0 0;
   font-size: var(--font-label);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .viral-media-status.is-loading {

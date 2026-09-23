@@ -39,14 +39,17 @@ import {
   listMaterialTags,
   listViralFavorites,
   listViralVideos,
+  newViralSearchKey,
   putMaterial,
   refreshViralVideoStatistics,
   removeViralFavorite,
   resolveMaterials,
   saveStudioDraft,
   saveViralFavorite,
+  searchViralVideos,
   updateMaterial,
 } from "../api";
+import { isInsufficientCredits } from "../insufficientCredits";
 import { VideoPreview } from "../VideoPreview";
 import { CharacterMaterialViews } from "./CharacterMaterialViews";
 import { useStudio } from "./context";
@@ -794,7 +797,7 @@ function ViralCard({
 }
 
 export function ViralPage() {
-  const { data, review, updateData, user } = useStudio();
+  const { data, openLive, review, updateData, user } = useStudio();
   const accountId = user.id;
   const [platform, setPlatform] = useState<"抖音" | "视频号">("抖音");
   const [category, setCategory] = useState("全部");
@@ -802,6 +805,20 @@ export function ViralPage() {
   const [sort, setSort] = useState<"热门优先" | "最新">("热门优先");
   const [scope, setScope] = useState<"all" | "favorites">("all");
   const [visibleCount, setVisibleCount] = useState(viralInitialCount);
+  // 关键词搜索：只有显式提交才走服务端（会外呼上游并按次计费），结果整体替换列表。
+  const [searchKeyword, setSearchKeyword] = useState<string>();
+  const [searchResults, setSearchResults] = useState<StudioVideo[]>();
+  const [searchCursor, setSearchCursor] = useState<string>();
+  const [searchHasMore, setSearchHasMore] = useState(false);
+  const [searchBusy, setSearchBusy] = useState(false);
+  const [searchError, setSearchError] = useState<string>();
+  const [searchCharged, setSearchCharged] = useState<number>();
+  // 记录最近一次尝试，供「重试」复用同一个幂等键（同轮次不重复扣费）。
+  const searchAttemptRef = useRef<
+    { keyword: string; cursor?: string; key: string } | undefined
+  >(undefined);
+  // 在途搜索的序号：切平台/退出搜索时自增，让迟到响应失效。
+  const searchOperationRef = useRef(0);
   const [activeVideoId, setActiveVideoId] = useState<string>();
   const [listError, setListError] = useState<string>();
   const [refreshStatus, setRefreshStatus] = useState<string>();
@@ -878,6 +895,106 @@ export function ViralPage() {
 
   const current = review ? shown.slice(0, visibleCount) : shown;
   const statisticsError = useViralStatistics(current, !review);
+
+  const searchActive = searchResults !== undefined;
+  // 搜索模式下不做本地二次过滤：上游可能按描述/话题命中，再按标题筛会误杀结果。
+  const gridVideos = searchActive ? (searchResults ?? []) : current;
+
+  const performSearch = useCallback(
+    async (
+      keyword: string,
+      cursor: string | undefined,
+      idempotencyKey: string,
+    ) => {
+      searchAttemptRef.current = { keyword, cursor, key: idempotencyKey };
+      const operation = ++searchOperationRef.current;
+      const isCurrent = () => operation === searchOperationRef.current;
+      setSearchBusy(true);
+      setSearchError(undefined);
+      try {
+        const result = await searchViralVideos(keyword, platformKey, {
+          cursor,
+          idempotencyKey,
+        });
+        // 切平台/退出搜索会作废在途请求，迟到的结果不得再写回状态。
+        if (!isCurrent()) return;
+        const incoming = result.items.map(studioVideoFromViral);
+        setSearchKeyword(keyword);
+        setSearchResults((previous) =>
+          cursor ? [...(previous ?? []), ...incoming] : incoming,
+        );
+        setSearchCursor(result.cursor ?? undefined);
+        setSearchHasMore(Boolean(result.hasMore && result.cursor));
+        setSearchCharged(result.billing?.charged ?? 0);
+        // 服务端已把结果 upsert 进内容池，这里同步进本地 data，点开详情不必再拉一次。
+        updateData((previous) => {
+          const incomingIds = new Set(incoming.map((video) => video.id));
+          return {
+            ...previous,
+            videos: [
+              ...previous.videos.filter((video) => !incomingIds.has(video.id)),
+              ...incoming,
+            ],
+          };
+        });
+      } catch (cause) {
+        if (!isCurrent()) return;
+        if (isInsufficientCredits(cause)) {
+          setSearchError("余额不足，无法搜索。");
+          openLive("wallet");
+        } else if (apiErrorCode(cause) === "VIRAL_SEARCH_UNAVAILABLE") {
+          setSearchError("爆款视频数据源暂不可用，请联系管理员。");
+        } else {
+          setSearchError(
+            cause instanceof Error ? cause.message : "搜索失败，请重试。",
+          );
+        }
+      } finally {
+        // 只有最新一次操作才有权解除忙碌态，否则会把后发请求的 busy 提前清掉。
+        if (isCurrent()) setSearchBusy(false);
+      }
+    },
+    [openLive, platformKey, updateData],
+  );
+
+  /** 新搜索 = 新计费轮次，必须换新幂等键。 */
+  const submitSearch = useCallback(() => {
+    const keyword = query.trim();
+    if (review || searchBusy || !keyword) return;
+    void performSearch(keyword, undefined, newViralSearchKey());
+  }, [performSearch, query, review, searchBusy]);
+
+  /** 翻页同样按次计量，因此也换新键。 */
+  const loadMoreSearch = useCallback(() => {
+    if (searchBusy || !searchKeyword || !searchCursor) return;
+    void performSearch(searchKeyword, searchCursor, newViralSearchKey());
+  }, [performSearch, searchBusy, searchCursor, searchKeyword]);
+
+  /** 重试复用原键：同一次尝试的失败重试不重复扣费。 */
+  const retrySearch = useCallback(() => {
+    const attempt = searchAttemptRef.current;
+    if (searchBusy || !attempt) return;
+    void performSearch(attempt.keyword, attempt.cursor, attempt.key);
+  }, [performSearch, searchBusy]);
+
+  /** 退出搜索态、恢复浏览列表；不动输入框（切平台时用它）。 */
+  const exitSearch = useCallback(() => {
+    // 作废在途搜索，否则它回来时会把已退出的搜索态重新点亮。
+    searchOperationRef.current += 1;
+    setSearchResults(undefined);
+    setSearchKeyword(undefined);
+    setSearchCursor(undefined);
+    setSearchHasMore(false);
+    setSearchError(undefined);
+    setSearchCharged(undefined);
+    setSearchBusy(false);
+  }, []);
+
+  /** 「返回爆款列表」：连输入框一起清掉，否则残留关键词会继续过滤浏览列表。 */
+  const backToBrowse = useCallback(() => {
+    exitSearch();
+    setQuery("");
+  }, [exitSearch]);
 
   useEffect(() => {
     void accountId;
@@ -1210,7 +1327,13 @@ export function ViralPage() {
     updateData,
   ]);
 
-  const canLoadMore = review ? visibleCount < shown.length : !query && hasMore;
+  // 搜索态下浏览列表整体让位给搜索结果：不清空输入框时 `!query` 会重新放行，
+  // 无限滚动的 sentinel 就会在搜索页底部悄悄加载浏览列表，必须显式压掉。
+  const canLoadMore = searchActive
+    ? false
+    : review
+      ? visibleCount < shown.length
+      : !query && hasMore;
   useEffect(() => {
     const node = sentinelRef.current;
     if (!node || !canLoadMore) return;
@@ -1245,17 +1368,33 @@ export function ViralPage() {
           <h1>爆款视频</h1>
           <p>乡墅灵感，持续发现 · 最近 7 天爆款</p>
         </div>
-        <div className="content-search">
-          <Icon name="search" />
-          <input
-            aria-label="搜索视频标题"
-            value={query}
-            onChange={(event) => {
-              setQuery(event.target.value);
+        <search className="content-search">
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              submitSearch();
             }}
-            placeholder="在已加载的爆款中搜索"
-          />
-        </div>
+          >
+            <Icon name="search" />
+            <input
+              aria-label="搜索视频标题"
+              value={query}
+              onChange={(event) => {
+                setQuery(event.target.value);
+              }}
+              placeholder={
+                searchActive ? "换关键词再搜一次" : "输入关键词搜索爆款视频"
+              }
+            />
+            <button
+              type="submit"
+              aria-label="搜索"
+              disabled={review || searchBusy || !query.trim()}
+            >
+              搜索
+            </button>
+          </form>
+        </search>
       </header>
       <div className="content-viral-toolbar">
         <div
@@ -1301,6 +1440,8 @@ export function ViralPage() {
               onClick={() => {
                 setCategory("全部");
                 setPlatform(item.id);
+                // 搜索结果是按平台搜出来的，切平台后必须退出搜索态，否则展示会对不上。
+                exitSearch();
               }}
               role="tab"
               type="button"
@@ -1334,7 +1475,7 @@ export function ViralPage() {
           </Button>
         ))}
       </nav>
-      {!review && <RefreshStatisticsButton videos={current} />}
+      {!review && <RefreshStatisticsButton videos={gridVideos} />}
       {(listError || statisticsError) && (
         <p className="viral-media-status is-error" role="status">
           {listError ?? statisticsError}
@@ -1345,14 +1486,36 @@ export function ViralPage() {
           {refreshStatus}
         </p>
       )}
-      {listLoading && (
+      {listLoading && !searchActive && (
         <p className="viral-media-status" role="status">
           正在读取爆款视频…
         </p>
       )}
-      {current.length ? (
+      {searchActive && (
+        <p className="viral-media-status" role="status">
+          搜索「{searchKeyword}」· 命中 {gridVideos.length} 条
+          {searchCharged !== undefined && ` · 本次消耗 ${searchCharged} 点`}
+          <Button variant="quiet" onClick={backToBrowse}>
+            返回爆款列表
+          </Button>
+        </p>
+      )}
+      {searchBusy && (
+        <p className="viral-media-status" role="status">
+          正在搜索爆款视频…（需外呼上游，请稍候）
+        </p>
+      )}
+      {searchError && (
+        <p className="viral-media-status is-error" role="alert">
+          {searchError}
+          <Button variant="quiet" disabled={searchBusy} onClick={retrySearch}>
+            重试
+          </Button>
+        </p>
+      )}
+      {gridVideos.length ? (
         <section className="content-video-grid content-video-grid-viral">
-          {current.map((video) => (
+          {gridVideos.map((video) => (
             <ViralCard
               key={video.id}
               video={video}
@@ -1376,13 +1539,21 @@ export function ViralPage() {
         </section>
       ) : (
         <Empty
-          title={scope === "favorites" ? "暂无收藏视频" : "暂无爆款视频"}
+          title={
+            searchActive
+              ? "没有找到相关视频"
+              : scope === "favorites"
+                ? "暂无收藏视频"
+                : "暂无爆款视频"
+          }
           description={
-            scope === "favorites"
-              ? "收藏爆款视频后，可以在这里统一查看。"
-              : refreshStatus
-                ? refreshStatus
-                : "数据源尚未配置或最近 7 天暂无内容，配置后自动展示。"
+            searchActive
+              ? "换个关键词再搜一次，或返回爆款列表。"
+              : scope === "favorites"
+                ? "收藏爆款视频后，可以在这里统一查看。"
+                : refreshStatus
+                  ? refreshStatus
+                  : "数据源尚未配置或最近 7 天暂无内容，配置后自动展示。"
           }
         />
       )}
@@ -1405,6 +1576,16 @@ export function ViralPage() {
             : review
               ? "上拉加载更多…"
               : "加载更多视频"}
+        </button>
+      )}
+      {searchActive && searchHasMore && (
+        <button
+          type="button"
+          className="viral-reveal-sentinel"
+          disabled={searchBusy}
+          onClick={loadMoreSearch}
+        >
+          {searchBusy ? "正在加载…" : "加载下一页（按次计费）"}
         </button>
       )}
     </section>

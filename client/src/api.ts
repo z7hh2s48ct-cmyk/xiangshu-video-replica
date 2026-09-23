@@ -7517,6 +7517,9 @@ export async function customerCloseRechargeOrder(
 const VIRAL_LIST_TIMEOUT_MS = 120_000;
 const VIRAL_MEDIA_TIMEOUT_MS = 120_000;
 const VIRAL_STATISTICS_TIMEOUT_MS = 150_000;
+// 关键词搜索除上游检索外，还要并发归档命中视频的封面（8 路，单封面上限 10MB），
+// 比纯读列表慢一个量级；给足余量，避免在归档中途被客户端超时中断。
+const VIRAL_SEARCH_TIMEOUT_MS = 240_000;
 
 export type ViralPlatform = "douyin" | "wechat_channels" | "xiaohongshu";
 export type ViralSort = "hot" | "latest";
@@ -7562,6 +7565,19 @@ export type ViralListResponse = {
   hasMore?: boolean;
   nextCursor?: string | null;
   total?: number;
+};
+
+/** 一次搜索的计费回执：本次实际扣分与服务单位（服务端权威值，客户端只展示）。 */
+export type ViralSearchBilling = {
+  charged: number;
+  unit: string;
+};
+
+export type ViralSearchResponse = {
+  items: ViralVideoItem[];
+  cursor: string | null;
+  hasMore: boolean;
+  billing: ViralSearchBilling;
 };
 
 export type ViralFavoritesResponse = {
@@ -7631,6 +7647,51 @@ export function listViralVideos(
     "爆款视频列表暂不可用",
     {},
     VIRAL_LIST_TIMEOUT_MS,
+  );
+}
+
+/**
+ * 关键词搜索爆款视频：服务端上游检索 → 封面归档自有存储 → 结果落库 → 返回。
+ *
+ * 与 `listViralVideos` 的根本区别是**这条会外呼上游并按次计费**（服务端科目
+ * `viral_search`，1 单位/页），所以只能由用户显式触发，绝不能随输入逐字调用。
+ * 同一个 `Idempotency-Key` 复用同一计费轮次，失败重试不会重复扣分。
+ */
+/**
+ * 生成一次爆款搜索的幂等键。
+ *
+ * 服务端以 `Idempotency-Key` 派生计费 `source_id`：**同一键 = 同一计费轮次**，
+ * 所以「同一次尝试的失败重试」必须复用同一个键才不重复扣费；而「用户重新发起
+ * 搜索」或「翻到下一页」都要换新键，否则会被服务端判为同一轮次而漏计。
+ */
+export function newViralSearchKey(): string {
+  return createRequestKey("viral-search");
+}
+
+export function searchViralVideos(
+  keyword: string,
+  platform: ViralPlatform,
+  options: { cursor?: string; idempotencyKey?: string } = {},
+): Promise<ViralSearchResponse> {
+  const payload: {
+    keyword: string;
+    platform: ViralPlatform;
+    cursor?: string;
+  } = { keyword: keyword.trim(), platform };
+  if (options.cursor) payload.cursor = options.cursor;
+  return requestApiJson<ViralSearchResponse>(
+    "/api/viral/search",
+    "搜索爆款视频失败",
+    {
+      method: "POST",
+      // Content-Type 由 requestApi 按 body 自动补；这里只带幂等键。
+      headers: {
+        "Idempotency-Key":
+          options.idempotencyKey ?? createRequestKey("viral-search"),
+      },
+      body: JSON.stringify(payload),
+    },
+    VIRAL_SEARCH_TIMEOUT_MS,
   );
 }
 
