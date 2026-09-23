@@ -541,14 +541,8 @@ def test_collection_settlement_recovers_once_and_never_retries_insufficient_bala
         )
 
 
-def test_scheduled_collector_records_platform_cost_without_charging_customers(
-    client, route_state, monkeypatch
-):
-    """P1 停用采集计费后的 collector 语义：显式入队的任务照常消费、供应商成本
-    照记平台单（user_id IS NULL），但不再产生任何客户采集扣费."""
-    from app.billing_meter import meter_call
-    from app.generation_worker import run_pg_collection_once
-    from app.storage import FakeStorageAdapter
+def test_retired_scheduled_collector_creates_no_task_or_charge(client, route_state):
+    """旧开关和关键词即使仍在库中，也不得再产生任务、成本或客户扣费。"""
     from app.viral_collection import enqueue_due_viral_collections
 
     user = account(client, "scheduled_collection")[1]
@@ -565,64 +559,30 @@ def test_scheduled_collector_records_platform_cost_without_charging_customers(
             (json.dumps([{"platform": "douyin", "category": "其他", "keyword": "别墅"}]),),
         )
         raw.execute("DELETE FROM viral_refresh_tasks")
+        batches_before = raw.execute("SELECT count(*) FROM viral_collection_batches").fetchone()[0]
+        charges_before = raw.execute("SELECT count(*) FROM viral_collection_charges").fetchone()[0]
         enqueue_due_viral_collections(BusinessConnection.postgres(raw))
 
-    class Source:
-        def douyin_search(self, **_kwargs):
-            with meter_call("viral_data"):
-                return []
-
-    monkeypatch.setattr(
-        "app.viral_collection.viral_source_client_from_settings", lambda _: Source()
-    )
-    assert (
-        run_pg_collection_once(
-            worker_id="billing-integration",
-            storage=FakeStorageAdapter(provider="cos", bucket="test"),
-        )
-        == 1
-    )
     with psycopg.connect(route_state) as raw:
-        assert raw.execute("SELECT status FROM viral_refresh_tasks").fetchone()[0] == "SUCCEEDED"
+        assert raw.execute("SELECT count(*) FROM viral_refresh_tasks").fetchone()[0] == 0
         assert (
             raw.execute(
                 "SELECT available_credits FROM wallets WHERE user_id=%s", (user,)
             ).fetchone()[0]
             == 100
         )
-        config = json.loads(
-            raw.execute("SELECT collection_config_json FROM viral_refresh_tasks").fetchone()[0]
+        assert (
+            raw.execute("SELECT count(*) FROM viral_collection_batches").fetchone()[0]
+            == batches_before
         )
         assert (
-            raw.execute(
-                "SELECT count(*) FROM billing_operations WHERE collection_batch_id=%s "
-                "AND user_id IS NULL AND state='SUCCEEDED'",
-                (config["billing_batch_id"],),
-            ).fetchone()[0]
-            == 1
-        )
-        assert (
-            raw.execute(
-                "SELECT count(*) FROM billing_operations WHERE collection_batch_id=%s "
-                "AND user_id IS NOT NULL",
-                (config["billing_batch_id"],),
-            ).fetchone()[0]
-            == 0
-        )
-        assert (
-            raw.execute(
-                "SELECT count(*) FROM viral_collection_charges c "
-                "JOIN billing_operations p ON p.id=c.request_id "
-                "WHERE p.collection_batch_id=%s",
-                (config["billing_batch_id"],),
-            ).fetchone()[0]
-            == 0
+            raw.execute("SELECT count(*) FROM viral_collection_charges").fetchone()[0]
+            == charges_before
         )
 
 
 def test_acquire_no_longer_enqueues_scheduled_collection(client, route_state):
-    """P1 停用采集调度：即使运行控制开着、关键词已到期，acquire 也不再自动入队
-    （采集任务只能被显式入队——admin 单条归档 / 失败重试）."""
+    """即使历史运行控制开着、关键词已到期，acquire 也不再自动入队。"""
     from app.viral_refresh import acquire_viral_refresh_task
 
     account(client, "no_auto_enqueue")

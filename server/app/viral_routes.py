@@ -1,7 +1,7 @@
 """爆款视频路由（C4 重启）.
 
-- ``GET /api/viral/videos?platform=&sort=``：按服务端配置的关键词聚合
-  两个平台的最近 7 天爆款列表（结果带 TTL 缓存，作为计费护栏）。
+- ``GET /api/viral/videos?platform=&sort=``：只读客户搜索沉淀的内容池；
+  不触发运营采集，也不依赖旧采集 TTL。
 - ``POST /api/viral/videos/media``：按需取媒体文件（抖音音频优先/低清
   兜底；视频号解密后直传主存储），返回带签名的可播放地址。
 
@@ -38,20 +38,17 @@ from app.viral_media import (
     viral_cover_key,
 )
 from app.viral_media_preparation import ViralMediaBusy
-from app.viral_refresh import viral_refresh_status
 from app.viral_store import (
     InvalidViralCursorError,
     ViralAvailability,
     add_viral_favorite,
     favorite_viral_video_ids,
-    fetch_state_is_fresh,
     get_viral_video,
     is_viral_favorite,
     list_favorite_viral_video_page,
     list_viral_video_page,
     remove_viral_favorite,
     validate_viral_cursor,
-    viral_fetched_at,
     viral_video_availabilities,
     viral_video_availability,
 )
@@ -77,7 +74,6 @@ _STORED_PLATFORMS = (*_VALID_PLATFORMS, PLATFORM_XIAOHONGSHU)
 _DOUYIN_SORT_TYPE = {SORT_HOT: "1", SORT_LATEST: "2"}
 _WECHAT_SORT = {SORT_HOT: "hot", SORT_LATEST: "latest"}
 
-VIRAL_LIST_CACHE_TTL = timedelta(days=7)
 VIRAL_MEDIA_FRESHNESS = timedelta(minutes=10)
 # 源站直链只活几小时（§10）。这里给客户端一个保守上界用于安排下载窗口，
 # 不是源站的承诺值，过期仍以源站实际响应为准。
@@ -248,8 +244,6 @@ def list_viral_videos(
                 status_code=400,
                 detail={"code": "VIRAL_CURSOR_INVALID", "message": "分页游标无效，请刷新列表"},
             ) from exc
-    fresh = fetch_state_is_fresh(conn, platform=platform, sort=sort, max_age=VIRAL_LIST_CACHE_TTL)
-    refreshing, refresh_error = viral_refresh_status(conn, platform=platform, sort=SORT_HOT)
     try:
         page = list_viral_video_page(
             conn,
@@ -287,11 +281,11 @@ def list_viral_videos(
             )
             for video in page.items
         ],
-        fetchedAt=viral_fetched_at(conn, platform=platform, sort=sort),
-        dataVersion=viral_fetched_at(conn, platform=platform, sort=sort),
-        stale=not fresh,
-        refreshing=refreshing,
-        refreshError=refresh_error,
+        fetchedAt=None,
+        dataVersion=None,
+        stale=False,
+        refreshing=False,
+        refreshError=None,
         total=page.total,
         hasMore=page.has_more,
         nextCursor=page.next_cursor,

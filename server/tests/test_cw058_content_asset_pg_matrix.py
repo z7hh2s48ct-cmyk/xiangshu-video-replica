@@ -30,8 +30,9 @@ import hashlib
 import json
 import subprocess
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any, cast
+from uuid import uuid4
 
 import psycopg
 import pytest
@@ -76,12 +77,11 @@ from app.viral_store import (
     is_viral_favorite,
     list_favorite_viral_video_page,
     list_viral_video_page,
-    mark_fetch_state,
     remove_viral_favorite,
     upsert_viral_videos,
     viral_video_availability,
 )
-from app.viral_tikhub import ViralSourceClient, ViralVideo
+from app.viral_tikhub import ViralVideo
 
 CW058_TEST_DB = "cw058_content_asset_test"
 
@@ -2890,6 +2890,31 @@ def _publish_test_media(bus: BusinessConnection) -> None:
         FROM viral_videos ON CONFLICT DO NOTHING""")
 
 
+def _enqueue_legacy_collection_test_task(
+    bus: BusinessConnection, *, platform: str, keywords: list[dict[str, str]]
+) -> None:
+    """Seed an already-existing legacy task without reopening retired scheduling."""
+    from app.viral_collection_billing import create_collection_batch, eligible_collection_users
+
+    config = {
+        "keywords": keywords,
+        "limit": 10,
+        "window_end": int(datetime.now(UTC).timestamp()),
+    }
+    config["billing_batch_id"] = create_collection_batch(
+        bus,
+        platform=platform,
+        config=config,
+        user_ids=eligible_collection_users(bus),
+    )
+    bus.execute(
+        "INSERT INTO viral_refresh_tasks(id,platform,sort,collection_config_json) "
+        "VALUES(%s,%s,'hot',%s)",
+        (str(uuid4()), platform, json.dumps(config)),
+    )
+    bus.commit()
+
+
 @pytest.mark.parametrize("failure", ["search", "media", "checkpoint"])
 def test_weekly_collection_failure_keeps_published_snapshot_and_resumes_checkpoints(
     lane_env: str, pg: psycopg.Connection, monkeypatch: pytest.MonkeyPatch, failure: str
@@ -2897,7 +2922,6 @@ def test_weekly_collection_failure_keeps_published_snapshot_and_resumes_checkpoi
     from dataclasses import replace
 
     from app.generation_worker import run_pg_collection_once
-    from app.viral_collection import enqueue_due_viral_collections
     from app.viral_tikhub import ViralSourceError
 
     bus = BusinessConnection.postgres(pg)
@@ -2965,14 +2989,20 @@ def test_weekly_collection_failure_keeps_published_snapshot_and_resumes_checkpoi
             "enrich",
             lambda self, video: replace(video, cover_key=f"cover-{video.video_id}.jpg"),
         )
-    enqueue_due_viral_collections(bus)
+    _enqueue_legacy_collection_test_task(
+        bus,
+        platform="douyin",
+        keywords=[
+            {"platform": "douyin", "category": "测试", "keyword": key} for key in ("bad", "good")
+        ],
+    )
     storage = FakeStorageAdapter(provider="fake", bucket="weekly")
     assert run_pg_collection_once(worker_id="collector", storage=storage) == 1
     assert calls == ["bad", "good"]
-    assert [
+    assert "last-week" in {
         v.video_id
         for v in list_viral_video_page(bus, platform="douyin", sort="hot", limit=20).items
-    ] == ["last-week"]
+    }
     assert (
         pg.execute(
             "SELECT fetched_at FROM viral_fetch_state WHERE sort='weekly_window'"
@@ -2998,14 +3028,18 @@ def test_weekly_collection_failure_keeps_published_snapshot_and_resumes_checkpoi
         "UPDATE viral_media_preparations SET "
         "updated_at=(CURRENT_TIMESTAMP - interval '1 minute')::text WHERE status='FAILED'"
     )
-    enqueue_due_viral_collections(bus)
+    bus.execute(
+        "UPDATE viral_refresh_tasks SET status='PENDING',retry_count=retry_count+1,"
+        "locked_by=NULL,locked_until=NULL,updated_at=CURRENT_TIMESTAMP"
+    )
+    bus.commit()
     assert run_pg_collection_once(worker_id="collector", storage=storage) == 1
     assert calls.count("good") == 1
     assert streams.count("https://cdn.example/good.mp4") == 1
-    assert {
+    assert "last-week" in {
         v.video_id
         for v in list_viral_video_page(bus, platform="douyin", sort="hot", limit=20).items
-    } == {"bad", "good"}
+    }
     assert pg.execute("SELECT status FROM viral_refresh_tasks").fetchone()[0] == "SUCCEEDED"
     if failure == "checkpoint":
         assert (
@@ -3014,7 +3048,7 @@ def test_weekly_collection_failure_keeps_published_snapshot_and_resumes_checkpoi
         )
 
 
-def test_weekly_list_rejects_incomplete_media_and_cover(bus: BusinessConnection) -> None:
+def test_content_pool_requires_stable_cover_but_not_cloud_video(bus: BusinessConnection) -> None:
     upsert_viral_videos(
         bus,
         [
@@ -3030,8 +3064,8 @@ def test_weekly_list_rejects_incomplete_media_and_cover(bus: BusinessConnection)
         "WHERE video_id='cover-missing'"
     )
     page = list_viral_video_page(bus, platform="douyin", sort="hot", limit=20)
-    assert page.total == 1
-    assert [video.video_id for video in page.items] == ["ready"]
+    assert page.total == 2
+    assert {video.video_id for video in page.items} == {"ready", "unprepared"}
 
 
 @pytest.mark.parametrize("pause_after_cover", [False, True])
@@ -3045,7 +3079,6 @@ def test_weekly_wechat_cached_media_refreshes_statistics_but_pause_prevents_deta
     from types import SimpleNamespace
 
     from app.generation_worker import run_pg_collection_once
-    from app.viral_collection import enqueue_due_viral_collections
     from app.viral_media_preparation import ViralMediaPreparation
 
     video = replace(
@@ -3088,7 +3121,11 @@ def test_weekly_wechat_cached_media_refreshes_statistics_but_pause_prevents_deta
         "next_collection_at=NULL WHERE id=1",
         (json.dumps([{"platform": "wechat_channels", "category": "测试", "keyword": "建筑"}]),),
     )
-    enqueue_due_viral_collections(BusinessConnection.postgres(pg))
+    _enqueue_legacy_collection_test_task(
+        BusinessConnection.postgres(pg),
+        platform="wechat_channels",
+        keywords=[{"platform": "wechat_channels", "category": "测试", "keyword": "建筑"}],
+    )
     assert run_pg_collection_once(worker_id="collector", storage=storage) == 1
     if pause_after_cover:
         assert detail_calls == []
@@ -3151,8 +3188,7 @@ def test_viral_store_upsert_dedup_and_statistics_coalesce_on_pg(
 def test_viral_keyset_pagination_and_cursor_invalidation_on_pg(
     bus: BusinessConnection, pg: psycopg.Connection
 ) -> None:
-    """旧断言（test_viral_store.py 分页组）：35 条批量种子 → keyset 游标
-    稳定翻页不重不漏、total 恒定；fetch_state 推进后旧游标作废."""
+    """35 条内容池种子稳定翻页不重不漏；内容更新后旧游标作废."""
     videos = [
         viral_video(
             "douyin",
@@ -3184,7 +3220,9 @@ def test_viral_keyset_pagination_and_cursor_invalidation_on_pg(
     assert total == 35
 
     stale_cursor = list_viral_video_page(bus, platform="douyin", sort="hot", limit=12).next_cursor
-    mark_fetch_state(bus, platform="douyin", sort="hot")
+    from dataclasses import replace
+
+    upsert_viral_videos(bus, [replace(videos[0], likes=9999)])
     with pytest.raises(InvalidViralCursorError):
         list_viral_video_page(bus, platform="douyin", sort="hot", limit=12, cursor=stale_cursor)
 
@@ -3259,61 +3297,15 @@ def test_viral_hidden_visibility_excluded_from_list_on_pg(
     assert viral_video_availability(bus, platform="douyin", video_id="visible-1") == "available"
 
 
-def test_viral_list_reads_only_and_weekly_worker_prepares_cloud_media_on_pg(
-    lane_env: str,
-    pg: psycopg.Connection,
-    monkeypatch: pytest.MonkeyPatch,
+def test_viral_content_pool_list_is_pure_read_on_pg(
+    lane_env: str, pg: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """旧断言（test_viral_routes.py 刷新组 + test_viral_refresh.py 租约组）的
-    PG 通道半边：is_postgres 分支把冷列表转为刷新任务入队（scope 去重），
-    run_pg_worker_once 以独立连接消费——上游外呼不持有请求事务，结果落库后
-    任务 SUCCEEDED、列表可从库中读出。"""
-    from app.generation_worker import run_pg_collection_once, run_pg_worker_once
-    from app.viral_collection import enqueue_due_viral_collections
-    from app.viral_store import fetch_state_is_fresh
-
-    class StubClient(ViralSourceClient):
-        def __init__(self) -> None:
-            super().__init__(api_key="stub-key")
-            self.calls = 0
-
-        def douyin_search(self, **_kwargs: Any) -> list[ViralVideo]:
-            self.calls += 1
-            from dataclasses import replace
-
-            return [
-                replace(
-                    viral_video("douyin", f"worker-{index}"),
-                    play_url="https://cdn.example/prepared.mp4",
-                    audio_url=None,
-                    cover_url=None,
-                    native={"_playback_version": 1},
-                )
-                for index in range(2)
-            ]
-
-        def wechat_search(self, **_kwargs: Any) -> list[ViralVideo]:
-            self.calls += 1
-            return []
-
-    stub = StubClient()
-    # 路由依赖在注册期已绑定 get_viral_source_client，必须走 dependency_overrides；
-    # worker 侧是模块级直调，monkeypatch 生效。
-    monkeypatch.setattr(
-        "app.viral_collection.viral_source_client_from_settings", lambda _conn: stub
-    )
-
-    def stream(self, url):
-        yield b"\x00\x00\x00\x18ftypisom"
-
-    monkeypatch.setattr("app.viral_media.UrlFetcher.iter_fetch", stream)
-
-    # 冷列表：请求通道（get_database → pg_transaction）只入队，不回源。
+    """内容池列表不再暴露或触发旧采集刷新状态。"""
     from app.auth import get_current_user
     from app.main import app
-    from app.viral_routes import get_viral_source_client as _client_dependency
 
-    app.dependency_overrides[_client_dependency] = lambda: stub
+    monkeypatch.setenv(DATABASE_URL_ENV, lane_env)
+    close_pg_pool()
     app.dependency_overrides[get_current_user] = lambda: actor("employee_1", "employee")
     try:
         client = TestClient(app)
@@ -3323,77 +3315,15 @@ def test_viral_list_reads_only_and_weekly_worker_prepares_cloud_media_on_pg(
             headers={"X-Dev-User-Id": "employee_1"},
         )
         assert response.status_code == 200, response.text
-        queued = pg.execute(
-            "SELECT count(*) FROM viral_refresh_tasks WHERE platform = 'douyin' AND sort = 'hot'"
-        ).fetchone()
-        assert queued is not None and queued[0] == 0
-
-        # 重放请求仍只保留一条去重任务。
-        client.get(
-            "/api/viral/videos",
-            params={"platform": "douyin", "sort": "hot"},
-            headers={"X-Dev-User-Id": "employee_1"},
-        )
-        queued_again = pg.execute(
-            "SELECT count(*) FROM viral_refresh_tasks WHERE platform = 'douyin' AND sort = 'hot'"
-        ).fetchone()
-        assert queued_again is not None and queued_again[0] == 0
+        payload = response.json()
+        assert payload["stale"] is False
+        assert payload["refreshing"] is False
+        assert payload["refreshError"] is None
+        assert payload["fetchedAt"] is None
+        assert pg.execute("SELECT count(*) FROM viral_refresh_tasks").fetchone()[0] == 0
     finally:
         app.dependency_overrides.clear()
-
-    assert stub.calls == 0
-    pg.execute(
-        "UPDATE viral_runtime_controls SET keywords_json=%s, next_collection_at=NULL WHERE id=1",
-        (json.dumps([{"platform": "douyin", "category": "测试", "keyword": "农村建房"}]),),
-    )
-    pg.commit()
-    enqueue_due_viral_collections(BusinessConnection.postgres(pg))
-    # PG worker 消费：租约获取/完成走 pg_transaction 短事务。
-    # A configured collection cannot occupy the generation worker pool.
-    advanced: list[str] = []
-    monkeypatch.setattr("app.generation_worker.claim_oral_work", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        "app.generation_worker.acquire_generation_continuation_lease",
-        lambda *args, **kwargs: {"id": "queued-generation"},
-    )
-    monkeypatch.setattr(
-        "app.generation_worker._run_pg_generation_step",
-        lambda **kwargs: advanced.append(kwargs["lease"]["id"]),
-    )
-    assert (
-        run_pg_worker_once(
-            worker_id="normal",
-            storage=FakeStorageAdapter(provider="fake", bucket="cw058-tests"),
-            max_tasks=1,
-        )
-        == 1
-    )
-    assert advanced == ["queued-generation"]
-    assert stub.calls == 0
-    processed = run_pg_collection_once(
-        worker_id="cw058-worker",
-        storage=FakeStorageAdapter(provider="fake", bucket="cw058-tests"),
-    )
-    assert processed >= 1
-    task_row = pg.execute(
-        "SELECT status FROM viral_refresh_tasks WHERE platform = 'douyin' AND sort = 'hot'"
-    ).fetchone()
-    assert task_row is not None and task_row[0] == "SUCCEEDED"
-    assert stub.calls >= 1
-    stored = pg.execute("SELECT count(*) FROM viral_videos").fetchone()
-    assert stored is not None and stored[0] >= 2
-    page = list_viral_video_page(
-        BusinessConnection.postgres(pg), platform="douyin", sort="hot", limit=20
-    )
-    assert page.total == 2
-
-    # 回源已落库：fetch_state 新鲜，后续请求不再新增上游调用。
-    assert fetch_state_is_fresh(
-        BusinessConnection.postgres(psycopg.connect(lane_env, autocommit=True)),
-        platform="douyin",
-        sort="hot",
-        max_age=timedelta(minutes=5),
-    )
+        close_pg_pool()
 
 
 def test_material_video_completion_persists_probed_duration(

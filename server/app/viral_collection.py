@@ -1,4 +1,9 @@
-"""Weekly keyword collection and background media archiving; customer reads never enqueue."""
+"""Legacy viral collection reader and executor.
+
+Scheduled collection was retired when customer keyword search became the sole
+content-pool entry. Existing task rows remain readable and executable for
+recovery, but this module never creates a new scheduled task.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +13,6 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import uuid4
 
 from app.billing_meter import collection_billing_context
 from app.db_pg import pg_transaction
@@ -29,67 +33,8 @@ from app.viral_tikhub import ViralSourceError, viral_source_client_from_settings
 
 
 def enqueue_due_viral_collections(conn: BusinessConnection) -> None:
-    """Singleton row lock makes each daily/weekly schedule unique across workers."""
-    row = conn.execute(
-        "SELECT * FROM viral_runtime_controls WHERE id=1 AND collection_enabled=1 "
-        "FOR UPDATE SKIP LOCKED"
-    ).fetchone()
-    if row is None:
-        return
-    keywords = [
-        ViralKeywordConfig.model_validate(item) for item in json.loads(row["keywords_json"])
-    ]
-    if not keywords:
-        return
-    due = conn.execute(
-        "SELECT 1 FROM viral_runtime_controls WHERE id=1 "
-        "AND (next_collection_at IS NULL OR next_collection_at <= CURRENT_TIMESTAMP)"
-    ).fetchone()
-    if due:
-        busy = conn.execute(
-            "SELECT 1 FROM viral_refresh_tasks WHERE status IN ('PENDING','RUNNING') LIMIT 1"
-        ).fetchone()
-        if busy is not None:
-            return
-        window_end = conn.execute(
-            "SELECT extract(epoch FROM CURRENT_TIMESTAMP)::bigint"
-        ).fetchone()[0]
-        recipients = eligible_collection_users(conn)
-        for platform in dict.fromkeys(item.platform for item in keywords):
-            batch_config = {
-                "keywords": [item.model_dump() for item in keywords if item.platform == platform],
-                "limit": int(row["per_keyword_limit"]),
-                "window_end": int(window_end),
-            }
-            batch_id = create_collection_batch(
-                conn, platform=platform, config=batch_config, user_ids=recipients
-            )
-            config = json.dumps({**batch_config, "billing_batch_id": batch_id})
-            conn.execute(
-                """INSERT INTO viral_refresh_tasks(id,platform,sort,collection_config_json)
-                VALUES(%s,%s,'hot',%s) ON CONFLICT(platform,sort) DO UPDATE SET status='PENDING',
-                    collection_config_json=excluded.collection_config_json, checkpoint_json='{}',
-                    retry_count=0, locked_by=NULL, locked_until=NULL, error_code=NULL,
-                    error_message_redacted=NULL, completed_at=NULL, updated_at=CURRENT_TIMESTAMP""",
-                (str(uuid4()), platform, config),
-            )
-        conn.execute(
-            "UPDATE viral_runtime_controls SET next_collection_at="
-            "CURRENT_TIMESTAMP + (%s * interval '1 day') WHERE id=1",
-            (int(row["collection_interval_days"]),),
-        )
-    else:
-        # Two retries per scheduled batch. Completed keywords and media remain
-        # checkpointed, so retries only resume missing work, never restart a batch.
-        conn.execute(
-            """UPDATE viral_refresh_tasks SET status='PENDING', retry_count=retry_count+1,
-                locked_by=NULL, locked_until=NULL, updated_at=CURRENT_TIMESTAMP
-            WHERE status='FAILED' AND retryable=1 AND retry_count < 2
-                AND collection_config_json != '{}'
-                AND COALESCE(collection_config_json::jsonb->>'kind','') != 'single_archive'
-                AND updated_at::timestamptz <=
-                    CURRENT_TIMESTAMP - interval '15 minutes'"""
-        )
+    """Compatibility no-op: scheduled collection must never enqueue again."""
+    return
 
 
 @contextmanager

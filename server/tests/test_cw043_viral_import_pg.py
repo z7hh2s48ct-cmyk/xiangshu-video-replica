@@ -442,7 +442,7 @@ def test_waiter_does_not_reclaim_when_running_snapshot_becomes_succeeded(pg_stat
 
 
 @pytest.mark.parametrize("interval_days", [1, 7])
-def test_schedule_is_unique_and_does_not_repeat_until_due(pg_state, interval_days):
+def test_retired_schedule_never_enqueues_or_changes_history(pg_state, interval_days):
     import json
     from concurrent.futures import ThreadPoolExecutor
 
@@ -465,28 +465,13 @@ def test_schedule_is_unique_and_does_not_repeat_until_due(pg_state, interval_day
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         list(pool.map(lambda _: tick(), range(2)))
-    assert len(_rows(pg_state, "SELECT * FROM viral_refresh_tasks")) == 1
-    assert _rows(
-        pg_state,
-        f"SELECT next_collection_at BETWEEN now()+interval '{interval_days * 24 - 1} hours' "
-        f"AND now()+interval '{interval_days * 24 + 1} hours' AS future "
-        "FROM viral_runtime_controls",
-    )[0]["future"]
-    _exec(pg_state, "UPDATE viral_refresh_tasks SET status='SUCCEEDED'")
-    tick()
-    assert _rows(pg_state, "SELECT status FROM viral_refresh_tasks")[0]["status"] == "SUCCEEDED"
-    _exec(
-        pg_state, "UPDATE viral_runtime_controls SET next_collection_at=now()-interval '1 minute'"
+    assert _rows(pg_state, "SELECT * FROM viral_refresh_tasks") == []
+    assert (
+        _rows(pg_state, "SELECT next_collection_at FROM viral_runtime_controls")[0][
+            "next_collection_at"
+        ]
+        is None
     )
-    tick()
-    assert _rows(pg_state, "SELECT status FROM viral_refresh_tasks")[0]["status"] == "PENDING"
-    _exec(
-        pg_state,
-        "UPDATE viral_refresh_tasks SET status='FAILED',retryable=1,retry_count=2,"
-        "updated_at='2020-01-01 00:00:00'",
-    )
-    tick()
-    assert _rows(pg_state, "SELECT status FROM viral_refresh_tasks")[0]["status"] == "FAILED"
     _exec(pg_state, "DELETE FROM viral_runtime_controls")
 
 

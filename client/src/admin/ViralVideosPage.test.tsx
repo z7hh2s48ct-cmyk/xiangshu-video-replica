@@ -19,6 +19,7 @@ const video = {
   created_at: "2026-09-13T08:00:00Z",
   homepage_featured: false,
   collection_published: true,
+  cover_key: "viral/covers/opaque.jpg",
   media_status: "SUCCEEDED",
   storage_uri: "cos://archive/video.mp4",
 };
@@ -56,96 +57,29 @@ function setup() {
 }
 
 describe("ViralVideosPage", () => {
-  it("转存失败在确认框内显示原因，重试保留原幂等键", async () => {
-    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => ({
-      ok: init?.method !== "POST",
-      status: init?.method === "POST" ? 409 : 200,
-      json: async () =>
-        init?.method === "POST"
-          ? {
-              detail: {
-                code: "VIRAL_ARCHIVE_BUSY",
-                message: "该平台已有后台任务，请完成后再转存。",
-              },
-            }
-          : {
-              items: [
-                { ...video, media_status: "NOT_STARTED", storage_uri: null },
-              ],
-              total: 1,
-            },
+  it("以内容池语义展示搜索沉淀内容，无云视频也可进入首页精选", async () => {
+    const fetchMock = setup();
+    fetchMock.mockImplementation(async (_url, _init) => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        items: [{ ...video, media_status: "NOT_STARTED", storage_uri: null }],
+        total: 1,
+      }),
     }));
-    vi.stubGlobal("fetch", fetchMock);
-    setAdminCsrfToken("csrf-curation-test");
     render(<ViralVideosPage />);
-    fireEvent.click(await screen.findByRole("button", { name: "转存到云端" }));
-    fireEvent.change(screen.getByLabelText(/操作原因/), {
-      target: { value: "验证失败重试" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "确认操作" }));
-    const dialog = screen.getByRole("dialog", { name: "转存单条视频" });
-    await waitFor(() =>
-      expect(dialog).toHaveTextContent("该平台已有后台任务，请完成后再转存。"),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "确认操作" }));
-    await waitFor(() =>
-      expect(
-        fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
-      ).toHaveLength(2),
-    );
-    const posts = fetchMock.mock.calls.filter(
-      ([, init]) => init?.method === "POST",
-    );
-    expect(posts[0][1]?.headers).toEqual(posts[1][1]?.headers);
-    expect(screen.getByLabelText(/操作原因/)).toHaveValue("验证失败重试");
-  });
 
-  it("单条转存携带写入合同并显示后台排队，不能重复点击", async () => {
-    let queued = false;
-    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
-      if (init?.method === "POST") queued = true;
-      return {
-        ok: true,
-        status: queued ? 202 : 200,
-        json: async () => ({
-          items: [
-            {
-              ...video,
-              media_status: "NOT_STARTED",
-              storage_uri: null,
-              archive_status: queued ? "PENDING" : null,
-            },
-          ],
-          total: 1,
-        }),
-      };
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    setAdminCsrfToken("csrf-curation-test");
-    render(<ViralVideosPage />);
-    fireEvent.click(await screen.findByRole("button", { name: "转存到云端" }));
-    fireEvent.change(screen.getByLabelText(/操作原因/), {
-      target: { value: "单条转存验收" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "确认操作" }));
     expect(
-      await screen.findByRole("button", { name: "后台转存中" }),
-    ).toBeDisabled();
-    expect(screen.getByText("转存排队中")).toBeInTheDocument();
-    const post = fetchMock.mock.calls.find(
-      ([, init]) => init?.method === "POST",
-    );
-    expect(post?.[0]).toContain("opaque%2Fvideo%3Did/archive");
-    expect(JSON.parse(String(post?.[1]?.body))).toMatchObject({
-      reason: "单条转存验收",
-      confirm: true,
-    });
-    expect(post?.[1]?.headers).toMatchObject({
-      "X-Admin-CSRF": "csrf-curation-test",
-      "Idempotency-Key": expect.any(String),
-    });
+      await screen.findByRole("heading", { name: /内容池 1/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/视频文件仅保留旧数据只读预览/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "展示到首页" })).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "转存到云端" }),
+    ).not.toBeInTheDocument();
   });
-
   afterEach(() => {
     vi.unstubAllGlobals();
     setAdminCsrfToken("");

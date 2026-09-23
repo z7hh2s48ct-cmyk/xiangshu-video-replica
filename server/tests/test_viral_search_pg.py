@@ -135,6 +135,41 @@ def test_upsert_keeps_existing_category_when_search_category_is_empty(
         assert updated is not None and updated.category == "建房预算"
 
 
+def test_search_content_with_stable_cover_persists_in_customer_catalog(route_state: str) -> None:
+    """搜索内容池只要求稳定封面；刷新列表不依赖旧采集批次或云端视频。"""
+    from dataclasses import replace
+
+    from app.viral_store import list_viral_video_page, upsert_viral_videos
+
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        upsert_viral_videos(
+            conn,
+            [
+                replace(
+                    _viral_seed(video_id="search-persisted"),
+                    cover_key="viral/covers/stable.jpg",
+                )
+            ],
+        )
+        page = list_viral_video_page(conn, platform="douyin", sort="hot", limit=12)
+
+        assert page.total == 1
+        assert [item.video_id for item in page.items] == ["search-persisted"]
+        assert (
+            raw.execute(
+                "SELECT collection_published FROM viral_videos WHERE video_id='search-persisted'"
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM viral_media_preparations WHERE video_id='search-persisted'"
+            ).fetchone()[0]
+            == 0
+        )
+
+
 def test_mark_and_list_viral_discoveries_dedup_per_day(route_state: str) -> None:
     """同键 upsert 刷新 searched_at；不同关键词/日期各自成行；左联内容池带回视频."""
     from app.viral_store import (

@@ -47,58 +47,27 @@ SESSIONS_PATH = "/api/control/customers/{user_id}/sessions"
 
 
 @pytest.mark.pg
-def test_single_archive_is_durable_idempotent_and_does_not_recollect(
-    client: TestClient, route_state: str, monkeypatch: pytest.MonkeyPatch
+def test_single_archive_write_is_retired_but_history_remains_readable(
+    client: TestClient, route_state: str
 ) -> None:
-    from app.db_portable import BusinessConnection
-    from app.storage import FakeStorageAdapter
-    from app.viral_collection import run_viral_collection
-    from app.viral_refresh import acquire_viral_refresh_task, complete_viral_refresh_task
-
     headers = _admin_session(client)
     path = "/api/control/viral/videos/douyin/admin-video%2Fopaque%3Did/archive"
-    body = {"confirm": True, "reason": "修复单条归档并保留列表"}
     with psycopg.connect(route_state) as conn:
-        conn.execute("DELETE FROM viral_refresh_tasks")
-        conn.execute("UPDATE viral_runtime_controls SET collection_enabled=1,keywords_json='[]'")
-        conn.execute("UPDATE viral_videos SET collection_published=1")
-    first = client.post(path, headers={**headers, "Idempotency-Key": "archive-one"}, json=body)
-    assert first.status_code == 202, first.text
-    replay = client.post(path, headers={**headers, "Idempotency-Key": "archive-one"}, json=body)
-    assert replay.status_code == 202
-    assert replay.headers["X-Idempotent-Replay"] == "true"
-    assert (
-        client.get("/api/control/viral/videos", headers=headers).json()["items"][0][
-            "archive_status"
-        ]
-        == "PENDING"
-    )
-    calls = []
-    monkeypatch.setattr(
-        "app.viral_collection.viral_source_client_from_settings", lambda conn: object()
-    )
-    monkeypatch.setattr("app.viral_collection.CoverEnricher.enrich", lambda self, video: video)
-    monkeypatch.setattr(
-        "app.viral_collection.ViralMediaPipeline.fetch",
-        lambda self, video, **kwargs: calls.append(video.video_id),
-    )
-    with psycopg.connect(route_state) as raw:
-        lease = acquire_viral_refresh_task(
-            BusinessConnection.postgres(raw), worker_id="archive-test"
+        conn.execute(
+            "INSERT INTO viral_media_preparations"
+            "(id,platform,video_id,media_kind,status,storage_uri) VALUES"
+            "('legacy-media','douyin','admin-video/opaque=id','video','SUCCEEDED',"
+            "'fake://test/video.mp4')"
         )
-    assert lease is not None
-    run_viral_collection(lease, FakeStorageAdapter(provider="cos", bucket="test"))
-    with psycopg.connect(route_state) as raw:
-        complete_viral_refresh_task(BusinessConnection.postgres(raw), lease=lease)
-        assert raw.execute("SELECT collection_published FROM viral_videos").fetchone()[0] == 1
-        assert raw.execute("SELECT count(*) FROM viral_collection_batches").fetchone()[0] == 0
-        assert (
-            raw.execute(
-                "SELECT count(*) FROM audit_logs WHERE action='viral_video.archive'"
-            ).fetchone()[0]
-            == 1
-        )
-    assert calls == ["admin-video/opaque=id"]
+    response = client.post(
+        path,
+        headers={**headers, "Idempotency-Key": "archive-retired"},
+        json={"confirm": True, "reason": "验证旧入口关闭"},
+    )
+    assert response.status_code == 410
+    assert response.json()["detail"]["code"] == "VIRAL_ARCHIVE_RETIRED"
+    item = client.get("/api/control/viral/videos", headers=headers).json()["items"][0]
+    assert item["storage_uri"] == "fake://test/video.mp4"
 
 
 @pytest.mark.pg
@@ -127,14 +96,14 @@ def test_single_archive_rejection_preserves_queue_and_wallet(
         json={"confirm": True, "reason": "验证拒绝路径无业务副作用"},
     )
     assert (
-        result.status_code == {"paused": 409, "deleted": 404, "busy": 409, "auditor": 403}[blocked]
+        result.status_code == {"paused": 410, "deleted": 410, "busy": 410, "auditor": 403}[blocked]
     )
     assert (
         result.json()["detail"]["code"]
         == {
-            "paused": "VIRAL_COLLECTION_PAUSED",
-            "deleted": "VIRAL_VIDEO_NOT_FOUND",
-            "busy": "VIRAL_ARCHIVE_BUSY",
+            "paused": "VIRAL_ARCHIVE_RETIRED",
+            "deleted": "VIRAL_ARCHIVE_RETIRED",
+            "busy": "VIRAL_ARCHIVE_RETIRED",
             "auditor": "AUDITOR_READ_ONLY",
         }[blocked]
     )
@@ -752,7 +721,7 @@ def test_auditor_cannot_flip_queue_mode(client: TestClient):
 
 
 @pytest.mark.pg
-def test_homepage_selection_repairs_missing_cover_without_recollecting_video(
+def test_homepage_selection_repairs_missing_cover_without_cloud_video(
     client: TestClient, route_state: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from dataclasses import replace
@@ -764,11 +733,6 @@ def test_homepage_selection_repairs_missing_cover_without_recollecting_video(
     with psycopg.connect(route_state) as conn:
         conn.execute(
             "UPDATE viral_videos SET cover_url='https://cdn.example.com/cover.jpg',cover_key=NULL"
-        )
-        conn.execute(
-            "INSERT INTO viral_media_preparations"
-            "(id,platform,video_id,media_kind,status,storage_uri) "
-            "VALUES('cover-media','douyin','admin-video/opaque=id','video','SUCCEEDED','fake://test/video.mp4')"
         )
     calls = []
 
@@ -802,7 +766,7 @@ def test_homepage_selection_repairs_missing_cover_without_recollecting_video(
 
 
 @pytest.mark.pg
-def test_manual_feature_publishes_ready_video_to_catalog_and_unfeature_keeps_it(
+def test_manual_feature_selects_content_pool_video_without_cloud_video(
     client: TestClient, route_state: str
 ) -> None:
     from datetime import UTC, datetime
@@ -816,12 +780,7 @@ def test_manual_feature_publishes_ready_video_to_catalog_and_unfeature_keeps_it(
             "UPDATE viral_videos SET published_at=%s,collection_published=0",
             (int(datetime.now(UTC).timestamp()),),
         )
-        conn.execute(
-            "INSERT INTO viral_media_preparations"
-            "(id,platform,video_id,media_kind,status,storage_uri) VALUES"
-            "('catalog-media','douyin','admin-video/opaque=id','video',"
-            "'SUCCEEDED','fake://test/video.mp4')"
-        )
+        conn.execute("UPDATE viral_videos SET cover_key='viral/covers/admin-stable.jpg'")
     path = "/api/control/viral/videos/douyin/admin-video%2Fopaque%3Did/curation"
     for action in ("feature", "unfeature"):
         response = client.patch(
@@ -864,16 +823,8 @@ def test_admin_collected_video_requires_manual_homepage_selection_and_delete_is_
     assert page.json()["items"][0]["homepage_featured"] is False
     assert "native_json" not in page.json()["items"][0]
     payload = {"action": "feature", "reason": "人工确认内容质量", "confirm": True}
-    unready = client.patch(
-        path, headers={**headers, "Idempotency-Key": "feature-unready"}, json=payload
-    )
-    assert unready.status_code == 409, unready.text
     with psycopg.connect(route_state) as conn:
-        conn.execute(
-            "INSERT INTO viral_media_preparations"
-            "(id,platform,video_id,media_kind,status,storage_uri) VALUES"
-            "('admin-media','douyin','admin-video/opaque=id','video','SUCCEEDED','fake://test/video.mp4')"
-        )
+        conn.execute("UPDATE viral_videos SET cover_key='viral/covers/admin-stable.jpg'")
         bus = BusinessConnection.postgres(conn)
         original = get_viral_video(bus, platform="douyin", video_id="admin-video/opaque=id")
         assert (
@@ -945,7 +896,7 @@ def test_admin_collected_video_requires_manual_homepage_selection_and_delete_is_
             ).fetchone()[0]
             == 3
         )
-        assert conn.execute("SELECT count(*) FROM viral_media_preparations").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM viral_media_preparations").fetchone()[0] == 0
 
 
 def test_admin_preview_converts_local_storage_to_signed_http(
@@ -1005,9 +956,7 @@ def test_collected_video_curation_requires_writer_csrf_reason_and_contract(
     )
 
 
-def test_admin_daily_weekly_cycle_updates_next_run_and_preserves_on_toggle(
-    client: TestClient, route_state: str
-) -> None:
+def test_admin_rejects_reenabling_retired_collection(client: TestClient, route_state: str) -> None:
     headers = _admin_session(client)
     path = "/api/control/settings/viral"
     with psycopg.connect(route_state) as conn:
@@ -1025,26 +974,13 @@ def test_admin_daily_weekly_cycle_updates_next_run_and_preserves_on_toggle(
     changed = client.patch(
         path, headers={**headers, "Idempotency-Key": "daily-cycle"}, json=payload
     )
-    assert changed.status_code == 200, changed.text
-    assert changed.json()["collection_interval_days"] == 1
+    assert changed.status_code == 409, changed.text
+    assert changed.json()["detail"]["code"] == "VIRAL_COLLECTION_RETIRED"
     with psycopg.connect(route_state) as conn:
-        assert conn.execute(
-            "SELECT next_collection_at BETWEEN now()+interval '23 hours' "
-            "AND now()+interval '25 hours' FROM viral_runtime_controls"
+        interval = conn.execute(
+            "SELECT collection_interval_days FROM viral_runtime_controls"
         ).fetchone()[0]
-    payload.pop("collection_interval_days")
-    preserved = client.patch(
-        path, headers={**headers, "Idempotency-Key": "daily-toggle"}, json=payload
-    )
-    assert preserved.json()["collection_interval_days"] == 1
-    assert (
-        client.patch(
-            path,
-            headers={**headers, "Idempotency-Key": "invalid-cycle"},
-            json={**payload, "collection_interval_days": 2},
-        ).status_code
-        == 422
-    )
+        assert interval == 7
 
 
 def test_admin_controls_viral_runtime_and_video_availability(
@@ -1053,7 +989,7 @@ def test_admin_controls_viral_runtime_and_video_availability(
     headers = _admin_session(client)
     initial = client.get("/api/control/settings/viral", headers=headers)
     assert initial.status_code == 200, initial.text
-    assert initial.json()["collection_enabled"] is True
+    assert initial.json()["collection_enabled"] is False
     assert initial.json()["import_enabled"] is True
     assert initial.json()["source_configured"] is False
     assert initial.json()["pending_refreshes"] == 0
@@ -1062,7 +998,7 @@ def test_admin_controls_viral_runtime_and_video_availability(
         "/api/control/settings/viral",
         headers={**headers, "Idempotency-Key": "weekly-keywords"},
         json={
-            "collection_enabled": True,
+            "collection_enabled": False,
             "import_enabled": True,
             "confirm": True,
             "reason": "配置每周采集",
@@ -1080,7 +1016,7 @@ def test_admin_controls_viral_runtime_and_video_availability(
         "/api/control/settings/viral",
         headers={**headers, "Idempotency-Key": "weekly-keywords"},
         json={
-            "collection_enabled": True,
+            "collection_enabled": False,
             "import_enabled": True,
             "confirm": True,
             "reason": "配置每周采集",

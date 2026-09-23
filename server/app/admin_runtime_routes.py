@@ -191,7 +191,9 @@ def _viral_runtime_response(conn: psycopg.Connection) -> ViralRuntimeResponse:
             )
         )
     return ViralRuntimeResponse(
-        collection_enabled=bool(controls[0]) if controls is not None else False,
+        # Scheduled collection is retired. The stored value is historical only
+        # and must never advertise a runnable switch to operators.
+        collection_enabled=False,
         import_enabled=bool(controls[1]) if controls is not None else False,
         pending_imports=counts.get("PENDING", 0),
         running_imports=counts.get("RUNNING", 0),
@@ -223,6 +225,13 @@ def update_viral_runtime(
     response: Response,
     actor: AdminWriter,
 ) -> dict[str, object]:
+    if payload.collection_enabled:
+        raise http_error(
+            409,
+            "VIRAL_COLLECTION_RETIRED",
+            "定时采集已停用，请使用客户关键词搜索沉淀内容池。",
+        )
+
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         # 单例行必须用 upsert：原先「先 UPDATE 再看 rowcount 补 INSERT」在并发
         # 首写下两个请求都会走 INSERT，撞 id 主键 → 500（2026-09-12 评审 P3
@@ -239,7 +248,7 @@ def update_viral_runtime(
                 updated_by_user_id = EXCLUDED.updated_by_user_id,
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (int(payload.collection_enabled), int(payload.import_enabled), actor.user_id),
+            (0, int(payload.import_enabled), actor.user_id),
         )
         if payload.keywords is not None:
             conn.execute(
@@ -482,71 +491,10 @@ def archive_collected_viral_video(
     response: Response,
     actor: AdminWriter,
 ) -> dict[str, object]:
-    def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
-        # Serialize against the scheduler; reuse the durable latest slot without
-        # replacing a running collection or introducing an in-process job.
-        control = conn.execute(
-            "SELECT collection_enabled FROM viral_runtime_controls WHERE id=1 FOR UPDATE"
-        ).fetchone()
-        if control is None or not control[0]:
-            raise http_error(409, "VIRAL_COLLECTION_PAUSED", "后台采集已暂停，请先开启采集服务。")
-        video = conn.execute(
-            "SELECT 1 FROM viral_videos WHERE platform=%s AND video_id=%s "
-            "AND deleted_at IS NULL FOR UPDATE",
-            (platform, video_id),
-        ).fetchone()
-        if video is None:
-            raise http_error(404, "VIRAL_VIDEO_NOT_FOUND", "视频不存在或已删除。")
-        active = conn.execute(
-            "SELECT id,collection_config_json FROM viral_refresh_tasks "
-            "WHERE platform=%s AND status IN ('PENDING','RUNNING') FOR UPDATE",
-            (platform,),
-        ).fetchall()
-        for task in active:
-            config = json.loads(task[1])
-            if config.get("kind") == "single_archive" and config.get("video_id") == video_id:
-                return {"task_id": task[0], "queued": True}
-        if active:
-            raise http_error(409, "VIRAL_ARCHIVE_BUSY", "该平台已有后台任务，请完成后再转存。")
-        queued = conn.execute(
-            """INSERT INTO viral_refresh_tasks(id,platform,sort,collection_config_json)
-            VALUES(%s,%s,'latest',%s) ON CONFLICT(platform,sort) DO UPDATE SET
-                status='PENDING',collection_config_json=excluded.collection_config_json,
-                checkpoint_json='{}',retry_count=0,locked_by=NULL,locked_until=NULL,
-                error_code=NULL,error_message_redacted=NULL,retryable=0,
-                started_at=NULL,completed_at=NULL,updated_at=CURRENT_TIMESTAMP RETURNING id""",
-            (
-                str(uuid.uuid4()),
-                platform,
-                json.dumps({"kind": "single_archive", "video_id": video_id}),
-            ),
-        ).fetchone()
-        if queued is None:
-            raise RuntimeError("viral archive task enqueue did not persist")
-        task_id = str(queued[0])
-        conn.execute(
-            """INSERT INTO audit_logs(id,actor_user_id,action,entity_type,entity_id,metadata_json)
-            VALUES(%s,%s,'viral_video.archive','viral_video',%s,%s)""",
-            (
-                str(uuid.uuid4()),
-                actor.user_id,
-                f"{platform}:{video_id}",
-                json.dumps(
-                    {"request_id": request_id, "reason": payload.reason.strip(), "task_id": task_id}
-                ),
-            ),
-        )
-        return {"task_id": task_id, "queued": True}
-
-    return write_with_idempotency(
-        request,
-        response,
-        actor,
-        payload,
-        business,
-        success_status=202,
-        unavailable_code=RUNTIME_SETTINGS_SERVICE_UNAVAILABLE,
-        unavailable_message=RUNTIME_SETTINGS_SERVICE_UNAVAILABLE_MESSAGE,
+    raise http_error(
+        410,
+        "VIRAL_ARCHIVE_RETIRED",
+        "视频云端转存已停用；存量云端视频仅保留只读预览。",
     )
 
 
@@ -674,13 +622,6 @@ def _prepare_feature_cover(platform: str, video_id: str) -> tuple[str, str] | No
         video = get_viral_video(conn, platform=platform, video_id=video_id)
         if video is None or video.cover_key or not video.cover_url:
             return None
-        ready = conn.execute(
-            "SELECT 1 FROM viral_media_preparations WHERE platform=%s AND video_id=%s "
-            "AND media_kind='video' AND status='SUCCEEDED' AND storage_uri IS NOT NULL",
-            (platform, video_id),
-        ).fetchone()
-        if ready is None:
-            return None
         storage = get_media_storage(conn)
     # Only the existing public cover is fetched, with a bounded download and
     # deterministic cache key. No provider collection request or long PG lock.
@@ -713,24 +654,15 @@ def curate_collected_viral_video(
         if row is None:
             raise http_error(404, "VIRAL_VIDEO_NOT_FOUND", "视频不存在或已删除。")
         if payload.action == "feature":
-            ready = conn.execute(
-                "SELECT 1 FROM viral_media_preparations WHERE platform=%s AND video_id=%s "
-                "AND media_kind='video' AND status='SUCCEEDED' AND storage_uri IS NOT NULL",
-                (platform, video_id),
-            ).fetchone()
-            if ready is None:
-                raise http_error(
-                    409, "VIRAL_MEDIA_NOT_READY", "视频和封面归档完成后才能展示到首页。"
-                )
             if row[0] and not row[1]:
                 if prepared_cover is None or prepared_cover[0] != row[0]:
-                    raise http_error(
-                        409, "VIRAL_COVER_NOT_READY", "视频已归档，但封面暂时无法获取，请稍后重试。"
-                    )
+                    raise http_error(409, "VIRAL_COVER_NOT_READY", "封面暂时无法归档，请稍后重试。")
                 conn.execute(
                     "UPDATE viral_videos SET cover_key=%s WHERE platform=%s AND video_id=%s",
                     (prepared_cover[1], platform, video_id),
                 )
+            elif not row[1]:
+                raise http_error(409, "VIRAL_COVER_NOT_READY", "稳定封面准备完成后才能展示到首页。")
             hidden = conn.execute(
                 "SELECT 1 FROM viral_video_visibility WHERE platform=%s AND video_id=%s "
                 "AND status!='AVAILABLE'",
@@ -742,12 +674,11 @@ def curate_collected_viral_video(
                 )
         conn.execute(
             """UPDATE viral_videos SET homepage_featured=%s,
-                collection_published=CASE WHEN %s THEN 1 ELSE collection_published END,
                 deleted_at=CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE deleted_at END
+                ,updated_at=CURRENT_TIMESTAMP
             WHERE platform=%s AND video_id=%s""",
             (
                 int(payload.action == "feature"),
-                payload.action == "feature",
                 payload.action == "delete",
                 platform,
                 video_id,
