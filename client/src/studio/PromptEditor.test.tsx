@@ -304,8 +304,27 @@ describe("最终提示词后置", () => {
     );
   });
 
+  it("非开头首帧默认用持续行走的开场衔接，并提交到合成接口", async () => {
+    render(<FinalHarness sourceFrameTimestamp={1.2} />);
+    const opening = screen.getByLabelText("开场衔接");
+    expect((opening as HTMLTextAreaElement).value).toContain("边走边开始口播");
+    fireEvent.click(screen.getByLabelText("采用这份文案"));
+    fireEvent.click(screen.getByRole("button", { name: "合成最终提示词" }));
+    await waitFor(() =>
+      expect(api.compile).toHaveBeenCalledWith(
+        "project",
+        expect.objectContaining({
+          opening_action: (opening as HTMLTextAreaElement).value,
+        }),
+      ),
+    );
+  });
+
   it("执行前逐项显示缺失原因，并在补齐前不调用服务端", () => {
     render(<FinalHarness frame="" sourceFrameTimestamp={-1} />);
+    fireEvent.change(screen.getByLabelText("开场衔接"), {
+      target: { value: "" },
+    });
 
     const checklist = screen.getByRole("region", { name: "生成前检查" });
     expect(checklist).toHaveTextContent("首帧选择");

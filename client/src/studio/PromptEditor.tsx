@@ -29,6 +29,9 @@ export type ReplicaPreflightCheck = {
   blocking?: boolean;
 };
 
+const DEFAULT_OPENING_ACTION =
+  "人物延续首帧中的移动；若动作不明显，则自然起步向前走。镜头平稳跟随，边走边开始口播，顺畅衔接到原视频的第一个动作，避免原地静止或突然定格。";
+
 export function ReplicaPreflightChecklist({
   checks,
 }: {
@@ -120,7 +123,7 @@ export function ReplicaFinalPromptControls({
   const [confirmedKey, setConfirmedKey] = useState("");
   const confirmed = scriptConfirmed ?? confirmedKey === key;
   const [scale, setScale] = useState(false);
-  const [openingAction, setOpeningAction] = useState("");
+  const [openingAction, setOpeningAction] = useState(DEFAULT_OPENING_ACTION);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [pending, setPending] = useState<{
