@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Video Replica PostgreSQL PITR base backup daily
+
+[Timer]
+OnCalendar=*-*-* 02:40:00
+RandomizedDelaySec=10m
+Persistent=true
+Unit=video-replica-pitr-backup.service
+
+[Install]
+WantedBy=timers.target

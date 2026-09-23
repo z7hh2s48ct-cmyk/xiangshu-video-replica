@@ -1,0 +1,446 @@
+.people-page,
+.person-page {
+  color: #ecece8;
+}
+.people-toolbar,
+.panel-heading,
+.person-header,
+.person-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+.people-toolbar h1,
+.person-page h1 {
+  margin: 0;
+  font-size: var(--font-title);
+}
+.people-toolbar p,
+.person-header p,
+.person-header span {
+  color: #999b95;
+  margin: 8px 0;
+}
+.people-filters {
+  display: flex;
+  gap: 12px;
+  margin: 28px 0;
+}
+.people-filter {
+  background: #101111;
+  border: 1px solid #292a27;
+  color: #ecece8;
+  border-radius: 8px;
+  padding: 11px 26px;
+  font-size: var(--font-body);
+}
+.people-filter.is-active {
+  background: #e5aa36;
+  color: #111;
+  border-color: #e5aa36;
+}
+.people-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+.person-card,
+.person-header,
+.person-content,
+.people-toolbar {
+  background: #101111;
+  border: 1px solid #292a27;
+  border-radius: 10px;
+}
+.person-card {
+  overflow: hidden;
+}
+/* 容器比例固定，不再用固定高度。三列网格里卡片宽度随窗口变化，而高度钉死
+   360px 会让容器比例随窗口漂移——同一张人物图在不同窗口下被裁掉的部位都不
+   一样。改用 aspect-ratio 后比例恒定。
+   4/5 与 .scene-image 保持一致；内层 img 覆盖 .studio-media img 的默认 cover，
+   改为 contain，避免把人物的头或脚裁掉（外层那行 object-fit 作用在包裹 div
+   上，从来没生效过）。 */
+.person-card__portrait {
+  width: 100%;
+  aspect-ratio: 4 / 5;
+  height: auto;
+  background: #1d1d1b;
+}
+.person-card__portrait.studio-media img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.person-card__body {
+  padding: 18px;
+}
+.person-card h2 {
+  margin: 0;
+  font-size: var(--font-lead);
+}
+.person-card p {
+  color: #999b95;
+}
+.person-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: #b7baaf;
+  font-size: var(--font-label);
+  min-height: 42px;
+}
+.person-card__meta span.is-warning {
+  color: #e5aa36;
+}
+.person-card__actions,
+.panel-heading > div:last-child,
+.avatar-card > button,
+.voice-card > div:last-child {
+  display: flex;
+  gap: 10px;
+  margin-top: 18px;
+}
+.people-back {
+  background: none;
+  border: 0;
+  color: #ecece8;
+  font-size: var(--font-subtitle);
+  padding: 8px 0;
+  margin-bottom: 14px;
+}
+.person-header {
+  justify-content: flex-start;
+  padding: 12px 18px;
+  margin-bottom: 0;
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.person-header__portrait {
+  width: 100px;
+  min-width: 100px;
+  max-width: 100px;
+  flex: 0 0 100px;
+  height: 100px;
+  object-fit: cover;
+  border-radius: 8px;
+  background: #252522;
+}
+.person-header > div {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.person-header h1 {
+  font-size: var(--font-title);
+  margin: 0 0 8px;
+}
+.person-header p {
+  margin: 6px 0;
+}
+.photos-panel .panel-heading > div:last-child {
+  margin-top: 0;
+}
+.person-content {
+  padding: 14px 18px;
+  min-height: 420px;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+.person-page .studio-tabs {
+  margin: 0;
+}
+.ip-layout,
+.avatar-layout,
+.voice-layout {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr;
+  gap: 18px;
+}
+.people-page .studio-panel,
+.person-page .studio-panel {
+  background: #101111;
+  border: 1px solid #292a27;
+  border-radius: 9px;
+  padding: 22px;
+}
+.people-page h2,
+.person-page h2 {
+  margin-top: 0;
+}
+.ip-preview {
+  font-size: var(--font-subtitle);
+  line-height: 2;
+  color: #e2e1dc;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.person-footer {
+  grid-column: 1 / -1;
+  justify-content: center;
+  border-top: 1px solid #292a27;
+  padding-top: 18px;
+}
+.photos-panel > .studio-panel {
+  margin: 12px 0;
+}
+.people-sheet {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  max-width: 900px;
+  margin: 16px auto 0;
+  object-fit: contain;
+  background: #161713;
+  border-radius: 8px;
+}
+.person-page .people-sheet.studio-media img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.scene-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+.scene-image {
+  width: 100%;
+  aspect-ratio: 4 / 5;
+  height: auto;
+  object-fit: contain;
+  border-radius: 8px;
+}
+.scene-image--sheet {
+  aspect-ratio: 16 / 9;
+}
+.person-page .scene-image.studio-media img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.scene-preview-button {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: #161713;
+}
+.scene-preview-button .studio-media {
+  margin: 0;
+}
+.scene-expanded-image {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+}
+.studio-dialog .scene-expanded-image.studio-media img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.scene-set-label {
+  margin: 6px 0 14px;
+  color: #999b95;
+  font-size: var(--font-label);
+}
+.photos-panel {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.85fr) minmax(0, 1.4fr);
+  align-items: start;
+  gap: 20px;
+}
+.photos-panel > .panel-heading {
+  grid-column: 1 / -1;
+}
+.photos-panel > .studio-panel {
+  grid-column: 1;
+  grid-row: 2 / span 3;
+  margin: 0;
+}
+.photos-panel > .character-scene-panel,
+.photos-panel > .studio-empty,
+.photos-panel > h3,
+.photos-panel > .scene-grid,
+.photos-panel > .people-pagination {
+  grid-column: 2;
+  margin: 0;
+}
+.photos-panel .scene-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr));
+}
+.photos-panel .panel-heading {
+  align-items: flex-start;
+}
+.photos-panel .panel-heading p {
+  color: #999b95;
+  font-size: var(--font-body);
+  margin-bottom: 0;
+}
+.photos-panel .panel-heading > div:last-child {
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+.photos-panel .scene-grid .studio-panel {
+  padding: 16px;
+}
+.photos-panel .scene-grid .studio-panel > div:last-child {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.ip-layout {
+  align-items: start;
+}
+.ip-layout textarea {
+  min-height: 96px;
+  resize: vertical;
+  line-height: 1.6;
+}
+.ip-layout .studio-field:has(textarea)::after {
+  content: "可换行输入，拖动右下角可展开";
+  font-size: var(--font-caption);
+  color: #999b95;
+}
+.scene-grid strong {
+  display: block;
+  margin-top: 12px;
+}
+.scene-grid .studio-panel button {
+  font-size: var(--font-label);
+  padding: 8px 11px;
+}
+.avatar-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.avatar-card {
+  border: 1px solid #292a27;
+  border-radius: 8px;
+  overflow: hidden;
+  padding-bottom: 14px;
+}
+.person-page .avatar-card .studio-media {
+  height: 180px;
+}
+.person-page .avatar-card .studio-media img {
+  width: 100%;
+  height: 180px;
+  object-fit: cover;
+}
+.avatar-card h3,
+.avatar-card p,
+.avatar-card button {
+  margin-left: 14px;
+}
+.avatar-card p {
+  color: #999b95;
+}
+.voice-card {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+  align-items: center;
+  border: 1px solid #292a27;
+  border-radius: 8px;
+  padding: 16px;
+  margin-top: 12px;
+}
+.voice-card.is-confirmed {
+  border-color: #e5aa36;
+}
+.voice-card h3 {
+  margin: 0;
+}
+.voice-card p {
+  color: #999b95;
+}
+.voice-card small {
+  color: #e5aa36;
+  margin-left: 8px;
+}
+.people-page input,
+.person-page input {
+  width: 100%;
+  box-sizing: border-box;
+  background: #0b0c0c;
+  color: #ecece8;
+  border: 1px solid #292a27;
+  border-radius: 7px;
+  padding: 12px;
+  font: inherit;
+}
+.ip-layout .studio-field {
+  margin-bottom: 12px;
+}
+.people-page .hint,
+.person-page .hint {
+  margin-top: 20px;
+}
+@media (max-width: 1100px) {
+  .photos-panel {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .photos-panel > .studio-panel,
+  .photos-panel > .character-scene-panel,
+  .photos-panel > .studio-empty,
+  .photos-panel > h3,
+  .photos-panel > .scene-grid,
+  .photos-panel > .people-pagination {
+    grid-column: 1;
+    grid-row: auto;
+  }
+  .people-grid,
+  .scene-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+  .ip-layout,
+  .avatar-layout,
+  .voice-layout {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 760px) {
+  .people-grid,
+  .scene-grid,
+  .avatar-grid {
+    grid-template-columns: 1fr;
+  }
+  .people-toolbar,
+  .panel-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .person-header {
+    padding: 16px;
+  }
+  .person-content {
+    padding: 16px;
+  }
+  .voice-card {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+.voice-card > div {
+  min-width: 0;
+  max-width: 100%;
+}
+.voice-card > div:last-child {
+  flex-wrap: wrap;
+}
+.voice-card audio {
+  max-width: 100%;
+}
+
+/* 删除人物确认弹窗：逐条列出会被连带删除的内容。级联范围比用户预期大得多
+   （口播分身、声音、成片与存储对象），所以用列表而非一句话带过。 */
+.person-delete-casualties {
+  margin: 12px 0 16px;
+  padding-left: 20px;
+  color: #d8c69a;
+  font-size: var(--font-label);
+  line-height: 1.9;
+}

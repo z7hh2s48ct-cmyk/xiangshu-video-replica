@@ -1,0 +1,486 @@
+name: Continuous Integration
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Design (2026-09-10, CI localization speedup):
+# - `changes` computes which areas a PR touched so heavy, area-specific steps
+#   only run when relevant; on push to main everything is forced true.
+# - `select-runner` picks the Linux gate's runner: a self-hosted `video-replica`
+#   runner when one is online (PR CI then runs on the developer's own warm
+#   machine), otherwise GitHub-hosted ubuntu-24.04. Arch is intentionally NOT
+#   pinned so an arm64 macOS VM and an x64 Windows/WSL2 runner both qualify.
+#   Listing runners needs an "Administration" scope GITHUB_TOKEN lacks, so the
+#   step uses an optional SELF_HOSTED_RUNNER_READ_PAT secret and degrades to a
+#   hosted runner when that secret is absent or the lookup fails.
+# - `quality-linux` stays a SINGLE job (stable required-check name). Its pytest
+#   suite runs sharded (each shard against its own isolated PostgreSQL
+#   container via scripts/ci/run-pytest-shards.sh); the job-level postgres
+#   service was removed because the shard script self-manages PostgreSQL for
+#   hosted, self-hosted and local runs identically. The customer E2E step starts
+#   its own fixture afterwards (setup-backend.mjs derives PG_BASE from
+#   TEST_POSTGRESQL_URL and builds the customer_e2e database itself).
+# - `windows-nsis` always reports green: when no desktop/client change is
+#   detected its heavy build steps short-circuit (skip) and the job succeeds in
+#   seconds, keeping the required-check name stable without a 13-minute build.
+# Every job keeps the same-repo PR guard so fork PRs never execute untrusted
+# code on a self-hosted runner.
+
+jobs:
+  changes:
+    name: Detect changes
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      desktop: ${{ github.event_name == 'push' || steps.filter.outputs.desktop == 'true' }}
+      frontend: ${{ github.event_name == 'push' || steps.filter.outputs.frontend == 'true' }}
+      server: ${{ github.event_name == 'push' || steps.filter.outputs.server == 'true' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Detect changed paths
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            desktop:
+              - 'client/src-tauri/**'
+              - 'client/**'
+              - 'package.json'
+              - 'package-lock.json'
+              - '.github/workflows/ci.yml'
+            frontend:
+              - 'client/**'
+              - 'package.json'
+              - 'package-lock.json'
+            server:
+              - 'server/**'
+              - 'scripts/**'
+              - 'package.json'
+
+  select-runner:
+    name: Select runner
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - name: Choose self-hosted runner when online, else GitHub-hosted
+        id: pick
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          CI_FORCE_HOSTED: ${{ vars.CI_FORCE_HOSTED }}
+        with:
+          # Listing the repo's self-hosted runners needs an "Administration"
+          # read scope that GITHUB_TOKEN does NOT provide (it 403s "Resource not
+          # accessible by integration", and `administration` is not a valid
+          # permissions: key). Pass an optional fine-grained PAT secret
+          # (Administration: read-only, this repo only) so auto-dispatch works;
+          # when the secret is absent it falls back to GITHUB_TOKEN, the lookup
+          # 403s, and the script's catch cleanly selects a GitHub-hosted runner.
+          github-token: ${{ secrets.SELF_HOSTED_RUNNER_READ_PAT || github.token }}
+          script: |
+            const hosted = '["ubuntu-24.04"]';
+            const selfHosted = '["self-hosted","linux","video-replica"]';
+            const forced = (process.env.CI_FORCE_HOSTED || '').trim().toLowerCase();
+            if (forced === 'true' || forced === '1' || forced === 'yes') {
+              core.info('CI_FORCE_HOSTED is set -> GitHub-hosted runner.');
+              core.setOutput('runner', hosted);
+              return;
+            }
+            try {
+              const runners = await github.paginate(
+                github.rest.actions.listSelfHostedRunnersForRepo,
+                { owner: context.repo.owner, repo: context.repo.repo, per_page: 100 }
+              );
+              const match = runners.find(r =>
+                r.status === 'online' &&
+                (r.labels || []).some(l => l.name === 'video-replica')
+              );
+              if (match) {
+                core.info(`Self-hosted runner online: ${match.name} -> ${selfHosted}`);
+                core.setOutput('runner', selfHosted);
+              } else {
+                core.info('No online video-replica runner -> GitHub-hosted runner.');
+                core.setOutput('runner', hosted);
+              }
+            } catch (err) {
+              core.warning(`Runner lookup failed (${err.message}); -> GitHub-hosted runner.`);
+              core.setOutput('runner', hosted);
+            }
+
+  secret-scan:
+    name: Secret scan
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Scan runtime contract surface
+        run: npm run check:security
+
+  quality-linux:
+    name: Linux quality gate
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: [changes, select-runner]
+    runs-on: ${{ fromJSON(needs.select-runner.outputs.runner) }}
+    # 2026-08-26: raised 30 -> 60 — the full pytest suite (PG fixture + 10k
+    # queue load) measures 9-27 minutes on a hosted runner depending on its
+    # performance; a slow runner previously hit the 30-minute cap mid-run. The
+    # suite is now sharded (see below), but the timeout stays generous to cover
+    # a cold self-hosted runner or a slow hosted one.
+    timeout-minutes: 60
+    env:
+      TEST_POSTGRESQL_URL: postgresql://testuser:testpass@localhost:5433/customer_v3_test
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install system dependencies (Tauri + ffmpeg)
+        run: |
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            sudo sed -i \
+              's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+              /etc/apt/apt-mirrors.txt
+          fi
+          sudo apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            update
+          # ffmpeg backs the server media-validation pytest suite (image decode
+          # + source-frame extraction); production bundles it via NSIS on Windows.
+          sudo apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            install --yes \
+            build-essential \
+            ffmpeg \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.0"
+          enable-cache: true
+          cache-dependency-glob: server/uv.lock
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+      - name: Install JavaScript dependencies
+        run: npm ci
+      - name: Install Python dependencies
+        run: uv sync --project server --locked --group dev --python 3.12
+      - name: Run static quality checks
+        # secret scan + client check (biome/tsc/vitest) + e2e lint + tauri
+        # (cargo fmt/check) + ruff + ruff format --check + mypy. This is the
+        # former `npm run check` minus its trailing full pytest, which now runs
+        # sharded in the next step. Always runs: backend changes must be gated.
+        run: npm run check:static
+      - name: Assert migration chain invariants
+        # MIGRATION-GUARD-20260912: fail-closed guard for the migration chain, ordered
+        # BEFORE the sharded pytest so a broken chain is caught in seconds instead of
+        # after a 17-minute shard run. DB-free and stdlib-only, so it runs on plain
+        # `python3` like the shard-coverage guard below.
+        # Enforces: exactly one head, a single base, a linear frozen published range,
+        # the new-revision timestamp naming policy, and that no migration file recorded
+        # in server/migrations/manifest.json has been rewritten. Remedy for most
+        # failures is `python3 scripts/ci/migration_manifest.py --record` and commit.
+        # See docs/并行开发迁移Head与PR冲突处置手册.md §5.
+        run: python3 scripts/ci/migration_manifest.py --check
+      - name: Assert shard manifests cover every test file
+        # CI-7 (CW-061): fail-closed coverage guard, ordered BEFORE the sharded
+        # pytest. run-pytest-shards.sh only executes the files named in the
+        # committed shard manifests; without this assertion a stale split makes
+        # CI silently skip any test file added since the manifests were last
+        # regenerated (the CW-044 §18.2 fail-open gap: 13 files never ran, and
+        # the gap grows by one per new test file). Non-zero exit lists the
+        # uncovered/ghost entries and fails the gate; regenerate the manifests
+        # with `python3 scripts/ci/build-test-shards.py --shards 4` to clear it.
+        run: python3 scripts/ci/build-test-shards.py --check-coverage
+      - name: Run sharded PostgreSQL pytest
+        # Each shard gets its own isolated PostgreSQL container (distinct name +
+        # host port), so the PG-touching test files never collide. Falls back to
+        # a single sequential pass when Docker is unavailable. Override the shard
+        # count per-runner with the CI_PYTEST_SHARDS repo variable (e.g. a warm
+        # self-hosted VM with more cores can use 6 or 8).
+        run: bash scripts/ci/run-pytest-shards.sh
+        env:
+          CI_PYTEST_SHARDS: ${{ vars.CI_PYTEST_SHARDS || 4 }}
+      - name: Start PostgreSQL fixture for E2E
+        if: needs.changes.outputs.frontend == 'true'
+        # The shard containers are torn down by the shard script; the customer
+        # E2E needs a PostgreSQL on TEST_POSTGRESQL_URL (5433) so setup-backend.mjs
+        # can build its own customer_e2e database.
+        run: bash scripts/pg-fixture.sh start
+      - name: Install Playwright Chromium
+        if: needs.changes.outputs.frontend == 'true'
+        run: npx playwright install chromium --with-deps
+      - name: Run customer browser E2E
+        if: needs.changes.outputs.frontend == 'true'
+        run: npm run test:customer-e2e
+      - name: Run Rust tests
+        if: needs.changes.outputs.desktop == 'true'
+        run: cargo test --manifest-path client/src-tauri/Cargo.toml --locked
+      - name: Build web client
+        if: needs.changes.outputs.desktop == 'true'
+        run: npm run build
+      # CW-019: the admin console is a separate artifact (client/dist-admin,
+      # base /admin/). Building it here proves the admin entry compiles and that
+      # the customer build did not silently absorb it.
+      #
+      # Gated on `desktop`, identical to the "Build web client" step above: the
+      # verify step asserts on client/dist, which only exists when that step ran.
+      # Gating on `frontend` instead would let a desktop-only change skip the
+      # build yet still run the assertion, and an ungated step would fail on a
+      # server-only PR because verify treats a missing artifact directory as a
+      # hard error (a missing bundle must never be able to pass as "clean").
+      - name: Build admin bundle
+        if: needs.changes.outputs.desktop == 'true'
+        run: npm run build:admin
+      # CW-019: artifact-level assertion that client/dist contains no admin or
+      # internal entry (file names, chunk names, management/internal feature
+      # strings). Prints the full SHA-256 manifest and exits non-zero on any hit.
+      - name: Verify customer bundle excludes admin and internal entries
+        if: needs.changes.outputs.desktop == 'true'
+        run: npm run verify:customer-bundle
+      - name: Audit JavaScript dependencies
+        if: needs.changes.outputs.frontend == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            set +e
+            output="$(timeout 120s npm audit --audit-level=high 2>&1)"
+            status=$?
+            set -e
+            printf '%s\n' "$output"
+
+            if [[ "$status" -eq 0 ]]; then
+              exit 0
+            fi
+
+            if [[ "$attempt" -lt 3 ]] && { [[ "$status" -eq 124 ]] || grep -Eq '503 Service Unavailable|audit endpoint returned an error' <<<"$output"; }; then
+              echo "npm audit service unavailable; retrying attempt $((attempt + 1))/3" >&2
+              sleep $((attempt * 15))
+              continue
+            fi
+
+            exit "$status"
+          done
+      - name: Stop PostgreSQL fixture
+        if: always()
+        # Keep a persistent self-hosted runner clean between runs (idempotent on
+        # hosted runners, which are destroyed anyway).
+        run: bash scripts/pg-fixture.sh stop || true
+
+  ffmpeg-windows-binaries:
+    name: Build LGPL ffmpeg for the customer installer
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Detect desktop changes
+        shell: bash
+        env:
+          DESKTOP_CHANGED: ${{ needs.changes.outputs.desktop }}
+        run: echo "desktop=${DESKTOP_CHANGED} - when false, the ffmpeg build is skipped."
+      - name: Checkout repository
+        if: needs.changes.outputs.desktop == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # 客户云安装包需要 ffmpeg 做本地抽音轨（P2 本地缓存），而 Windows runner
+      # 跑不了 Linux 容器，因此在这里（Linux）交叉编译出 Windows exe，再以
+      # artifact 交给 windows-nsis。构建脚本内部对二进制做 LGPL 静态断言
+      # （无 --enable-gpl、含 --enable-version3），因此产物一定是 LGPL 构建。
+      - name: Cross-compile static Windows ffmpeg/ffprobe (LGPL)
+        if: needs.changes.outputs.desktop == 'true'
+        run: bash scripts/ffmpeg-minimal/build.sh "$RUNNER_TEMP/ffmpeg-out"
+      - name: Upload ffmpeg binaries
+        if: needs.changes.outputs.desktop == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ffmpeg-windows-lgpl
+          path: ${{ runner.temp }}/ffmpeg-out/*.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  windows-nsis:
+    name: Windows Tauri and NSIS
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: [changes, ffmpeg-windows-binaries]
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - name: Detect desktop changes
+        shell: bash
+        env:
+          DESKTOP_CHANGED: ${{ needs.changes.outputs.desktop }}
+        # Always runs, so the job concludes SUCCESS (stable required-check name)
+        # even when every heavy step below short-circuits on a non-desktop PR.
+        # The flag is passed via env (not interpolated into the shell) per the
+        # workflow security guideline; it is a strict 'true'/'false' string.
+        run: echo "desktop=${DESKTOP_CHANGED} - when false, the NSIS build steps are skipped and this gate stays green."
+      - name: Checkout repository
+        if: needs.changes.outputs.desktop == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        if: needs.changes.outputs.desktop == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Set up Rust
+        if: needs.changes.outputs.desktop == 'true'
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+      - name: Install JavaScript dependencies
+        if: needs.changes.outputs.desktop == 'true'
+        run: npm ci
+      - name: Check Tauri project (customer default)
+        if: needs.changes.outputs.desktop == 'true'
+        run: npm run check:tauri
+      # CW-022: the OS-native credential (DPAPI), durable-identity and
+      # download-registry tests are compiled out on Linux, so the Windows job
+      # must execute them natively.
+      - name: Run Rust credential and download tests on Windows
+        if: needs.changes.outputs.desktop == 'true'
+        run: cargo test --manifest-path client/src-tauri/Cargo.toml --locked
+      # bundle.resources 现在包含 ffmpeg.exe/ffprobe.exe，缺失会让 tauri build
+      # 直接失败，所以必须在打包前把产物放到 resources/ffmpeg/。
+      - name: Download ffmpeg binaries
+        if: needs.changes.outputs.desktop == 'true'
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: ffmpeg-windows-lgpl
+          path: client/src-tauri/resources/ffmpeg
+      # CW-021: the internal edition and its local sidecar are retired, so the
+      # Windows job builds only the customer cloud bundle.
+      - name: Build unsigned customer cloud NSIS installer
+        if: needs.changes.outputs.desktop == 'true'
+        run: npm run tauri:build:customer
+        env:
+          # Contract-only unsigned artifact. Release builds replace this
+          # non-routable origin with the approved staging/production origin.
+          VITE_API_BASE_URL: https://staging.example.invalid
+      - name: Verify customer installer excludes local backend distribution
+        if: needs.changes.outputs.desktop == 'true'
+        shell: pwsh
+        run: |
+          $sevenZipCommand = Get-Command 7z.exe -ErrorAction SilentlyContinue
+          $sevenZip = if ($null -ne $sevenZipCommand) {
+            $sevenZipCommand.Source
+          } else {
+            Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+          }
+          if (-not (Test-Path -LiteralPath $sevenZip)) {
+            throw '7-Zip is required to inspect the NSIS payload'
+          }
+          $installer = Get-ChildItem -LiteralPath '.cargo-target/release/bundle/nsis' -Filter '*.exe' | Select-Object -First 1
+          if ($null -eq $installer) {
+            throw 'customer NSIS installer was not produced'
+          }
+          $extractRoot = Join-Path $env:RUNNER_TEMP 'customer-nsis-payload'
+          & $sevenZip x $installer.FullName "-o$extractRoot" -y
+          if ($LASTEXITCODE -ne 0) {
+            throw 'customer NSIS installer could not be inspected'
+          }
+          # CW-021 widened detection: the local sidecar is gone from the source
+          # tree, so the payload must not carry any local-backend launcher, an
+          # embedded server/Python runtime, or a SQLite business database.
+          # 2026-09-23 用户明确授权放开 ffmpeg 一项：客户云客户端需要 ffmpeg 做
+          # 本地抽音轨（P2 本地缓存 → 需要文案时本地抽音频再上传），那是客户端
+          # 自身能力，不是被 CW-021 清掉的本地后端。ffmpeg.exe/ffprobe.exe 因此
+          # 从禁项移除，其余（start-backend/pyvenv/业务库/server/.venv）不变。
+          $payload = Get-ChildItem -LiteralPath $extractRoot -Recurse -File
+          $forbiddenNames = @('start-backend.bat', 'start-backend.sh', 'pyvenv.cfg')
+          $forbidden = $payload |
+            Where-Object {
+              $_.Name -in $forbiddenNames -or
+              $_.Extension -in @('.db', '.sqlite', '.sqlite3', '.pyd') -or
+              $_.FullName -match '[\\/](server|\.venv)[\\/]'
+            }
+          if ($forbidden) {
+            throw "customer installer contains local backend distribution: $($forbidden.FullName -join ', ')"
+          }
+          $binaryMarkers = @('start-backend', 'VIDEO_REPLICA_BOOT_COMMAND', '127.0.0.1:8000')
+          $binaries = $payload | Where-Object { $_.Extension -in @('.exe', '.dll') }
+          foreach ($binary in $binaries) {
+            $bytes = [System.IO.File]::ReadAllBytes($binary.FullName)
+            foreach ($marker in $binaryMarkers) {
+              foreach ($encoding in @([System.Text.Encoding]::ASCII, [System.Text.Encoding]::Unicode)) {
+                if ($encoding.GetString($bytes).Contains($marker)) {
+                  throw "customer installer binary $($binary.Name) contains local backend marker '$marker'"
+                }
+              }
+            }
+          }
+      - name: Record customer cloud installer SHA256
+        if: needs.changes.outputs.desktop == 'true'
+        shell: pwsh
+        run: Get-FileHash .cargo-target/release/bundle/nsis/*.exe -Algorithm SHA256
+      - name: Archive unsigned customer cloud NSIS installer locally
+        if: needs.changes.outputs.desktop == 'true'
+        shell: pwsh
+        env:
+          LOCAL_ARTIFACT_ROOT: ${{ runner.temp }}/video-replica-artifacts
+        run: |
+          if (-not $env:LOCAL_ARTIFACT_ROOT) {
+            throw 'LOCAL_ARTIFACT_ROOT must be configured for the Windows job'
+          }
+          $installers = Get-ChildItem -LiteralPath '.cargo-target/release/bundle/nsis' -Filter '*.exe'
+          if (-not $installers) {
+            throw 'customer NSIS installer was not produced'
+          }
+          $destination = Join-Path $env:LOCAL_ARTIFACT_ROOT '${{ github.sha }}\customer-cloud-internal-test-unsigned'
+          New-Item -ItemType Directory -Path $destination -Force | Out-Null
+          $installers | Copy-Item -Destination $destination -Force
+          $installers | Get-FileHash -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash) *$(Split-Path $_.Path -Leaf)" } |
+            Set-Content -LiteralPath (Join-Path $destination 'SHA256SUMS.txt') -Encoding utf8
+          # CW-024: this CI artifact is a --no-sign contract-only build. The
+          # machine-readable channel label marks it internal-test-only so an
+          # unsigned installer can never be mistaken for a customer release;
+          # the sole release channel is the signed flow in
+          # scripts/release/build-customer-signed-release.ps1.
+          Set-Content -LiteralPath (Join-Path $destination 'RELEASE-CHANNEL.txt') -Value 'internal-test-unsigned' -Encoding utf8

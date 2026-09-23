@@ -1,0 +1,4 @@
+interface:
+  display_name: "短视频复刻"
+  short_description: "自动拆解参考视频并生成一致首帧与完整图生视频提示词"
+  default_prompt: "使用 $video-reverse-prompt-script-firstframe 拆解这个视频，并只交付首帧与图生视频提示词。"

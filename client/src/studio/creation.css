@@ -1,0 +1,2412 @@
+.creation-page {
+  color: var(--studio-text, #ecece8);
+  min-width: 0;
+}
+
+.creation-heading {
+  margin: 0 0 22px;
+}
+
+.creation-heading h1 {
+  font-size: var(--font-title);
+  font-weight: 520;
+  letter-spacing: -0.03em;
+  margin: 0;
+}
+
+.creation-heading p {
+  color: var(--studio-muted, #999b95);
+  font-size: var(--font-subtitle);
+  margin: 6px 0 0;
+}
+
+.creation-heading-back {
+  align-items: center;
+  display: flex;
+  gap: 14px;
+}
+
+.creation-source-strip {
+  align-items: center;
+  background: #101211;
+  border: 1px solid #242622;
+  border-radius: 10px;
+  color: #c8c9c4;
+  display: flex;
+  gap: 10px;
+  margin: 16px 0;
+  min-height: 48px;
+  padding: 0 18px;
+}
+
+.creation-status-dot {
+  background: #62c96f;
+  border-radius: 50%;
+  box-shadow: 0 0 0 3px rgb(98 201 111 / 10%);
+  display: inline-block;
+  height: 10px;
+  width: 10px;
+}
+
+.creation-panel-title,
+.creation-panel-title-row {
+  color: #e7e7e2;
+  font-size: var(--font-subtitle);
+  margin-bottom: 16px;
+}
+
+.creation-panel-title-row {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.creation-panel-title-row small {
+  color: #65bd59;
+  font-size: var(--font-label);
+}
+
+.creation-copy-grid {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.creation-copy-source,
+.creation-copy-editor,
+.creation-copy-person {
+  min-height: 0;
+  min-width: 0;
+}
+
+.creation-copy-grid .creation-panel-title {
+  font-size: var(--font-section);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.creation-copy-grid .creation-panel-title-row .creation-panel-title {
+  margin: 0;
+}
+
+.creation-step-number {
+  color: var(--studio-gold);
+  font-variant-numeric: tabular-nums;
+}
+
+.creation-copy-person-row,
+.creation-copy-person-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.creation-copy-person-row {
+  justify-content: space-between;
+}
+
+.creation-copy-person-actions .studio-button {
+  min-width: 116px;
+}
+
+.creation-script-copy {
+  color: #c8c9c4;
+  font-size: var(--font-body);
+  line-height: 1.85;
+  overflow-wrap: anywhere;
+  max-height: 240px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
+
+.creation-input,
+.creation-textarea {
+  background: #0c0d0d;
+  border: 1px solid #2b2d29;
+  border-radius: 8px;
+  box-sizing: border-box;
+  color: #ecece8;
+  font: inherit;
+  outline: none;
+  padding: 14px 16px;
+  width: 100%;
+}
+
+.creation-input:focus,
+.creation-textarea:focus {
+  border-color: #ad7920;
+}
+
+.creation-textarea {
+  line-height: 1.8;
+  min-height: 248px;
+  resize: vertical;
+}
+
+.creation-copy-textarea {
+  min-height: 320px;
+  height: 360px;
+  margin-top: 14px;
+}
+
+.creation-source-textarea {
+  height: 224px;
+  min-height: 192px;
+  overflow-y: auto;
+}
+
+.creation-resize-hint {
+  font-size: var(--font-caption);
+  text-align: right;
+  margin: 6px 0 0;
+}
+
+.creation-saved-state {
+  color: #81837e;
+  font-size: var(--font-label);
+  margin-top: 12px;
+  text-align: right;
+}
+
+.creation-person-card {
+  align-items: center;
+  border-bottom: 1px solid #292b27;
+  display: flex;
+  gap: 13px;
+  margin-bottom: 18px;
+  padding-bottom: 18px;
+}
+
+.creation-copy-person-row .creation-person-card {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  flex: 1 1 240px;
+}
+
+.creation-person-card p,
+.creation-person-card small {
+  color: #999b95;
+  display: block;
+  margin: 5px 0 0;
+}
+
+.creation-avatar {
+  border-radius: 8px;
+  flex: 0 0 58px;
+  height: 72px;
+  max-width: 58px;
+  min-width: 58px;
+  width: 58px;
+}
+
+.creation-copy-person > button {
+  margin-top: 10px;
+  width: 100%;
+}
+
+.creation-action-bar {
+  align-items: center;
+  background: #0e100f;
+  border: 1px solid #242622;
+  border-radius: 10px;
+  display: flex;
+  gap: 16px;
+  justify-content: flex-end;
+  margin-top: 26px;
+  padding: 18px 20px;
+}
+
+.creation-action-bar > div:first-child {
+  margin-right: auto;
+}
+
+.creation-action-bar .creation-action-note {
+  color: #999b95;
+  font-size: 12px;
+  margin-right: auto;
+}
+
+.creation-action-bar strong,
+.creation-action-bar small {
+  display: block;
+}
+
+.creation-saved-list {
+  margin-top: 16px;
+}
+
+.creation-script-row {
+  align-items: center;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid #252723;
+  color: #e8e8e4;
+  cursor: pointer;
+  display: flex;
+  font: inherit;
+  justify-content: space-between;
+  padding: 16px 4px;
+  text-align: left;
+  width: 100%;
+}
+
+.creation-script-row small {
+  color: #969892;
+}
+
+.creation-empty-workspace {
+  min-height: 430px;
+}
+
+.creation-replica-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: 0.75fr 0.95fr 1.05fr;
+}
+
+.creation-replica .studio-creation-nav {
+  width: max-content;
+}
+
+.creation-replica .creation-source-strip {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  width: auto;
+}
+
+.creation-shot-list,
+.creation-frame-compare,
+.creation-shot-notes {
+  min-height: 450px;
+}
+
+.creation-shot {
+  align-items: center;
+  background: #111312;
+  border: 1px solid #9d6b14;
+  border-radius: 9px;
+  color: #ecece8;
+  display: flex;
+  gap: 13px;
+  padding: 10px;
+  text-align: left;
+  width: 100%;
+}
+
+.creation-shot + .creation-shot {
+  margin-top: 12px;
+}
+
+.creation-shot:not(.active) {
+  border-color: #2b2d29;
+}
+
+.creation-shot > :first-child {
+  aspect-ratio: 16 / 9;
+  width: 120px;
+}
+
+.creation-shot span,
+.creation-shot small {
+  display: block;
+}
+
+.creation-shot small {
+  color: #979993;
+  margin-top: 8px;
+}
+
+.creation-frame-stack > div > span {
+  color: #a8aaa4;
+  display: block;
+  margin-bottom: 7px;
+}
+
+.creation-frame-stack > div > :last-child {
+  aspect-ratio: 16 / 9;
+  width: 100%;
+}
+
+.creation-frame-source img {
+  object-position: center 28%;
+}
+
+.creation-frame-stack > svg {
+  display: block;
+  margin: 8px auto;
+}
+
+.creation-shot-notes p {
+  color: #c3c5bf;
+  line-height: 1.85;
+  min-height: 210px;
+}
+
+.creation-shot-person {
+  align-items: center;
+  border: 1px solid #292b27;
+  border-radius: 8px;
+  display: flex;
+  gap: 14px;
+  padding: 12px;
+}
+
+.creation-shot-person span,
+.creation-shot-person small {
+  display: block;
+}
+
+.creation-shot-person small {
+  color: #999b95;
+  margin-top: 5px;
+}
+
+.creation-replica .creation-action-bar {
+  margin-top: 18px;
+  padding-block: 14px;
+}
+
+.creation-replacement-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.creation-replacement-grid > section,
+.creation-replacement-grid > div {
+  min-height: 430px;
+}
+
+.creation-replacement-grid > section:first-child .creation-large-media img {
+  object-position: center 25%;
+}
+
+.creation-large-media {
+  aspect-ratio: 4 / 3;
+  margin-bottom: 18px;
+  width: 100%;
+}
+
+.creation-replacement-grid button {
+  width: 100%;
+}
+
+.creation-preview-state {
+  align-items: center;
+  border: 1px solid #272a26;
+  border-radius: 8px;
+  color: #b4b6b0;
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  margin-top: 18px;
+  padding: 12px;
+}
+
+.creation-action-center {
+  justify-content: center;
+}
+
+.creation-video-grid {
+  align-items: stretch;
+  display: grid;
+  gap: 14px;
+  grid-template-columns:
+    minmax(0, 1.2fr) minmax(248px, 0.72fr)
+    minmax(280px, 1fr);
+  margin-top: 16px;
+}
+
+.creation-video-grid.reference {
+  grid-template-columns:
+    minmax(0, 1.2fr) minmax(248px, 0.72fr)
+    minmax(280px, 1fr);
+}
+
+.creation-video-form,
+.creation-video-controls,
+.creation-video-preview {
+  min-height: 0;
+  min-width: 0;
+}
+
+.creation-video-form > * + *,
+.creation-video-controls > * + * {
+  margin-top: 12px;
+}
+
+.creation-video-form .creation-textarea {
+  min-height: 184px;
+}
+
+.creation-frame-row {
+  align-items: center;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 1fr auto 1fr;
+  margin-top: 12px;
+}
+
+.creation-frame-card {
+  background: #0d0f0e;
+  border: 1px dashed #555851;
+  border-radius: 8px;
+  color: #b5b7b1;
+  cursor: pointer;
+  min-height: 112px;
+  padding: 10px;
+}
+
+.creation-frame-card > .studio-media {
+  display: block;
+  height: 96px;
+  min-height: 96px;
+  width: 100%;
+}
+
+.creation-frame-card-label {
+  display: block;
+  margin-top: 7px;
+}
+
+.creation-reference-list {
+  max-height: 250px;
+  margin-top: 12px;
+  overflow-y: auto;
+}
+
+.creation-reference-row {
+  align-items: center;
+  border: 1px solid #262823;
+  border-radius: 8px;
+  display: flex;
+  gap: 12px;
+  margin-top: 8px;
+  padding: 8px;
+}
+
+.creation-reference-row > :first-child {
+  aspect-ratio: 16 / 9;
+  width: 112px;
+}
+
+.creation-reference-copy,
+.creation-reference-row small {
+  display: block;
+}
+
+.creation-reference-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.creation-reference-copy strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.creation-reference-row small {
+  color: #8f918c;
+  margin-top: 6px;
+}
+
+.creation-reference-remove.studio-button {
+  flex: 0 0 34px;
+  min-height: 34px;
+  padding: 0;
+  width: 34px;
+}
+
+.creation-parameters {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.creation-parameters > .studio-field {
+  margin-bottom: 0;
+}
+
+.creation-parameters > .studio-field:nth-child(n + 3) {
+  grid-column: auto;
+}
+
+.creation-segmented,
+.creation-ratios {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.creation-segmented button,
+.creation-ratios button {
+  background: #0b0c0c;
+  border: 1px solid #292b27;
+  border-radius: 6px;
+  color: #b9bbb5;
+  cursor: pointer;
+  min-height: 34px;
+  padding: 0 15px;
+}
+
+.creation-segmented button.active,
+.creation-ratios button.active {
+  background: #2b2416;
+  border-color: #9d6b14;
+  color: #f2b632;
+}
+
+.creation-parameters input[type="range"] {
+  accent-color: #e2a331;
+  width: 100%;
+}
+
+.creation-form-actions {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 1fr;
+}
+
+.creation-preview-media {
+  aspect-ratio: 16 / 9;
+  min-height: 0;
+  width: 100%;
+}
+
+.creation-video-preview .studio-empty {
+  min-height: 400px;
+}
+
+.creation-oral-grid {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: minmax(0, 43fr) minmax(0, 57fr);
+  margin-top: 16px;
+}
+
+.creation-oral-left {
+  background: #101111;
+  border: 1px solid #292a27;
+  border-radius: 10px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.creation-oral-left > .studio-tabs {
+  border-bottom-color: #292a27;
+  margin: 0;
+  width: 100%;
+}
+
+.creation-oral-left > .studio-tabs > button {
+  flex: 1;
+}
+
+.creation-oral-inputs,
+.creation-oral-avatar {
+  min-height: 470px;
+}
+
+.creation-oral-left > .creation-oral-inputs {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  min-height: 418px;
+}
+
+.creation-oral-inputs > * + * {
+  margin-top: 18px;
+}
+
+.creation-readonly-script {
+  border: 1px solid #292b27;
+  border-radius: 8px;
+  font-size: var(--font-body);
+  line-height: 1.7;
+  min-height: 238px;
+  padding: 16px;
+}
+
+.creation-readonly-script > div {
+  color: #92948f;
+  display: flex;
+  justify-content: space-between;
+}
+
+.creation-readonly-script > div strong {
+  color: #caa044;
+}
+
+.creation-readonly-script p {
+  color: #d1d2cd;
+  white-space: pre-wrap;
+}
+
+.creation-readonly-script button,
+.creation-text-link {
+  background: none;
+  border: 0;
+  color: #e4aa30;
+  cursor: pointer;
+  float: right;
+  font: inherit;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.creation-voice-row,
+.creation-identity-row {
+  align-items: center;
+  border: 1px solid #282a26;
+  border-radius: 8px;
+  display: flex;
+  gap: 16px;
+  padding: 12px 14px;
+}
+
+.creation-voice-row span,
+.creation-identity-row strong {
+  flex: 1;
+}
+
+.creation-voice-row small {
+  color: #67bd5b;
+}
+
+.creation-identity-row {
+  margin-bottom: 16px;
+}
+
+.creation-identity-row > span {
+  color: #a4a6a0;
+}
+
+.creation-avatar-preview {
+  aspect-ratio: 13 / 7;
+  width: 100%;
+}
+
+.creation-avatar-meta {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  padding: 16px 4px;
+}
+
+.creation-avatar-meta small {
+  color: #68bd5d;
+}
+
+.creation-audio-card {
+  background: #111312;
+  border: 1px solid #2a2c28;
+  border-radius: 9px;
+  padding: 22px;
+}
+
+.creation-audio-title {
+  align-items: center;
+  display: flex;
+  gap: 13px;
+  margin-bottom: 22px;
+}
+
+.creation-audio-title span,
+.creation-audio-title small {
+  display: block;
+}
+
+.creation-audio-title small {
+  color: #999b95;
+  margin-top: 5px;
+}
+
+.creation-inline-actions {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 1fr 1fr;
+  margin-top: 14px;
+}
+
+.creation-style-controls {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+@media (max-width: 1180px) {
+  .creation-replica-grid,
+  .creation-replacement-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .creation-copy-person,
+  .creation-shot-notes,
+  .creation-replacement-preview {
+    grid-column: 1 / -1;
+    min-height: auto;
+  }
+
+  .creation-video-grid,
+  .creation-video-grid.reference,
+  .creation-oral-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .creation-copy-grid,
+  .creation-replica-grid,
+  .creation-replacement-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .creation-copy-person,
+  .creation-shot-notes,
+  .creation-replacement-preview {
+    grid-column: auto;
+  }
+
+  .creation-action-bar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .creation-action-bar > div:first-child {
+    margin-right: 0;
+  }
+
+  .creation-video-grid,
+  .creation-video-grid.reference {
+    display: block;
+  }
+
+  .creation-video-preview {
+    margin-top: 16px;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * C2 独立创作：提示词导入 / 素材双通道 / 生成进度视图
+ * ------------------------------------------------------------------------- */
+.creation-prompt-import {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+
+.creation-prompt-list {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  max-height: 180px;
+  overflow: auto;
+  border: 1px solid var(--line, #ddd);
+  border-radius: 10px;
+  padding: 8px;
+}
+
+.creation-prompt-list button {
+  display: grid;
+  gap: 2px;
+  border: 1px solid var(--line, #ddd);
+  border-radius: 8px;
+  background: var(--panel, #fff);
+  cursor: pointer;
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.creation-prompt-list button:hover {
+  border-color: var(--accent-strong, #c6a45f);
+}
+
+.creation-prompt-list p {
+  margin: 4px 6px;
+  color: var(--text-muted, #777);
+  font-size: var(--font-label);
+}
+
+.creation-prompt-import-context {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid #665025;
+  border-radius: 8px;
+  color: var(--text-muted, #b8b8b1);
+  font-size: var(--font-label);
+}
+
+.creation-prompt-import-context strong {
+  color: var(--text, #ecece8);
+}
+
+.creation-upload-row {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+}
+
+/* 复刻页 ⑧：提示词按钮主次分层——保存类操作留在左侧，右组携带就绪
+   徽标与唯一主按钮「去 AI 视频创作」。 */
+.creation-prompt-actions {
+  align-items: center;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.creation-final-badge {
+  color: #65bd59;
+  font-size: var(--font-label);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* S3 门禁未就绪时的可见原因，与就绪徽标同位；中性色避免误读为错误。 */
+.creation-final-badge.is-pending {
+  color: var(--studio-muted, #a9a9a9);
+  font-weight: 400;
+}
+
+.creation-upload-mini {
+  align-self: stretch;
+  border: 1px dashed var(--line, #bbb);
+  border-radius: 10px;
+  background: transparent;
+  cursor: pointer;
+  padding: 8px 12px;
+  font-size: var(--font-label);
+}
+
+.creation-upload-mini:hover:not(:disabled) {
+  border-color: var(--accent-strong, #c6a45f);
+}
+
+.creation-frame-slot {
+  display: grid;
+  gap: 6px;
+  flex: 1;
+}
+
+.creation-progress {
+  display: grid;
+  gap: 10px;
+}
+
+.creation-progress.failed {
+  gap: 6px;
+}
+
+.creation-progress-headline {
+  font-weight: 600;
+}
+
+.creation-progress-stages {
+  display: flex;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.creation-progress-stages li {
+  flex: 1;
+  border: 1px solid var(--line, #ddd);
+  border-radius: 999px;
+  color: var(--text-muted, #777);
+  font-size: var(--font-label);
+  padding: 5px 10px;
+  text-align: center;
+}
+
+.creation-progress-stages li.is-done {
+  border-color: rgba(74, 222, 128, 0.45);
+  color: #4ade80;
+}
+
+.creation-progress-stages li.is-active {
+  border-color: var(--accent-strong, #c6a45f);
+  color: var(--accent-strong, #c6a45f);
+  font-weight: 600;
+}
+
+.creation-progress-bar {
+  width: 100%;
+  height: 10px;
+}
+
+.creation-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  color: var(--text-muted, #777);
+  font-size: var(--font-label);
+}
+
+.creation-progress-copy {
+  color: var(--text-muted, #777);
+  font-size: var(--font-label);
+  margin: 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * C2-复刻：项目选择 / 分镜行 / 拆解面板
+ * ------------------------------------------------------------------------- */
+.creation-project-select {
+  border: 1px solid var(--line, #ddd);
+  border-radius: 10px;
+  background: var(--panel, #fff);
+  color: var(--text, #333);
+  padding: 9px 12px;
+  font-size: var(--font-label);
+}
+
+.creation-replica-analyze {
+  display: grid;
+  gap: 10px;
+}
+
+/* 项目名回到「拆解控制」标题行右侧（复刻页曾整个丢掉项目名）。 */
+.creation-replica-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.creation-replica-project-name {
+  color: #b6afa2;
+  font-size: var(--font-label);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 宽度交给 useMediaRowFit 的 --media-col 驱动；max-height 会把竖版素材压成窄高条。 */
+.creation-replica-video__media {
+  width: min(100%, 960px);
+  margin: 0 auto;
+}
+
+.creation-shot-summary-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.creation-shot-summary-list p {
+  margin: 0;
+  color: var(--text, #333);
+  font-size: var(--font-body);
+  line-height: 1.6;
+}
+
+.creation-shot-summary-list strong {
+  display: inline-block;
+  min-width: 96px;
+  color: var(--text-muted, #777);
+}
+
+.creation-shot-details {
+  margin-top: 16px;
+}
+
+.creation-shot-details > summary,
+.creation-final-prompt-details > summary {
+  cursor: pointer;
+  color: var(--studio-gold);
+  padding: 8px 0;
+}
+
+/* 宽度由 .media-row 的 --media-col 决定；560px 上限会把竖版素材压成窄高条。 */
+.creation-final-preview__media {
+  width: 100%;
+  margin: 12px auto 0;
+}
+
+.creation-replacement .flow-character-row__preview {
+  width: min(100%, 320px);
+  max-height: 360px;
+  object-fit: contain;
+  border-radius: 12px;
+}
+
+.creation-review-candidates {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.creation-review-candidates figure {
+  min-width: 0;
+  margin: 0;
+}
+
+.creation-review-candidates figcaption {
+  margin-top: 4px;
+  color: var(--text-muted, #777);
+  text-align: center;
+}
+
+.creation-final-prompt-details {
+  margin: 10px 0;
+}
+
+.replica-final-controls {
+  display: grid;
+  gap: 12px;
+}
+
+/* 「开场衔接」输入框此前沿用浏览器默认宽度（约 20 列），在整栏布局里被压成
+   230px 窄条，与下方全宽的「合成最终提示词」按钮比例失调；这里统一拉满，
+   标签占一行、输入框紧随其下。 */
+.replica-final-controls label:has(> textarea) {
+  display: grid;
+  gap: 6px;
+}
+
+.replica-final-controls textarea {
+  width: 100%;
+  min-height: 88px;
+  resize: vertical;
+}
+
+.replica-final-controls pre {
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+/* 复刻页 ⑧：合成按钮降级为次级样式（全局 button 默认金色主按钮），
+   把「唯一主按钮」让给「去 AI 视频创作」。 */
+.replica-final-compose {
+  background: transparent;
+  border: 1px solid var(--studio-border, #2b2b2b);
+  color: var(--studio-text, #ecece8);
+  font-weight: 500;
+  justify-self: start;
+  min-height: 36px;
+  padding: 0 16px;
+  width: fit-content;
+}
+
+.replica-final-compose:not(:disabled):hover {
+  background: color-mix(in srgb, var(--studio-gold, #e5aa36) 12%, transparent);
+  border-color: var(--studio-gold, #e5aa36);
+  color: var(--studio-gold, #e5aa36);
+}
+
+.replica-preflight {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--studio-line, #2b2b2b);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--studio-panel, #111) 92%, transparent);
+}
+
+.replica-preflight__summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.replica-preflight__summary span {
+  color: var(--studio-muted, #a9a9a9);
+  font-size: var(--font-label);
+}
+
+.replica-preflight ul {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.replica-preflight li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: var(--studio-bg, #090909);
+}
+
+.replica-preflight li > span:last-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.replica-preflight li small {
+  color: var(--studio-muted, #a9a9a9);
+  overflow-wrap: anywhere;
+}
+
+.replica-preflight li.is-passed > span:first-child {
+  color: #4ecb71;
+}
+
+.replica-preflight li.is-blocked > span:first-child,
+.replica-preflight li.is-blocked small {
+  color: var(--studio-gold, #f3b431);
+}
+
+.replica-preflight li.is-warning > span:first-child,
+.replica-preflight li.is-warning small {
+  color: var(--studio-muted, #a9a9a9);
+}
+
+.creation-shot-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  border: 1px solid var(--line, #e2e2e2);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.creation-shot-index {
+  font-family: var(--mono, monospace);
+  color: var(--text-muted, #777);
+  font-size: var(--font-label);
+  padding-top: 2px;
+}
+
+.creation-shot-body {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.creation-shot-body strong {
+  font-size: var(--font-label);
+}
+
+.creation-shot-body small {
+  color: var(--text-muted, #777);
+  font-size: var(--font-label);
+}
+
+/* Video references, opening frames and oral avatars share the playback framing. */
+.creation-reference-row > .video-preview {
+  flex: 0 0 72px;
+  width: 72px;
+  aspect-ratio: 9 / 16;
+}
+.video-preview.creation-preview-media,
+.video-preview.creation-avatar-preview {
+  width: min(100%, 320px, 38vh);
+  aspect-ratio: 9 / 16;
+  margin-inline: auto;
+}
+
+.creation-frame-row button > .video-preview {
+  width: min(100%, 96px);
+  height: auto;
+  min-height: 0;
+  aspect-ratio: 9 / 16;
+  margin-inline: auto;
+}
+
+.copy-methods {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  margin: 20px 0;
+}
+.copy-methods legend {
+  font-size: var(--font-label);
+  margin-bottom: 10px;
+  color: #b9bbb3;
+}
+.copy-methods label {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  gap: 6px 10px;
+  padding: 16px;
+  border: 1px solid #33342e;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.copy-methods label:has(input:checked) {
+  border-color: #e5ad32;
+  background: #211d12;
+}
+.copy-methods input {
+  accent-color: #e5ad32;
+  margin: 2px 0;
+}
+.copy-methods small {
+  grid-column: 2;
+  color: #b9bbb3;
+  font-size: var(--font-label);
+}
+.copy-person-summary,
+.copy-generate-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin: 16px 0;
+}
+.copy-person-summary > div,
+.copy-generate-row > :first-child {
+  flex: 1;
+}
+.copy-person-summary p {
+  color: #b9bbb3;
+  margin: 6px 0;
+}
+.copy-requirements {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 16px;
+}
+.copy-requirements label {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  font-size: var(--font-label);
+}
+.copy-requirements select {
+  background: #0b0c0b;
+  color: #eee;
+  border: 1px solid #33342e;
+  border-radius: 6px;
+  padding: 10px;
+  font: inherit;
+}
+.creation-textarea.copy-instructions {
+  min-height: 160px;
+  height: 176px;
+  resize: vertical;
+}
+.copy-quick-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+.copy-quick-actions .studio-button {
+  padding: 6px 12px;
+  font-size: var(--font-label);
+}
+.creation-copy-settings [role="alert"] {
+  color: #f5a79b;
+}
+@media (max-width: 760px) {
+  .copy-methods,
+  .copy-requirements {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Shared creation workspace: materials and preview, with prompt and parameters below. */
+.creation-video-workspace .creation-video-grid,
+.creation-video-workspace .creation-video-grid.reference {
+  grid-template-columns: minmax(210px, 0.85fr) minmax(0, 3.25fr);
+  grid-template-areas: "materials preview" "materials composer" "materials settings";
+  grid-template-rows: minmax(280px, 1fr) auto auto;
+  gap: 0;
+  margin-top: 16px;
+  min-height: calc(100dvh - 230px);
+  border-top: 1px solid var(--studio-border);
+}
+.creation-video-workspace .studio-panel {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 20px;
+}
+.creation-video-workspace .creation-video-form {
+  grid-area: materials;
+  border-right: 1px solid var(--studio-border);
+}
+.creation-video-workspace .creation-video-preview {
+  grid-area: preview;
+}
+.creation-video-workspace .creation-video-composer {
+  grid-area: composer;
+  padding-top: 4px;
+}
+.creation-video-workspace .creation-video-controls {
+  grid-area: settings;
+  border-left: 1px solid var(--studio-border);
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.creation-video-workspace .creation-video-controls > * {
+  margin: 0;
+}
+.creation-video-workspace .creation-form-actions {
+  margin-top: auto;
+  padding-top: 24px;
+}
+.creation-video-workspace .creation-video-preview .creation-preview-media {
+  max-height: 56dvh;
+  object-fit: contain;
+}
+.creation-video-workspace .creation-video-preview .studio-empty {
+  min-height: 300px;
+}
+/* 参考素材行（视频工作区）：缩略图居左、@编号文案居中、移除居右，用途输入独占
+   次行整宽；行内不再做多列小卡片，素材区整体落在合并上传区下方。 */
+.creation-video-workspace .creation-reference-list {
+  max-height: none;
+  overflow: visible;
+}
+.creation-video-workspace .creation-reference-row {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr) 32px;
+  grid-template-areas:
+    "preview copy remove"
+    "purpose purpose purpose";
+  gap: 8px 12px;
+  margin: 0;
+  padding: 10px;
+  border: 1px solid #262823;
+  border-radius: 8px;
+  align-items: start;
+}
+.creation-video-workspace .creation-reference-copy {
+  grid-area: copy;
+}
+.creation-video-workspace .creation-reference-copy strong {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-weight: 500;
+}
+.creation-video-workspace .creation-reference-copy small {
+  font-size: var(--font-caption);
+}
+.creation-video-workspace .creation-reference-remove {
+  grid-area: remove;
+}
+.creation-video-workspace .creation-reference-row > input {
+  grid-area: purpose;
+  min-width: 0;
+  width: 100%;
+}
+.creation-video-workspace .creation-reference-preview-button {
+  --image-preview-height: 74px;
+  grid-area: preview;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 132px;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: #15140e;
+  overflow: hidden;
+}
+.creation-reference-preview-button[aria-pressed="true"] {
+  border-color: var(--studio-gold);
+}
+.creation-video-workspace .creation-reference-preview-button > .studio-media,
+.creation-video-workspace .creation-reference-preview-button > .video-preview {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+.creation-upload-dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 128px;
+  gap: 6px;
+  border: 1px dashed var(--studio-gold);
+  border-radius: 8px;
+  color: var(--studio-gold);
+  background: #15140e;
+  margin-top: 16px;
+}
+.creation-upload-dropzone.is-dragging,
+.creation-upload-dropzone:hover:not(:disabled) {
+  background: #292314;
+  border-style: solid;
+}
+.creation-upload-dropzone small {
+  color: var(--studio-muted);
+  font-size: var(--font-caption);
+}
+.creation-video-workspace .creation-frame-row {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+.creation-video-workspace .creation-frame-row > .studio-icon {
+  align-self: center;
+  transform: rotate(90deg);
+}
+.creation-video-workspace .creation-frame-slot > button {
+  width: 100%;
+}
+.creation-frame-source-copy {
+  color: var(--studio-muted);
+  margin: 0 0 16px;
+}
+.creation-frame-source-actions {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.creation-frame-source-actions > * {
+  min-height: 44px;
+  width: 100%;
+}
+.creation-frame-source-actions .creation-upload-mini {
+  border-style: solid;
+  color: #ecece8;
+}
+.creation-video-composer .h3-prompt-tools {
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.creation-video-composer .h3-prompt-label {
+  margin-right: auto;
+  font-size: var(--font-section);
+}
+.creation-video-composer textarea {
+  min-height: 264px;
+  max-height: 720px;
+}
+.creation-video-workspace .creation-panel-title {
+  font-size: var(--font-section);
+}
+.creation-video-workspace > .studio-tabs {
+  margin: 16px 20px 0;
+}
+@media (max-width: 720px) {
+  .creation-video-workspace .creation-video-grid,
+  .creation-video-workspace .creation-video-grid.reference {
+    display: flex;
+    flex-direction: column;
+  }
+  .creation-video-workspace .creation-video-form {
+    border-right: 0;
+    order: 0;
+  }
+  .creation-video-workspace .creation-video-preview {
+    order: 1;
+  }
+  .creation-video-workspace .creation-video-composer {
+    order: 2;
+  }
+  .creation-video-workspace .creation-video-controls {
+    order: 3;
+  }
+  .creation-video-workspace .creation-parameters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .creation-video-workspace .studio-panel {
+    padding: 16px;
+  }
+}
+
+.creation-video-workspace .creation-video-controls {
+  border-left: 0;
+  padding-top: 8px;
+  gap: 10px;
+}
+.creation-video-workspace .creation-video-controls .creation-panel-title {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.creation-parameters--inline {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+}
+.creation-parameters--inline select {
+  width: 100%;
+  min-height: 42px;
+}
+.creation-video-workspace .creation-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+  border-top: 1px solid var(--studio-border);
+  padding-top: 16px;
+  margin-top: 6px;
+}
+.creation-video-workspace .creation-form-actions .studio-button {
+  min-width: 144px;
+}
+/* T2V 提交前的「建议优化提示词」引导（非强制）：独占一行，置于按钮上方。 */
+.creation-optimize-hint {
+  flex: 1 1 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: var(--font-caption);
+  line-height: 1.5;
+  color: var(--studio-text-secondary, #9aa0a6);
+}
+.creation-video-workspace .creation-video-controls > .studio-hint {
+  font-size: var(--font-caption);
+}
+.creation-video-workspace .creation-video-preview .creation-preview-media {
+  max-height: 43dvh;
+}
+@media (max-width: 720px) {
+  .creation-video-workspace .creation-parameters--inline {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+  .creation-video-workspace .creation-form-actions .studio-button {
+    min-width: 0;
+    flex: 1;
+  }
+}
+
+.creation-replica > .studio-panel,
+.creation-replica > details,
+.creation-replica > .creation-upload-row,
+.creation-replica > .creation-source-strip {
+  margin: 20px;
+}
+/* 复刻页 ①：步骤吸顶导航。sticky top:0 相对 window 滚动生效（页头是
+   absolute，滚动后自然消失）；毛玻璃底避免滚过内容透出干扰阅读。 */
+.replica-steps {
+  align-items: center;
+  backdrop-filter: blur(6px);
+  background: color-mix(in srgb, var(--studio-bg, #080909) 88%, transparent);
+  border: 1px solid var(--studio-border, #2b2b2b);
+  border-radius: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 12px 20px 0;
+  padding: 10px 14px;
+  position: sticky;
+  top: 0;
+  z-index: 6;
+}
+.replica-steps__item {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--studio-muted, #999b95);
+  cursor: pointer;
+  display: inline-flex;
+  font-size: var(--font-label);
+  font-weight: 500;
+  gap: 8px;
+  padding: 2px 4px;
+  white-space: nowrap;
+}
+/* 相邻步骤之间画连接线（对应效果图的 step-line）。 */
+.replica-steps__item + .replica-steps__item::before {
+  background: var(--studio-border, #2b2b2b);
+  content: "";
+  height: 1px;
+  margin-right: 2px;
+  width: 28px;
+}
+.replica-steps__item:not(:disabled):hover {
+  background: transparent;
+  color: var(--studio-text, #ecece8);
+}
+.replica-steps__dot {
+  border: 1px solid var(--studio-border, #2b2b2b);
+  border-radius: 50%;
+  display: grid;
+  font-size: 11px;
+  height: 21px;
+  place-items: center;
+  width: 21px;
+}
+.replica-steps__item.is-done {
+  color: #cfcbc2;
+}
+.replica-steps__item.is-done .replica-steps__dot {
+  background: var(--studio-gold, #e5aa36);
+  border-color: transparent;
+  color: #14100a;
+  font-weight: 700;
+}
+.replica-steps__item.is-current {
+  color: var(--studio-text, #ecece8);
+  font-weight: 600;
+}
+.replica-steps__item.is-current .replica-steps__dot {
+  border-color: var(--studio-gold, #e5aa36);
+  color: var(--studio-gold, #e5aa36);
+  box-shadow: 0 0 0 3px rgb(224 168 63 / 12%);
+}
+
+.creation-replica-flow {
+  display: grid;
+  gap: 32px;
+  margin: 20px;
+}
+.creation-workflow-section {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  /* 吸顶步骤条约占 44px，章节定位时留出它的高度加少量缓冲。 */
+  scroll-margin-top: 72px;
+}
+.creation-workflow-section + .creation-workflow-section {
+  /* 修复静默失效：--studio-line 从未定义，此分割线此前根本没画出来。 */
+  border-top: 1px solid var(--studio-border, #2b2b2b);
+  padding-top: 28px;
+}
+.creation-workflow-section > h2 {
+  color: var(--studio-text);
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0;
+}
+.creation-replica-analyze .creation-panel-title-row {
+  flex-wrap: wrap;
+  overflow-wrap: anywhere;
+}
+/* 复刻页 ②：拆解控制信息卡（时长 / 镜头数 / 末次拆解），填充原本的空白区。 */
+.creation-replica-stats {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 14px;
+}
+.creation-replica-stat {
+  background: color-mix(in srgb, var(--studio-panel, #101111) 86%, transparent);
+  border: 1px solid var(--studio-border, #2b2b2b);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.creation-replica-stat span {
+  color: var(--studio-muted, #999b95);
+  display: block;
+  font-size: var(--font-label);
+  margin-bottom: 6px;
+}
+.creation-replica-stat strong {
+  color: var(--studio-text, #ecece8);
+  font-size: 15px;
+}
+.creation-replica-stat.is-gold strong {
+  color: var(--studio-gold, #e5aa36);
+}
+
+.creation-final-copy {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.creation-final-copy > .studio-panel {
+  margin: 0;
+}
+.creation-workflow-section > .studio-panel,
+.creation-workflow-section > .creation-replacement,
+.creation-workflow-section > .creation-replica-narration {
+  margin: 0;
+}
+.creation-step-number {
+  color: var(--studio-gold);
+  margin-right: 8px;
+  font-weight: 500;
+}
+.creation-replica .creation-panel-title-row {
+  gap: 16px;
+}
+.creation-replica .creation-textarea {
+  min-height: 256px;
+  height: auto;
+}
+.creation-replica .creation-shot-list summary {
+  cursor: pointer;
+  color: var(--studio-muted);
+}
+/* 分镜表折叠后标题行补时间轴信息（复刻页 UX 优化 2026-09-21）：折叠态看不到
+   镜头内容，起止时间就是判断是否要展开的关键线索。需覆盖
+   .creation-panel-title-row small 的绿色——这里是辅助信息，不是状态徽章。 */
+.creation-shot-list-title {
+  align-items: baseline;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.creation-replica .creation-shot-list-title small {
+  color: var(--studio-muted);
+  font-weight: 400;
+}
+/* 口播文案按内容自适应高度（JS 同步 style.height），覆盖上方 256px 的复刻页
+   统一最小高度；选择器精确到 narration 面板，PromptEditor 的 textarea 不受影响。 */
+.creation-replica .creation-replica-narration .creation-textarea {
+  height: auto;
+  max-height: 264px;
+  min-height: 84px;
+  overflow-y: auto;
+}
+.creation-replica-narration__title {
+  align-items: baseline;
+  display: inline-flex;
+  gap: 8px;
+}
+.creation-replica .creation-replica-narration__title small {
+  color: var(--studio-muted);
+  font-weight: 400;
+}
+/* 中性信息提示（如「模拟输出」）：不是错误，用蓝灰 info 样式与
+   settings-error 的红色报错区分，避免中性说明被误读为失败。 */
+.creation-note-info {
+  background: #131a26;
+  border: 1px solid #2c3648;
+  border-radius: 9px;
+  color: #b9c2d6;
+  font-size: var(--font-label);
+  margin-top: 12px;
+  padding: 9px 12px;
+}
+.creation-note-info::before {
+  color: #8fa6cf;
+  content: "ⓘ ";
+}
+.creation-replacement-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.4fr);
+  gap: 16px;
+  margin: 0;
+  align-items: start;
+}
+.creation-replacement-grid > section,
+.creation-replacement-grid > div {
+  min-height: 0;
+}
+.creation-replacement-grid .creation-replacement-step {
+  min-width: 0;
+  margin: 0;
+  padding: 16px;
+}
+.creation-replacement-grid .creation-replacement-step .panel {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.creation-replacement-grid .first-frame-comparison {
+  grid-template-columns: 1fr;
+}
+.creation-replacement-grid img,
+.creation-replacement-grid video {
+  max-height: 520px;
+  object-fit: contain;
+}
+.creation-handoff {
+  margin: 20px;
+  display: flex;
+  gap: 24px;
+  align-items: center;
+}
+.creation-handoff > div {
+  flex: 1;
+}
+.creation-replica > .creation-action-bar,
+.creation-replacement > .creation-action-bar {
+  margin: 20px;
+}
+.creation-replica > .studio-tabs,
+.creation-replacement > .studio-tabs {
+  margin: 16px 20px;
+}
+@media (max-width: 1100px) {
+  .creation-replacement-grid {
+    grid-template-columns: 1fr;
+  }
+  .creation-handoff {
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 900px) {
+  .media-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+.creation-video-workspace
+  .creation-video-preview
+  .video-preview.creation-preview-media {
+  width: 100%;
+  height: 25dvh;
+  min-height: 200px;
+  max-height: 360px;
+  aspect-ratio: 16 / 9;
+}
+.creation-video-workspace .creation-video-composer textarea {
+  height: 264px;
+  min-height: 264px;
+}
+
+.creation-upload-dropzone:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.creation-video-workspace .creation-frame-slot > .creation-upload-mini {
+  min-height: 42px;
+  padding: 10px;
+}
+.creation-video-workspace .creation-frame-row button > .video-preview {
+  width: 100%;
+  height: 132px;
+  aspect-ratio: 16 / 9;
+}
+
+/* Both generation modes share the approved left editor / right preview layout. */
+.creation-video-grid.reference .creation-video-form > .studio-field {
+  position: relative;
+}
+/* 合并上传区（REFERENCE-MATERIAL-PREVIEW）：上传框在上、素材库入口紧随其下，
+   参考素材列表整体落在上传框下方，不再挤在右上角或多列小卡片里。 */
+.creation-reference-upload {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+}
+.creation-reference-upload .creation-upload-dropzone {
+  margin: 0;
+  min-height: 152px;
+}
+.creation-reference-upload .creation-upload-hint {
+  margin: 0;
+}
+.creation-reference-upload > .studio-button {
+  width: 100%;
+  justify-content: center;
+}
+.creation-reference-materials {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px 14px;
+  margin-top: 14px;
+}
+.creation-video-workspace
+  .creation-reference-materials
+  .creation-reference-list {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  max-height: none;
+  overflow: visible;
+  margin: 0;
+}
+.creation-reference-materials .creation-reference-copy strong {
+  /* 长文件名最多两行，超出以省略号收尾——原先只有 max-height 裁剪，会无声
+     切掉半行且不给截断提示。 */
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  display: -webkit-box;
+  line-clamp: 2;
+  overflow: hidden;
+}
+.creation-reference-empty {
+  color: var(--studio-muted);
+  font-size: var(--font-caption);
+  margin: 0;
+}
+.creation-reference-counter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 12px 0 0;
+  font-size: var(--font-caption);
+}
+.creation-reference-counter small {
+  color: var(--studio-muted);
+}
+.creation-reference-counter small[data-state="limited"] {
+  color: var(--studio-gold);
+}
+.creation-reference-placeholder {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: center;
+  min-width: 0;
+  color: var(--studio-muted);
+  font-size: var(--font-caption);
+  padding: 0 8px;
+  text-align: center;
+}
+.creation-reference-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--studio-text, inherit);
+  word-break: break-all;
+}
+.creation-reference-placeholder small {
+  color: var(--studio-muted);
+}
+.creation-reference-retry {
+  align-self: flex-start;
+  background: transparent;
+  border: 0;
+  color: var(--studio-gold);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-caption);
+  margin-top: 4px;
+  padding: 0;
+  text-decoration: underline;
+}
+.creation-reference-dialog-media {
+  width: min(78vw, 960px);
+  max-height: 70dvh;
+  margin-inline: auto;
+  object-fit: contain;
+}
+.creation-video-workspace--split {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100dvh - 64px);
+}
+.creation-video-workspace--split .creation-video-grid,
+.creation-video-workspace--split .creation-video-grid.reference {
+  flex: 1;
+  grid-template-columns: minmax(0, 1.08fr) minmax(0, 1fr);
+  grid-template-areas: "materials preview" "composer preview" "settings preview";
+  grid-template-rows: auto auto 1fr;
+  min-height: 0;
+  border-top: 0;
+  column-gap: 12px;
+  margin-top: 8px;
+}
+.creation-video-workspace--split .creation-video-form {
+  border-right: 0;
+  padding-top: 12px;
+  padding-bottom: 16px;
+}
+.creation-video-workspace--split .creation-video-form > .studio-field,
+.creation-video-workspace--split .creation-parameters .studio-field {
+  margin-bottom: 0;
+}
+.creation-frame-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.creation-frame-heading small {
+  color: var(--studio-muted);
+  font-weight: 400;
+  font-size: var(--font-caption);
+}
+.creation-video-workspace--split .creation-frame-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.creation-video-workspace--split .creation-frame-row > .studio-icon {
+  display: none;
+}
+.creation-video-workspace--split .creation-frame-slot {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+  grid-template-rows: 280px auto;
+}
+.creation-video-workspace--split .creation-frame-card {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) 40px;
+  height: 280px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px dashed #555851;
+  background: #0d0f0e;
+}
+.creation-video-workspace--split .creation-frame-card:focus-visible,
+.creation-video-workspace--split .creation-frame-card:hover:not(:disabled) {
+  border-color: var(--studio-gold);
+}
+.creation-video-workspace--split .creation-frame-card > .studio-media {
+  align-self: center;
+}
+.creation-frame-empty {
+  align-items: center;
+  align-self: stretch;
+  color: var(--studio-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  justify-content: center;
+  margin: 0;
+}
+.creation-video-workspace--split .creation-frame-empty .studio-icon {
+  color: var(--studio-gold);
+}
+.creation-frame-empty strong {
+  color: var(--studio-text);
+}
+.creation-frame-empty small {
+  font-size: var(--font-caption);
+}
+.creation-video-workspace--split .creation-frame-card-label {
+  align-items: center;
+  background: #151714;
+  border-top: 1px solid #292c27;
+  display: flex;
+  justify-content: center;
+  margin: 0;
+  padding: 0 10px;
+}
+.creation-video-workspace--split .creation-frame-slot > .studio-button {
+  min-height: 36px;
+  padding: 6px;
+  border-style: solid;
+}
+.creation-video-workspace--split .creation-frame-slot > .creation-upload-mini {
+  min-height: 36px;
+  padding: 6px;
+}
+.creation-video-workspace--split .creation-frame-card > .video-preview {
+  --image-preview-height: 240px;
+}
+.creation-video-workspace--split .creation-video-composer textarea {
+  height: 180px;
+  min-height: 180px;
+}
+.creation-video-workspace--split .creation-video-composer {
+  padding-bottom: 8px;
+}
+.creation-preview-ratio {
+  float: right;
+  padding: 4px 12px;
+  border: 1px solid var(--studio-border);
+  border-radius: 6px;
+  color: var(--studio-muted);
+  font-weight: 400;
+}
+.creation-video-workspace--split .creation-video-preview {
+  background: #101213;
+  border: 1px solid var(--studio-border);
+  margin: -64px 20px 20px 0;
+  padding: 24px;
+  min-width: 0;
+}
+.creation-video-workspace--split
+  .creation-video-preview
+  .video-preview.creation-preview-media {
+  --image-preview-height: clamp(300px, 50dvh, 620px);
+  height: clamp(300px, 50dvh, 620px);
+  max-height: none;
+  min-height: 0;
+}
+.creation-preview-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+}
+.creation-video-bottom-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 16px 24px;
+  background: #111314;
+  border-top: 1px solid var(--studio-border);
+}
+.creation-video-bottom-bar strong {
+  font-size: var(--font-body);
+  font-weight: 500;
+}
+.creation-video-bottom-bar .creation-form-actions {
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+@media (max-width: 1000px) {
+  .creation-video-workspace--split .creation-video-grid,
+  .creation-video-workspace--split .creation-video-grid.reference {
+    display: flex;
+    flex-direction: column;
+  }
+  .creation-video-workspace--split .creation-video-preview {
+    margin: 0 20px 20px;
+    order: 3;
+  }
+  .creation-video-workspace--split .creation-video-controls {
+    order: 2;
+  }
+  .creation-video-bottom-bar {
+    flex-wrap: wrap;
+    padding: 12px 16px;
+    gap: 10px;
+  }
+  .creation-video-bottom-bar .creation-form-actions {
+    flex: 1;
+  }
+}
+@media (max-width: 1200px) {
+  .creation-video-workspace--split .creation-frame-row {
+    grid-template-columns: 1fr;
+  }
+  .creation-video-workspace--split .creation-frame-slot {
+    grid-template-rows: 240px auto;
+  }
+  .creation-video-workspace--split .creation-frame-card {
+    height: 240px;
+  }
+  .creation-video-workspace--split .creation-frame-card > .video-preview {
+    --image-preview-height: 200px;
+  }
+}
+/* ---------------------------------------------------------------------------
+ * 比例驱动的媒体行（useMediaRowFit）
+ *
+ * 左栏宽度不是均分出来的，而是由素材宽高比反推：列宽 = 媒体高度 × 比例 + 42px 补偿。
+ * --media-col / --row-ratio / --media-min-h 由 useMediaRowFit 写在行元素上。
+ * ------------------------------------------------------------------------- */
+
+/* 行内两栏等高（底部对齐），左栏宽度由 --media-col 决定 */
+.media-row {
+  display: grid;
+  gap: 20px;
+  align-items: stretch;
+}
+
+/* 两列模板只在 ≥901px 生效：≤900px 依赖 @media (max-width: 900px) 的单列
+   降级。反向包裹不是洁癖——模板与降级规则同特异性（都是 .media-row），
+   无条件写在后面会把降级整条覆盖：882 视口下媒体行仍是两列（245+348）、
+   媒体缩到 204×362 就是这么来的。 */
+@media (min-width: 901px) {
+  .media-row {
+    grid-template-columns: var(--media-col, 240px) minmax(0, 1fr);
+  }
+}
+
+/* 场景形象|置换首帧行：置换首帧面板不再吃满整行剩余宽度（宽视口下它横跨
+   全宽、右栏大片留白，左栏场景图反而挤成细条）。右列上限 700px（复刻页 UX
+   优化 2026-09-21：原 880px 下右列仍偏空、三带被拉散）——minmax 下限为 0，
+   列空间不足时轨道自动收缩，不会溢出。用 min-width 反向包裹：否则本规则与
+   .media-row 同特异性、写在后面会覆盖 ≤900px 的单列降级。 */
+@media (min-width: 901px) {
+  .media-row--scene {
+    grid-template-columns: var(--media-col, 240px) minmax(0, 700px);
+    justify-content: start;
+  }
+}
+
+/* 该行两张主图的显示高度必须跟随行内媒体框（--media-min-h，本行为 480px），
+   而不是复刻页默认的 44dvh 预算（legacy-panels.css 的
+   clamp(260px, 44dvh, 420px)，732 视口下仅 322px）——否则媒体框被抬到
+   480 后图仍停在 322，上下留黑边，场景形象图照旧显小。
+   两条覆盖都限定在 .media-row--scene 行内：源画面行沿用同名的
+   source-frame-current 规则不受影响。
+   场景图再补 object-fit: cover：媒体框已按参考视频画幅取形状，
+   素材比例不同时裁切填满，而不是缩成素材自身比例、看着还是细长条。 */
+.creation-replica .media-row--scene .flow-character-row__preview {
+  height: 100%;
+  max-height: none;
+  object-fit: cover;
+  /* 极端竖长素材（515×1378）盖到 9:16 要藏 33.6% 高度：默认 50% 50%
+     上下等分，可见窗口常落在纯色中段；向上朝 25% 取景保住人像上半身，
+     与文件内既有取景偏移（20%~28%）同风格。 */
+  object-position: center 25%;
+}
+
+.creation-replica .media-row--scene .first-frame-current {
+  --image-preview-height: var(--media-min-h, 320px);
+}
+
+/* 刻意保持低特异性：页面级 .studio-panel 规则仍能覆盖这里的布局属性。 */
+.media-row > .studio-panel,
+.media-row > div {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  min-width: 0;
+}
+
+/* 媒体框：按比例收缩 + 弹性填满面板剩余高度 */
+.media-frame {
+  flex: 1 1 auto;
+  min-height: var(--media-min-h, 320px);
+  aspect-ratio: var(--row-ratio, 0.5625);
+  width: auto;
+  max-width: 100%;
+  /* 不可省：column flex 默认 align-items: stretch 会把子项横向拉满，
+     覆盖 width:auto + aspect-ratio，媒体框被拉成大宽条、比例失真。 */
+  align-self: flex-start;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0b0c0b;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+/* 撞上 40% 列宽上限时，max-width 会先把宽度卡住，高度改由 flex 决定，
+   aspect-ratio 反向失效（1440 视口下 16:9 素材实测 428×306，比例 1.400）。
+   故从列宽反推高度上限：列宽 = 高度 × 比例 + 42px（与 useMediaRowFit 的
+   padCompensation 同源），反过来即 (列宽 - 42) / 比例。
+   min-height 必须一起压低——CSS 里 min-height 优先于 max-height，
+   只写 max-height 会被 --media-min-h 顶回去，比例照旧失真。
+   只在 .media-row 内生效：--media-col 由该行提供，行外没有这个量，
+   行外的媒体框（如源画面面板）不该被一个不存在的列宽卡住。 */
+.media-row .media-frame {
+  --media-fit-max-h: calc(
+    (var(--media-col, 240px) - 42px) /
+    var(--row-ratio, 0.5625)
+  );
+  max-height: var(--media-fit-max-h);
+  min-height: min(var(--media-min-h, 320px), var(--media-fit-max-h));
+}
+
+/* 三带法：左右两侧头部带/底部带等高，媒体自然上下对齐 */
+.studio-panel.banded {
+  display: flex;
+  flex-direction: column;
+}
+
+.band-ctrl {
+  height: var(--band-ctrl, 62px);
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  /* 固定带高不参与伸缩，否则两侧内容多少不同就会把带高拉不开、对不齐。 */
+  flex: 0 0 auto;
+}
+
+.band-act {
+  height: var(--band-act, 44px);
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  flex: 0 0 auto;
+}
+
+.band-act.center {
+  justify-content: center;
+}
+
+/* 费用提示跟随操作带右侧（原为独立一行左对齐，与按钮列错位）。 */
+.band-act__price {
+  color: var(--studio-muted);
+  font-size: var(--font-label);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+/* 复刻页第 2 节（置换首帧）：源画面独占一行，下面一行两栏三带对齐。
+   选择器带上 .creation-replica 是为了与页面上方
+   .creation-workflow-section > .creation-replacement 的特异性持平，
+   否则低特异性规则写在后面会被 lint 判为 noDescendingSpecificity。 */
+.creation-replica .creation-replacement {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.creation-replacement-source {
+  min-width: 0;
+}
+
+/* 两栏媒体框钉死同高：banded 面板在媒体框之后还跟着费用提示、候选折叠区等
+   尾随内容，用 flex:1 自适应时右栏媒体框会被这些内容挤矮，两栏既不同高、
+   也就得不到同宽。--image-preview-height 必须同步，VideoPreview 的内联宽度按它算。 */
+.creation-replacement .media-frame {
+  flex: 0 0 auto;
+  height: var(--media-min-h, 320px);
+  --image-preview-height: var(--media-min-h, 320px);
+}
+
+.creation-replacement .media-frame img,
+.creation-replacement .media-frame video {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+/* 带内控件收进左栏宽度：默认 min-width 240px 会把窄栏顶出格。 */
+.creation-replacement .band-ctrl > label,
+.creation-replacement .band-ctrl > select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.creation-replacement .band-ctrl select {
+  width: 100%;
+}
+
+/* 媒体带 = 预览框 + 候选与历史侧栏：宽视口并排（展开不再撑高媒体带），
+   剩余宽度不足侧栏 280px 基准时整块换行回预览框下方，退化为竖向堆叠。 */
+.first-frame-media-band {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* 不靠 .creation-replacement .media-frame 的 flex 值兜底：若换到别的容器里重用，
+   基础 .media-frame 的 flex: 1 1 auto 会把它横向拉宽、丢掉画幅形状。 */
+.first-frame-media-band > .media-frame {
+  flex: 0 0 auto;
+}
+
+.first-frame-media-band > .first-frame-band-extras,
+.first-frame-media-band > .creation-review-candidates {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+
+/* 侧栏与预览框同高：与 .media-row .media-frame 的 max-height 同一公式。 */
+.first-frame-band-extras[open] {
+  height: min(
+    var(--media-min-h, 320px),
+    calc((var(--media-col, 240px) - 42px) / var(--row-ratio, 0.5625))
+  );
+  overflow-y: auto;
+}
+
+/* 三带布局里候选与历史收进折叠侧栏，媒体框高度不受其展开影响。 */
+.first-frame-band-extras > summary {
+  width: fit-content;
+  color: #b6afa2;
+  font-size: var(--font-label);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+/* 两侧三带容器都必须是零间距纵向带，否则左栏媒体框会比右栏差出一个 gap。 */
+.creation-replacement .flow-character-row--banded,
+.creation-replacement
+  .first-frame-selection--compact.first-frame-selection--banded {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+}

@@ -1,0 +1,1098 @@
+/* User center shares the studio brand and keeps table overflow inside cards. */
+.studio-shell--center .studio-sidebar,
+.studio-shell--center .studio-topbar {
+  display: none;
+}
+.studio-shell--center .studio-main {
+  margin-left: 0;
+  width: 100%;
+}
+.studio-shell--center .studio-stage {
+  padding: 0;
+}
+.uc-center {
+  --uc-gold: #e8b441;
+  --uc-muted: #a2a5ad;
+  color: #eef0f4;
+  background: #090a0b;
+  min-height: 100vh;
+  font-size: var(--font-body);
+}
+.uc-center * {
+  box-sizing: border-box;
+}
+.uc-center button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  cursor: pointer;
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+.uc-center button:hover {
+  color: var(--uc-gold);
+  background: #ffffff08;
+}
+.uc-center button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.uc-center button:focus-visible,
+.uc-center input:focus-visible {
+  outline: 2px solid var(--uc-gold);
+  outline-offset: 3px;
+}
+.uc-center svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+.uc-center h1,
+.uc-center h2,
+.uc-center h3,
+.uc-center p {
+  margin: 0;
+}
+.uc-center h2 {
+  font-size: var(--font-section);
+  font-weight: 650;
+}
+.uc-center p {
+  color: var(--uc-muted);
+  line-height: 1.8;
+}
+.uc-brandbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  min-height: 82px;
+  padding: 14px 4%;
+  border-bottom: 1px solid #28292b;
+}
+.uc-brand,
+.uc-brandbar nav,
+.uc-top-name {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+.uc-brandbar nav {
+  gap: 22px;
+}
+.uc-brandbar nav > button:first-child {
+  color: var(--uc-gold);
+}
+.uc-content {
+  max-width: 1560px;
+  margin: auto;
+  padding: 32px 4% 64px;
+}
+.uc-title {
+  margin-bottom: 24px;
+}
+.uc-title h1 {
+  font-size: var(--font-title);
+  margin-bottom: 6px;
+}
+.uc-card {
+  border: 1px solid #333335;
+  border-radius: 12px;
+  background: #131416;
+  padding: 24px;
+  min-width: 0;
+}
+.uc-card > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.uc-card > header p,
+.uc-card > p {
+  margin-top: 8px;
+}
+.uc-card h2 small {
+  color: var(--uc-muted);
+  font-size: var(--font-caption);
+  margin-left: 10px;
+  font-weight: 400;
+}
+.uc-identity {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 30px;
+  align-items: center;
+  padding: 30px;
+  border-color: #51432a;
+}
+.uc-person {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  min-width: 0;
+}
+.uc-person > div {
+  min-width: 0;
+}
+.uc-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  background: #3b301b;
+  color: #f1c35b;
+  border: 1px solid #80632d;
+  font-size: var(--font-title);
+}
+.uc-avatar-small {
+  width: 32px;
+  height: 32px;
+  font-size: var(--font-body);
+}
+.uc-person h2 {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-size: var(--font-title);
+  overflow-wrap: anywhere;
+}
+.uc-person h2 button {
+  font-size: var(--font-caption);
+  color: var(--uc-muted);
+}
+.uc-person dl {
+  margin: 12px 0 0;
+  font-size: var(--font-caption);
+}
+.uc-person dl > div {
+  display: flex;
+  gap: 12px;
+  margin: 7px 0;
+}
+.uc-person dt {
+  min-width: 50px;
+  color: var(--uc-muted);
+}
+.uc-person dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.uc-person dd small {
+  margin-left: 8px;
+}
+/* 身份徽章：母账号沿用金色 .uc-tag，子账号换冷色，一眼能分清自己在哪一侧。
+   母账号名沿用次要文字色（由这里继承给 <small>）。 */
+.uc-identity-badge {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 8px 0 0;
+  font-size: var(--font-caption);
+  color: var(--uc-muted);
+}
+.uc-identity-badge .uc-tag {
+  margin-top: 0;
+}
+/* 额度读数按余额告警色分级：正常/不限保持安静，预警与用尽才抢注意力。 */
+.uc-quota-normal,
+.uc-quota-unlimited {
+  color: var(--uc-muted);
+}
+.uc-quota-warning {
+  color: #edc262;
+}
+.uc-quota-exhausted {
+  color: #ef9595;
+}
+.uc-balance {
+  padding-left: 32px;
+  border-left: 1px solid #393429;
+}
+.uc-balance h3 {
+  font-size: var(--font-body);
+  color: #d9c48e;
+  font-weight: 400;
+}
+.uc-balance > div {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 6px 0 12px;
+}
+.uc-balance strong {
+  font-size: var(--font-display);
+  color: #f0c75f;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.uc-balance > div > button {
+  margin-left: auto;
+  align-self: center;
+}
+.uc-balance p {
+  font-size: var(--font-caption);
+}
+.uc-balance p > span {
+  margin-left: 24px;
+}
+.uc-balance b {
+  font-weight: 500;
+  color: #ded8c6;
+}
+.uc-center .uc-primary {
+  background: #e8b441;
+  color: #17120a;
+  border-color: #e8b441;
+  font-weight: 600;
+  padding: 10px 22px;
+}
+.uc-center .uc-primary:hover {
+  background: #f3c65d;
+  color: #17120a;
+}
+.uc-center .uc-outline {
+  border-color: #766034;
+  color: #efc666;
+}
+.uc-tabs {
+  display: flex;
+  gap: 32px;
+  border-bottom: 1px solid #333335;
+  margin: 24px 0;
+  overflow-x: auto;
+}
+.uc-tabs button {
+  border-radius: 0;
+  white-space: nowrap;
+  padding: 16px 5px;
+  border-bottom: 2px solid transparent;
+  color: var(--uc-muted);
+}
+.uc-tabs button[aria-selected="true"] {
+  color: #edc262;
+  border-bottom-color: #edc262;
+}
+.uc-table-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+}
+.uc-center table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: var(--font-caption);
+  text-align: left;
+}
+.uc-center th {
+  color: var(--uc-muted);
+  font-weight: 400;
+  white-space: nowrap;
+  background: #ffffff03;
+}
+.uc-center th,
+.uc-center td {
+  padding: 15px 10px;
+  border-bottom: 1px solid #2b2c2f;
+}
+.uc-center td {
+  line-height: 1.6;
+}
+.uc-center td strong {
+  display: block;
+  max-width: 160px;
+  overflow-wrap: anywhere;
+}
+.uc-center td small {
+  display: block;
+  color: var(--uc-muted);
+  white-space: nowrap;
+  font-size: var(--font-caption);
+  margin-top: 4px;
+}
+.uc-center td code {
+  white-space: nowrap;
+  color: #c4c5cd;
+  font-size: var(--font-caption);
+}
+.uc-tag {
+  display: inline-block;
+  color: #d8ba70;
+  border: 1px solid #61522f;
+  border-radius: 4px;
+  padding: 0 5px;
+  font-size: var(--font-caption);
+  margin-top: 4px;
+}
+/* 子账号的身份徽章换冷色：和母账号的金色放在一起才分得清。写在 .uc-tag 之后
+   ——同权重，靠顺序取胜。 */
+.uc-tag-sub {
+  color: #9fc4e8;
+  border-color: #3f5c78;
+}
+.uc-valid {
+  color: #8bcca0;
+}
+.uc-muted {
+  color: var(--uc-muted);
+}
+.uc-row-actions {
+  display: flex;
+  gap: 2px;
+  white-space: nowrap;
+}
+.uc-row-actions button {
+  font-size: var(--font-caption);
+  padding: 6px;
+  color: #dec079;
+}
+.uc-center .uc-danger {
+  color: #ef9595;
+}
+.uc-center .uc-footnote {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: var(--font-caption);
+  margin-top: 16px;
+}
+.uc-footnote svg {
+  width: 14px;
+  height: 14px;
+  margin-top: 3px;
+}
+.uc-preference {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-top: 24px;
+}
+.uc-preference > svg {
+  color: #d4b868;
+}
+.uc-preference strong {
+  font-size: var(--font-label);
+  font-weight: 500;
+}
+.uc-preference p {
+  font-size: var(--font-caption);
+  margin-top: 4px;
+}
+.uc-center .uc-switch {
+  margin-left: auto;
+  flex-shrink: 0;
+  width: 36px;
+  min-height: 21px;
+  height: 21px;
+  padding: 2px;
+  border-radius: 14px;
+  border-color: #5a5b60;
+  background: #46474a;
+  justify-content: flex-start;
+}
+.uc-switch span {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: #eee;
+}
+.uc-center .uc-switch[aria-checked="true"] {
+  background: #d6a735;
+  border-color: #d6a735;
+  justify-content: flex-end;
+}
+.uc-center .uc-error,
+.uc-center .uc-notice {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  margin: 12px 0;
+  border-radius: 8px;
+  border: 1px solid #804b45;
+  color: #fac1b8;
+  background: #311e1d;
+}
+.uc-center .uc-notice {
+  border-color: #5e623c;
+  background: #242619;
+  color: #e0dca2;
+}
+.uc-error button,
+.uc-notice button {
+  text-decoration: underline;
+  margin-left: auto;
+}
+.uc-settings {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 22px;
+  align-items: start;
+}
+.uc-settings form {
+  margin-top: 24px;
+}
+.uc-center label {
+  display: block;
+  font-size: var(--font-label);
+  margin: 18px 0 10px;
+}
+.uc-center input {
+  background: #0c0d0f;
+  color: #f2f2f4;
+  border: 1px solid #55534a;
+  border-radius: 7px;
+  padding: 12px 14px;
+  font: inherit;
+  width: 100%;
+  min-width: 0;
+}
+.uc-settings form > button {
+  margin-top: 20px;
+}
+.uc-dialog {
+  color: #f0f0f2;
+  background: #17181b;
+  border: 1px solid #756038;
+  border-radius: 14px;
+  padding: 30px;
+  width: min(540px, calc(100vw - 32px));
+  max-height: calc(100vh - 40px);
+}
+.uc-dialog::backdrop {
+  background: #000b;
+}
+.uc-dialog h2 {
+  margin-bottom: 14px;
+}
+.uc-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 24px;
+}
+@media (max-width: 1100px) {
+  .uc-tabs {
+    gap: 24px;
+  }
+}
+@media (max-width: 760px) {
+  .uc-brandbar {
+    flex-wrap: wrap;
+    padding: 16px 20px;
+    gap: 12px;
+  }
+  .uc-brandbar nav {
+    width: 100%;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .uc-top-name {
+    gap: 7px;
+    font-size: var(--font-caption);
+  }
+  .uc-content {
+    padding: 24px 16px 40px;
+  }
+  .uc-card {
+    padding: 18px;
+  }
+  .uc-identity,
+  .uc-settings {
+    grid-template-columns: 1fr;
+  }
+  .uc-person {
+    gap: 14px;
+  }
+  .uc-person h2 {
+    font-size: var(--font-section);
+  }
+  .uc-avatar {
+    width: 58px;
+    height: 58px;
+    font-size: var(--font-title);
+  }
+  .uc-avatar-small {
+    width: 27px;
+    height: 27px;
+    font-size: var(--font-label);
+  }
+  .uc-balance {
+    border-left: 0;
+    border-top: 1px solid #393429;
+    padding: 22px 0 0;
+  }
+  .uc-balance strong {
+    font-size: var(--font-metric);
+  }
+  .uc-tabs {
+    gap: 20px;
+  }
+  .uc-card > header {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .uc-card h2 small {
+    display: block;
+    margin: 7px 0 0;
+  }
+}
+.uc-record-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  gap: 16px;
+  margin: 20px 0;
+}
+
+.uc-record-filters label {
+  display: grid;
+  gap: 8px;
+}
+.uc-record-filters input,
+.uc-record-filters select {
+  width: 100%;
+  min-width: 0;
+}
+.uc-center .recharge-dialog__presets button {
+  display: grid;
+  gap: 5px;
+  padding: 16px 10px;
+  border: 1px solid #4a3b24;
+  border-radius: 11px;
+  color: #1c160d;
+  background: #dfaa43;
+}
+.uc-center .recharge-dialog__presets button strong,
+.uc-center .recharge-dialog__presets button span {
+  white-space: nowrap;
+}
+.uc-center .recharge-dialog__chooser form > button {
+  min-height: 44px;
+  border: 1px solid #4a3b24;
+  color: #1c160d;
+  background: #dfaa43;
+}
+
+/* 个人中心「设备管理」页签（桌面端专属，审计方案 A）。卡片纵向堆叠：
+   本机连接 / 待确认配对 / 设备槽位 / 已解绑设备。设备卡自身的样式在
+   customer-access.css 的 .device-* 里，这里只管页签内的排布。 */
+.uc-devices {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+.uc-devices__slots-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.uc-devices__slots-head h2 {
+  margin: 0;
+}
+.uc-devices__deferred-toggle {
+  margin-top: 12px;
+  text-decoration: underline;
+}
+
+/* CW-062 B4 账号安全：卡片内三段式（改密表单 / 危险动作 / 最近登录）。
+   本文件的类都只服务客户个人中心，故不写进 styles.css——那会被
+   split_customer_styles 复制进生成的 customer-access.css，造成重复定义。
+   危险按钮刻意不叫 .uc-danger：那个名字在本文件里已经是「危险文字色」，
+   复用它会被 0,2,0 的旧规则盖掉按钮配色。 */
+.uc-security > p {
+  color: var(--text-muted);
+}
+.uc-security__action {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+.uc-security__action strong {
+  display: block;
+}
+.uc-security__action p {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+  font-size: var(--font-caption);
+}
+.uc-security__danger {
+  border: 1px solid #804b45;
+  border-radius: 7px;
+  padding: 10px 16px;
+  font: inherit;
+  color: #fac1b8;
+  background: #311e1d;
+  white-space: nowrap;
+}
+.uc-security__danger:hover {
+  border-color: #a25d55;
+}
+.uc-security__danger:disabled {
+  opacity: 0.6;
+}
+.uc-security__history {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+.uc-devices__history ul,
+.uc-security__history ul {
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.uc-devices__history li,
+.uc-security__history li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--line);
+  color: var(--text-muted);
+  font-size: var(--font-caption);
+}
+.uc-devices__history li span:first-child,
+.uc-security__history li span:first-child {
+  color: var(--text);
+}
+
+/* B3 消费记录：筛选区下方的动作行（按子账号汇总 / 导出 CSV / 清除筛选）
+   与聚合摘要表的说明行。 */
+.uc-record-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 12px 0 4px;
+}
+.uc-record-actions__toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+.uc-record-actions__toggle input {
+  width: auto;
+  min-width: 0;
+}
+.uc-record-summary__caption {
+  caption-side: top;
+  text-align: left;
+  padding-bottom: 8px;
+  color: var(--text-muted);
+  font-size: var(--font-caption);
+}
+
+/* 字数提示（P2#19）：跟在输入框下方的说明文字右侧。 */
+.uc-count {
+  float: right;
+  color: var(--text-muted);
+  font-size: var(--font-caption);
+}
+.uc-count__warning {
+  display: block;
+  color: #e0b25e;
+}
+
+/* 发布账号页签的上下文说明段（P1#11）：说清「绑了之后能干什么」并给出跳转。 */
+.uc-publishing-head {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.uc-publishing-head > p {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+/* 消费记录页签顶部的两个总额（P1#6：从首屏 hero 挪过来的）。 */
+.uc-record-totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin: 8px 0 0;
+  color: var(--text-muted);
+  font-size: var(--font-caption);
+}
+
+/* 密码强度提示（P1#12）：三档颜色 + 一根短条，输入时实时变化。 */
+.uc-password-strength {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 0;
+  color: var(--text-muted);
+  font-size: var(--font-caption);
+}
+.uc-password-strength__meter {
+  display: inline-block;
+  width: 60px;
+  height: 4px;
+  border-radius: 2px;
+  background: #3a3a40;
+  overflow: hidden;
+}
+.uc-password-strength__meter i {
+  display: block;
+  height: 100%;
+  width: 33%;
+  background: currentColor;
+}
+.uc-password-strength--1 {
+  color: #ef9595;
+}
+.uc-password-strength--1 .uc-password-strength__meter i {
+  width: 33%;
+}
+.uc-password-strength--2 {
+  color: #e0b25e;
+}
+.uc-password-strength--2 .uc-password-strength__meter i {
+  width: 66%;
+}
+.uc-password-strength--3 {
+  color: #8bcca0;
+}
+.uc-password-strength--3 .uc-password-strength__meter i {
+  width: 100%;
+}
+.uc-password-strength--0 {
+  color: #ef9595;
+}
+.uc-password-strength--0 .uc-password-strength__meter i {
+  width: 15%;
+}
+/* 确认框的勾选行：要压过 .uc-center label / .uc-center input 的通用规则。 */
+.uc-confirm .uc-confirm__ack {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 16px 0 0;
+}
+.uc-confirm .uc-confirm__ack input {
+  width: auto;
+  min-width: 0;
+}
+
+/* Token 卡片化（机会点 2 / 方案 B）：一列卡片取代原来的 5 列表格，
+   每张卡自带状态、最近使用与「消费占比」条。 */
+.uc-token-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.uc-token {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #131416;
+}
+.uc-token--revoked {
+  opacity: 0.72;
+}
+.uc-token__head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.uc-token__head strong {
+  font-size: var(--font-body);
+}
+.uc-token__head .uc-muted,
+.uc-token__head .uc-valid {
+  margin-left: auto;
+}
+.uc-token code {
+  font-size: var(--font-caption);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.uc-token__meta {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--font-caption);
+}
+.uc-token__usage {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: var(--font-caption);
+  color: var(--text-muted);
+}
+.uc-token__share {
+  display: inline-block;
+  flex: 1;
+  min-width: 60px;
+  height: 6px;
+  border-radius: 3px;
+  background: #303036;
+  overflow: hidden;
+}
+.uc-token__share i {
+  display: block;
+  height: 100%;
+  background: #dfaa43;
+}
+.uc-token-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 20px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 10px;
+}
+.uc-token-empty h3 {
+  margin: 0;
+}
+.uc-token-empty p {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+/* 统一的重试按钮（P1#8）：此前 8 处各写各的、类名横跨三套。 */
+.uc-retry {
+  color: #dec079;
+  text-decoration: underline;
+  font-size: var(--font-caption);
+}
+
+/* 错误块里的分类提示行（P1#8）：先说「该做什么」，再说平台给的原因。 */
+.uc-error__hint {
+  font-weight: 500;
+}
+
+/* 接口价格页的近 30 天消费构成（P1#10 / 方案 F）。 */
+.uc-donut-block {
+  margin-bottom: 20px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+}
+.uc-donut-block h3 {
+  font-size: var(--font-label);
+  margin-bottom: 12px;
+}
+.uc-donut {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 24px;
+}
+.uc-donut svg {
+  width: 160px;
+  height: 160px;
+  flex-shrink: 0;
+  transform: rotate(-90deg);
+}
+.uc-donut__total {
+  transform: rotate(90deg);
+  transform-origin: 80px 80px;
+  fill: #f0c75f;
+  font-size: 20px;
+  font-weight: 650;
+}
+.uc-donut__unit {
+  transform: rotate(90deg);
+  transform-origin: 80px 80px;
+  fill: var(--text-muted);
+  font-size: 10px;
+}
+.uc-donut__empty {
+  color: var(--text-muted);
+}
+.uc-donut__legend {
+  flex: 1;
+  min-width: 200px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--font-caption);
+}
+.uc-donut__legend li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  color: var(--text-muted);
+}
+/* Top 3 高亮（审计原话：Top 3 业务高亮）。 */
+.uc-donut__legend-top {
+  color: var(--text);
+  font-weight: 600;
+}
+.uc-donut__legend b {
+  margin-left: auto;
+  font-weight: 600;
+}
+.uc-donut__legend small {
+  min-width: 48px;
+  text-align: right;
+}
+.uc-donut__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* 移动端表格改卡片流（审计 P1 清单 #7）。
+   纯 CSS 实现：每列的名字按列序写进 ::before，不动 20 多处 <td> 标记。
+   760px 以下每行变成一张卡（表头隐藏、单元格竖排、左侧带列名）。 */
+@media (max-width: 760px) {
+  .uc-responsive-table {
+    display: block;
+  }
+  .uc-responsive-table > thead {
+    display: none;
+  }
+  .uc-responsive-table > tbody,
+  .uc-responsive-table > tbody > tr {
+    display: block;
+    width: 100%;
+  }
+  .uc-responsive-table > tbody > tr {
+    margin-bottom: 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+  }
+  .uc-responsive-table > tbody > tr > td {
+    display: block;
+    width: 100%;
+    padding: 6px 0;
+    border: none;
+    white-space: normal;
+  }
+  .uc-responsive-table > tbody > tr > td::before {
+    display: block;
+    margin-bottom: 2px;
+    color: var(--text-muted);
+    font-size: var(--font-caption);
+  }
+  /* 触摸目标：原来 6px 的内边距在手机上太小（audit-35）。 */
+  .uc-responsive-table .uc-row-actions button {
+    padding: 12px;
+  }
+
+  .uc-ledger-table > tbody > tr > td:nth-of-type(1)::before {
+    content: "时间";
+  }
+  .uc-ledger-table > tbody > tr > td:nth-of-type(2)::before {
+    content: "业务";
+  }
+  .uc-ledger-table > tbody > tr > td:nth-of-type(3)::before {
+    content: "来源";
+  }
+  .uc-ledger-table > tbody > tr > td:nth-of-type(4)::before {
+    content: "可用积分变化";
+  }
+  .uc-ledger-table > tbody > tr > td:nth-of-type(5)::before {
+    content: "待结算变化";
+  }
+
+  .uc-orders-table > tbody > tr > td:nth-of-type(1)::before {
+    content: "订单号 / 创建时间";
+  }
+  .uc-orders-table > tbody > tr > td:nth-of-type(2)::before {
+    content: "支付金额";
+  }
+  .uc-orders-table > tbody > tr > td:nth-of-type(3)::before {
+    content: "订单积分";
+  }
+  .uc-orders-table > tbody > tr > td:nth-of-type(4)::before {
+    content: "状态";
+  }
+  .uc-orders-table > tbody > tr > td:nth-of-type(5)::before {
+    content: "操作";
+  }
+
+  .uc-summary-table > tbody > tr > td:nth-of-type(1)::before {
+    content: "子账号";
+  }
+  .uc-summary-table > tbody > tr > td:nth-of-type(2)::before {
+    content: "消费";
+  }
+  .uc-summary-table > tbody > tr > td:nth-of-type(3)::before {
+    content: "退回";
+  }
+  .uc-summary-table > tbody > tr > td:nth-of-type(4)::before {
+    content: "流水笔数";
+  }
+}
+
+/* 首访三步引导（方案 G / P2#14）。 */
+.uc-onboarding__progress {
+  color: var(--text-muted);
+  font-size: var(--font-caption);
+  margin-bottom: 6px;
+}
+.uc-onboarding p {
+  color: var(--text-muted);
+  line-height: 1.8;
+}
+
+/* 帮助中心（P2#21）：问答式清单，术语与界面用词对齐。 */
+.uc-help dl {
+  margin: 0;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.uc-help dt {
+  margin-top: 14px;
+  font-weight: 600;
+}
+.uc-help dd {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  line-height: 1.8;
+}
+/* 术语就地说明：虚线下划线表示「可以悬停看解释」。 */
+.uc-term {
+  border-bottom: 1px dashed var(--line-strong);
+  cursor: help;
+}
+
+/* 闲置提示（机会点 2 的「闲置自动禁用」——本批只提示、不禁用）。 */
+.uc-token__idle {
+  margin: 0;
+  color: #e0b25e;
+  font-size: var(--font-caption);
+}
+
+/* 错误块里的「复制错误信息」入口。 */
+.uc-error__feedback {
+  font-size: var(--font-caption);
+  color: var(--text-muted);
+  text-decoration: underline;
+}

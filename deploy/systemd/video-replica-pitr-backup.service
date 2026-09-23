@@ -1,0 +1,18 @@
+[Unit]
+Description=Video Replica PostgreSQL physical PITR base backup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=postgres
+Group=postgres
+EnvironmentFile=/etc/video-replica/pitr.env
+WorkingDirectory=/opt/video-replica/app
+ExecStart=/opt/video-replica/app/deploy/postgres/pitr-backup.sh
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/video-replica-pitr

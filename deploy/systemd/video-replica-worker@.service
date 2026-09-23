@@ -1,0 +1,28 @@
+[Unit]
+Description=Video Replica customer generation worker %i
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=video-replica
+Group=video-replica
+WorkingDirectory=/opt/video-replica/app/server
+EnvironmentFile=/etc/video-replica/customer.env
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/usr/bin/test -x /usr/bin/ffprobe
+ExecStartPre=/opt/video-replica/app/server/.venv/bin/python -m app.bootstrap
+ExecStart=/opt/video-replica/app/server/.venv/bin/python -m app.generation_worker --worker-id %H-worker-%i --idle-seconds 1
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=90
+TimeoutStopSec=90
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

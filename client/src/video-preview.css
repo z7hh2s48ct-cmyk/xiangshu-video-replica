@@ -1,0 +1,67 @@
+/* Shared presentation only: source files and generation aspect ratios stay native. */
+.video-preview {
+  position: relative;
+  isolation: isolate;
+  display: block;
+  width: 100%;
+  min-width: 0;
+  aspect-ratio: 9 / 16;
+  overflow: hidden;
+  border-radius: 8px;
+  background: #101111;
+}
+
+/* Repeated class keeps page-level image/video rules from cropping the foreground. */
+.video-preview.video-preview > .video-preview__foreground,
+.video-preview.video-preview > .video-preview__backdrop {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  max-height: none;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  object-position: center;
+}
+
+.video-preview.video-preview > .video-preview__foreground {
+  z-index: 1;
+  object-fit: contain;
+  background: transparent;
+}
+
+/* Fit mode：盒子尺寸由宿主决定（素材网格用显式行高定盒），这里只把被页面级
+   cover 规则裁成封面的前景拉回 contain——素材以竖屏为主，cover 在横向视窗里
+   只剩中段。比例由宿主规则决定，本类不声明 aspect-ratio，避免与首帧选择器
+   等场景各自的 9:16 宿主规则争优先级。 */
+.video-preview--fit.video-preview.video-preview > .video-preview__foreground {
+  object-fit: contain;
+}
+
+.video-preview.video-preview > .video-preview__backdrop {
+  z-index: 0;
+  object-fit: cover;
+  filter: blur(18px) brightness(0.55);
+  transform: scale(1.15);
+  pointer-events: none;
+}
+
+.video-preview.video-preview > .video-preview__backdrop[hidden] {
+  display: none;
+}
+
+.video-preview__empty {
+  display: grid;
+  place-content: center;
+  gap: 10px;
+  position: absolute;
+  inset: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+  color: #a9aca4;
+  text-align: center;
+}

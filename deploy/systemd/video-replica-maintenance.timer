@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the Video Replica maintenance sweep every day
+
+[Timer]
+# Staggered against the 03:20 backup timer so the two jobs never contend.
+OnCalendar=*-*-* 04:10:00
+RandomizedDelaySec=10m
+Persistent=true
+Unit=video-replica-maintenance.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,24 @@
+[Unit]
+Description=Video Replica internal P0 worker
+Requires=video-replica-api.service
+After=video-replica-api.service
+
+[Service]
+Type=simple
+User=video-replica
+Group=video-replica
+WorkingDirectory=/opt/video-replica/app
+EnvironmentFile=/etc/video-replica/internal-p0.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/video-replica/app/server/.venv/bin/python -m app.generation_worker
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/video-replica
+
+[Install]
+WantedBy=multi-user.target

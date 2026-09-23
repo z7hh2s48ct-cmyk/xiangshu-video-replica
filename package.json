@@ -1,0 +1,47 @@
+{
+  "name": "video-replica-desktop",
+  "version": "2.2.0",
+  "private": true,
+  "workspaces": [
+    "client"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace client",
+    "build:admin": "npm run build:admin --workspace client",
+    "build:all": "npm run build && npm run build:admin",
+    "check": "bash scripts/verify_no_secrets.sh && npm run check --workspace client && npm run check:e2e && npm run check:tauri && uv --cache-dir .uv-cache run --project server --locked ruff check server && uv --cache-dir .uv-cache run --project server --locked ruff format --check server && uv --cache-dir .uv-cache run --project server --locked python -m mypy --config-file server/pyproject.toml server/app && uv --cache-dir .uv-cache run --project server --locked python -m pytest --rootdir server server/tests",
+    "check:e2e": "biome check e2e",
+    "check:security": "bash scripts/verify_no_secrets.sh",
+    "check:sharded": "npm run check:static && bash scripts/ci/run-pytest-shards.sh",
+    "check:static": "bash scripts/verify_no_secrets.sh && npm run check --workspace client && npm run check:e2e && npm run check:tauri && uv --cache-dir .uv-cache run --project server --locked ruff check server && uv --cache-dir .uv-cache run --project server --locked ruff format --check server && uv --cache-dir .uv-cache run --project server --locked python -m mypy --config-file server/pyproject.toml server/app",
+    "check:tauri": "cargo fmt --manifest-path client/src-tauri/Cargo.toml --check && cargo check --manifest-path client/src-tauri/Cargo.toml --locked",
+    "dev:client": "npm run dev --workspace client",
+    "dev:publish-worker": "bash scripts/dev-with-pg.sh uv --cache-dir .uv-cache run --project server --locked python -m app.bootstrap && bash scripts/dev-with-pg.sh uv --cache-dir .uv-cache run --project server --locked python -m app.publish_worker",
+    "dev:server": "bash scripts/dev-with-pg.sh uv --cache-dir .uv-cache run --project server --locked python -m app.bootstrap && bash scripts/dev-with-pg.sh uv --cache-dir .uv-cache run --project server --locked python -m uvicorn app.main:app --app-dir server --reload --host 127.0.0.1 --port 8000 --no-proxy-headers",
+    "dev:worker": "bash scripts/dev-with-pg.sh uv --cache-dir .uv-cache run --project server --locked python -m app.bootstrap && bash scripts/dev-with-pg.sh uv --cache-dir .uv-cache run --project server --locked python -m app.generation_worker",
+    "dev:viral-collection": "bash scripts/dev-with-pg.sh uv --cache-dir .uv-cache run --project server --locked python -m app.bootstrap && bash scripts/dev-with-pg.sh uv --cache-dir .uv-cache run --project server --locked python -m app.generation_worker --viral-collection --idle-seconds 30",
+    "format": "npm run format --workspace client && uv --cache-dir .uv-cache run --project server --locked ruff format server",
+    "generate:api": "npm run generate:api --workspace client",
+    "release:customer": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/build-customer-signed-release.ps1",
+    "require:customer-api-base": "node scripts/require_customer_api_base.mjs",
+    "tauri": "npm run tauri --workspace client --",
+    "tauri:build": "npm run require:customer-api-base && npm run tauri --workspace client -- build --config src-tauri/tauri.customer.conf.json --bundles nsis --no-sign --ci -- --no-default-features",
+    "tauri:build:customer": "npm run tauri:build",
+    "tauri:dev": "npm run tauri --workspace client -- dev",
+    "test": "npm run test --workspace client && uv --cache-dir .uv-cache run --project server --locked python -m pytest --rootdir server server/tests",
+    "test:e2e": "npm run test --workspace client -- e2e_contract.test.tsx && uv --cache-dir .uv-cache run --project server --locked python -m pytest --rootdir server server/tests/test_e2e_fake_provider.py",
+    "test:gate1": "uv --cache-dir .uv-cache run --project server --locked python -m app.gate1_e2e",
+    "test:customer-e2e": "playwright test --config e2e/customer/playwright.config.mjs",
+    "verify:customer-bundle": "node scripts/verify_customer_bundle.mjs"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "jsdom": "29.1.1"
+  },
+  "overrides": {
+    "js-yaml": "4.3.2"
+  }
+}

@@ -1,0 +1,29 @@
+[
+  {
+    "platform": "douyin",
+    "official_page": "https://creator.douyin.com/",
+    "asset_url": "https://lf3-static.bytednsdoc.com/obj/eden-cn/yvahlyj_upfbvk_zlp/ljhwZthlaukjlkulzlp/pc_creator/favicon_v2_7145ff0.ico",
+    "retrieved": "2026-09-13",
+    "sha256": "1fd2b6b6e7c1280f211a486b524e57fea14fc6d6a3038898ecaf739747b43b72",
+    "bytes": 4286,
+    "modified": false
+  },
+  {
+    "platform": "wechat_channels",
+    "official_page": "https://channels.weixin.qq.com/",
+    "asset_url": "https://res.wx.qq.com/t/wx_fed/finder/helper/finder-helper-web/res/favicon-v2.ico",
+    "retrieved": "2026-09-13",
+    "sha256": "f27ed8a51c12055714e2867bc346e6c8fe5e31719ef7d8675e9f23422ca0b92d",
+    "bytes": 997,
+    "modified": false
+  },
+  {
+    "platform": "xiaohongshu",
+    "official_page": "https://creator.xiaohongshu.com/",
+    "asset_url": "https://www.xiaohongshu.com/favicon.ico",
+    "retrieved": "2026-09-13",
+    "sha256": "33b25a8e2b0a67d2fc58eb6739a608211af9e62b3fdd935e7ce7e1ce12963372",
+    "bytes": 4286,
+    "modified": false
+  }
+]

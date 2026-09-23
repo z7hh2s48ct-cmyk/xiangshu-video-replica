@@ -1,0 +1,447 @@
+.customer-360-grid {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.customer-focused-detail {
+  display: grid;
+  gap: 14px;
+}
+
+.customer-detail-back {
+  justify-self: start;
+}
+
+.customer-detail-hero {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 22px;
+  border: 1px solid var(--admin-line-soft);
+  border-radius: 10px;
+  background: #171716;
+}
+
+.customer-detail-identity {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+}
+
+.customer-detail-avatar {
+  display: grid;
+  width: 84px;
+  height: 84px;
+  place-items: center;
+  border: 1px solid var(--admin-line);
+  border-radius: 9px;
+  color: var(--admin-gold);
+  background: #24221e;
+  font-size: var(--font-metric);
+}
+
+.customer-detail-title {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.customer-detail-title h1,
+.customer-detail-identity p {
+  margin: 0;
+}
+
+.customer-detail-identity p {
+  margin-top: 8px;
+  color: var(--admin-muted);
+}
+
+.customer-detail-operations {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(120px, 1fr));
+  gap: 10px;
+  align-content: center;
+  min-width: 330px;
+}
+
+.customer-detail-operations small {
+  grid-column: 1 / -1;
+  color: var(--admin-muted);
+  text-align: center;
+}
+
+.customer-detail-kpis {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.customer-detail-kpis article {
+  padding: 18px 20px;
+  border: 1px solid var(--admin-line-soft);
+  border-radius: 9px;
+  background: #171716;
+}
+
+.customer-detail-kpis span,
+.customer-detail-kpis small {
+  color: var(--admin-muted);
+}
+
+.customer-detail-kpis strong {
+  display: block;
+  margin-top: 8px;
+  color: var(--admin-gold);
+  font-size: var(--font-title);
+}
+
+.customer-detail-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.customer-focused-detail .customer-detail-meta {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.customer-focused-detail .customer-detail-meta > div {
+  padding: 14px 18px;
+  grid-template-columns: 90px minmax(0, 1fr);
+}
+.customer-focused-detail .customer-detail-meta dt,
+.customer-focused-detail .customer-detail-meta dd,
+.customer-focused-detail .customer-detail-meta code {
+  font-size: var(--font-body);
+}
+
+.customer-360-panel {
+  overflow: hidden;
+  border: 1px solid var(--admin-line-soft);
+  border-radius: 7px;
+  background: #171716;
+}
+
+.customer-360-panel:last-child {
+  grid-column: 1 / -1;
+}
+
+.customer-360-panel h3 {
+  margin: 0;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--admin-line-soft);
+  color: var(--admin-text);
+  font-size: var(--font-subtitle);
+}
+
+.customer-360-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  align-items: center;
+  padding: 13px 14px;
+  border-bottom: 1px solid var(--admin-line-soft);
+  color: var(--admin-text);
+  font-size: var(--font-label);
+}
+
+.customer-360-row:last-child {
+  border-bottom: 0;
+}
+
+.customer-360-row small {
+  font-size: var(--font-caption);
+  color: var(--admin-muted);
+  text-align: right;
+}
+
+@media (max-width: 650px) {
+  .customer-focused-detail .customer-detail-meta,
+  .customer-detail-settings-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .customer-detail-title {
+    flex-wrap: wrap;
+    overflow-wrap: anywhere;
+  }
+  .customer-detail-avatar {
+    flex: 0 0 54px;
+    width: 54px;
+    height: 54px;
+  }
+}
+
+@media (max-width: 1050px) {
+  .customer-detail-hero {
+    flex-direction: column;
+  }
+
+  .customer-detail-operations {
+    min-width: 0;
+  }
+
+  .customer-detail-kpis,
+  .customer-detail-settings-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .customer-360-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .customer-360-panel:last-child {
+    grid-column: auto;
+  }
+}
+
+.customer-id-copy {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  vertical-align: middle;
+}
+.customer-id-copy__value code {
+  overflow-wrap: anywhere;
+}
+.customer-id-copy .customer-id-copy__value {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  user-select: text;
+}
+.customer-id-copy .customer-id-copy__icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  padding: 4px;
+  border: 0;
+  color: var(--admin-muted);
+  background: transparent;
+}
+.customer-id-copy .customer-id-copy__icon:hover {
+  color: var(--admin-gold);
+  background: #ffffff0a;
+}
+.customer-id-copy__notice {
+  position: absolute;
+  z-index: 5;
+  left: 0;
+  top: calc(100% + 6px);
+  padding: 7px 10px;
+  border: 1px solid var(--admin-line);
+  border-radius: 6px;
+  color: var(--admin-text);
+  background: #302b21;
+  white-space: nowrap;
+  box-shadow: 0 6px 18px #0005;
+}
+.customer-detail-operations {
+  min-width: 0;
+  grid-template-columns: auto;
+}
+.customer-detail-identity {
+  min-width: 0;
+}
+.customer-detail-identity > div:last-child {
+  min-width: 0;
+}
+.customer-detail-hero {
+  padding: 18px;
+}
+.customer-detail-avatar {
+  flex-shrink: 0;
+  width: 60px;
+  height: 60px;
+  font-size: var(--font-title);
+}
+.customer-detail-kpis article {
+  padding: 14px 18px;
+}
+.customer-detail-kpis strong {
+  font-size: var(--font-title);
+}
+.customer-360-panel:last-child {
+  grid-column: auto;
+}
+.customer-360-panel h3 {
+  font-size: var(--font-body);
+}
+.customer-detail-settings-grid > :only-child {
+  grid-column: 1 / -1;
+}
+.customer-focused-detail .admin-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: end;
+  gap: 12px;
+}
+.customer-focused-detail .admin-form > label {
+  min-width: 0;
+}
+.customer-focused-detail .admin-form > button {
+  justify-self: end;
+}
+@media (max-width: 650px) {
+  .customer-360-grid,
+  .customer-focused-detail .admin-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .customer-id-copy__notice {
+    white-space: normal;
+    min-width: 150px;
+  }
+}
+
+.customer-account-tools {
+  border: 1px solid var(--admin-line-soft);
+  border-radius: 9px;
+  padding: 14px 18px;
+  background: #171716;
+}
+.customer-account-tools summary {
+  cursor: pointer;
+  color: var(--admin-text);
+  font-weight: 600;
+}
+.customer-account-tools[open] summary {
+  margin-bottom: 14px;
+}
+.customer-account-tools .admin-table-wrap {
+  margin-bottom: 14px;
+}
+.customer-account-tools .admin-data-table {
+  width: 100%;
+}
+
+/* 列宽按字段用途分配；长标识截断显示，复制仍使用完整值。 */
+.customer-list-filters.admin-toolbar {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.customer-list-filters__actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.customer-cell-ellipsis,
+.customers-table .customer-id-copy__value code {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.customers-table .customer-id-copy {
+  width: 100%;
+}
+.customer-cell-date,
+.customer-cell-generation {
+  display: grid;
+  gap: 3px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.customer-cell-date small,
+.customer-cell-generation small {
+  color: var(--admin-muted);
+}
+@media (min-width: 761px) {
+  .customers-table {
+    table-layout: fixed;
+    min-width: 940px;
+  }
+  .customers-table :is(th, td) {
+    padding: 14px 10px;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .customers-table th:nth-child(1) {
+    width: 13%;
+  }
+  .customers-table th:nth-child(2) {
+    width: 18%;
+  }
+  .customers-table th:nth-child(3) {
+    width: 13%;
+  }
+  .customers-table th:nth-child(4) {
+    width: 8%;
+  }
+  .customers-table th:nth-child(5),
+  .customers-table th:nth-child(6) {
+    width: 11%;
+  }
+  .customers-table th:nth-child(7) {
+    width: 16%;
+  }
+  .customers-table th:nth-child(8) {
+    width: 10%;
+  }
+}
+/* 任务书 C（2026-09-18）：客户详情设备视图 CustomerDeviceSection。
+   只读角色不渲染操作列，故样式只覆盖可写态。 */
+.customer-devices {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.customer-devices__header {
+  align-items: baseline;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.customer-devices__header h2 {
+  font-size: 16px;
+  margin: 0;
+}
+
+.customer-devices__header small {
+  color: var(--admin-muted);
+}
+
+.customer-devices__actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* 吊销为终态不可逆操作，比解绑更强，用危险色区分（同 admin-sessions__revoke 口径）。 */
+.admin-shell--control button.customer-devices__revoke {
+  border-color: #75483e;
+  color: #e78974;
+  background: transparent;
+}
+
+@media (max-width: 760px) {
+  .customer-list-filters.admin-toolbar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .customers-table :is(.customer-id-copy, .customer-cell-ellipsis) {
+    max-width: 220px;
+    justify-self: end;
+  }
+  .customer-detail-kpis {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 480px) {
+  .customer-list-filters.admin-toolbar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .customers-table :is(.customer-id-copy, .customer-cell-ellipsis) {
+    max-width: 180px;
+  }
+}

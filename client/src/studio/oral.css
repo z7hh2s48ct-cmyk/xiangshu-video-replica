@@ -1,0 +1,909 @@
+.oral-library-page,
+.oral-voice-page,
+.oral-composer {
+  --oral-gold: #e5aa36;
+  --oral-muted: #a5a69e;
+}
+
+.oral-journey {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  padding: 0;
+  margin: 0 0 24px;
+  list-style: none;
+  border: 1px solid #30312a;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #141511;
+}
+
+.oral-journey li {
+  padding: 18px 22px;
+  display: grid;
+  grid-template-columns: 32px 1fr;
+  gap: 4px 10px;
+  align-items: center;
+  color: #a5a69e;
+}
+
+.oral-journey li + li {
+  border-left: 1px solid #30312a;
+}
+
+.oral-journey :where(li) > span {
+  grid-row: span 2;
+  color: #8c8f83;
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.oral-journey strong {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.oral-journey small {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.oral-journey [aria-current] {
+  background: #242116;
+}
+
+.oral-journey [aria-current] > span,
+.oral-journey [aria-current] > strong {
+  color: #efbc53;
+}
+
+.oral-panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 22px;
+}
+
+.oral-panel-heading h3 {
+  font-size: 17px;
+  margin: 0;
+  font-weight: 600;
+}
+
+.oral-panel-heading p {
+  margin: 7px 0 0;
+  font-size: 12px;
+  color: var(--oral-muted);
+}
+
+.oral-upload-zone {
+  width: 100%;
+  min-height: 216px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 26px 20px;
+  border: 1px dashed #6d5b31;
+  background: #1b1b14;
+  border-radius: 12px;
+  cursor: pointer;
+  color: #ededdf;
+  font: inherit;
+  text-align: center;
+}
+
+.oral-upload-zone:hover:not(:disabled),
+.oral-upload-zone:focus-visible {
+  border-color: var(--oral-gold);
+  background: #242116;
+}
+
+.oral-upload-zone:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
+.oral-upload-zone strong {
+  font-size: 17px;
+  margin-top: 3px;
+  font-weight: 500;
+}
+
+.oral-upload-zone > span:not(.oral-upload-icon) {
+  font-size: 13px;
+  color: #b0b1a5;
+  overflow-wrap: anywhere;
+}
+
+.oral-upload-zone small {
+  font-size: 12px;
+  color: #96988a;
+}
+
+.oral-upload-icon {
+  color: #e5aa36;
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  background: #302919;
+  border-radius: 14px;
+  margin-bottom: 6px;
+}
+
+.oral-upload-panel .studio-field {
+  margin-bottom: 20px;
+}
+
+.oral-upload-panel .studio-field > span {
+  font-size: 13px;
+}
+
+.oral-upload-panel input:not([type="checkbox"]):not([type="file"]) {
+  font-size: 14px;
+  background: #0f100e;
+  border-color: #383a30;
+  padding: 13px 14px;
+}
+
+.oral-consent {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 12px;
+  line-height: 1.8;
+  color: #b5b6ab;
+  margin: 20px 0;
+  cursor: pointer;
+}
+
+.oral-consent input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  margin: 3px 0 0;
+  accent-color: #e5aa36;
+}
+
+.oral-submit.studio-button {
+  width: 100%;
+  min-height: 46px;
+  gap: 10px;
+  justify-content: center;
+  font-size: 14px;
+}
+
+.oral-footnote {
+  text-align: center;
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: #959889;
+  line-height: 1.7;
+}
+
+.oral-ready {
+  color: #b8ca9b;
+  font-size: 11px;
+}
+
+.oral-pending-card {
+  display: flex;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #32352b;
+  border-radius: 10px;
+  color: #e7b758;
+}
+
+.oral-pending-card h3 {
+  margin: 0;
+  font-size: 14px;
+  color: #e4e5dd;
+}
+
+.oral-pending-card p {
+  font-size: 12px;
+  line-height: 1.7;
+  margin: 8px 0;
+}
+
+.oral-pending-card .studio-button {
+  font-size: 12px;
+  padding: 4px 0;
+}
+
+.oral-upload-progress {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding-top: 12px;
+  font-size: 12px;
+}
+
+.oral-upload-progress progress {
+  min-width: 0;
+  flex: 1;
+  accent-color: var(--oral-gold);
+}
+
+.oral-error {
+  color: #f0a497;
+  font-size: 13px;
+  line-height: 1.7;
+  padding: 12px;
+  background: #2f1e1a;
+  border-radius: 8px;
+}
+
+.oral-composer-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.8fr) minmax(0, 1.2fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.oral-composer .oral-source-panel,
+.oral-composer .oral-script-panel {
+  padding: 24px;
+  background: #141512;
+  border-radius: 14px;
+}
+
+.oral-composer .creation-avatar-preview {
+  height: 250px;
+  min-height: 0;
+  width: 100%;
+  object-fit: contain;
+  margin: 16px 0;
+  background: #0b0c0a;
+}
+
+.oral-source-label {
+  display: block;
+  font-size: 12px;
+  color: #a5a69e;
+  margin: 10px 0;
+}
+
+.oral-voice-choice {
+  border-top: 1px solid #32352b;
+  padding-top: 22px;
+  margin-top: 22px;
+}
+
+.oral-voice-choice audio {
+  width: 100%;
+  height: 34px;
+  margin-top: 12px;
+}
+
+.oral-script-panel textarea {
+  min-height: 310px;
+  resize: vertical;
+  line-height: 1.95;
+  font-size: 15px;
+}
+
+.oral-script-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin: 12px 0 20px;
+  font-size: 12px;
+  color: var(--oral-muted);
+}
+
+.oral-script-meta .studio-button {
+  font-size: 12px;
+}
+
+.oral-readiness {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  margin-top: 20px;
+  color: #a5a69e;
+}
+
+.oral-readiness span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.oral-readiness .is-ready {
+  color: #b8ca9b;
+}
+
+.oral-composer .creation-action-bar {
+  margin-top: 24px;
+}
+
+@media (max-width: 1000px) {
+  .oral-composer-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .oral-journey li {
+    padding: 15px 12px;
+    grid-template-columns: 24px 1fr;
+    gap: 4px;
+  }
+  .oral-journey small {
+    grid-column: 1 / -1;
+  }
+}
+@media (max-width: 600px) {
+  .oral-journey small {
+    display: none;
+  }
+  .oral-journey strong {
+    font-size: 12px;
+  }
+  .oral-composer .creation-action-bar {
+    flex-wrap: wrap;
+  }
+}
+
+/* Selected library-first design: assets on the left, creation guidance on the right. */
+.oral-library-page {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr);
+  gap: 32px;
+  padding: 12px 4px;
+}
+.oral-library-main {
+  min-width: 0;
+}
+.oral-library-heading {
+  margin: 4px 0 36px;
+}
+.oral-library-heading h2 {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  font-size: 27px;
+  margin: 0 0 12px;
+  font-weight: 600;
+}
+.oral-library-heading h2 > span {
+  font-size: 13px;
+  color: #b8bab1;
+  background: #1c1e19;
+  border: 1px solid #35382f;
+  border-radius: 20px;
+  padding: 6px 12px;
+  font-weight: 400;
+}
+.oral-library-heading p,
+.oral-library-guide > p {
+  font-size: 14px;
+  line-height: 1.8;
+  color: #a5a79d;
+  margin: 0;
+}
+/* 纵向列表：一行一个分身。原先是三列网格，卡片宽度只有三分之一，
+   「使用此分身/下载源视频/删除」三个按钮必然换行，预览图也被压得很小。
+   改为纵向堆叠、左图右文后，每张卡拿到整行宽度，操作区一行放得下。 */
+.oral-library-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.oral-library-card {
+  min-width: 0;
+  overflow: hidden;
+  background: #151713;
+  border: 1px solid #2e3128;
+  border-radius: 7px;
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  align-items: stretch;
+}
+.oral-library-preview {
+  position: relative;
+  aspect-ratio: 1.1;
+  background: #090b08;
+}
+.oral-library-preview .studio-media {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  border-radius: 0;
+}
+.oral-library-preview img,
+.oral-library-preview video {
+  object-fit: cover;
+}
+.oral-demo-badge,
+.oral-video-badge {
+  position: absolute;
+  top: 12px;
+  font-size: 11px;
+  background: #182129df;
+  color: #eef0eb;
+  border-radius: 4px;
+  padding: 5px 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  pointer-events: none;
+}
+.oral-demo-badge {
+  left: 10px;
+}
+.oral-video-badge {
+  right: 10px;
+}
+.oral-library-card-body {
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 14px;
+}
+.oral-library-card-body h3 {
+  font-size: 16px;
+  font-weight: 500;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+/* 整行宽度下按钮不再需要换行；窄窗口仍允许回落，避免横向溢出。 */
+.oral-library-card-body > div {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+/* 删除推到最右，与「使用/下载」这类正向操作拉开距离，避免误点。 */
+.oral-library-card-body > div > .studio-button:last-child {
+  margin-left: auto;
+}
+.oral-library-card-body .studio-button {
+  color: #ebbb53;
+  border-color: #7b602b;
+  border-radius: 5px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+.oral-library-card-body .oral-ready {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 6px;
+  border-radius: 4px;
+  background: #202d1e;
+  color: #a7d098;
+  font-size: 11px;
+}
+/* 纵向列表里它是整行一条，不再是等高网格里的一格；315px 会突兀地高过
+   旁边的分身卡（卡高由 200px 缩略图 ÷ 1.1 ≈ 182px 决定）。 */
+.oral-create-tile {
+  min-height: 108px;
+  background: transparent;
+  color: #ecece8;
+  border: 1px dashed #515448;
+  border-radius: 7px;
+  font: inherit;
+  display: flex;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+  gap: 16px;
+  padding: 20px 10px;
+  cursor: pointer;
+}
+.oral-create-tile > .studio-icon {
+  color: #afb3a5;
+}
+.oral-create-tile strong {
+  font-size: 15px;
+  font-weight: 500;
+}
+.oral-create-tile > span {
+  font-size: 12px;
+  color: #a6a99c;
+  text-align: center;
+}
+.oral-create-tile:hover:not(:disabled),
+.oral-create-tile:focus-visible {
+  border-color: #dba936;
+  background: #1b1c14;
+}
+.oral-create-tile:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.oral-library-footer {
+  border-top: 1px solid #30332a;
+  padding-top: 22px;
+  margin-top: 46px;
+  display: flex;
+  gap: 14px;
+  color: #b2b6aa;
+  font-size: 14px;
+  line-height: 1.8;
+}
+.oral-library-footer p {
+  margin: 0 0 5px;
+}
+.oral-library-footer > .studio-icon {
+  flex-shrink: 0;
+  margin-top: 3px;
+}
+.oral-library-footer span {
+  font-size: 13px;
+}
+.oral-library-guide {
+  border-left: 1px solid #30332a;
+  padding-left: 28px;
+}
+.oral-library-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  align-items: center;
+  margin: 0 0 32px;
+}
+.oral-library-actions .studio-button {
+  font-size: 13px;
+  gap: 8px;
+  padding: 12px 14px;
+  white-space: nowrap;
+}
+.oral-library-actions .studio-button--quiet {
+  color: #e8b750;
+  padding: 8px 0;
+}
+.oral-library-guide h3 {
+  font-size: 17px;
+  font-weight: 500;
+  margin: 0 0 10px;
+}
+.oral-shooting-guide {
+  list-style: none;
+  padding: 0;
+  margin: 24px 0 36px;
+  display: grid;
+  gap: 24px;
+}
+.oral-shooting-guide li {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+}
+.oral-shooting-guide li > span {
+  display: grid;
+  place-items: center;
+  background: #242720;
+  border-radius: 50%;
+  color: #b4b9aa;
+  width: 46px;
+  height: 46px;
+  flex: 0 0 46px;
+}
+.oral-shooting-guide h4 {
+  font-size: 14px;
+  font-weight: 500;
+  margin: 0 0 5px;
+}
+.oral-shooting-guide p {
+  margin: 0;
+  color: #a5a99a;
+  font-size: 12px;
+  line-height: 1.8;
+}
+.oral-create-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  padding: 0;
+  margin: 20px 0 28px;
+  list-style: none;
+  text-align: center;
+}
+.oral-create-steps li {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.oral-create-steps li > span {
+  display: grid;
+  place-items: center;
+  background: #252820;
+  border-radius: 50%;
+  color: #aeb5a2;
+  width: 45px;
+  height: 45px;
+  margin-bottom: 2px;
+}
+.oral-create-steps li:first-child > span {
+  color: #e8b749;
+  background: #312b19;
+  border: 1px solid #856a2a;
+}
+.oral-create-steps strong {
+  font-size: 12px;
+  font-weight: 500;
+}
+.oral-create-steps small {
+  color: #a4a999;
+  font-size: 11px;
+  line-height: 1.7;
+}
+.oral-library-voice {
+  border-top: 1px solid #30332a;
+  padding-top: 18px;
+}
+.oral-library-voice > div {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px;
+  background: #1c1f19;
+  border-radius: 8px;
+}
+.oral-library-voice p {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+}
+.oral-library-voice strong,
+.oral-library-voice p span {
+  display: block;
+  font-weight: 400;
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.oral-library-voice p span {
+  font-size: 11px;
+  color: #a5aa99;
+}
+.oral-library-voice .studio-button {
+  padding: 0;
+  font-size: 12px;
+  color: #e8b750;
+  white-space: nowrap;
+}
+.oral-pending-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 20px;
+}
+.oral-dialog-intro {
+  color: #a5a99a;
+  font-size: 14px;
+  line-height: 1.8;
+  margin: 0 0 20px;
+}
+.oral-dialog-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  margin-top: 20px;
+}
+.oral-upload-panel .studio-field {
+  margin-top: 22px;
+}
+@media (max-width: 1200px) {
+  .oral-library-page {
+    grid-template-columns: minmax(0, 1.5fr) minmax(290px, 1fr);
+    gap: 24px;
+  }
+  .oral-library-guide {
+    padding-left: 24px;
+  }
+}
+@media (max-width: 900px) {
+  .oral-library-page {
+    grid-template-columns: 1fr;
+  }
+  .oral-library-guide {
+    border-left: 0;
+    border-top: 1px solid #30332a;
+    padding: 24px 0 0;
+  }
+  .oral-library-actions {
+    justify-content: flex-start;
+  }
+  .oral-library-footer {
+    margin-top: 24px;
+  }
+}
+@media (max-width: 540px) {
+  /* 窄屏放弃左图右文，回到上图下文；200px 缩略图会把正文挤到只剩一两个字。 */
+  .oral-library-card {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .oral-library-preview {
+    aspect-ratio: 4 / 3;
+  }
+  .oral-library-card-body > div > .studio-button:last-child {
+    margin-left: 0;
+  }
+  .oral-create-tile {
+    min-height: 180px;
+  }
+  .oral-library-heading h2 {
+    font-size: 22px;
+  }
+  .oral-library-actions {
+    flex-wrap: wrap;
+  }
+}
+
+.oral-voice-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 20px;
+  margin-bottom: 30px;
+}
+.oral-voice-heading h2 {
+  margin: 0 0 12px;
+  font-size: 27px;
+}
+.oral-voice-heading h2 span {
+  font-size: 13px;
+  color: #aab0a2;
+  margin-left: 12px;
+  font-weight: 400;
+}
+.oral-voice-heading p {
+  margin: 0;
+  color: #a5a99a;
+  font-size: 14px;
+}
+.oral-voice-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+  gap: 32px;
+}
+.oral-voice-guide {
+  border-left: 1px solid #30332a;
+  padding-left: 28px;
+}
+.oral-voice-guide h3 {
+  margin: 0;
+  font-size: 17px;
+}
+.oral-voice-page .voice-card {
+  background: #171a14;
+  border: 1px solid #31362b;
+  padding: 20px;
+  margin: 0 0 14px;
+  border-radius: 8px;
+  gap: 18px;
+}
+.oral-voice-page .voice-card h3 {
+  font-size: 16px;
+  margin: 0 0 8px;
+}
+.oral-voice-page .voice-card p {
+  font-size: 12px;
+  line-height: 1.7;
+}
+.oral-voice-page .voice-card audio {
+  max-width: 240px;
+  height: 34px;
+}
+.oral-voice-page .voice-card .studio-button {
+  font-size: 12px;
+  padding: 9px 12px;
+}
+@media (max-width: 1000px) {
+  .oral-voice-grid {
+    grid-template-columns: 1fr;
+  }
+  .oral-voice-guide {
+    border-left: 0;
+    padding: 22px 0 0;
+    border-top: 1px solid #30332a;
+  }
+}
+@media (max-width: 600px) {
+  .oral-voice-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .oral-voice-page .voice-card {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* Override the shared heading scale only on the redesigned oral surfaces. */
+.studio-shell .oral-library-heading h2,
+.studio-shell .oral-voice-heading h2 {
+  font-size: 30px;
+  line-height: 1.35;
+}
+.oral-library-heading p,
+.oral-library-guide > p {
+  font-size: 16px;
+}
+.oral-library-card-body h3 {
+  font-size: 18px;
+}
+.oral-library-card-body .studio-button,
+.oral-library-actions .studio-button {
+  font-size: 14px;
+}
+.oral-library-guide h3 {
+  font-size: 20px;
+}
+.oral-shooting-guide h4 {
+  font-size: 16px;
+}
+.oral-shooting-guide p {
+  font-size: 14px;
+}
+.oral-create-steps strong {
+  font-size: 14px;
+}
+.oral-create-steps small {
+  font-size: 13px;
+}
+.oral-library-voice strong {
+  font-size: 14px;
+}
+.oral-library-voice p span {
+  font-size: 12px;
+}
+@media (max-width: 540px) {
+  .studio-shell .oral-library-heading h2,
+  .studio-shell .oral-voice-heading h2 {
+    font-size: 24px;
+  }
+}
+
+/* Reserve the same controls area while a clone moves from processing to playback. */
+.oral-voice-page .voice-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+.oral-voice-page .voice-card .voice-card__actions {
+  display: grid;
+  grid-template-columns: minmax(0, 240px) minmax(0, 1fr);
+  gap: 12px;
+  margin-top: 0;
+  align-items: center;
+}
+.oral-voice-page .voice-card__preview,
+.oral-voice-page .voice-card__action {
+  min-width: 0;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+}
+.oral-voice-page .voice-card__preview audio,
+.oral-voice-page .voice-card__preview .studio-button {
+  width: 100%;
+  height: 44px;
+  min-height: 44px;
+  box-sizing: border-box;
+}
+.oral-voice-page .voice-card__action {
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.oral-voice-page .voice-card__action .studio-button {
+  min-height: 44px;
+  height: 44px;
+  box-sizing: border-box;
+}
+@media (max-width: 600px) {
+  .oral-voice-page .voice-card .voice-card__actions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

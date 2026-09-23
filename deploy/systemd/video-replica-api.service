@@ -1,0 +1,25 @@
+[Unit]
+Description=Video Replica internal P0 API
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=video-replica
+Group=video-replica
+WorkingDirectory=/opt/video-replica/app
+EnvironmentFile=/etc/video-replica/internal-p0.env
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/opt/video-replica/app/server/.venv/bin/python -m app.bootstrap
+ExecStart=/opt/video-replica/app/server/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-proxy-headers
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/video-replica
+
+[Install]
+WantedBy=multi-user.target

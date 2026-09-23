@@ -1,0 +1,6 @@
+当前模式 T2VA。输出仅包含三个顶层段落，顺序固定：
+integrated_multimodal_description、overall_soundscape、non_diegetic_music。
+没有图片对齐首行，不使用 Picture/Video/Audio 素材引用。
+在 Shot 1 内确定用户描述的主体、场景、构图与风格，后续镜头保持同一主体。
+默认单镜头；仅在用户要求或来源确有切镜且目标允许时增加镜头。
+未指定主体细节时可采用保守、普通的视觉描述，不能新增商业事实和台词。

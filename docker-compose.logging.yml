@@ -1,0 +1,60 @@
+# Docker Compose configuration for Loki logging stack.
+
+version: "3.8"
+
+# P2-1 (BILLING-OBS) — same bounded json-file rotation as the customer
+# delivery compose (deploy/customer/compose.yaml); internal hosts must not
+# accumulate unbounded container logs either.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  loki:
+    image: grafana/loki:2.9.0
+    container_name: loki
+    volumes:
+      - ./loki-config.yaml:/etc/loki/loki-config.yaml
+      - loki-data:/var/lib/loki/logs
+    command: -config.file=/etc/loki/loki-config.yaml
+    ports:
+      - "3100:3100"  # Query API
+    networks:
+      - logging-net
+    restart: unless-stopped
+    logging: *default-logging
+    
+  promtail:
+    image: grafana/promtail:2.9.0
+    container_name: promtail
+    volumes:
+      - ./promtail-config.yaml:/etc/promtail/config.yaml
+      - /var/log/application:/var/log/application:ro
+    command: -config.file=/etc/promtail/config.yaml
+    depends_on:
+      - loki
+    networks:
+      - logging-net
+    restart: unless-stopped
+    logging: *default-logging
+      
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: grafana
+    environment:
+      - GF_INSTALL_PLUGINS=grafana-lokiexplore-app
+    ports:
+      - "3001:3000"
+    networks:
+      - logging-net
+    restart: unless-stopped
+    logging: *default-logging
+
+networks:
+  logging-net:
+    driver: bridge
+
+volumes:
+  loki-data:

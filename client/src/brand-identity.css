@@ -1,0 +1,26 @@
+.brand-identity {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* Preserve the original horizontal lockup, enlarged by exactly 20%. */
+  gap: 3.6px;
+  color: #e9b63d;
+  text-align: left;
+  white-space: nowrap;
+}
+.brand-identity > img {
+  width: 50.4px;
+  height: 43.2px;
+  flex: 0 0 auto;
+  object-fit: contain;
+}
+.brand-identity__text {
+  display: flex;
+  align-items: center;
+  font-size: 15.6px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+.brand-identity__text > strong {
+  font-weight: inherit;
+}

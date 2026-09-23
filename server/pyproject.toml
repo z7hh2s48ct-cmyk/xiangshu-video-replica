@@ -1,0 +1,70 @@
+[project]
+name = "video-replica-api"
+version = "2.2.0"
+description = "Customer cloud API service for the 众墅之家 video replica platform"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic==1.17.2",
+    "cos-python-sdk-v5==1.9.44",
+    "cryptography==50.0.0",
+    "curl-cffi>=0.6.0",
+    "fastapi==0.141.1",
+    "opencv-python-headless>=4.5.0",
+    "pillow>=9.0.0",
+    "playwright==1.62.0",
+    "psycopg[binary,pool]>=3.2",
+    "python-multipart==0.0.31",
+    "qrcode[pil]==8.2",
+    "requests>=2.31.0",
+    "sqlalchemy>=2.0.52",
+    "uvicorn==0.52.2",
+]
+
+[dependency-groups]
+dev = [
+    "asyncpg>=0.31.0",
+    "httpx==0.28.1",
+    "mypy==2.3.0",
+    "pytest==9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff==0.16.2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "pg: requires the isolated PostgreSQL integration fixture",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# C5 发布能力引入的供应商源码保持原样（见 app/publishers/vendor/*/VENDOR-NOTES.md），
+# 不参与本仓库 lint/format/mypy 口径。
+exclude = ["app/publishers/vendor"]
+
+[tool.ruff.format]
+# 已发布迁移只追加；保留 061 原始 SQL 文本布局，仍执行 lint 与迁移测试。
+exclude = ["migrations/versions/061_provider_whitelist_widen.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+
+[[tool.mypy.overrides]]
+module = "app.publishers.vendor.*"
+ignore_errors = true
+follow_imports = "skip"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[build-system]
+requires = ["hatchling==1.32.0"]
+build-backend = "hatchling.build"

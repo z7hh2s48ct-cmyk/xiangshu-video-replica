@@ -1,0 +1,471 @@
+.analytics-page {
+  color: #eeeeea;
+  margin: 0 auto;
+  max-width: 1260px;
+  padding: 8px 18px 28px;
+}
+
+.analytics-heading {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.analytics-heading h1 {
+  font-size: var(--font-title);
+  line-height: 1.15;
+  margin: 0 0 14px;
+}
+
+.analytics-freshness {
+  align-items: center;
+  color: #8f9089;
+  display: flex;
+  font-size: var(--font-label);
+  gap: 16px;
+  margin: -4px 0 14px;
+}
+
+.analytics-freshness .is-stale {
+  align-items: center;
+  color: #e3a36c;
+  display: inline-flex;
+  gap: 6px;
+}
+
+.analytics-filters {
+  align-items: center;
+  border: 0;
+  display: flex;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 0;
+}
+
+.analytics-filters legend {
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  height: 1px;
+  overflow: hidden;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
+}
+
+.analytics-filters label {
+  align-items: center;
+  background: #0d0e0e;
+  border: 1px solid #30312e;
+  border-radius: 8px;
+  display: flex;
+  min-width: 160px;
+  padding: 0 12px;
+}
+
+.analytics-page .analytics-filters select {
+  appearance: none;
+  background:
+    linear-gradient(45deg, transparent 50%, #b8b9b3 50%) calc(100% - 8px) 17px /
+    6px 6px no-repeat,
+    linear-gradient(135deg, #b8b9b3 50%, transparent 50%) calc(100% - 4px) 17px
+    / 6px 6px no-repeat;
+  border: 0;
+  color: #deded9;
+  cursor: pointer;
+  font: inherit;
+  height: 42px;
+  outline: 0;
+  padding: 0 28px 0 8px;
+  width: 100%;
+}
+
+.analytics-sample-mark {
+  align-items: center;
+  color: #c6c7c1;
+  display: inline-flex;
+  gap: 8px;
+  margin-left: 2px;
+}
+
+.analytics-sample-mark i {
+  background: #45c77d;
+  border-radius: 50%;
+  box-shadow: 0 0 10px #45c77d66;
+  height: 9px;
+  width: 9px;
+}
+
+.analytics-metrics {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  margin-bottom: 14px;
+}
+
+.analytics-metric {
+  align-items: center;
+  display: flex;
+  gap: 16px;
+  min-height: 104px;
+  padding: 16px 20px;
+}
+
+.analytics-metric-icon {
+  align-items: center;
+  background: radial-gradient(circle, #49391a 0, #26200f 68%, #171713 100%);
+  border: 1px solid #644814;
+  border-radius: 50%;
+  color: #f1b92d;
+  display: flex;
+  flex: 0 0 68px;
+  height: 68px;
+  justify-content: center;
+}
+
+.analytics-metric div > span,
+.analytics-metric small {
+  color: #b4b5af;
+  display: block;
+}
+
+.analytics-metric strong {
+  display: block;
+  font-size: var(--font-title);
+  line-height: 1.12;
+  margin: 5px 0 2px;
+  white-space: nowrap;
+}
+
+.analytics-charts {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(0, 1.55fr) minmax(330px, 1fr);
+  margin-bottom: 14px;
+}
+
+.analytics-trend,
+.analytics-share {
+  height: 320px;
+  padding: 16px 18px 10px;
+}
+
+.analytics-trend h2,
+.analytics-share h2,
+.analytics-performance h2 {
+  font-size: var(--font-section);
+  margin: 0;
+}
+
+.analytics-trend h2 small,
+.analytics-share h2 small {
+  color: #aaa9a3;
+  font-size: var(--font-body);
+  font-weight: 400;
+  margin-left: 10px;
+}
+
+.analytics-trend-chart {
+  display: block;
+  height: 210px;
+  overflow: visible;
+  width: 100%;
+}
+
+.analytics-trend-chart line {
+  stroke: #292a27;
+  stroke-width: 1;
+}
+
+.analytics-trend-chart text {
+  fill: #b6b7b2;
+  font-size: var(--font-label);
+}
+
+.analytics-trend-chart .analytics-point-value {
+  fill: #f1b51c;
+}
+
+.analytics-trend-chart circle {
+  fill: #10110f;
+  stroke: #f2b51a;
+  stroke-width: 3;
+}
+
+.analytics-trend-line {
+  fill: none;
+  stroke: #e8ad29;
+  stroke-width: 3;
+}
+
+.analytics-trend-area {
+  fill: url(#analytics-trend-fill);
+}
+
+.analytics-trend > p,
+.analytics-share > p {
+  border-top: 1px solid #292a27;
+  color: #d4d4cf;
+  margin: -2px 0 0;
+  padding-top: 9px;
+  text-align: center;
+}
+
+.analytics-share-body {
+  align-items: center;
+  display: flex;
+  gap: 22px;
+  height: 202px;
+  justify-content: center;
+}
+
+.analytics-donut {
+  align-items: center;
+  border-radius: 50%;
+  display: flex;
+  flex: 0 0 140px;
+  height: 140px;
+  justify-content: center;
+  position: relative;
+}
+
+.analytics-donut::after {
+  background: #101110;
+  border-radius: 50%;
+  content: "";
+  inset: 28px;
+  position: absolute;
+}
+
+.analytics-donut strong {
+  font-size: var(--font-section);
+  position: relative;
+  z-index: 1;
+}
+
+.analytics-share dl {
+  margin: 0;
+}
+
+.analytics-share dl div + div {
+  margin-top: 20px;
+}
+
+.analytics-share dt {
+  align-items: center;
+  display: flex;
+  font-size: var(--font-body);
+  gap: 9px;
+}
+
+.analytics-share dt i,
+.analytics-platform i {
+  border-radius: 50%;
+  display: inline-block;
+  height: 12px;
+  width: 12px;
+}
+
+.analytics-share dt i.is-douyin,
+.analytics-platform--douyin i {
+  background: #efb524;
+}
+
+.analytics-share dt i.is-wechat,
+.analytics-platform--wechat i {
+  background: #916916;
+}
+
+.analytics-share dd {
+  color: #cacbc5;
+  font-size: var(--font-body);
+  margin: 5px 0 0 21px;
+}
+
+.analytics-performance {
+  min-height: 258px;
+  padding: 12px 14px 14px;
+}
+
+.analytics-performance h2 {
+  margin: 0 0 10px 2px;
+}
+
+.analytics-table-wrap {
+  overflow-x: auto;
+}
+
+.analytics-performance table {
+  border-collapse: collapse;
+  /* 五列（作品/类型/完成时间/消耗/操作）常规宽度即可完整呈现。 */
+  min-width: 820px;
+  width: 100%;
+}
+
+.analytics-performance th,
+.analytics-performance td {
+  border: 1px solid #2d2e2b;
+  font-size: var(--font-body);
+  height: 52px;
+  padding: 7px 10px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.analytics-performance th {
+  color: #c7c8c2;
+  font-weight: 500;
+  height: 38px;
+}
+
+.analytics-work,
+.analytics-person,
+.analytics-platform,
+.analytics-actions {
+  align-items: center;
+  display: flex;
+}
+
+.analytics-work {
+  gap: 10px;
+  min-width: 260px;
+}
+
+.analytics-person img {
+  border-radius: 50%;
+  height: 34px;
+  object-fit: cover;
+  width: 34px;
+}
+
+.analytics-work .studio-media {
+  border-radius: 5px;
+  flex: 0 0 80px;
+  height: 42px;
+  margin: 0;
+  overflow: hidden;
+  width: 80px;
+}
+
+.analytics-work .studio-media img {
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+.analytics-platform {
+  gap: 8px;
+}
+
+.analytics-person {
+  gap: 8px;
+}
+
+.analytics-actions {
+  gap: 10px;
+}
+
+.analytics-actions .studio-button {
+  font-size: var(--font-label);
+  height: 34px;
+  padding: 0 13px;
+}
+
+.analytics-actions .studio-button:last-child {
+  border-color: #86630f;
+  color: #efb524;
+}
+
+.analytics-empty-page {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+  min-height: 620px;
+}
+
+@media (max-width: 1050px) {
+  .analytics-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .analytics-charts {
+    grid-template-columns: 1fr;
+  }
+
+  .analytics-trend,
+  .analytics-share {
+    height: auto;
+  }
+}
+
+@media (max-width: 720px) {
+  .analytics-page {
+    padding-inline: 14px;
+  }
+
+  .analytics-filters {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .analytics-filters label {
+    width: 100%;
+  }
+
+  .analytics-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .analytics-share-body {
+    flex-direction: column;
+    height: auto;
+    padding: 24px 0;
+  }
+}
+
+.analytics-share-empty {
+  color: #8f9089;
+  margin: 0;
+}
+
+.analytics-trend-legend {
+  align-items: center;
+  color: #b4b5af;
+  display: flex;
+  font-size: var(--font-label);
+  gap: 16px;
+  margin: 6px 0 0;
+}
+
+.analytics-page .analytics-trend-legend span {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+}
+
+.analytics-trend-legend i {
+  border-radius: 50%;
+  display: inline-block;
+  height: 8px;
+  width: 8px;
+}
+
+.analytics-trend-legend i.is-completed {
+  background: #e8ad29;
+}
+
+.analytics-trend-legend i.is-failed {
+  background: #d0654f;
+}
+
+.analytics-trend-chart .analytics-trend-failed {
+  fill: none;
+  stroke: #d0654f;
+  stroke-width: 2;
+  stroke-dasharray: 6 5;
+}
+
+.analytics-trend-chart circle.analytics-point-failed {
+  fill: #10110f;
+  stroke: #d0654f;
+  stroke-width: 2.5;
+}

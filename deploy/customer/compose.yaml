@@ -1,0 +1,280 @@
+# CW-032 — the single default customer delivery package (唯一默认部署包).
+#
+# This file is the registered in-repo source of truth for the customer
+# single-host topology; deploy/customer-git-rollout.sh points COMPOSE at it
+# (override: CUSTOMER_COMPOSE=) instead of requiring an unregistered
+# /opt/video-replica-candidate/compose.yaml host file.
+#
+# Roles (角色): db = data store; migrate = the ONLY schema-DDL role
+# (one-shot, alembic upgrade head); api-1/api-2 = HTTP; worker-1..4 = tasks;
+# backup = deploy/postgres/pitr-backup.sh on the host (rotation delegated to
+# the archive platform's immutability policy — no local prune, by design).
+#
+# Connection-pool budget (全进程连接池预算): 2 API + 4 generation + 1 collection + 1 publish worker, each
+# defaulting to VIDEO_REPLICA_PG_POOL_MAX=8 (ceiling 64, server/app/db_pg.py)
+# => 8 x 8 = 64 + 1 transient migrate + 3 superuser_reserved = 68 <=
+# max_connections=120 below. The machine-checked contract lives in
+# server/tests/test_cw032_delivery_package.py.
+#
+# Required in /etc/video-replica/compose.env (gitignored): APP_IMAGE, POSTGRES_USER,
+# POSTGRES_PASSWORD, POSTGRES_DB. Application configuration comes from
+# /etc/video-replica/customer.env via env_file (template:
+# deploy/customer.env.example); its VIDEO_REPLICA_DATABASE_URL must point at
+# db:5432 on this compose network.
+
+name: video-replica-customer
+
+# P2-1 (BILLING-OBS) — 容器日志轮转与留存. The application keeps records on
+# stderr only (server/app/logging_setup.py installs no file handler), so the
+# docker json-file driver is the single log sink on disk; without a bound one
+# busy worker could fill the host. Every service opts into this shared anchor.
+# Contract: server/tests/test_cw032_delivery_package.py (parameters) and
+# deploy/customer/README.md §8 (operator procedure + retention boundary).
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?/etc/video-replica/compose.env must define POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?/etc/video-replica/compose.env must define POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?/etc/video-replica/compose.env must define POSTGRES_DB}
+    command:
+      - postgres
+      - -c
+      - max_connections=120
+      - -c
+      - superuser_reserved_connections=3
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/etc/postgresql/tls/server.crt
+      - -c
+      - ssl_key_file=/etc/postgresql/tls/server.key
+      - -c
+      - hba_file=/etc/postgresql/customer-pg_hba.conf
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - type: bind
+        source: ${POSTGRES_TLS_DIR:-/etc/video-replica/postgres-tls}
+        target: /etc/postgresql/tls
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../postgres/customer-pg_hba.conf
+        target: /etc/postgresql/customer-pg_hba.conf
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  migrate:
+    image: ${APP_IMAGE:?/etc/video-replica/compose.env must define APP_IMAGE}
+    restart: "no"
+    logging: *default-logging
+    env_file:
+      - ${CUSTOMER_ENV_FILE:-/etc/video-replica/customer.env}
+    volumes: &app-files
+      # Keep the probe available when rolling back to an image predating this module.
+      - type: bind
+        source: ./healthcheck.py
+        target: /opt/video-replica/customer-healthcheck.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${POSTGRES_CA_FILE:-/etc/video-replica/postgresql-ca.pem}
+        target: /etc/video-replica/postgresql-ca.pem
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${METRICS_TOKEN_FILE:-/etc/video-replica/metrics.token}
+        target: /etc/video-replica/metrics.token
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      db:
+        condition: service_healthy
+    command:
+      - sh
+      - -lc
+      - cd /opt/video-replica/server && python -m alembic upgrade head
+
+  api-1:
+    image: ${APP_IMAGE:?/etc/video-replica/compose.env must define APP_IMAGE}
+    restart: unless-stopped
+    logging: *default-logging
+    env_file:
+      - ${CUSTOMER_ENV_FILE:-/etc/video-replica/customer.env}
+    volumes: *app-files
+    ports:
+      - "127.0.0.1:8001:8000"
+    command:
+      - sh
+      - -lc
+      - cd /opt/video-replica/server && exec python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-proxy-headers
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "/opt/video-replica/customer-healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  api-2:
+    image: ${APP_IMAGE:?/etc/video-replica/compose.env must define APP_IMAGE}
+    restart: unless-stopped
+    logging: *default-logging
+    env_file:
+      - ${CUSTOMER_ENV_FILE:-/etc/video-replica/customer.env}
+    volumes: *app-files
+    ports:
+      - "127.0.0.1:8002:8000"
+    command:
+      - sh
+      - -lc
+      - cd /opt/video-replica/server && exec python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-proxy-headers
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "/opt/video-replica/customer-healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  worker-1:
+    image: ${APP_IMAGE:?/etc/video-replica/compose.env must define APP_IMAGE}
+    restart: unless-stopped
+    logging: *default-logging
+    env_file:
+      - ${CUSTOMER_ENV_FILE:-/etc/video-replica/customer.env}
+    volumes: *app-files
+    command:
+      - sh
+      - -lc
+      - cd /opt/video-replica/server && exec python -m app.generation_worker
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker-2:
+    image: ${APP_IMAGE:?/etc/video-replica/compose.env must define APP_IMAGE}
+    restart: unless-stopped
+    logging: *default-logging
+    env_file:
+      - ${CUSTOMER_ENV_FILE:-/etc/video-replica/customer.env}
+    volumes: *app-files
+    command:
+      - sh
+      - -lc
+      - cd /opt/video-replica/server && exec python -m app.generation_worker
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker-3:
+    image: ${APP_IMAGE:?/etc/video-replica/compose.env must define APP_IMAGE}
+    restart: unless-stopped
+    logging: *default-logging
+    env_file:
+      - ${CUSTOMER_ENV_FILE:-/etc/video-replica/customer.env}
+    volumes: *app-files
+    command:
+      - sh
+      - -lc
+      - cd /opt/video-replica/server && exec python -m app.generation_worker
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker-4:
+    image: ${APP_IMAGE:?/etc/video-replica/compose.env must define APP_IMAGE}
+    restart: unless-stopped
+    logging: *default-logging
+    env_file:
+      - ${CUSTOMER_ENV_FILE:-/etc/video-replica/customer.env}
+    volumes: *app-files
+    command:
+      - sh
+      - -lc
+      - cd /opt/video-replica/server && exec python -m app.generation_worker
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # PUBLISH-DELIVERY-20260917: platform deliveries (API first, browser fallback)
+  # and account login probes run apart from the H3 generation loop — one
+  # upload can block for minutes. Douyin signing needs the base image's Node.js.
+  worker-publish:
+    image: ${APP_IMAGE:?/etc/video-replica/compose.env must define APP_IMAGE}
+    restart: unless-stopped
+    logging: *default-logging
+    env_file:
+      - ${CUSTOMER_ENV_FILE:-/etc/video-replica/customer.env}
+    volumes: *app-files
+    command:
+      - sh
+      - -lc
+      - cd /opt/video-replica/server && exec python -m app.publish_worker --idle-seconds 3
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker-viral:
+    image: ${APP_IMAGE:?/etc/video-replica/compose.env must define APP_IMAGE}
+    restart: unless-stopped
+    logging: *default-logging
+    env_file:
+      - ${CUSTOMER_ENV_FILE:-/etc/video-replica/customer.env}
+    volumes: *app-files
+    command:
+      - sh
+      - -lc
+      - cd /opt/video-replica/server && exec python -m app.generation_worker --viral-collection --idle-seconds 30
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
+
+# Trust the host nginx gateway /32, not the entire container subnet.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${CUSTOMER_NETWORK_SUBNET:-172.30.42.0/24}
+          gateway: ${CUSTOMER_NETWORK_GATEWAY:-172.30.42.1}
