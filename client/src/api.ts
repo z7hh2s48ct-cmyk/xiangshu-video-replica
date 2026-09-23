@@ -7558,7 +7558,7 @@ export type ViralVideoItem = {
   likeDisplay: string | null;
   tags: string[];
   hasPlayableAudio: boolean;
-  /** 源平台播放地址；真实列表播放统一由服务端媒体管线转存后使用。 */
+  /** 源平台播放地址；桌面端用来缓存并播放本地副本。 */
   playUrl: string | null;
   isFavorite?: boolean;
   availability?: "available" | "unavailable" | "hidden";
@@ -7591,6 +7591,20 @@ export type ViralSearchResponse = {
   cursor: string | null;
   hasMore: boolean;
   billing: ViralSearchBilling;
+};
+
+export type ViralDiscoveryItem = {
+  platform: ViralPlatform;
+  videoId: string;
+  keyword: string;
+  searchedAt: string;
+  video: ViralVideoItem | null;
+};
+
+export type ViralDiscoveriesResponse = {
+  date: string;
+  total: number;
+  items: ViralDiscoveryItem[];
 };
 
 export type ViralFavoritesResponse = {
@@ -7644,7 +7658,7 @@ export type ViralImportTask = {
   retryable?: boolean;
 };
 
-/** 最近 7 天爆款列表（服务端按分类关键词聚合，带计费护栏缓存）。 */
+/** 读取内容池中的爆款视频；此调用不会触发上游搜索或计费。 */
 export function listViralVideos(
   platform: ViralPlatform,
   sort: ViralSort = "hot",
@@ -7654,7 +7668,7 @@ export function listViralVideos(
   if (options.limit !== undefined) query.set("limit", String(options.limit));
   if (options.cursor) query.set("cursor", options.cursor);
   if (options.featuredOnly) query.set("featured_only", "true");
-  // 页面仅读取数据库中的已归档媒体，不触发上游采集。
+  // 页面仅读取数据库中的内容池，不触发上游搜索。
   return requestApiJson<ViralListResponse>(
     `/api/viral/videos?${query}`,
     "爆款视频列表暂不可用",
@@ -7705,6 +7719,17 @@ export function searchViralVideos(
       body: JSON.stringify(payload),
     },
     VIRAL_SEARCH_TIMEOUT_MS,
+  );
+}
+
+/** 只读本人指定日期的搜索发现；不会调用上游或产生搜索费用。 */
+export function listViralDiscoveries(
+  date?: string,
+): Promise<ViralDiscoveriesResponse> {
+  const query = date ? `?date=${encodeURIComponent(date)}` : "";
+  return requestApiJson<ViralDiscoveriesResponse>(
+    `/api/viral/search/discoveries${query}`,
+    "我的发现暂不可用",
   );
 }
 

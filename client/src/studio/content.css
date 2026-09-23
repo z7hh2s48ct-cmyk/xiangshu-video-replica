@@ -87,6 +87,8 @@
   align-items: center;
   border-bottom: 1px solid #292a27;
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
   justify-content: space-between;
   min-height: 42px;
 }
@@ -125,6 +127,28 @@
   gap: 8px;
 }
 .content-sort select {
+  background: #101111;
+  border: 1px solid #343530;
+  border-radius: 6px;
+  color: #deded8;
+  font: inherit;
+  padding: 6px 10px;
+}
+.viral-discoveries-toolbar {
+  align-items: center;
+  color: #b6b7b1;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: var(--font-label);
+  gap: 16px;
+  margin-top: 12px;
+}
+.viral-discoveries-toolbar label {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+.viral-discoveries-toolbar input {
   background: #101111;
   border: 1px solid #343530;
   border-radius: 6px;
@@ -1391,7 +1415,7 @@
   transition: width 0.2s ease;
 }
 
-/* 缓存占用与清理入口（决策 #16 面板的轻量版）。非桌面端整块不渲染。 */
+/* 桌面端下载任务和本地缓存占用。 */
 .viral-cache-usage {
   align-items: center;
   display: flex;
@@ -1400,6 +1424,56 @@
   margin: 8px 0 0;
   font-size: var(--font-label);
   color: #999b95;
+}
+.viral-download-panel {
+  background: #151716;
+  border: 1px solid #343530;
+  border-radius: 8px;
+  color: #deded8;
+  margin: 8px 0 14px;
+  max-height: 340px;
+  overflow-y: auto;
+  padding: 12px;
+}
+.viral-download-panel > p {
+  color: #999b95;
+  margin: 0;
+}
+.viral-download-panel ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.viral-download-panel li {
+  align-items: center;
+  border-bottom: 1px solid #292a27;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 9px 0;
+}
+.viral-download-panel li:last-child {
+  border-bottom: 0;
+}
+.viral-download-panel li > div:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.viral-download-panel strong {
+  font-size: var(--font-label);
+  overflow-wrap: anywhere;
+}
+.viral-download-panel span,
+.viral-download-panel small {
+  color: #999b95;
+  font-size: var(--font-caption);
+}
+.viral-download-actions {
+  display: flex;
+  gap: 6px;
 }
 
 .viral-card-scrim {
@@ -1576,6 +1650,11 @@
   -webkit-box-orient: vertical;
   overflow: hidden;
   min-height: 2.9em;
+}
+.viral-discovery-keyword {
+  color: #b6b7b1;
+  font-size: var(--font-caption);
+  margin: 0;
 }
 
 .viral-card-author {

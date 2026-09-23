@@ -36,6 +36,7 @@ import {
   listMaterialGroups,
   listMaterials,
   listMaterialTags,
+  listViralDiscoveries,
   listViralFavorites,
   listViralVideos,
   newViralSearchKey,
@@ -85,11 +86,17 @@ import {
   cacheAvailable,
   cacheProgressRatio,
   clearViralCache,
+  deleteViralCache,
   enforceViralCacheLimit,
   ensureViralCacheForVideo,
+  ensureViralSourceCache,
   formatCacheBytes,
+  listenViralCacheProgress,
   listViralCache,
+  listViralCacheTasks,
   openViralCacheFolder,
+  pauseViralCache,
+  resumeViralCache,
   useViralAutoCache,
   useViralCacheProgress,
   type ViralCachedItem,
@@ -381,14 +388,14 @@ function RefreshStatisticsButton({ videos }: { videos: StudioVideo[] }) {
         disabled={busy}
         onClick={() => void refreshStatistics()}
       >
-        {busy ? "正在刷新…" : "读取最新已采集数据"}
+        {busy ? "正在读取…" : "重新读取互动数据"}
       </button>
       {error && <p role="alert">{error}</p>}
     </div>
   );
 }
 
-/** 点击播放：真实平台视频先走媒体管线，测试夹具可直接使用 playUrl。 */
+/** 平台视频只播放桌面本地缓存；无平台身份的测试素材沿用 playUrl。 */
 function useViralPlayback(
   video?: StudioVideo,
   active = true,
@@ -683,9 +690,19 @@ export function ViralFavoriteButton({
   );
 }
 
-/** 缓存占用与清理入口（决策 #16 下载管理面板的轻量版）。非桌面端不渲染。 */
-function ViralCacheUsage({ revision }: { revision: number }) {
+/** 桌面下载管理：文件系统占用与当前会话任务分开读取，进度由事件更新。 */
+function ViralCacheUsage({
+  revision,
+  videos,
+}: {
+  revision: number;
+  videos: StudioVideo[];
+}) {
   const [items, setItems] = useState<ViralCachedItem[] | null>(null);
+  const [opened, setOpened] = useState(false);
+  const [tasks, setTasks] = useState<ViralCacheProgress[] | null>(null);
+  const [busyKey, setBusyKey] = useState<string>();
+  const [error, setError] = useState<string>();
   // biome-ignore lint/correctness/useExhaustiveDependencies: revision 是刻意的重载触发器——缓存完成数变化时重新读一次占用，effect 体内不需要用到它。
   useEffect(() => {
     if (!cacheAvailable()) return;
@@ -694,33 +711,295 @@ function ViralCacheUsage({ revision }: { revision: number }) {
       .then((next) => {
         if (!cancelled) setItems(next);
       })
-      .catch(() => {
-        // 读不到就当没有缓存：这只是只读的状态展示，不值得打断浏览。
+      .catch((cause) => {
+        if (!cancelled)
+          setError(cause instanceof Error ? cause.message : "读取缓存目录失败");
       });
     return () => {
       cancelled = true;
     };
   }, [revision]);
-  if (!cacheAvailable() || items === null) return null;
+  useEffect(() => {
+    if (!opened || !cacheAvailable()) return;
+    let cancelled = false;
+    let unsubscribe: (() => void) | undefined;
+    void listViralCacheTasks()
+      .then((snapshot) => {
+        if (!cancelled)
+          setTasks((current) => {
+            if (!current) return snapshot;
+            const latest = new Map(
+              snapshot.map((item) => [
+                viralCacheKey(item.platform, item.videoId),
+                item,
+              ]),
+            );
+            for (const item of current)
+              latest.set(viralCacheKey(item.platform, item.videoId), item);
+            return [...latest.values()];
+          });
+      })
+      .catch((cause) => {
+        if (!cancelled)
+          setError(cause instanceof Error ? cause.message : "读取下载任务失败");
+      });
+    void listenViralCacheProgress((progress) => {
+      if (cancelled) return;
+      setTasks((current) => {
+        const previous = current ?? [];
+        const key = viralCacheKey(progress.platform, progress.videoId);
+        return [
+          ...previous.filter(
+            (item) => viralCacheKey(item.platform, item.videoId) !== key,
+          ),
+          progress,
+        ];
+      });
+      if (progress.state === "cached") {
+        void listViralCache()
+          .then((next) => {
+            if (!cancelled) setItems(next);
+          })
+          .catch((cause) => {
+            if (!cancelled)
+              setError(
+                cause instanceof Error ? cause.message : "读取缓存目录失败",
+              );
+          });
+      }
+    })
+      .then((stop) => {
+        if (cancelled) stop();
+        else unsubscribe = stop;
+      })
+      .catch((cause) => {
+        if (!cancelled)
+          setError(cause instanceof Error ? cause.message : "监听下载状态失败");
+      });
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
+  }, [opened]);
+  if (!cacheAvailable()) return null;
+  if (items === null)
+    return error ? (
+      <p className="viral-media-status is-error" role="alert">
+        {error}
+      </p>
+    ) : null;
   const totalBytes = items.reduce((sum, item) => sum + item.bytes, 0);
+  const videoByKey = new Map(
+    videos.flatMap((video) =>
+      video.platformKey && video.nativeId
+        ? [[viralCacheKey(video.platformKey, video.nativeId), video] as const]
+        : [],
+    ),
+  );
+  const currentTasks = tasks ?? [];
+  const taskKeys = new Set(
+    currentTasks.map((item) => viralCacheKey(item.platform, item.videoId)),
+  );
+  const allTasks: ViralCacheProgress[] = [
+    ...currentTasks,
+    ...items
+      .filter(
+        (item) => !taskKeys.has(viralCacheKey(item.platform, item.videoId)),
+      )
+      .map((item) => ({
+        platform: item.platform,
+        videoId: item.videoId,
+        state: "cached" as const,
+        downloadedBytes: item.bytes,
+        totalBytes: item.bytes,
+        speedBytesPerSecond: 0,
+        error: null,
+      })),
+  ];
+  const activeTasks = allTasks.some((item) =>
+    ["queued", "downloading", "paused"].includes(item.state),
+  );
+  const runTaskAction = async (
+    item: ViralCacheProgress,
+    action: "pause" | "resume" | "delete" | "retry" | "refresh",
+  ) => {
+    const key = viralCacheKey(item.platform, item.videoId);
+    setBusyKey(key);
+    setError(undefined);
+    try {
+      if (action === "pause")
+        await pauseViralCache(item.platform, item.videoId);
+      else if (action === "resume")
+        await resumeViralCache(item.platform, item.videoId);
+      else if (action === "retry") {
+        const video = videoByKey.get(key);
+        if (!video)
+          throw new Error("当前列表没有这条视频，请重新打开视频后重试");
+        await ensureViralCacheForVideo(video);
+      } else if (action === "refresh") {
+        if (item.platform !== "douyin" && item.platform !== "wechat_channels")
+          throw new Error("当前平台不支持重新获取视频地址");
+        await ensureViralSourceCache(item.platform, item.videoId);
+      } else {
+        await deleteViralCache(item.platform, item.videoId);
+        setTasks(
+          (current) =>
+            current?.filter(
+              (task) => viralCacheKey(task.platform, task.videoId) !== key,
+            ) ?? null,
+        );
+        setItems(await listViralCache());
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "下载任务操作失败");
+    } finally {
+      setBusyKey(undefined);
+    }
+  };
   return (
-    <div className="viral-cache-usage" role="status">
-      <span>
-        本地已缓存 {items.length} 条 · 占用 {formatCacheBytes(totalBytes)}
-      </span>
-      <Button variant="quiet" onClick={() => void openViralCacheFolder()}>
-        打开缓存目录
-      </Button>
-      <Button
-        variant="quiet"
-        disabled={items.length === 0}
-        title="只删除本地缓存文件，需要时可以重新缓存"
-        onClick={() => {
-          void clearViralCache("all").then(() => setItems([]));
-        }}
-      >
-        清空本地缓存
-      </Button>
+    <div className="viral-cache-manager">
+      <div className="viral-cache-usage" role="status">
+        <span>
+          本地已缓存 {items.length} 条 · 占用 {formatCacheBytes(totalBytes)}
+        </span>
+        <Button variant="quiet" onClick={() => setOpened((value) => !value)}>
+          {opened ? "收起下载管理" : "下载管理"}
+        </Button>
+        <Button
+          variant="quiet"
+          onClick={() => {
+            void openViralCacheFolder().catch((cause) =>
+              setError(
+                cause instanceof Error ? cause.message : "打开缓存目录失败",
+              ),
+            );
+          }}
+        >
+          打开缓存目录
+        </Button>
+        <Button
+          variant="quiet"
+          disabled={
+            items.length === 0 ||
+            tasks === null ||
+            activeTasks ||
+            busyKey !== undefined
+          }
+          title="只删除本地缓存文件，需要时可以重新缓存"
+          onClick={() => {
+            setBusyKey("all");
+            setError(undefined);
+            void clearViralCache("all")
+              .then(() => {
+                setItems([]);
+                setTasks([]);
+              })
+              .catch((cause) =>
+                setError(
+                  cause instanceof Error ? cause.message : "清空缓存失败",
+                ),
+              )
+              .finally(() => setBusyKey(undefined));
+          }}
+        >
+          清空本地缓存
+        </Button>
+      </div>
+      {error && (
+        <p className="viral-media-status is-error" role="alert">
+          {error}
+        </p>
+      )}
+      {opened && (
+        <section className="viral-download-panel" aria-label="下载任务">
+          {tasks === null ? (
+            <p>正在读取下载任务…</p>
+          ) : allTasks.length === 0 ? (
+            <p>暂无下载任务</p>
+          ) : (
+            <ul>
+              {allTasks.map((item) => {
+                const key = viralCacheKey(item.platform, item.videoId);
+                const video = videoByKey.get(key);
+                const ratio = cacheProgressRatio(item);
+                const status = `${CACHE_BADGE_LABELS[item.state]}${
+                  ratio === null ? "" : ` · ${Math.round(ratio * 100)}%`
+                }${
+                  item.state === "downloading"
+                    ? ` · ${formatCacheBytes(item.speedBytesPerSecond)}/s`
+                    : ""
+                }`;
+                return (
+                  <li key={key}>
+                    <div>
+                      <strong>{video?.title ?? key}</strong>
+                      <span>{status}</span>
+                      {item.error && <small>{item.error}</small>}
+                    </div>
+                    <div className="viral-download-actions">
+                      {(item.state === "queued" ||
+                        item.state === "downloading") && (
+                        <Button
+                          variant="quiet"
+                          aria-label={`暂停 ${key}`}
+                          disabled={busyKey !== undefined}
+                          onClick={() => void runTaskAction(item, "pause")}
+                        >
+                          暂停
+                        </Button>
+                      )}
+                      {item.state === "paused" && (
+                        <Button
+                          variant="quiet"
+                          aria-label={`继续 ${key}`}
+                          disabled={busyKey !== undefined}
+                          onClick={() => void runTaskAction(item, "resume")}
+                        >
+                          继续
+                        </Button>
+                      )}
+                      {(item.state === "cached" || item.state === "failed") && (
+                        <Button
+                          variant="quiet"
+                          aria-label={`删除缓存 ${key}`}
+                          disabled={busyKey !== undefined}
+                          onClick={() => void runTaskAction(item, "delete")}
+                        >
+                          删除
+                        </Button>
+                      )}
+                      {item.state === "failed" && video && video.playUrl && (
+                        <Button
+                          variant="quiet"
+                          aria-label={`重试 ${key}`}
+                          title="使用当前地址重新下载，不会再次请求源站地址"
+                          disabled={busyKey !== undefined}
+                          onClick={() => void runTaskAction(item, "retry")}
+                        >
+                          重试
+                        </Button>
+                      )}
+                      {item.state === "failed" &&
+                        (item.platform === "douyin" ||
+                          item.platform === "wechat_channels") && (
+                          <Button
+                            variant="quiet"
+                            aria-label={`更新地址并重试 ${key}`}
+                            title="重新获取源站地址，可能产生一次调用费用"
+                            disabled={busyKey !== undefined}
+                            onClick={() => void runTaskAction(item, "refresh")}
+                          >
+                            更新地址并重试
+                          </Button>
+                        )}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
+      )}
     </div>
   );
 }
@@ -757,6 +1036,7 @@ function ViralCard({
   onFavoriteChange,
   availability = "available",
   cacheProgress,
+  discoveryKeyword,
 }: {
   video: StudioVideo;
   active: boolean;
@@ -765,6 +1045,7 @@ function ViralCard({
   onFavoriteChange: (saved: boolean) => void;
   availability?: ViralVideoItem["availability"];
   cacheProgress?: ViralCacheProgress;
+  discoveryKeyword?: string;
 }) {
   const {
     review,
@@ -860,6 +1141,9 @@ function ViralCard({
       />
       <div className="viral-card-body">
         <h3>{video.title}</h3>
+        {discoveryKeyword && (
+          <p className="viral-discovery-keyword">搜索词：{discoveryKeyword}</p>
+        )}
         <div className="viral-card-tags">
           {video.tags?.slice(0, 6).map((tag) => (
             <span key={tag} title={`#${tag}`}>
@@ -905,7 +1189,18 @@ export function ViralPage() {
   const [category, setCategory] = useState("全部");
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<"热门优先" | "最新">("热门优先");
-  const [scope, setScope] = useState<"all" | "favorites">("all");
+  const [scope, setScope] = useState<"all" | "favorites" | "discoveries">(
+    "all",
+  );
+  const [discoveryDate, setDiscoveryDate] = useState<string>();
+  const [resolvedDiscoveryDate, setResolvedDiscoveryDate] = useState<string>();
+  const [discoveryVideos, setDiscoveryVideos] = useState<StudioVideo[]>([]);
+  const [discoveryKeywords, setDiscoveryKeywords] = useState(
+    new Map<string, string>(),
+  );
+  const [discoveryTotal, setDiscoveryTotal] = useState(0);
+  const [discoveryError, setDiscoveryError] = useState<string>();
+  const [discoveryLoading, setDiscoveryLoading] = useState(false);
   const [visibleCount, setVisibleCount] = useState(viralInitialCount);
   // 关键词搜索：只有显式提交才走服务端（会外呼上游并按次计费），结果整体替换列表。
   const [searchKeyword, setSearchKeyword] = useState<string>();
@@ -923,7 +1218,6 @@ export function ViralPage() {
   const searchOperationRef = useRef(0);
   const [activeVideoId, setActiveVideoId] = useState<string>();
   const [listError, setListError] = useState<string>();
-  const [refreshStatus, setRefreshStatus] = useState<string>();
   const [listLoading, setListLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [nextCursor, setNextCursor] = useState<string>();
@@ -970,11 +1264,11 @@ export function ViralPage() {
 
   const shown = useMemo(
     () =>
-      data.videos
+      (scope === "discoveries" ? discoveryVideos : data.videos)
         .filter(
           (item) =>
             item.platform === platform &&
-            (scope === "all" || favoriteKeys.has(viralIdentity(item))) &&
+            (scope !== "favorites" || favoriteKeys.has(viralIdentity(item))) &&
             (category === "全部" || item.category === category) &&
             `${item.title}${item.author}`.includes(query),
         )
@@ -987,7 +1281,16 @@ export function ViralPage() {
           }
           return (right.publishedAt ?? 0) - (left.publishedAt ?? 0);
         }),
-    [category, data.videos, favoriteKeys, platform, query, scope, sort],
+    [
+      category,
+      data.videos,
+      discoveryVideos,
+      favoriteKeys,
+      platform,
+      query,
+      scope,
+      sort,
+    ],
   );
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: 平台/分类/搜索词/排序变化时重置滚动加载计数。
@@ -1147,7 +1450,84 @@ export function ViralPage() {
   useEffect(() => {
     void accountId;
     setFavoriteKeys(new Set());
+    setDiscoveryVideos([]);
+    setDiscoveryKeywords(new Map());
+    setDiscoveryTotal(0);
+    setDiscoveryDate(undefined);
   }, [accountId]);
+
+  useEffect(() => {
+    if (review || scope !== "discoveries") return;
+    void accountId;
+    let cancelled = false;
+    setDiscoveryLoading(true);
+    setDiscoveryError(undefined);
+    setListError(undefined);
+    setDiscoveryVideos([]);
+    setDiscoveryKeywords(new Map());
+    setDiscoveryTotal(0);
+    void listViralDiscoveries(discoveryDate)
+      .then((result) => {
+        if (cancelled) return;
+        const available = result.items.flatMap((item) =>
+          item.video ? [item.video] : [],
+        );
+        const incoming = available.map(studioVideoFromViral);
+        setResolvedDiscoveryDate(result.date);
+        setDiscoveryTotal(result.total);
+        setDiscoveryVideos(incoming);
+        setDiscoveryKeywords(
+          new Map(
+            result.items.map((item) => [
+              `${item.platform}:${item.videoId}`,
+              item.keyword,
+            ]),
+          ),
+        );
+        setServerCategories([
+          ...new Set(available.map((item) => item.category).filter(Boolean)),
+        ]);
+        setFavoriteKeys(
+          new Set(
+            available
+              .filter((item) => item.isFavorite)
+              .map((item) => `${item.platform}:${item.videoId}`),
+          ),
+        );
+        setAvailabilityByKey(
+          new Map(
+            available.map((item) => [
+              `${item.platform}:${item.videoId}`,
+              item.availability,
+            ]),
+          ),
+        );
+        updateData((currentData) => {
+          const incomingIds = new Set(incoming.map((video) => video.id));
+          return {
+            ...currentData,
+            videos: [
+              ...currentData.videos.filter(
+                (video) => !incomingIds.has(video.id),
+              ),
+              ...incoming,
+            ],
+          };
+        });
+      })
+      .catch((cause) => {
+        if (!cancelled)
+          setDiscoveryError(
+            cause instanceof Error ? cause.message : "我的发现暂不可用",
+          );
+      })
+      .finally(() => {
+        if (!cancelled) setDiscoveryLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [accountId, discoveryDate, review, scope, updateData]);
 
   useEffect(() => {
     if (queryLifecycleRef.current === query) return;
@@ -1176,7 +1556,6 @@ export function ViralPage() {
     setLoadingMore(false);
     let cancelled = false;
     setListError(undefined);
-    setRefreshStatus(undefined);
     setListLoading(true);
     setNextCursor(undefined);
     setHasMore(false);
@@ -1201,15 +1580,6 @@ export function ViralPage() {
         });
         setNextCursor(confirmedNextCursor);
         setHasMore(confirmedHasMore);
-        setRefreshStatus(
-          result.refreshing
-            ? "正在采集爆款视频，当前先展示已缓存内容…"
-            : result.refreshError
-              ? result.refreshError
-              : result.stale
-                ? "当前展示缓存内容，等待下次刷新。"
-                : undefined,
-        );
         setFavoriteKeys(
           new Set(
             result.items
@@ -1481,7 +1851,7 @@ export function ViralPage() {
     ? false
     : review
       ? visibleCount < shown.length
-      : !query && hasMore;
+      : scope !== "discoveries" && !query && hasMore;
   useEffect(() => {
     const node = sentinelRef.current;
     if (!node || !canLoadMore) return;
@@ -1502,7 +1872,9 @@ export function ViralPage() {
         ? item === "抖音"
           ? 20
           : 30
-        : data.videos.filter((video) => video.platform === item).length
+        : (scope === "discoveries" ? discoveryVideos : data.videos).filter(
+            (video) => video.platform === item,
+          ).length
     }`,
   }));
   const categories = review
@@ -1514,7 +1886,7 @@ export function ViralPage() {
       <header className="content-title">
         <div>
           <h1>爆款视频</h1>
-          <p>乡墅灵感，持续发现 · 最近 7 天爆款</p>
+          <p>搜索发现乡墅灵感，收藏并提取可复刻的内容</p>
         </div>
         <search className="content-search">
           <form
@@ -1556,6 +1928,7 @@ export function ViralPage() {
             onClick={() => {
               setCategory("全部");
               setScope("all");
+              exitSearch();
             }}
             role="tab"
             type="button"
@@ -1568,12 +1941,29 @@ export function ViralPage() {
             onClick={() => {
               setCategory("全部");
               setScope("favorites");
+              exitSearch();
             }}
             role="tab"
             type="button"
           >
             我的收藏
           </button>
+          {!review && (
+            <button
+              aria-selected={scope === "discoveries"}
+              className={scope === "discoveries" ? "is-active" : ""}
+              onClick={() => {
+                setCategory("全部");
+                setQuery("");
+                setScope("discoveries");
+                exitSearch();
+              }}
+              role="tab"
+              type="button"
+            >
+              我的发现
+            </button>
+          )}
         </div>
         <div
           className="content-platform-tabs"
@@ -1612,6 +2002,23 @@ export function ViralPage() {
           </select>
         </label>
       </div>
+      {scope === "discoveries" && !review && (
+        <div className="viral-discoveries-toolbar">
+          <label>
+            发现日期
+            <input
+              aria-label="发现日期"
+              type="date"
+              value={discoveryDate ?? resolvedDiscoveryDate ?? ""}
+              onChange={(event) => {
+                setCategory("全部");
+                setDiscoveryDate(event.target.value || undefined);
+              }}
+            />
+          </label>
+          <span>当天发现 {discoveryTotal} 条</span>
+        </div>
+      )}
       <nav className="content-filters" aria-label="视频分类">
         {categories.map((item) => (
           <Button
@@ -1624,15 +2031,22 @@ export function ViralPage() {
         ))}
       </nav>
       {!review && <RefreshStatisticsButton videos={gridVideos} />}
-      {!review && <ViralCacheUsage revision={cachedOnPage} />}
+      {!review && (
+        <ViralCacheUsage revision={cachedOnPage} videos={data.videos} />
+      )}
+      {discoveryLoading && scope === "discoveries" && (
+        <p className="viral-media-status" role="status">
+          正在读取我的发现…
+        </p>
+      )}
+      {discoveryError && scope === "discoveries" && (
+        <p className="viral-media-status is-error" role="alert">
+          {discoveryError}
+        </p>
+      )}
       {(listError || statisticsError) && (
         <p className="viral-media-status is-error" role="status">
           {listError ?? statisticsError}
-        </p>
-      )}
-      {refreshStatus && (
-        <p className="viral-media-status" role="status">
-          {refreshStatus}
         </p>
       )}
       {listLoading && !searchActive && (
@@ -1684,6 +2098,11 @@ export function ViralPage() {
               }
               availability={availabilityByKey.get(viralIdentity(video))}
               cacheProgress={cacheProgressFor(video)}
+              discoveryKeyword={
+                scope === "discoveries"
+                  ? discoveryKeywords.get(viralIdentity(video))
+                  : undefined
+              }
             />
           ))}
         </section>
@@ -1694,16 +2113,18 @@ export function ViralPage() {
               ? "没有找到相关视频"
               : scope === "favorites"
                 ? "暂无收藏视频"
-                : "暂无爆款视频"
+                : scope === "discoveries"
+                  ? "当天暂无发现"
+                  : "暂无爆款视频"
           }
           description={
             searchActive
               ? "换个关键词再搜一次，或返回爆款列表。"
               : scope === "favorites"
                 ? "收藏爆款视频后，可以在这里统一查看。"
-                : refreshStatus
-                  ? refreshStatus
-                  : "数据源尚未配置或最近 7 天暂无内容，配置后自动展示。"
+                : scope === "discoveries"
+                  ? "搜索爆款视频后，当天的发现会保存在这里。"
+                  : "当前暂无爆款视频，搜索关键词发现内容。"
           }
         />
       )}

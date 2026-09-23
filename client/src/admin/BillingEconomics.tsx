@@ -240,7 +240,7 @@ export function BillingEconomics({
         type="button"
         onClick={() => setShowCollections((value) => !value)}
       >
-        {showCollections ? "收起采集账单" : "查看爆款采集账单"}
+        {showCollections ? "收起历史采集账单" : "查看历史采集账单"}
       </button>
       {showCollections && <ViralCollectionBilling key={query} query={query} />}
       <button type="button" onClick={() => setShowActions((value) => !value)}>

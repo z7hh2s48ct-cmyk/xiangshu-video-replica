@@ -476,7 +476,7 @@ export function BillingRatesManager({
   return (
     <section className="admin-panel" aria-label="逐项成本与售价">
       <p>
-        爆款视频数据按后台采集的已确认接口请求次数，使用采集批次开始时的单次售价向客户扣分；搜索分页和视频号详情分别计次。未配置或未启用售价时不向客户收费，读取已采集视频不扣分。
+        爆款关键词搜索及翻页、视频号按需获取播放地址分别计次；浏览内容池、我的发现和收藏不扣分。付费接口未配置有效售价时拒绝发起调用。供应商成本与客户扣分分别记录。
       </p>
       <div className="billing-rates-toolbar">
         <span>

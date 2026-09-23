@@ -14,6 +14,7 @@ import type {
   StudioPublishDraft,
   StudioState,
 } from "./types";
+import type { ViralCacheProgress } from "./viralCache";
 
 const {
   useStudio,
@@ -23,6 +24,7 @@ const {
   createViralImportTask,
   getViralImportTask,
   listViralFavorites,
+  listViralDiscoveries,
   listViralVideos,
   newViralSearchKey,
   searchViralVideos,
@@ -64,6 +66,7 @@ const {
   createViralImportTask: vi.fn(),
   getViralImportTask: vi.fn(),
   listViralFavorites: vi.fn(),
+  listViralDiscoveries: vi.fn(),
   listViralVideos: vi.fn(),
   searchViralVideos: vi.fn(),
   newViralSearchKey: vi.fn(() => "viral-search-key"),
@@ -134,6 +137,7 @@ vi.mock("../api", () => ({
   createViralImportTask,
   getViralImportTask,
   listViralFavorites,
+  listViralDiscoveries,
   listViralVideos,
   newViralSearchKey,
   searchViralVideos,
@@ -187,6 +191,16 @@ const viralCacheBridge = vi.hoisted(() => ({
     (platform: string, videoId: string) => Promise<string | null>
   >(async () => null),
   ensureViralCacheForVideo: vi.fn(async () => {}),
+  ensureViralSourceCache: vi.fn(async () => {}),
+  listViralCache: vi.fn<() => Promise<unknown[]>>(async () => []),
+  listViralCacheTasks: vi.fn<() => Promise<unknown[]>>(async () => []),
+  pauseViralCache: vi.fn(async () => {}),
+  resumeViralCache: vi.fn(async () => {}),
+  deleteViralCache: vi.fn(async () => {}),
+  clearViralCache: vi.fn(async () => {}),
+  listenViralCacheProgress: vi.fn<
+    (handler: (progress: ViralCacheProgress) => void) => Promise<() => void>
+  >(async () => () => {}),
   // 桌面端判定：jsdom 里恒为 false（走 Web 的服务端拉取链路），
   // 需要验证桌面链路的用例自行 mockReturnValue(true)。
   cacheAvailable: vi.fn(() => false),
@@ -465,6 +479,18 @@ describe("V1.4 内容与运营页面", () => {
     viralCacheBridge.viralCacheLocalUrl.mockResolvedValue(null);
     viralCacheBridge.ensureViralCacheForVideo.mockReset();
     viralCacheBridge.ensureViralCacheForVideo.mockResolvedValue(undefined);
+    viralCacheBridge.ensureViralSourceCache
+      .mockReset()
+      .mockResolvedValue(undefined);
+    viralCacheBridge.listViralCache.mockReset().mockResolvedValue([]);
+    viralCacheBridge.listViralCacheTasks.mockReset().mockResolvedValue([]);
+    viralCacheBridge.pauseViralCache.mockReset().mockResolvedValue(undefined);
+    viralCacheBridge.resumeViralCache.mockReset().mockResolvedValue(undefined);
+    viralCacheBridge.deleteViralCache.mockReset().mockResolvedValue(undefined);
+    viralCacheBridge.clearViralCache.mockReset().mockResolvedValue(undefined);
+    viralCacheBridge.listenViralCacheProgress
+      .mockReset()
+      .mockResolvedValue(() => {});
     viralCacheBridge.cacheAvailable.mockReset();
     viralCacheBridge.cacheAvailable.mockReturnValue(false);
     fetchViralVideoStatistics.mockReset();
@@ -472,6 +498,7 @@ describe("V1.4 内容与运营页面", () => {
     createViralImportTask.mockReset();
     getViralImportTask.mockReset();
     listViralFavorites.mockReset();
+    listViralDiscoveries.mockReset();
     listViralVideos.mockReset();
     // mockReset 会清掉实现，幂等键生成器要补回默认值。
     searchViralVideos.mockReset();
@@ -490,6 +517,11 @@ describe("V1.4 内容与运营页面", () => {
       total: 0,
     });
     listViralFavorites.mockResolvedValue({ items: [], total: 0 });
+    listViralDiscoveries.mockResolvedValue({
+      date: "2026-09-24",
+      total: 0,
+      items: [],
+    });
     saveViralFavorite.mockResolvedValue({ isFavorite: true });
     removeViralFavorite.mockResolvedValue({ isFavorite: false });
     createViralImportTask.mockResolvedValue({
@@ -689,6 +721,244 @@ describe("V1.4 内容与运营页面", () => {
     expect(value.navigate).toHaveBeenCalledWith(
       "copy",
       expect.objectContaining({ returnTo: "viral" }),
+    );
+  });
+
+  it("我的发现按日期读取本人搜索记录，切换平台不重新搜索或扣费", async () => {
+    const base = studio();
+    fetchViralVideoStatistics.mockResolvedValue({ items: [] });
+    const first = viralItem(1, {
+      videoId: "discovered-douyin",
+      title: "发现的庭院视频",
+    });
+    const second = viralItem(2, {
+      platform: "wechat_channels",
+      videoId: "discovered-wechat",
+      title: "发现的视频号案例",
+    });
+    listViralDiscoveries.mockResolvedValueOnce({
+      date: "2026-09-24",
+      total: 2,
+      items: [
+        {
+          platform: "douyin",
+          videoId: first.videoId,
+          keyword: "庭院",
+          searchedAt: "2026-09-24T10:00:00+08:00",
+          video: first,
+        },
+        {
+          platform: "wechat_channels",
+          videoId: second.videoId,
+          keyword: "建房",
+          searchedAt: "2026-09-24T10:01:00+08:00",
+          video: second,
+        },
+      ],
+    });
+    useStudio.mockReturnValue(
+      studio({ review: false, data: { ...base.data, videos: [] } }),
+    );
+    render(<ViralPage />);
+
+    fireEvent.click(screen.getByRole("tab", { name: "我的发现" }));
+    await waitFor(() =>
+      expect(listViralDiscoveries).toHaveBeenCalledWith(undefined),
+    );
+    expect(await screen.findByText("发现的庭院视频")).toBeInTheDocument();
+    expect(screen.getByText("搜索词：庭院")).toBeInTheDocument();
+    expect(screen.queryByText("发现的视频号案例")).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
+    expect(screen.getByText("发现的视频号案例")).toBeInTheDocument();
+    expect(searchViralVideos).not.toHaveBeenCalled();
+    expect(listViralDiscoveries).toHaveBeenCalledTimes(1);
+
+    fireEvent.change(screen.getByLabelText("发现日期"), {
+      target: { value: "2026-09-23" },
+    });
+    await waitFor(() =>
+      expect(listViralDiscoveries).toHaveBeenCalledWith("2026-09-23"),
+    );
+  });
+
+  it("桌面下载管理展示任务并允许暂停与继续，不误报未入队视频", async () => {
+    viralCacheBridge.cacheAvailable.mockReturnValue(true);
+    viralCacheBridge.listViralCacheTasks.mockResolvedValue([
+      {
+        platform: "douyin",
+        videoId: "download-1",
+        state: "downloading",
+        downloadedBytes: 512,
+        totalBytes: 1024,
+        speedBytesPerSecond: 256,
+        error: null,
+      },
+    ]);
+    useStudio.mockReturnValue(
+      studio({
+        review: false,
+        data: { ...studio().data, videos: [] },
+      }),
+    );
+    render(<ViralPage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "下载管理" }));
+    expect(
+      await screen.findByText("缓存中 · 50% · 256 B/s"),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "暂停 douyin:download-1" }),
+    );
+    await waitFor(() =>
+      expect(viralCacheBridge.pauseViralCache).toHaveBeenCalledWith(
+        "douyin",
+        "download-1",
+      ),
+    );
+    const onProgress =
+      viralCacheBridge.listenViralCacheProgress.mock.calls.at(-1)?.[0];
+    act(() =>
+      onProgress?.({
+        platform: "douyin",
+        videoId: "download-1",
+        state: "paused",
+        downloadedBytes: 512,
+        totalBytes: 1024,
+        speedBytesPerSecond: 0,
+        error: null,
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "继续 douyin:download-1" }),
+    );
+    await waitFor(() =>
+      expect(viralCacheBridge.resumeViralCache).toHaveBeenCalledWith(
+        "douyin",
+        "download-1",
+      ),
+    );
+    expect(screen.queryByText("排队中")).toBeNull();
+  });
+
+  it("任务快照晚于进度事件返回时保留最新状态", async () => {
+    viralCacheBridge.cacheAvailable.mockReturnValue(true);
+    let resolveSnapshot!: (items: ViralCacheProgress[]) => void;
+    viralCacheBridge.listViralCacheTasks.mockReturnValue(
+      new Promise<ViralCacheProgress[]>((resolve) => {
+        resolveSnapshot = resolve;
+      }),
+    );
+    const base = studio();
+    useStudio.mockReturnValue(
+      studio({ review: false, data: { ...base.data, videos: [] } }),
+    );
+    render(<ViralPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "下载管理" }));
+    await waitFor(() =>
+      expect(viralCacheBridge.listenViralCacheProgress).toHaveBeenCalled(),
+    );
+    const onProgress =
+      viralCacheBridge.listenViralCacheProgress.mock.calls.at(-1)?.[0];
+    act(() =>
+      onProgress?.({
+        platform: "douyin",
+        videoId: "race-1",
+        state: "cached",
+        downloadedBytes: 1024,
+        totalBytes: 1024,
+        speedBytesPerSecond: 0,
+        error: null,
+      }),
+    );
+    await act(async () => {
+      resolveSnapshot([
+        {
+          platform: "douyin",
+          videoId: "race-1",
+          state: "downloading",
+          downloadedBytes: 512,
+          totalBytes: 1024,
+          speedBytesPerSecond: 256,
+          error: null,
+        },
+      ]);
+    });
+    expect(screen.getByText("已缓存 · 100%")).toBeInTheDocument();
+  });
+
+  it("下载失败只能由用户显式重试，避免列表自动触发额外源站请求", async () => {
+    viralCacheBridge.cacheAvailable.mockReturnValue(true);
+    viralCacheBridge.listViralCacheTasks.mockResolvedValue([
+      {
+        platform: "douyin",
+        videoId: "native-dy-1",
+        state: "failed",
+        downloadedBytes: 0,
+        totalBytes: null,
+        speedBytesPerSecond: 0,
+        error: "源站连接断开",
+      },
+    ]);
+    const base = studio();
+    useStudio.mockReturnValue(
+      studio({
+        review: false,
+        data: {
+          ...base.data,
+          videos: base.data.videos.map((video) =>
+            video.nativeId === "native-dy-1"
+              ? { ...video, playUrl: "https://source.test/video.mp4" }
+              : video,
+          ),
+        },
+      }),
+    );
+    render(<ViralPage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "下载管理" }));
+    expect(await screen.findByText("源站连接断开")).toBeInTheDocument();
+    expect(viralCacheBridge.ensureViralCacheForVideo).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "重试 douyin:native-dy-1" }),
+    );
+    await waitFor(() =>
+      expect(viralCacheBridge.ensureViralCacheForVideo).toHaveBeenCalledWith(
+        expect.objectContaining({ nativeId: "native-dy-1" }),
+      ),
+    );
+  });
+
+  it("源站地址过期时由用户显式更新地址后重试", async () => {
+    viralCacheBridge.cacheAvailable.mockReturnValue(true);
+    viralCacheBridge.listViralCacheTasks.mockResolvedValue([
+      {
+        platform: "wechat_channels",
+        videoId: "expired-1",
+        state: "failed",
+        downloadedBytes: 0,
+        totalBytes: null,
+        speedBytesPerSecond: 0,
+        error: "地址已过期",
+      },
+    ]);
+    const base = studio();
+    useStudio.mockReturnValue(
+      studio({ review: false, data: { ...base.data, videos: [] } }),
+    );
+    render(<ViralPage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "下载管理" }));
+    expect(viralCacheBridge.ensureViralSourceCache).not.toHaveBeenCalled();
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "更新地址并重试 wechat_channels:expired-1",
+      }),
+    );
+    await waitFor(() =>
+      expect(viralCacheBridge.ensureViralSourceCache).toHaveBeenCalledWith(
+        "wechat_channels",
+        "expired-1",
+      ),
     );
   });
 
@@ -2646,7 +2916,7 @@ describe("V1.4 内容与运营页面", () => {
     expect(updateData).toHaveBeenCalledTimes(1);
   });
 
-  it("冷库刷新时保持页面可用并显示采集状态", async () => {
+  it("内容池空列表不显示旧的自动采集状态", async () => {
     const base = studio();
     listViralVideos.mockResolvedValue({
       platform: "douyin",
@@ -2667,9 +2937,8 @@ describe("V1.4 内容与运营页面", () => {
 
     render(<ViralPage />);
 
-    expect(
-      await screen.findAllByText("正在采集爆款视频，当前先展示已缓存内容…"),
-    ).not.toHaveLength(0);
+    await waitFor(() => expect(listViralVideos).toHaveBeenCalled());
+    expect(screen.queryByText(/正在采集爆款视频/)).toBeNull();
     expect(screen.getByText("暂无爆款视频")).toBeInTheDocument();
   });
 
@@ -3208,7 +3477,7 @@ describe("V1.4 内容与运营页面", () => {
     expect(screen.getByRole("tab", { name: "抖音 0" })).toBeInTheDocument();
     expect(screen.getByText("暂无爆款视频")).toBeInTheDocument();
     expect(
-      screen.getByText("数据源尚未配置或最近 7 天暂无内容，配置后自动展示。"),
+      screen.getByText("当前暂无爆款视频，搜索关键词发现内容。"),
     ).toBeInTheDocument();
     expect(
       screen.queryByText("采集参数仅在管理后台配置。"),

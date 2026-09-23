@@ -93,8 +93,8 @@ export function ViralCollectionBilling({ query }: { query: string }) {
     };
   }, [selected, chargeOffset, revision]);
   return (
-    <section aria-label="爆款采集账单">
-      <h3>爆款采集账单</h3>
+    <section aria-label="历史爆款采集账单">
+      <h3>历史爆款采集账单</h3>
       <p>
         按上方日期查看所有客户的采集批次，不受用户、模块、供应商筛选影响。每次已确认的接口请求按批次快照单价向客户逐项扣分；供应商成本只记录一次。数据库读取和云存储不收费。
       </p>
