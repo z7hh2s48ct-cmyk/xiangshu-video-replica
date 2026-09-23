@@ -3842,6 +3842,102 @@ async def test_viral_copy_handler_serves_shared_cache_before_any_billing(
     assert _one(pg_state, "SELECT count(*) FROM viral_import_tasks") == 0
 
 
+async def test_viral_copy_handler_rechecks_cache_and_removes_racing_upload(
+    pg_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """上传期间其他用户写入共享文案时，本请求应免费秒回并删除未登记音轨."""
+    from app.asr import TranscriptResult
+    from app.script_from_audio import CachedTranscriptHit
+    from app.storage import FakeStorageAdapter
+    from app.viral_import_routes import _viral_copy_object_key
+
+    _seed_copy_fixture(pg_state)
+    storage = FakeStorageAdapter(provider="fake", bucket="copies")
+    lookups = 0
+
+    def racing_cache(*args: Any, **kwargs: Any) -> Any:
+        nonlocal lookups
+        lookups += 1
+        if lookups == 1:
+            return None
+        return CachedTranscriptHit(
+            result=TranscriptResult("竞态期间已生成的文案", 12.0, "zh"),
+            updated_at="2026-09-24T12:00:00Z",
+        )
+
+    monkeypatch.setattr("app.viral_import_routes.cached_transcript", racing_cache)
+    monkeypatch.setattr("app.viral_import_routes.get_media_storage", lambda conn: storage)
+    monkeypatch.setattr(
+        "app.viral_import_routes._inline_audio_limits", lambda conn, s: (None, None)
+    )
+    monkeypatch.setattr("app.viral_import_routes._probe_viral_copy_duration", lambda content: 12.0)
+
+    import io
+
+    from fastapi import Response, UploadFile
+
+    from app.viral_import_routes import extract_viral_video_copy
+
+    audio = b"\x00\x00\x00 ftypM4A " + b"\x00" * 32
+    response = Response()
+    payload = await extract_viral_video_copy(
+        response=response,
+        db=_handler_db(pg_state),
+        platform="douyin",
+        video_id="123",
+        file=UploadFile(file=io.BytesIO(audio), size=len(audio)),
+        idempotency_key="racing-cache",
+    )
+
+    assert response.status_code == 200
+    assert payload.text == "竞态期间已生成的文案"
+    assert storage.head_object(_viral_copy_object_key("u1", "racing-cache")) is None
+    assert _one(pg_state, "SELECT count(*) FROM script_from_audio_tasks") == 0
+    assert _one(pg_state, "SELECT count(*) FROM billing_operations") == 0
+    assert _one(pg_state, "SELECT count(*) FROM viral_import_tasks") == 0
+
+
+async def test_viral_copy_handler_removes_upload_when_registration_fails(
+    pg_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """音轨已写存储但数据库登记失败时，不能留下无主对象."""
+    from app.storage import FakeStorageAdapter
+    from app.viral_import_routes import _viral_copy_object_key
+
+    _seed_copy_fixture(pg_state)
+    storage = FakeStorageAdapter(provider="fake", bucket="copies")
+    monkeypatch.setattr("app.viral_import_routes.get_media_storage", lambda conn: storage)
+    monkeypatch.setattr(
+        "app.viral_import_routes._inline_audio_limits", lambda conn, s: (None, None)
+    )
+    monkeypatch.setattr("app.viral_import_routes._probe_viral_copy_duration", lambda content: 12.0)
+
+    def registration_failed(*args: Any, **kwargs: Any) -> Any:
+        raise HTTPException(status_code=409, detail={"code": "REGISTER_FAILED"})
+
+    monkeypatch.setattr("app.viral_import_routes.register_viral_copy_source", registration_failed)
+
+    import io
+
+    from fastapi import Response, UploadFile
+
+    from app.viral_import_routes import extract_viral_video_copy
+
+    audio = b"\x00\x00\x00 ftypM4A " + b"\x00" * 32
+    with pytest.raises(HTTPException) as failed:
+        await extract_viral_video_copy(
+            response=Response(),
+            db=_handler_db(pg_state),
+            platform="douyin",
+            video_id="123",
+            file=UploadFile(file=io.BytesIO(audio), size=len(audio)),
+            idempotency_key="registration-failed",
+        )
+    assert failed.value.detail["code"] == "REGISTER_FAILED"
+    assert storage.head_object(_viral_copy_object_key("u1", "registration-failed")) is None
+    assert _one(pg_state, "SELECT count(*) FROM viral_import_tasks") == 0
+
+
 async def test_viral_copy_handler_respects_the_shared_import_pause(pg_state: str) -> None:
     """管理端「暂停导入」对新端点同样生效：对用户而言仍是同一个动作."""
     _seed_copy_fixture(pg_state)

@@ -21,6 +21,7 @@ from fastapi import (
 )
 from pydantic import BaseModel, ConfigDict, Field
 
+from app import content_store
 from app.asr import AsrProviderError, max_inline_audio_bytes, max_inline_audio_seconds
 from app.auth import AuthenticatedUser, Database
 from app.customer_fence import BusinessDbDep
@@ -771,6 +772,28 @@ def _store_viral_copy_audio(storage: StorageAdapter, *, key: str, content: bytes
         ) from exc
 
 
+def _discard_unregistered_viral_copy_audio(
+    db: Any,
+    storage: StorageAdapter,
+    *,
+    stored: StoredObject,
+    actor_id: str,
+) -> None:
+    """Best-effort cleanup for an upload that never acquired a database owner."""
+    try:
+        with db.write() as (conn, _actor):
+            content_store.delete_object_if_unreferenced(
+                conn,
+                storage,
+                stored.key,
+                actor_id=actor_id,
+            )
+    except Exception as exc:
+        # Preserve the original request result. The deterministic key means a
+        # same-key retry overwrites this orphan instead of creating another one.
+        logger.warning("viral copy orphan cleanup deferred: %s", type(exc).__name__)
+
+
 @router.post(
     "/videos/copy",
     response_model=ViralCopyExtractionResponse,
@@ -839,29 +862,53 @@ async def extract_viral_video_copy(
     stored = _store_viral_copy_audio(
         storage, key=_viral_copy_object_key(owner_user_id, key), content=content
     )
-    with db.write() as (conn, actor):
-        with conn:
-            # 上传体在两个事务之间过手：会话若被换掉，素材不能落到新身份名下。
-            if actor.id != owner_user_id:
-                raise HTTPException(status_code=401, detail={"code": "SESSION_REPLACED"})
-            # 循环导入：viral_search_routes 反向依赖 viral_routes 的 ViralVideoItem。
-            from app.viral_search_routes import require_priced_viral_service
+    try:
+        with db.write() as (conn, actor):
+            with conn:
+                # 上传体在两个事务之间过手：会话若被换掉，素材不能落到新身份名下。
+                if actor.id != owner_user_id:
+                    raise HTTPException(status_code=401, detail={"code": "SESSION_REPLACED"})
+                # 上传期间可能已有另一个用户产出了共享文案。再查一次可以
+                # 避免落下无用的占位项目、素材和计费操作。
+                hit = cached_transcript(conn, platform=platform, video_id=video_id)
+                if hit is None:
+                    # 循环导入：viral_search_routes 反向依赖 viral_routes 的 ViralVideoItem。
+                    from app.viral_search_routes import require_priced_viral_service
 
-            require_priced_viral_service(conn, _COPY_ASR_SERVICE, error_code="VIRAL_COPY_UNPRICED")
-            source = register_viral_copy_source(
-                conn,
-                actor=actor,
-                video=video,
-                upload=ViralCopyUpload(stored=stored, duration_seconds=duration),
-                idempotency_key=key,
+                    require_priced_viral_service(
+                        conn, _COPY_ASR_SERVICE, error_code="VIRAL_COPY_UNPRICED"
+                    )
+                    source = register_viral_copy_source(
+                        conn,
+                        actor=actor,
+                        video=video,
+                        upload=ViralCopyUpload(stored=stored, duration_seconds=duration),
+                        idempotency_key=key,
+                    )
+                    row = enqueue_script_from_audio_task(
+                        conn,
+                        actor=actor,
+                        project_id=source.project_id,
+                        source_asset_id=source.asset_id,
+                        idempotency_key=key,
+                    )
+        if hit is not None:
+            _discard_unregistered_viral_copy_audio(
+                db,
+                storage,
+                stored=stored,
+                actor_id="viral-copy-cache-race",
             )
-            row = enqueue_script_from_audio_task(
-                conn,
-                actor=actor,
-                project_id=source.project_id,
-                source_asset_id=source.asset_id,
-                idempotency_key=key,
-            )
+            response.status_code = status.HTTP_200_OK
+            return ViralCopyExtractionResponse(text=hit.result.text, updatedAt=hit.updated_at)
+    except Exception:
+        _discard_unregistered_viral_copy_audio(
+            db,
+            storage,
+            stored=stored,
+            actor_id="viral-copy-request-failed",
+        )
+        raise
     return ViralCopyExtractionResponse(
         projectId=source.project_id,
         sourceAssetId=source.asset_id,
