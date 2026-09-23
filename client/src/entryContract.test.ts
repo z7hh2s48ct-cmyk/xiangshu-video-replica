@@ -81,7 +81,6 @@ it("客户正式构建复制侧栏图形与浏览器图标", () => {
     .mock.calls.map(([, target]) => String(target).replaceAll("\\", "/"));
   for (const asset of [
     "studio/logo-mark.svg",
-    "studio/li.png",
     "favicon.svg",
     "favicon.png",
     "favicon.ico",
@@ -90,6 +89,9 @@ it("客户正式构建复制侧栏图形与浏览器图标", () => {
       true,
     );
   }
+  expect(
+    destinations.some((path) => path.endsWith("/dist/studio/li.png")),
+  ).toBe(false);
 });
 
 /**

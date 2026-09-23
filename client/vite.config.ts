@@ -69,10 +69,6 @@ export default defineConfig({
           resolve(scriptDir, "public/studio/logo-mark.svg"),
           resolve(output, "studio/logo-mark.svg"),
         );
-        copyFileSync(
-          resolve(scriptDir, "public/studio/li.png"),
-          resolve(output, "studio/li.png"),
-        );
       },
     },
   ],
