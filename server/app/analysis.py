@@ -15,7 +15,14 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from app.db_portable import BusinessConnection
 
@@ -70,6 +77,28 @@ MOTION_CAMERA_MODES = (
     "ZOOM_OUT",
     "UNKNOWN",
 )
+# 并列主态分隔符：真实视频里位移与手势常常同等主导（边走边做手势），只留其一
+# 会把「在动」拆成两个都不完整的描述，下游合成因此丢失运动。
+SUBJECT_MOTION_STATE_SEPARATOR = "+"
+
+
+def _canonical_subject_motion_state(value: str) -> str:
+    """校验人物运动状态；允许用「+」并列多个主导状态。
+
+    并列只放宽「可同时表态」，分量仍必须是 ``SUBJECT_MOTION_STATES`` 成员，
+    且不得重复——未知分量与重复分量照旧 fail closed。
+    """
+    parts = [part.strip() for part in str(value).split(SUBJECT_MOTION_STATE_SEPARATOR)]
+    if not parts or any(part not in SUBJECT_MOTION_STATES for part in parts):
+        raise ValueError(
+            "subject_motion_state must be one of "
+            f"{', '.join(SUBJECT_MOTION_STATES)}, optionally joined by "
+            f"'{SUBJECT_MOTION_STATE_SEPARATOR}'"
+        )
+    if len(set(parts)) != len(parts):
+        raise ValueError("subject_motion_state must not repeat the same state")
+    return SUBJECT_MOTION_STATE_SEPARATOR.join(parts)
+
 
 # Failure phases let the desktop tell "the network hiccuped, retry" apart from
 # "the model answered with something we cannot use".
@@ -111,16 +140,7 @@ class ShotMotion(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    subject_motion_state: Literal[
-        "STATIC",
-        "WALKING",
-        "RUNNING",
-        "TURNING",
-        "GESTURING_ONLY",
-        "OBJECT_MOTION",
-        "NO_PERSON",
-        "UNKNOWN",
-    ]
+    subject_motion_state: str
     subject_direction: Literal[
         "toward_camera",
         "away_from_camera",
@@ -149,6 +169,11 @@ class ShotMotion(BaseModel):
         "UNKNOWN",
     ]
     relative_motion: str = Field(min_length=1)
+
+    @field_validator("subject_motion_state")
+    @classmethod
+    def validate_subject_motion_state(cls, value: str) -> str:
+        return _canonical_subject_motion_state(value)
 
 
 class ShotCard(BaseModel):
@@ -627,7 +652,25 @@ def parse_analysis_response(text: str, *, duration_seconds: float) -> VideoAnaly
     if isinstance(shots, list):
         for shot in shots:
             ProviderShotCard.model_validate(shot)
-    return VideoAnalysis.model_validate(payload)
+    return _with_original_script_fallback(VideoAnalysis.model_validate(payload))
+
+
+def _with_original_script_fallback(analysis: VideoAnalysis) -> VideoAnalysis:
+    """校验通过后，空 original_script 用分段台词回填。
+
+    服务商偶尔把口播正确切进各段 ``spoken_text``，却把全片 ``original_script``
+    留成空串；不兜底时爆款复刻页文案栏空白（前端直用空串）。这里与
+    ``generation.py`` 的 ``full_text = original_script or "".join(spoken_texts)``
+    编译兜底语义对齐，前端展示、提示词编译与历史恢复因此拿到同一份文案。
+
+    源片确实无口播（分段台词也为空）时保持空字符串，不制造假文案。
+    """
+    if analysis.original_script.strip():
+        return analysis
+    joined = "".join(shot.spoken_text for shot in analysis.shots)
+    if not joined.strip():
+        return analysis
+    return analysis.model_copy(update={"original_script": joined})
 
 
 def _normalize_timeline_rounding(
@@ -714,7 +757,9 @@ def analysis_instruction(duration_seconds: float) -> str:
         "motion 是结构化运动描述，每个镜头都必须完整填写以下六个字段：\n"
         "- subject_motion_state（人物运动状态，枚举）：STATIC 静止 / WALKING 行走 / "
         "RUNNING 跑动 / TURNING 转身 / GESTURING_ONLY 仅手势站位不动 / "
-        "OBJECT_MOTION 仅物体运动 / NO_PERSON 无人物；\n"
+        "OBJECT_MOTION 仅物体运动 / NO_PERSON 无人物；并列主态用“+”连接，"
+        "如 WALKING+GESTURING_ONLY（边走边做手势），位移与手势同等主导时"
+        "不得只留其一；\n"
         "- subject_direction（人物位移方向，枚举）：toward_camera 向镜头 / "
         "away_from_camera 背离镜头 / left 向画面左 / right 向画面右 / lateral 横向 / "
         "in_place 原地 / none 无；\n"
@@ -744,13 +789,16 @@ def analysis_instruction(duration_seconds: float) -> str:
         "不得为了凑数制造不存在的切镜或动作。真实切镜填写 "
         "segment_kind=SHOT_CUT，同镜头内阶段变化填写 segment_kind=ACTION_BEAT，"
         "boundary_reason 用中文说明拆分原因。\n"
-        "1. 人物在镜头内移动（行走、跑动、转身）时，subject_motion_state 必须选对应"
+        "1. 人物位移、行走、寻找目标、走近或离开画面是首要产出，必须优先记录；"
+        "分段边界不得默认落在静止姿态上。运动状态发生转换（如行走→停下、"
+        "转身→面向镜头、寻找→发现）时应当分段，不要合并成一段笼统描述。\n"
+        "2. 人物在镜头内移动（行走、跑动、转身）时，subject_motion_state 必须选对应"
         "运动状态，action 必须写明运动方向与幅度；不得把移动中的人物概括成“说话”或"
         "“站立”，也不得把运动镜头写成固定机位。\n"
-        "2. 人物确实静止时选 STATIC，不得凭空增加运动。\n"
-        "3. 无人物出镜的镜头 subject_motion_state 选 NO_PERSON 或 OBJECT_MOTION，"
+        "3. 人物确实静止时选 STATIC，不得凭空增加运动。\n"
+        "4. 无人物出镜的镜头 subject_motion_state 选 NO_PERSON 或 OBJECT_MOTION，"
         "文本字段写“无人物出镜”。\n"
-        "4. wardrobe_pose_detail 一旦出现任何面部/五官/发型描述视为不合规，必须"
+        "5. wardrobe_pose_detail 一旦出现任何面部/五官/发型描述视为不合规，必须"
         "改写为纯服装、配饰、姿态描述。"
     )
 

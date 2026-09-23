@@ -428,6 +428,10 @@ const analysisTaskObservers = new Map<
 export type AnalysisProvider = "apilio_gemini" | "fake_gemini";
 
 export type ShotMotion = {
+  /**
+   * 人物运动状态。允许用「+」并列多个同等主导的状态，例如
+   * "WALKING+GESTURING_ONLY"（边走边做手势）；分量取值由服务端校验。
+   */
   subject_motion_state:
     | "STATIC"
     | "WALKING"
@@ -435,7 +439,9 @@ export type ShotMotion = {
     | "TURNING"
     | "GESTURING_ONLY"
     | "OBJECT_MOTION"
-    | "NO_PERSON";
+    | "NO_PERSON"
+    | "UNKNOWN"
+    | `${string}+${string}`;
   subject_direction:
     | "toward_camera"
     | "away_from_camera"
@@ -5121,8 +5127,12 @@ export function readAnalysisPayload(
   return {
     summary: analysis.summary,
     duration_seconds: analysis.duration_seconds,
+    // 空串（含纯空白）不能直用：已落库的空串拆解版本会让爆款复刻页文案栏
+    // 空白。这里与服务端 parse_analysis_response 的落库兜底同语义，回落到
+    // 按时间拼接的分段台词。
     original_script:
-      typeof analysis.original_script === "string"
+      typeof analysis.original_script === "string" &&
+      analysis.original_script.trim() !== ""
         ? analysis.original_script
         : analysis.shots
             .map((shot) => shot.spoken_text)

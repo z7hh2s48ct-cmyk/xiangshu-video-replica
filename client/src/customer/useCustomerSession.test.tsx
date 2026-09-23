@@ -1026,6 +1026,73 @@ describe("useCustomerSession", () => {
     expect(beatsAfter).toBe(2);
   });
 
+  it("keeps renewing the lease while the window is hidden (minimized or occluded)", async () => {
+    // 会话租约由服务端计时（90 秒），本地心跳是唯一的续租手段。窗口最小化或
+    // 被遮挡时 WebView 会把页面标记为 hidden；此时若暂停心跳，租约必然到期，
+    // 用户就会在使用中被登出——正是「中途约 90 秒自动退出」的来源。
+    vi.useFakeTimers();
+    const store = memoryStore({ deviceToken: "device-token-1" });
+    const fetchMock = stubFetch((url) => {
+      if (url.endsWith("/api/customer/sessions/login")) {
+        return jsonResponse(loginBody, 201);
+      }
+      if (url.endsWith("/api/customer/sessions/heartbeat")) {
+        return jsonResponse(heartbeatBody, 200);
+      }
+      return jsonResponse({}, 500);
+    });
+    const hiddenSpy = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+
+    const { result } = renderHook(() =>
+      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
+    );
+    await vi.waitFor(() => expect(result.current.screen).toBe("workspace"));
+    expect(document.hidden).toBe(true);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    });
+
+    const beats = fetchMock.mock.calls.filter(([url]) =>
+      String(url).endsWith("/api/customer/sessions/heartbeat"),
+    ).length;
+    expect(beats).toBe(2);
+    hiddenSpy.mockRestore();
+  });
+
+  it("sends an immediate catch-up heartbeat when the window becomes visible again", async () => {
+    vi.useFakeTimers();
+    const store = memoryStore({ deviceToken: "device-token-1" });
+    const fetchMock = stubFetch((url) => {
+      if (url.endsWith("/api/customer/sessions/login")) {
+        return jsonResponse(loginBody, 201);
+      }
+      if (url.endsWith("/api/customer/sessions/heartbeat")) {
+        return jsonResponse(heartbeatBody, 200);
+      }
+      return jsonResponse({}, 500);
+    });
+
+    const { result } = renderHook(() =>
+      useCustomerSession(store, { heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS }),
+    );
+    await vi.waitFor(() => expect(result.current.screen).toBe("workspace"));
+
+    // 恢复可见时立刻补一次，不等待下一个 tick——否则回到窗口后仍可能先撞上
+    // 已经过期的租约。
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    const beats = fetchMock.mock.calls.filter(([url]) =>
+      String(url).endsWith("/api/customer/sessions/heartbeat"),
+    ).length;
+    expect(beats).toBe(1);
+  });
+
   it("exposes the session lease runtime from login and clears it on logout", async () => {
     // B1：不再有激活入口，改用「凭设备凭据重新登录」到达工作台。
     const store = memoryStore({ deviceToken: "device-token-1" });

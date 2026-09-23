@@ -57,7 +57,9 @@ def test_replica_final_prompt_uses_confirmed_script_frame_and_real_cuts() -> Non
     assert text.count("[Shot ") == 3  # first-frame instruction plus two shot markers
     assert "(S1) says: <d>[Chinese] 今天带你看庭院</d>" in text
     assert text.count("今天带你看庭院") == 1
-    assert "PULL_BACK" in text and "toward_camera" in text and "左侧柔光" in text
+    # 动作+motion 合成中文叙事句，裸枚举不再泄漏进正文（官方指南写法）。
+    assert "动作与运动：抬手；人物朝镜头方向行走；镜头拉远，主体占比保持不变" in text
+    assert "左侧柔光" in text
     assert not prompt_issues(text, mode="I2VA", duration=4, labels=["<Picture 1>"])
 
 
@@ -212,9 +214,13 @@ def test_replaced_scene_prompt_uses_confirmed_first_frame_environment() -> None:
     assert "scene_dressing: 源视频沙盘" not in text
     assert "scene_lighting: 源视频冷光" not in text
     assert "中景" in text and "人物居中" in text and "缓慢推进" in text
-    assert "动作参考（受场景替换规则约束）：人物抬手指向源视频售楼部沙盘" in text
+    assert (
+        "动作与运动参考（受场景替换规则约束）：人物抬手指向源视频售楼部沙盘；"
+        "人物行走；人物绕过源沙盘后靠近镜头" in text
+    )
     assert "动作：人物抬手指向源视频售楼部沙盘" not in text
-    assert "运动参考（受场景替换规则约束）：relative_motion: 人物绕过源沙盘后靠近镜头" in text
+    # motion 不再以 key: value 形式泄漏进正文。
+    assert "relative_motion:" not in text and "subject_motion_state:" not in text
     assert "源售楼部广播" not in text
     assert "overall_soundscape: 按已确认首帧的最终场景适配非语义环境音" in text
     assert "不得恢复源场景广播、固定道具声音或任何源人声" in text
@@ -303,8 +309,10 @@ def test_longer_target_automatically_scales_timeline_to_full_duration() -> None:
     assert "[Shot 2] At 00:07.500" in text
     # 官方格式只有切镜时间戳；逐镜头起止时间不进正文。
     assert "阶段" not in text
-    # 放慢是节奏指令，API 参数表达不了，必须留在正文；但不再复述目标时长。
-    assert "人物动作、镜头运动和口播间隔等比放慢" in text
+    # 拉长是节奏指令，API 参数表达不了，必须留在正文；但不再一律「等比放慢」
+    # （那会把整条成片压成慢镜头，正是「偏静止」的来源）。
+    assert "用同风格的连续动作铺满整条成片" in text
+    assert "等比放慢" not in text
     assert "目标时长" not in text
     assert "pace: 快节奏" not in text
 
@@ -609,3 +617,284 @@ def test_optimizer_never_auto_accepts_changed_dialogue_or_uncertainty(case: str)
     assert result["warnings"][0]["code"] == (
         "DIALOGUE_CHANGED" if case == "dialogue" else "UNCERTAIN"
     )
+
+
+# --- 爆款复刻文案回填：空 original_script 用分段台词兜底 -------------------------
+# 与 generation.py「full_text = original_script or "".join(spoken_texts)」的编译兜底
+# 语义对齐；落库时回填后，前端展示、提示词编译与历史恢复都自动拿到文案。
+
+
+def _analyze_with_facts(facts: dict, *, duration_seconds: float):
+    """Drive analyze_video through a provider whose response carries ``facts``."""
+    import json
+
+    from app.analysis import ApilioGemini, analyze_video
+
+    class Transport:
+        def post(self, url, *, headers, body):
+            return json.dumps(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "schema_version": "analysis-h3.v1",
+                                        "analysis": facts,
+                                        "generation_prompt": {
+                                            "mode": None,
+                                            "prompt_text": None,
+                                            "issues": [],
+                                        },
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                }
+            ).encode(), {}
+
+    return analyze_video(
+        video_uri="https://example.test/source.mp4",
+        video_duration_seconds=duration_seconds,
+        provider=ApilioGemini(api_key="test", transport=Transport()),
+    )
+
+
+def _fake_facts(**overrides: object) -> dict:
+    import json
+
+    from app.analysis import FakeGemini
+
+    facts = json.loads(FakeGemini().analyze(video_uri="fake", duration_seconds=8).text)
+    facts.update(overrides)
+    return facts
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\n\t"])
+def test_blank_original_script_is_backfilled_from_shot_spoken_text(blank: str) -> None:
+    """服务商返回空 original_script 时必须用分段台词回填。
+
+    否则爆款复刻页文案栏空白：前端 readAnalysisPayload 直用空串，提示词编译也
+    拿不到原文。
+    """
+    facts = _fake_facts(original_script=blank)
+    facts["shots"][0]["spoken_text"] = "第一句"
+    facts["shots"][1]["spoken_text"] = "第二句"
+
+    result = _analyze_with_facts(facts, duration_seconds=8)
+
+    assert result.analysis.original_script == "第一句第二句"
+
+
+def test_provided_original_script_is_never_overwritten_by_the_backfill() -> None:
+    facts = _fake_facts(original_script="服务商给出的完整口播")
+    facts["shots"][0]["spoken_text"] = "分段一"
+    facts["shots"][1]["spoken_text"] = "分段二"
+
+    result = _analyze_with_facts(facts, duration_seconds=8)
+
+    assert result.analysis.original_script == "服务商给出的完整口播"
+
+
+def test_silent_source_keeps_an_empty_original_script() -> None:
+    """无口播的源片不得被回填成假文案。"""
+    facts = _fake_facts(original_script="")
+    for shot in facts["shots"]:
+        shot["spoken_text"] = ""
+
+    result = _analyze_with_facts(facts, duration_seconds=8)
+
+    assert result.analysis.original_script == ""
+
+
+# --- 拆解侧动态义务：并列主态与「不得默认静止」 --------------------------------
+
+
+def test_compound_subject_motion_state_is_accepted() -> None:
+    """subject_motion_state 允许并列主态（边走边做手势）。"""
+    from app.analysis import ShotMotion
+
+    motion = ShotMotion(
+        subject_motion_state="WALKING+GESTURING_ONLY",
+        subject_direction="toward_camera",
+        subject_displacement="向镜头走近两三步",
+        hand_action="双臂随步态摆动并在胸前做讲解手势",
+        camera_motion="HANDHELD_TRACKING",
+        relative_motion="人物逐渐靠近镜头，画面占比增大",
+    )
+
+    assert motion.subject_motion_state == "WALKING+GESTURING_ONLY"
+
+
+@pytest.mark.parametrize("bad", ["FLYING", "WALKING+FLYING", "WALKING+WALKING", ""])
+def test_compound_motion_state_does_not_relax_the_enum(bad: str) -> None:
+    """并列主态只放宽「可并列」，未知分量、重复分量与空值仍必须失败。"""
+    from app.analysis import ShotMotion
+
+    with pytest.raises(ValidationError):
+        ShotMotion(
+            subject_motion_state=bad,
+            subject_direction="in_place",
+            subject_displacement="无位移",
+            hand_action="无",
+            camera_motion="STATIC",
+            relative_motion="无相对运动",
+        )
+
+
+def test_analysis_rules_make_displacement_the_first_class_output() -> None:
+    """拆解侧规则：位移是首要产出，边界不得默认静止，运动转换应当分段。"""
+    from pathlib import Path
+
+    rules = (
+        Path(__file__).resolve().parents[1] / "app" / "prompt_rules" / "analysis.txt"
+    ).read_text(encoding="utf-8")
+
+    assert "首要产出" in rules
+    assert "不得默认" in rules and "静止" in rules
+    assert "应当分段" in rules
+    assert "WALKING+GESTURING_ONLY" in rules
+
+
+def test_legacy_analysis_instruction_carries_the_same_dynamic_obligation() -> None:
+    """另一条 instruction 路径同样不得默认静止，否则换个 provider 就退回老行为。"""
+    from app.analysis import analysis_instruction
+
+    instruction = analysis_instruction(15)
+
+    assert "首要产出" in instruction
+    assert "WALKING+GESTURING_ONLY" in instruction
+
+
+# --- 合成侧：动作+motion 编译成叙事句，置于静态字段之前 ------------------------
+
+
+_MOTION_SHOT = {
+    "start_time": 0,
+    "end_time": 4,
+    "segment_kind": "ACTION_BEAT",
+    "shot_type": "中景",
+    "composition": "人物居中",
+    "action": "拿起文件夹后走向镜头",
+    "motion": {
+        "subject_motion_state": "WALKING",
+        "subject_direction": "toward_camera",
+        "subject_displacement": "向镜头走近两三步",
+        "hand_action": "双臂随步态自然摆动",
+        "camera_motion": "PULL_BACK",
+        "relative_motion": "人物逐渐靠近镜头，画面占比增大",
+    },
+}
+
+
+def test_action_and_motion_compile_into_a_narrative_before_static_fields() -> None:
+    """动作+motion 合成官方指南式叙事句（起点→连续发展→结束），放在静态字段之前。"""
+    from app.h3_prompts import compile_replica_final_text
+
+    text = compile_replica_final_text(
+        shot_payload={"shots": [dict(_MOTION_SHOT)]},
+        script_text="",
+        duration=4,
+        source_duration=4,
+        timeline_policy="preserve",
+        source_frame_time=0,
+    )
+
+    narrative = (
+        "动作与运动：拿起文件夹后走向镜头；"
+        "人物朝镜头方向行走，向镜头走近两三步，双臂随步态自然摆动；"
+        "镜头拉远，人物逐渐靠近镜头，画面占比增大"
+    )
+    assert narrative in text
+    # 模型先读到「人物在动」，再读到景别/构图等静态参数。
+    assert text.index(narrative) < text.index("shot_type: 中景")
+    # 裸枚举不是官方指南写法：正文用中文叙事，不再泄漏枚举字面量。
+    assert "WALKING" not in text
+    assert "PULL_BACK" not in text and "toward_camera" not in text
+    assert not prompt_issues(text, mode="I2VA", duration=4, labels=["<Picture 1>"])
+
+
+def test_compound_motion_state_keeps_both_clauses() -> None:
+    """并列主态在合成侧不得只留其一。"""
+    from app.h3_prompts import compile_replica_final_text
+
+    text = compile_replica_final_text(
+        shot_payload={
+            "shots": [
+                {
+                    "start_time": 0,
+                    "end_time": 4,
+                    "segment_kind": "ACTION_BEAT",
+                    "action": "边走边讲解",
+                    "motion": {
+                        "subject_motion_state": "WALKING+GESTURING_ONLY",
+                        "subject_direction": "toward_camera",
+                        "camera_motion": "HANDHELD_TRACKING",
+                    },
+                }
+            ]
+        },
+        script_text="",
+        duration=4,
+        source_duration=4,
+        timeline_policy="preserve",
+        source_frame_time=0,
+    )
+
+    assert "朝镜头方向行走" in text
+    assert "仅做手势" in text
+
+
+def test_legacy_shot_without_motion_is_warned_not_silently_skipped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """旧拆解结果缺 motion 时合成必须留痕，否则静默产出「偏静止」提示词无人知晓。"""
+    import logging
+
+    from app.h3_prompts import compile_replica_final_text
+
+    with caplog.at_level(logging.WARNING, logger="app.h3_prompts"):
+        text = compile_replica_final_text(
+            shot_payload={
+                "shots": [
+                    {
+                        "start_time": 0,
+                        "end_time": 2,
+                        "segment_kind": "ACTION_BEAT",
+                        "action": "抬手",
+                    },
+                    {"start_time": 2, "end_time": 4, "segment_kind": "ACTION_BEAT"},
+                ]
+            },
+            script_text="",
+            duration=4,
+            source_duration=4,
+            timeline_policy="preserve",
+            source_frame_time=0,
+        )
+
+    assert "动作与运动：抬手" in text
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1, "每次合成只给一条警告，列出全部缺 motion 的段"
+    message = warnings[0].getMessage()
+    assert "motion" in message
+    assert "s2" in message
+
+
+def test_short_source_fills_with_continuous_action_not_uniform_slow_motion() -> None:
+    """源片短于目标时长时用同风格连续动作自然填满，不再一律「等比放慢」。"""
+    from app.h3_prompts import compile_replica_final_text
+
+    text = compile_replica_final_text(
+        shot_payload={"shots": [{"start_time": 0, "end_time": 4, "segment_kind": "ACTION_BEAT"}]},
+        script_text="",
+        duration=10,
+        source_duration=4,
+        timeline_policy="preserve",
+        source_frame_time=0,
+    )
+
+    assert "同风格的连续动作" in text
+    assert "不新增剧情事件" in text
+    assert "等比放慢" not in text

@@ -1778,6 +1778,98 @@ describe("generation payload readers", () => {
     expect(parsed?.shots[0]?.segment_kind).toBe("ACTION_BEAT");
     expect(parsed?.shots[0]?.boundary_reason).toBe("表达重点变化");
   });
+
+  it("falls back to shot spoken text when original_script is an empty string", () => {
+    // 已落库的空串拆解版本：空串不能直用，否则爆款复刻页文案栏空白。
+    const parsed = readAnalysisPayload({
+      id: "analysis-v1",
+      project_id: "project-1",
+      asset_id: "video-1",
+      kind: "analysis",
+      version_number: 1,
+      payload: {
+        analysis: {
+          summary: "空原文但分段台词齐全",
+          duration_seconds: 12,
+          original_script: "",
+          shots: [
+            {
+              shot_id: "S01",
+              start_time: 0,
+              end_time: 6,
+              shot_type: "中景",
+              composition: "人物居中",
+              camera_motion: "固定",
+              subject: "主讲人",
+              action: "口播",
+              scene: "室内",
+              spoken_text: "这栋房子的采光设计非常好",
+              transition: "连续",
+              segment_kind: "ACTION_BEAT",
+              boundary_reason: "表达重点变化",
+            },
+            {
+              shot_id: "S02",
+              start_time: 6,
+              end_time: 12,
+              shot_type: "近景",
+              composition: "人物偏右",
+              camera_motion: "固定",
+              subject: "主讲人",
+              action: "口播",
+              scene: "室内",
+              spoken_text: "下午三点还有阳光",
+              transition: "连续",
+              segment_kind: "ACTION_BEAT",
+              boundary_reason: "表达重点变化",
+            },
+          ],
+        },
+      },
+      created_by_user_id: "employee-1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+
+    expect(parsed?.original_script).toBe(
+      "这栋房子的采光设计非常好下午三点还有阳光",
+    );
+  });
+
+  it("keeps a whitespace-only original_script from being displayed verbatim", () => {
+    const parsed = readAnalysisPayload({
+      id: "analysis-v1",
+      project_id: "project-1",
+      asset_id: "video-1",
+      kind: "analysis",
+      version_number: 1,
+      payload: {
+        analysis: {
+          summary: "空白原文",
+          duration_seconds: 12,
+          original_script: "   ",
+          shots: [
+            {
+              shot_id: "S01",
+              start_time: 0,
+              end_time: 12,
+              shot_type: "中景",
+              composition: "人物居中",
+              camera_motion: "固定",
+              subject: "主讲人",
+              action: "口播",
+              scene: "室内",
+              spoken_text: "回填后的文案",
+              transition: "连续",
+            },
+          ],
+        },
+      },
+      created_by_user_id: "employee-1",
+      created_at: "2030-01-01T00:00:00Z",
+    });
+
+    expect(parsed?.original_script).toBe("回填后的文案");
+  });
 });
 
 describe("API base URL resolution", () => {

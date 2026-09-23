@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
+
+logger = logging.getLogger(__name__)
 
 FORMATTER_VERSION = "h3-format.v1"
 MAX_PROMPT_CHARS = 7000
@@ -135,6 +138,110 @@ def protected_dialogue(text: str) -> str | None:
     return re.sub(r"\s", "", "".join(parts)) if parts else None
 
 
+# 官方指南要求镜头描述是自然叙事句，而不是把枚举堆成 ``key: value`` 标签
+# （docs/reference/minimax-h3-prompt-guide/base-en.txt §4.3：「Camera motion should
+# be written as a natural English action within the shot, rather than stacked as
+# separate labels」）。下面这组映射把 motion 枚举确定性渲染成中文叙事片段。
+# 注意：generation.py 的 render_shot_motion_clause 是面向另一套模板的祈使句
+# （「不得僵立原地」），两者服务不同模板，措辞不可互换，故分开维护。
+_MOTION_STATE_TEXT = {
+    "STATIC": "保持静止",
+    "WALKING": "行走",
+    "RUNNING": "奔跑",
+    "TURNING": "转身",
+    "GESTURING_ONLY": "仅做手势",
+    "OBJECT_MOTION": "物体位移",
+    "NO_PERSON": "无人物出镜",
+    "UNKNOWN": "运动状态无法判断",
+}
+# 只有位移类状态可以前置方向（「朝镜头方向行走」）。静止/无人物/物体位移这类
+# 状态自带完整语义，前置方向会读成病句（「无位移方向无人物出镜」），因此不在
+# 白名单里——白名单本身就是「不给这些状态加方向」的实现。
+_DIRECTION_PREFIXABLE_STATES = frozenset({"WALKING", "RUNNING", "TURNING"})
+_MOTION_DIRECTION_TEXT = {
+    "toward_camera": "朝镜头方向",
+    "away_from_camera": "背离镜头方向",
+    "left": "向画面左",
+    "right": "向画面右",
+    "lateral": "横向",
+    "in_place": "原地",
+    "none": "",
+    "unknown": "",
+}
+_CAMERA_MOTION_TEXT = {
+    "STATIC": "固定机位",
+    "PUSH_IN": "推近",
+    "PULL_BACK": "拉远",
+    "HANDHELD_TRACKING": "手持跟拍",
+    "PAN": "横摇",
+    "TILT": "纵摇",
+    "FOLLOW": "跟随",
+    "ORBIT": "环绕",
+    "CRANE_UP": "升镜",
+    "CRANE_DOWN": "降镜",
+    "ZOOM_IN": "变焦推近",
+    "ZOOM_OUT": "变焦拉远",
+    "UNKNOWN": "机位运动无法判断",
+}
+
+
+def _subject_motion_clause(motion: dict[str, Any]) -> str:
+    """把人物的运动状态（含并列主态）与位移方向渲染成一个叙事短语。"""
+    states = [part for part in str(motion.get("subject_motion_state") or "").split("+") if part]
+    raw_direction = str(motion.get("subject_direction") or "")
+    direction = _MOTION_DIRECTION_TEXT.get(raw_direction, "")
+
+    clauses: list[str] = []
+    for index, state in enumerate(states):
+        text = _MOTION_STATE_TEXT.get(state, "")
+        if not text:
+            continue
+        if index == 0 and direction and state in _DIRECTION_PREFIXABLE_STATES:
+            text = f"{direction}{text}"
+        clauses.append(text)
+    if not clauses and direction:
+        clauses.append(direction)
+    # 并列主态用「，同时」连接，读起来仍是一句话而不是标签堆叠。
+    return "，同时".join(clauses)
+
+
+def _shot_action_motion_narrative(shot: dict[str, Any]) -> str:
+    """动作 + motion 合成官方指南式叙事句：动作起点 → 连续发展 → 结束状态。
+
+    官方指南推荐的镜头结构是「首帧锚点 → 动作起点 → 连续发展 → 结果或反应」；
+    这里把 action 与结构化 motion 合成一句话，供 ``compile_replica_final_text``
+    放在静态字段之前下发，模型因此先读到「人物在动」再读到景别/构图等参数。
+    缺少 motion 的旧拆解结果只渲染 action，不劣化既有行为。
+    """
+    segments: list[str] = []
+    action = str(shot.get("action") or "").strip()
+    if action:
+        segments.append(_anchor_presenter_to_first_frame(action))
+
+    motion = shot.get("motion")
+    if isinstance(motion, dict):
+        head = _subject_motion_clause(motion)
+        person_parts = [head] if head else []
+        for key in ("subject_displacement", "hand_action"):
+            value = str(motion.get(key) or "").strip()
+            if value:
+                person_parts.append(_anchor_presenter_to_first_frame(value))
+        if person_parts:
+            segments.append("人物" + "，".join(person_parts))
+
+        camera_parts: list[str] = []
+        camera = _CAMERA_MOTION_TEXT.get(str(motion.get("camera_motion") or ""), "")
+        if camera:
+            camera_parts.append(f"镜头{camera}")
+        relative = str(motion.get("relative_motion") or "").strip()
+        if relative:
+            camera_parts.append(_anchor_presenter_to_first_frame(relative))
+        if camera_parts:
+            segments.append("，".join(camera_parts))
+
+    return "；".join(segments)
+
+
 def compile_replica_final_text(
     *,
     shot_payload: dict[str, Any],
@@ -203,8 +310,13 @@ def compile_replica_final_text(
         "贴纸、水印、Logo、账号名、界面文字或其他可读文字。只有当前确认文案可以作为台词。"
     )
     if source_duration < duration:
-        # 放慢是节奏指令，API 参数表达不了，必须留在正文；措辞不复述目标时长。
-        lines.append("人物动作、镜头运动和口播间隔等比放慢，铺满整条成片，不新增动作。")
+        # 拉长是节奏指令，API 参数表达不了，必须留在正文；措辞不复述目标时长。
+        # 不再一律「等比放慢」：把整条成片压成慢镜头正是「偏静止」的来源。改为
+        # 允许用同风格的连续动作自然填满时长，同时守住不新增剧情事件的边界。
+        lines.append(
+            "人物动作、镜头运动与口播间隔按原节奏自然延展，用同风格的连续动作"
+            "铺满整条成片，不新增剧情事件、镜头或人物。"
+        )
     if replace_scene:
         lines.append("全片场景以已确认首帧为准，不得恢复源视频的环境、陈设或光照。")
         lines.append(
@@ -228,6 +340,9 @@ def compile_replica_final_text(
         if shot_payload.get(key):
             lines.append(f"{key}: {_anchor_presenter_to_first_frame(shot_payload[key])}")
     shot_number = 1
+    # 旧拆解结果没有 motion，合成只能退回 action 文本；静默跳过会让「偏静止」
+    # 的提示词无人察觉，所以逐段收集后在末尾给一条警告。
+    legacy_without_motion: list[str] = []
     # 官方格式（docs/reference/minimax-h3-prompt-guide）只有真实切镜的
     # [Shot N] At MM:SS.mmm 标记（[Shot 1] 不带时间）；逐镜头起止时间、
     # 总时长等一律不进正文，成片时长由 H3 请求的 duration 参数承载。
@@ -236,6 +351,18 @@ def compile_replica_final_text(
             shot_number += 1
             start = float(shot["start_time"]) * scale
             lines.append(f"[Shot {shot_number}] At {int(start // 60):02d}:{start % 60:06.3f}")
+        # 官方指南的镜头结构是「首帧锚点 → 动作起点 → 连续发展 → 结束状态」，
+        # 动作与运动因此在静态字段之前下发：模型先读到人物在动，再读到景别、
+        # 构图、场景等画面参数，避免整段被读成静止画面。
+        if index == 0 and opening_action.strip():
+            lines.append(
+                f"用户确认的开场衔接：{_anchor_presenter_to_first_frame(opening_action.strip())}"
+            )
+        else:
+            narrative = _shot_action_motion_narrative(shot)
+            if narrative:
+                label = "动作与运动参考（受场景替换规则约束）" if replace_scene else "动作与运动"
+                lines.append(f"{label}：{narrative}")
         shot_keys = (
             (
                 "shot_type",
@@ -255,21 +382,16 @@ def compile_replica_final_text(
         for key in shot_keys:
             if shot.get(key):
                 lines.append(f"{key}: {_anchor_presenter_to_first_frame(shot[key])}")
-        if index == 0 and opening_action.strip():
-            lines.append(
-                f"用户确认的开场衔接：{_anchor_presenter_to_first_frame(opening_action.strip())}"
-            )
-        else:
-            if shot.get("action"):
-                action_label = "动作参考（受场景替换规则约束）" if replace_scene else "动作"
-                lines.append(f"{action_label}：{_anchor_presenter_to_first_frame(shot['action'])}")
-            if isinstance(shot.get("motion"), dict):
-                motion_prefix = "运动参考（受场景替换规则约束）：" if replace_scene else ""
-                lines.extend(
-                    f"{motion_prefix}{key}: {_anchor_presenter_to_first_frame(value)}"
-                    for key, value in shot["motion"].items()
-                    if value
-                )
+        if not isinstance(shot.get("motion"), dict):
+            legacy_without_motion.append(str(shot.get("shot_id") or f"s{index + 1}"))
+    if legacy_without_motion:
+        logger.warning(
+            "Replica prompt compiled without motion for %d shot(s) (%s): "
+            "legacy analysis carries no motion, so movement cues fall back to "
+            "the action text alone.",
+            len(legacy_without_motion),
+            ", ".join(legacy_without_motion),
+        )
     if script_text:
         lines.append(
             f"The on-screen person shown in <Picture 1> (S1) says: <d>[Chinese] {script_text}</d>"

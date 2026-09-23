@@ -530,20 +530,33 @@ export function useCustomerSession(
     if (screen !== "workspace" || sessionToken === null) {
       return;
     }
-    const timer = window.setInterval(() => {
-      // MATERIAL-PERF-D（P1-5）：页面隐藏时不发心跳（既省请求，也避免后台
-      // 标签页维持在线表象）；恢复可见后由下一个 tick 续上。
-      if (document.hidden) {
-        return;
-      }
+    const beat = () => {
       const token = sessionTokenRef.current;
       if (token === null) {
         return;
       }
       void sendHeartbeat(token);
-    }, heartbeatIntervalMs);
+    };
+    const timer = window.setInterval(beat, heartbeatIntervalMs);
+    // 租约由服务端计时（SESSION_LEASE_SECONDS = 90 秒），本地心跳是唯一的续租
+    // 手段。窗口最小化或被遮挡时 WebView 会把页面标记为 hidden；此时若照旧暂停
+    // 心跳，租约必然到期，下一次请求就会拿到 401 SESSION_EXPIRED 并把用户弹回
+    // 登录屏——即「使用中约 90 秒自动退出」。因此心跳不再随可见性暂停。
+    // 心跳本身不改变会话归属，只是同一设备续租（会话按设备一行），
+    // 所以不存在「后台标签页维持在线表象」的问题。
+    // 恢复可见时立刻补一次，不等待下一个 tick：否则回到窗口后仍可能先撞上
+    // 已经过期的租约。
+    const beatOnRestore = () => {
+      if (!document.hidden) {
+        beat();
+      }
+    };
+    document.addEventListener("visibilitychange", beatOnRestore);
+    window.addEventListener("focus", beatOnRestore);
     return () => {
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", beatOnRestore);
+      window.removeEventListener("focus", beatOnRestore);
     };
   }, [heartbeatIntervalMs, screen, sessionToken, sendHeartbeat]);
 
