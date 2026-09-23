@@ -1,6 +1,10 @@
 mod customer_credentials;
 mod publish_accounts;
 mod video_downloads;
+mod viral_cache;
+mod viral_decrypt;
+
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -28,16 +32,25 @@ pub fn run() {
             video_downloads::cancel_video_download,
             video_downloads::get_video_download_status,
             video_downloads::open_video_download_folder,
+            viral_cache::viral_cache_ensure,
+            viral_cache::viral_cache_status,
+            viral_cache::viral_cache_list,
+            viral_cache::viral_cache_delete,
+            viral_cache::viral_cache_clear,
+            viral_cache::viral_cache_open_folder,
         ])
-        .setup(|_app| {
-            let main = _app
+        .setup(|app| {
+            // 缓存根目录落在应用数据目录下，必须在 App 就绪后才能解析，
+            // 因此用 manage 而不是在 builder 链上直接构造。
+            app.manage(viral_cache::ViralCache::from_app(app.handle())?);
+            let main = app
                 .config()
                 .app
                 .windows
                 .iter()
                 .find(|config| config.label == "main")
                 .ok_or("main window configuration is missing")?;
-            tauri::WebviewWindowBuilder::from_config(_app, main)?
+            tauri::WebviewWindowBuilder::from_config(app, main)?
                 .on_download(video_downloads::on_download)
                 .build()?;
             Ok(())

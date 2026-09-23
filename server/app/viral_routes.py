@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 from app.auth import AuthenticatedUser, Database
 from app.customer_fence import BusinessDbDep
 from app.media_routes import api_base_url, get_media_storage
+from app.permissions import require_not_auditor
 from app.settings import settings_encryption_key
 from app.storage import StorageBackendUnavailable, local_download_signature
 from app.viral_keywords import configured_viral_categories
@@ -56,6 +57,7 @@ from app.viral_tikhub import (
     PLATFORM_WECHAT,
     PLATFORM_XIAOHONGSHU,
     ViralSourceClient,
+    ViralSourceError,
     ViralSourceUnavailable,
     ViralVideo,
     viral_source_client_from_settings,
@@ -74,6 +76,9 @@ _WECHAT_SORT = {SORT_HOT: "hot", SORT_LATEST: "latest"}
 
 VIRAL_LIST_CACHE_TTL = timedelta(days=7)
 VIRAL_MEDIA_FRESHNESS = timedelta(minutes=10)
+# 源站直链只活几小时（§10）。这里给客户端一个保守上界用于安排下载窗口，
+# 不是源站的承诺值，过期仍以源站实际响应为准。
+VIRAL_SOURCE_URL_TTL = timedelta(hours=2)
 logger = logging.getLogger(__name__)
 # 桌面单进程：同平台并发页面请求共享一次回源，库内时间戳仍是刷新依据。
 
@@ -154,6 +159,22 @@ class ViralMediaResponse(BaseModel):
     contentType: str
     cacheHit: bool
     video: ViralVideoItem | None = None
+
+
+class ViralSourceRequest(BaseModel):
+    platform: str = Field(min_length=1)
+    videoId: str = Field(min_length=1, max_length=512)
+
+
+class ViralSourceResponse(BaseModel):
+    platform: str
+    videoId: str
+    fullUrl: str
+    # 视频号专用：与 fullUrl 同批下发。每次请求都会变，客户端不得缓存。
+    decodeKey: str | None = None
+    contentType: str = "video/mp4"
+    # 直链有效期仅供客户端参考的保守上界，不是源站承诺。
+    expiresAt: str
 
 
 def _now() -> datetime:
@@ -425,6 +446,89 @@ def fetch_viral_video_media(payload: ViralMediaRequest, db: BusinessDbDep) -> Vi
         contentType=result.content_type,
         cacheHit=result.cache_hit,
     )
+
+
+@router.post("/videos/source", response_model=ViralSourceResponse)
+def fetch_viral_video_source(
+    payload: ViralSourceRequest,
+    db: BusinessDbDep,
+    client: ViralSourceClientDep,
+) -> ViralSourceResponse:
+    """下发源站直链（视频号额外**同批**下发 ``decode_key``），不代理下载、不落存储.
+
+    P2 客户端本地缓存的前置：客户端拿到直链后自行多线程取回并在本地解密
+    （决策 #17），平台不再代理下载、也不再为播放生成签名流（§6.3）。这与既有
+    ``/videos/media`` 的区别正在于此——后者是 ``cached_only`` 且回服务端签名 URL。
+
+    ``decode_key`` 每次请求都会变化，客户端必须与 ``fullUrl`` 同批取用、不得缓存；
+    因此本响应不做任何服务端缓存。
+
+    计费：本端点**当前不计费**——它是纯上游元数据调用，而 §7 的计费表只列了
+    搜索/ASR/复刻三项，客户端每次翻页缓存都会取一次直链，按次收费会成倍放
+    大成本。供应商成本因此敞口，是否接 ``viral_search_refresh`` 科目计费待定。
+    """
+    if payload.platform not in _VALID_PLATFORMS:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "VIRAL_PLATFORM_INVALID", "message": "不支持的视频平台"},
+        )
+    if client is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "VIRAL_SOURCE_UNAVAILABLE",
+                "message": "爆款视频数据源暂不可用，请联系管理员。",
+            },
+        )
+    with db.write() as (conn, actor):
+        require_not_auditor(
+            conn,
+            actor=actor,
+            action="viral.source",
+            entity_type="viral_source",
+            entity_id=payload.platform,
+        )
+        # 只发内容池里已有的视频。否则本端点会变成「拿任意 videoId 去上游取直链」
+        # 的开放代理，把供应商配额暴露给任何登录用户。
+        video = _require_stored_video(
+            conn, platform=payload.platform, video_id=payload.videoId, require_available=True
+        )
+    expires_at = (_now() + VIRAL_SOURCE_URL_TTL).isoformat()
+    try:
+        if payload.platform == PLATFORM_WECHAT:
+            export_id = str(video.native.get("export_id") or "")
+            if not export_id:
+                raise ViralSourceError("该视频缺少可用的资源标识")
+            detail = client.wechat_video_detail(
+                export_id=export_id,
+                object_nonce_id=video.native.get("object_nonce_id") or None,
+            )
+            if not detail.full_url or not detail.decode_key:
+                raise ViralSourceError("该视频素材暂时无法获取，请稍后重试")
+            return ViralSourceResponse(
+                platform=payload.platform,
+                videoId=payload.videoId,
+                fullUrl=detail.full_url,
+                decodeKey=detail.decode_key,
+                expiresAt=expires_at,
+            )
+        refreshed = client.douyin_refresh(platform=payload.platform, video_id=payload.videoId)
+        # 上游是按关键词「模拟」刷新的，必须精确匹配回同一个 video_id，
+        # 否则会把别的视频的直链下发给客户端。
+        exact = [item for item in refreshed if item.video_id == payload.videoId and item.play_url]
+        if not exact:
+            raise ViralSourceError("该视频素材暂时无法获取，请稍后重试")
+        return ViralSourceResponse(
+            platform=payload.platform,
+            videoId=payload.videoId,
+            fullUrl=exact[0].play_url or "",
+            expiresAt=expires_at,
+        )
+    except ViralSourceError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "VIRAL_SOURCE_UPSTREAM_FAILED", "message": str(exc)},
+        ) from exc
 
 
 _VIRAL_FILE_SCHEME = "local://"
