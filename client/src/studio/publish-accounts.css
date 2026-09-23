@@ -39,6 +39,11 @@
   margin-left: 0;
 }
 
+.publish-account-status--invalid {
+  color: #ff9aa8;
+  font-weight: 700;
+}
+
 @media (max-width: 640px) {
   .studio-publish-account.publish-account {
     display: grid;

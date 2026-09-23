@@ -434,15 +434,24 @@ export function LocalPublishAccountsPanel({
               {native &&
                 (syncErrors[cloudKey(account)]
                   ? " · 服务端未同步"
-                  : cloudAccounts[cloudKey(account)]
-                    ? cloudAccounts[cloudKey(account)].status === "invalid"
-                      ? " · 服务端登录态失效，请重新登录"
-                      : " · 已同步服务端，可自动发布"
+                  : cloudAccounts[cloudKey(account)]?.status === "connected"
+                    ? " · 已同步服务端，可自动发布"
                     : "")}
-              {!native &&
-                (account as Partial<CloudPublishAccount>).status ===
-                  "invalid" &&
-                " · 登录态失效，请重新登录"}
+              {((native &&
+                cloudAccounts[cloudKey(account)]?.status === "invalid") ||
+                (!native &&
+                  (account as Partial<CloudPublishAccount>).status ===
+                    "invalid")) && (
+                <>
+                  {" · "}
+                  <strong
+                    className="publish-account-status--invalid"
+                    role="alert"
+                  >
+                    服务端登录态失效，请重新登录
+                  </strong>
+                </>
+              )}
             </small>
             {native && syncErrors[cloudKey(account)] && (
               <p role="alert">{syncErrors[cloudKey(account)]}</p>

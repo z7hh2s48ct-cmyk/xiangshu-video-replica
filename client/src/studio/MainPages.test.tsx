@@ -2687,6 +2687,26 @@ describe("发布账号官方扫码", () => {
       ),
     );
   });
+  it("服务端发布登录态失效时显示红色报警", async () => {
+    const channelsAccount = { ...account, platform: "wechat_channels" };
+    nativeAccounts.listLocalPublishAccounts.mockResolvedValue([
+      channelsAccount,
+    ]);
+    nativeAccounts.listCloudPublishAccounts.mockResolvedValue([
+      {
+        ...channelsAccount,
+        id: "cloud-invalid",
+        status: "invalid",
+        error_message: "视频号登录态失效",
+        source: "desktop",
+      },
+    ]);
+    open();
+    fireEvent.click(await screen.findByRole("button", { name: "视频号" }));
+    const warning = await screen.findByText("服务端登录态失效，请重新登录");
+    expect(warning).toHaveClass("publish-account-status--invalid");
+    expect(warning).toHaveAttribute("role", "alert");
+  });
   it("只从本机加载账号并显示官方用户名，不提供 Cookie 输入框", async () => {
     nativeAccounts.listLocalPublishAccounts.mockResolvedValue([account]);
     const { value } = open();
