@@ -389,9 +389,7 @@ async function verifyFailureRecoveryPaths(page, runDir) {
   await openDetailsWithin(uncertainCard, "details.task-resolution-controls");
 
   await expect(
-    failedCard.getByText(
-      "The H3 task failed or returned an invalid result.",
-    ),
+    failedCard.getByText("The H3 task failed or returned an invalid result."),
   ).toBeVisible();
   await expect(
     failedCard.getByLabel(`重新生成原因 ${failedTaskId}`),
