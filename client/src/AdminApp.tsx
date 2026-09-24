@@ -15,6 +15,7 @@ import { SessionsPage } from "./admin/SessionsPage";
 import { SystemSettingsPage } from "./admin/SystemSettingsPage";
 import { AdminErrorBoundary } from "./admin/ui/AdminErrorBoundary";
 import { shanghaiDate } from "./admin/ui/vocabulary";
+import { ViralDiscoveriesPage } from "./admin/ViralDiscoveriesPage";
 import { ViralVideosPage } from "./admin/ViralVideosPage";
 import "./admin/admin-login.css";
 import { PageBanner } from "./admin/ui/PageBanner";
@@ -69,6 +70,7 @@ export type AdminTab =
   | "sessions"
   | "generationRecords"
   | "viralVideos"
+  | "viralDiscoveries"
   | "auditCenter"
   | "systemSettings";
 
@@ -108,7 +110,12 @@ const tabGroups: Array<{
       {
         id: "viralVideos",
         label: "爆款视频库",
-        helper: "采集数据、首页展示与删除管理",
+        helper: "采集数据、实时搜索、首页展示与删除管理",
+      },
+      {
+        id: "viralDiscoveries",
+        label: "用户搜索发现",
+        helper: "客户搜索记录下钻与上首页",
       },
     ],
   },
@@ -133,6 +140,7 @@ const tabPageTitles: Record<AdminTab, string> = {
   sessions: "会话与设备",
   generationRecords: "用户生成记录",
   viralVideos: "爆款视频库",
+  viralDiscoveries: "用户搜索发现",
   auditCenter: "审计中心",
   systemSettings: "系统设置",
 };
@@ -146,6 +154,7 @@ const navigationIcons: Record<AdminTab, string> = {
   sessions: shieldIcon,
   generationRecords: clapperboardIcon,
   viralVideos: clapperboardIcon,
+  viralDiscoveries: clapperboardIcon,
   auditCenter: shieldIcon,
   systemSettings: settingsIcon,
 };
@@ -821,6 +830,9 @@ export function AdminApp() {
           {activeTab === "auditCenter" ? <AuditCenterPage /> : null}
           {activeTab === "viralVideos" ? (
             <ViralVideosPage readOnly={readOnly} />
+          ) : null}
+          {activeTab === "viralDiscoveries" ? (
+            <ViralDiscoveriesPage readOnly={readOnly} />
           ) : null}
           {activeTab === "systemSettings" ? (
             <SystemSettingsPage

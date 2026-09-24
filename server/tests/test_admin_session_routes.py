@@ -1313,6 +1313,57 @@ def test_admin_viral_discoveries_daily_summary(client: TestClient, route_state: 
     assert client.get(path, headers=headers).status_code == 422
 
 
+def test_admin_viral_discovery_details_drilldown(client: TestClient, route_state: str) -> None:
+    """明细端点：按词下钻、带内容池行状态；坏日期 422；已删视频 video=null."""
+    headers = _admin_session(client)
+    with psycopg.connect(route_state) as conn:
+        conn.execute(
+            "INSERT INTO viral_search_discoveries "
+            "(id,user_id,keyword,platform,video_id,search_date,searched_at) VALUES "
+            "('dd-1','customer_u','农村建房','douyin','admin-video/opaque=id','2026-09-22',"
+            "'2026-09-22T01:00:00+00:00'),"
+            "('dd-2','admin_u','农村建房','douyin','admin-video/opaque=id','2026-09-22',"
+            "'2026-09-22T02:00:00+00:00'),"
+            "('dd-3','customer_u','农村建房','douyin','v-deleted-x','2026-09-22',"
+            "'2026-09-22T03:00:00+00:00')"
+        )
+        conn.execute(
+            "UPDATE viral_videos SET deleted_at=CURRENT_TIMESTAMP "
+            "WHERE platform='douyin' AND video_id='v-deleted-x'"
+        )
+    path = "/api/control/viral/discoveries/detail"
+    response = client.get(
+        path,
+        headers=headers,
+        params={"date": "2026-09-22", "keyword": "农村建房", "platform": "douyin"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["total"] == 2
+    assert [item["videoId"] for item in body["items"]] == [
+        "v-deleted-x",
+        "admin-video/opaque=id",
+    ]
+    newest = body["items"][0]
+    assert newest["users"] == 1 and newest["discoveries"] == 1
+    assert newest["video"] is None  # 内容池已删除，仅保留发现记录
+    stored = body["items"][1]
+    assert stored["users"] == 2 and stored["discoveries"] == 2
+    video = stored["video"]
+    assert video["title"] == "后台下架测试"
+    assert video["homepage_featured"] is False
+    assert video["media_status"] == "NOT_STARTED"
+    # 平台过滤后另一平台的记录不掺进来
+    empty = client.get(
+        path, headers=headers, params={"date": "2026-09-22", "platform": "wechat_channels"}
+    )
+    assert empty.status_code == 200
+    assert empty.json()["items"] == []
+    bad = client.get(path, headers=headers, params={"date": "2026-09-22T10:00"})
+    assert bad.status_code == 422
+    assert bad.json()["detail"]["code"] == "VIRAL_SEARCH_DATE_INVALID"
+
+
 def _use_admin_search_source(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """给管理端实时搜索挂一个抖音搜索桩，返回调用记录."""
 

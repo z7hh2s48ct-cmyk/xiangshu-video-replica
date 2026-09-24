@@ -1975,6 +1975,70 @@ export function adminSearchViralVideos(
 }
 
 // ---------------------------------------------------------------------------
+// 用户搜索发现（管理端）：每日聚合 + 关键词下钻明细
+// ---------------------------------------------------------------------------
+
+export type ViralDiscoverySummary = {
+  keyword: string;
+  platform: "douyin" | "wechat_channels";
+  discoveries: number;
+  users: number;
+  videos: number;
+};
+
+export type ViralDiscoveryAggregate = {
+  date: string;
+  total: number;
+  users: number;
+  videos: number;
+  keywords: ViralDiscoverySummary[];
+};
+
+export async function listViralDiscoveries(
+  date: string,
+): Promise<ViralDiscoveryAggregate> {
+  const response = await requestControl(
+    `/api/control/viral/discoveries?date=${encodeURIComponent(date)}`,
+    {},
+  );
+  if (!response.ok)
+    throw await parseActivationError(response, "读取搜索发现失败");
+  return response.json();
+}
+
+export type ViralDiscoveryDetail = {
+  keyword: string;
+  platform: "douyin" | "wechat_channels";
+  videoId: string;
+  discoveries: number;
+  users: number;
+  lastSearchedAt: string;
+  /** 内容池里已删除或从未入库的视频为 null，此时只能查看不能操作。 */
+  video: CollectedViralVideo | null;
+};
+
+export async function listViralDiscoveryDetails(options: {
+  date: string;
+  keyword?: string;
+  platform?: string;
+  offset?: number;
+  limit?: number;
+}): Promise<{ date: string; total: number; items: ViralDiscoveryDetail[] }> {
+  const query = new URLSearchParams({ date: options.date });
+  if (options.keyword) query.set("keyword", options.keyword);
+  if (options.platform) query.set("platform", options.platform);
+  query.set("offset", String(options.offset ?? 0));
+  query.set("limit", String(options.limit ?? 20));
+  const response = await requestControl(
+    `/api/control/viral/discoveries/detail?${query}`,
+    {},
+  );
+  if (!response.ok)
+    throw await parseActivationError(response, "读取搜索发现明细失败");
+  return response.json();
+}
+
+// ---------------------------------------------------------------------------
 // Dashboard summary (W15 — 总览仪表盘)
 // ---------------------------------------------------------------------------
 

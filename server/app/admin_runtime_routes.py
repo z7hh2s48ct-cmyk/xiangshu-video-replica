@@ -522,6 +522,112 @@ def read_viral_search_discoveries(
     }
 
 
+@router.get("/viral/discoveries/detail")
+def read_viral_discovery_details(
+    _actor: AdminReader,
+    date: Annotated[str | None, Query()] = None,
+    keyword: Annotated[str | None, Query(max_length=100)] = None,
+    platform: Literal["douyin", "wechat_channels"] | None = None,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+) -> dict[str, object]:
+    """用户搜索记录的逐条明细：按 (关键词×平台×视频) 分组，左联内容池.
+
+    聚合视图（``GET /viral/discoveries``）只回答「哪个词最热」；运营要据此
+    把具体视频转存/上首页时需要这一层：每行带视频的归档与首页状态，操作
+    语义与视频库完全一致。内容池里已删除的视频 ``video`` 为 null，仅保留
+    发现记录。日期错误码与聚合端点一致（不设 max_length，避免 FastAPI 的
+    参数校验 422 抢在业务错误码之前返回）。
+    """
+    resolved_date = (date or "").strip()
+    if not resolved_date:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "VIRAL_SEARCH_DATE_REQUIRED", "message": "日期参数必填。"},
+        )
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", resolved_date):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "VIRAL_SEARCH_DATE_INVALID", "message": "日期格式应为 YYYY-MM-DD。"},
+        )
+    filters = "d.search_date = %s"
+    params: list[object] = [resolved_date]
+    if (keyword or "").strip():
+        filters += " AND d.keyword = %s"
+        params.append((keyword or "").strip())
+    if platform:
+        filters += " AND d.platform = %s"
+        params.append(platform)
+    # 分页在分组后的 CTE 内完成：count(*) OVER () 在 LIMIT 前取值，
+    # 因此 total 是全量分组数而不是本页行数。
+    sql = f"""
+        WITH grouped AS (
+            SELECT d.keyword, d.platform, d.video_id,
+                   count(*) AS discoveries,
+                   count(DISTINCT d.user_id) AS users,
+                   max(d.searched_at) AS last_searched_at,
+                   count(*) OVER () AS total
+            FROM viral_search_discoveries d
+            WHERE {filters}
+            GROUP BY d.keyword, d.platform, d.video_id
+            ORDER BY max(d.searched_at) DESC, d.keyword, d.platform, d.video_id
+            LIMIT %s OFFSET %s
+        )
+        SELECT g.keyword, g.platform, g.video_id, g.discoveries, g.users,
+               g.last_searched_at, g.total,
+               v.title, v.author, v.category, v.duration_ms, v.likes, v.comments,
+               v.shares, v.collects, v.published_at, v.created_at,
+               v.homepage_featured, v.collection_published, v.cover_key,
+               v.native_json::jsonb->>'_statistics_checked_at' AS statistics_checked_at,
+               v.native_json::jsonb->>'_statistics_retry_at' AS statistics_retry_at,
+               (COALESCE(v.cover_url,'') != '') AS cover_required,
+               COALESCE(m.status,'NOT_STARTED') AS media_status, m.storage_uri,
+               r.status AS archive_status, r.error_message_redacted AS archive_error
+        FROM grouped g
+        LEFT JOIN viral_videos v
+            ON v.platform = g.platform AND v.video_id = g.video_id
+            AND v.deleted_at IS NULL
+        LEFT JOIN viral_media_preparations m
+            ON m.platform = g.platform AND m.video_id = g.video_id
+            AND m.media_kind = 'video'
+        LEFT JOIN viral_refresh_tasks r ON r.platform = g.platform AND r.sort = 'latest'
+            AND r.collection_config_json::jsonb->>'kind' = 'single_archive'
+            AND r.collection_config_json::jsonb->>'video_id' = g.video_id
+        ORDER BY g.last_searched_at DESC, g.keyword, g.platform, g.video_id
+    """
+    with pg_transaction() as raw:
+        # 命名行访问（dict(row)）必须走 BusinessConnection 的行工厂，
+        # 裸 psycopg 连接返回的是普通元组。
+        conn = BusinessConnection.postgres(raw)
+        rows = conn.execute(sql, (*params, limit, offset)).fetchall()
+    items: list[dict[str, object]] = []
+    total = 0
+    for row in rows:
+        mapping = dict(row)
+        total = int(mapping["total"])
+        items.append(
+            {
+                "keyword": str(mapping["keyword"]),
+                "platform": str(mapping["platform"]),
+                "videoId": str(mapping["video_id"]),
+                "discoveries": int(mapping["discoveries"]),
+                "users": int(mapping["users"]),
+                "lastSearchedAt": str(mapping["last_searched_at"]),
+                # 内容池已无此视频（或从未入库）时 video 为 null。
+                "video": (
+                    _collected_video_payload(mapping) if mapping["title"] is not None else None
+                ),
+            }
+        )
+    return {
+        "date": resolved_date,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "items": items,
+    }
+
+
 class ViralAdminSearchRequest(AdminWriteContract):
     model_config = ConfigDict(extra="forbid")
 
