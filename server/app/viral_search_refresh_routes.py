@@ -76,7 +76,9 @@ def _search_item(video: ViralVideo, *, has_copy: bool) -> dict[str, Any]:
         "coverUrl": None,
     }
     if video.cover_key:
-        item["coverUrl"] = f"{api_base_url()}/viral/covers/{video.platform}/{video.video_id}"
+        # 与 viral_tikhub.to_client_dict 同一前缀：路由挂在 /api/viral 下，
+        # 缺 /api 会让刷新结果里的封面全部 404。
+        item["coverUrl"] = f"{api_base_url()}/api/viral/covers/{video.platform}/{video.video_id}"
     elif video.cover_url:
         # Fallback to original URL
         item["coverUrl"] = video.cover_url

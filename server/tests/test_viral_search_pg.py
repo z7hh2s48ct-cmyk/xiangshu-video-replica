@@ -865,6 +865,8 @@ def test_refresh_charges_once_and_returns_updated_video(
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["video"]["videoId"] == "v-refresh"
+    # 封面必须走 /api 前缀的自有路由（缺前缀会在网关层 404）。
+    assert "/api/viral/covers/douyin/v-refresh" in body["video"]["coverUrl"]
     assert body["billing"] == {"charged": 2, "unit": "call"}
     # 验证钱包余额被扣除
     with psycopg.connect(route_state) as raw:
@@ -1418,6 +1420,57 @@ def test_source_releases_reservation_when_upstream_omits_decode_key(
             ).fetchone()[0]
             == "FAILED"
         )
+
+
+def test_content_pool_list_flags_copy_hits(source_client, route_state) -> None:
+    """浏览列表同样回填 hasCopy：与搜索接口口径一致，无需先搜一次才知道."""
+    from dataclasses import replace
+
+    from app.viral_store import upsert_viral_videos
+
+    headers, _uid = account(source_client, "pool_hascopy")
+    payload = json.dumps({"text": "池内已有文案", "duration_sec": 15.0}, ensure_ascii=False)
+    with psycopg.connect(route_state) as raw:
+        raw.execute(
+            "INSERT INTO viral_script_cache (platform, video_id, result_json) "
+            "VALUES ('douyin', 'v-pool-copy', %s) ON CONFLICT (platform, video_id) "
+            "DO UPDATE SET result_json=excluded.result_json",
+            (payload,),
+        )
+        upsert_viral_videos(
+            BusinessConnection.postgres(raw),
+            [replace(_viral_seed(video_id="v-pool-copy"))],
+        )
+        upsert_viral_videos(
+            BusinessConnection.postgres(raw),
+            [replace(_viral_seed(video_id="v-pool-plain"))],
+        )
+        # 列表只展示「最近 7 天发布、已入集且云端归档完成」的视频
+        # （viral_store 的窗口 + _PUBLISHED_SQL 过滤），种子数据必须补齐
+        # 归档状态才会出现在响应里。
+        raw.execute(
+            "INSERT INTO viral_media_preparations "
+            "(id, platform, video_id, media_kind, status, storage_uri) VALUES "
+            "('mp-copy',  'douyin', 'v-pool-copy',  'video', 'SUCCEEDED', 'local://media/viral/copy.mp4'), "
+            "('mp-plain', 'douyin', 'v-pool-plain', 'video', 'SUCCEEDED', 'local://media/viral/plain.mp4') "
+            "ON CONFLICT (platform, video_id, media_kind) DO UPDATE SET "
+            "status='SUCCEEDED', storage_uri=excluded.storage_uri"
+        )
+        raw.execute(
+            "UPDATE viral_videos SET published_at=%s, collection_published=1, "
+            "cover_key='viral/covers/douyin/' || video_id "
+            "WHERE video_id IN ('v-pool-copy', 'v-pool-plain')",
+            (int(datetime.now(UTC).timestamp()),),
+        )
+    response = source_client.get(
+        "/api/viral/videos",
+        headers=headers,
+        params={"platform": "douyin", "sort": "hot", "limit": 50},
+    )
+    assert response.status_code == 200, response.text
+    flags = {item["videoId"]: item["hasCopy"] for item in response.json()["items"]}
+    assert flags["v-pool-copy"] is True
+    assert flags["v-pool-plain"] is False
 
 
 def test_source_rejects_unpriced_service_before_reserving(source_client, route_state) -> None:

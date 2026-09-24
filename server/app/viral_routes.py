@@ -27,6 +27,7 @@ from app.billing_meter import billing_context
 from app.customer_fence import BusinessDbDep
 from app.media_routes import api_base_url, get_media_storage
 from app.permissions import require_not_auditor
+from app.script_from_audio import cached_transcript, cached_transcripts
 from app.settings import settings_encryption_key
 from app.storage import StorageBackendUnavailable, local_download_signature
 from app.usage_billing import accept_operation, finish_source
@@ -206,11 +207,13 @@ def _item(
     *,
     is_favorite: bool = False,
     availability: ViralAvailability = "available",
+    has_copy: bool = False,
 ) -> ViralVideoItem:
     item = ViralVideoItem(
         **video.to_client_dict(),
         isFavorite=is_favorite,
         availability=availability,
+        hasCopy=has_copy,
     )
     if not video.cover_key:
         item.coverUrl = None
@@ -275,6 +278,9 @@ def list_viral_videos(
         platform=platform,
         video_ids=[video.video_id for video in page.items],
     )
+    # 浏览列表同样回填共享文案命中：与搜索接口口径一致，卡片不用先搜一次
+    # 才知道这篇文案已经提取过。
+    copy_hits = cached_transcripts(conn, [(video.platform, video.video_id) for video in page.items])
     return ViralListResponse(
         platform=platform,
         sort=sort,
@@ -284,6 +290,7 @@ def list_viral_videos(
                 video,
                 is_favorite=video.video_id in favorite_ids,
                 availability=availability_by_id.get(video.video_id, "available"),
+                has_copy=(video.platform, video.video_id) in copy_hits,
             )
             for video in page.items
         ],
@@ -331,6 +338,7 @@ def list_viral_favorites(
             platform=video_platform,
             video_ids=[video.video_id for video in page.items if video.platform == video_platform],
         )
+    copy_hits = cached_transcripts(conn, [(video.platform, video.video_id) for video in page.items])
     return ViralFavoritesResponse(
         items=[
             _item(
@@ -339,6 +347,7 @@ def list_viral_favorites(
                 availability=availability_by_platform[video.platform].get(
                     video.video_id, "available"
                 ),
+                has_copy=(video.platform, video.video_id) in copy_hits,
             )
             for video in page.items
         ],
@@ -821,4 +830,5 @@ def get_viral_video_detail(
             video_id=video_id,
         ),
         availability=availability,
+        has_copy=cached_transcript(conn, platform=platform, video_id=video_id) is not None,
     )
