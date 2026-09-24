@@ -12,7 +12,6 @@ import { FundsPage } from "./admin/FundsPage";
 import { GenerationRecordsPage } from "./admin/GenerationRecordsPage";
 import { OverviewPage } from "./admin/OverviewPage";
 import { SessionsPage } from "./admin/SessionsPage";
-import { SubAccountsPage } from "./admin/SubAccountsPage";
 import { SystemSettingsPage } from "./admin/SystemSettingsPage";
 import { AdminErrorBoundary } from "./admin/ui/AdminErrorBoundary";
 import { shanghaiDate } from "./admin/ui/vocabulary";
@@ -68,7 +67,6 @@ export type AdminTab =
   | "funds"
   | "customersMgmt"
   | "sessions"
-  | "subAccounts"
   | "generationRecords"
   | "viralVideos"
   | "auditCenter"
@@ -103,11 +101,6 @@ const tabGroups: Array<{
         helper: "在线会话、强制下线与设备解绑",
       },
       {
-        id: "subAccounts",
-        label: "子账号管理",
-        helper: "为母账号创建和管理子账号",
-      },
-      {
         id: "generationRecords",
         label: "生成记录",
         helper: "视频、图片与 AI 评分费用追溯",
@@ -138,7 +131,6 @@ const tabPageTitles: Record<AdminTab, string> = {
   funds: "资金流水",
   customersMgmt: "客户管理",
   sessions: "会话与设备",
-  subAccounts: "子账号管理",
   generationRecords: "用户生成记录",
   viralVideos: "爆款视频库",
   auditCenter: "审计中心",
@@ -152,7 +144,6 @@ const navigationIcons: Record<AdminTab, string> = {
   funds: walletIcon,
   customersMgmt: usersIcon,
   sessions: shieldIcon,
-  subAccounts: usersIcon,
   generationRecords: clapperboardIcon,
   viralVideos: clapperboardIcon,
   auditCenter: shieldIcon,
@@ -811,15 +802,6 @@ export function AdminApp() {
               readOnly 由会话页自身收敛（auditor 不渲染强制下线与调账入口）。 */}
           {activeTab === "sessions" ? (
             <SessionsPage readOnly={readOnly} />
-          ) : null}
-          {activeTab === "subAccounts" ? (
-            <AdminErrorBoundary>
-              <SubAccountsPage
-                embedded={false}
-                operatorId={actor.user_id}
-                readOnly={readOnly}
-              />
-            </AdminErrorBoundary>
           ) : null}
           {activeTab === "generationRecords" ? (
             <GenerationRecordsPage

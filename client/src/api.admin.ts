@@ -138,7 +138,7 @@ export type WechatSelfCheckResult = {
  * 但它是控制面的 **POST**，而该车道的 POST 强制 CSRF——缺 `X-Admin-CSRF` 会被
  * `admin_auth_routes.py` 以 403 `ADMIN_CSRF_REQUIRED` 拒掉。所以这里必须走
  * `adminWrite`（它会带该头）；该路由不消费请求体，`confirm`/`reason`/
- * `Idempotency-Key` 随之发出但不被读取（`deleteSubAccount` 同例）。
+ * `Idempotency-Key` 随之发出但不被读取。
  *
  * 原先这里是裸 `requestControl` + `{ method: "POST" }`，**不带任何 CSRF 头**，
  * 生产环境必然 403——只因为 `PaymentSettingsSection.test.tsx` 把本模块整个 mock
@@ -429,113 +429,6 @@ interface AdminListPage<T> {
   total: number;
   limit: number;
   offset: number;
-}
-
-// Sub-account related types
-export interface SubAccountListItem {
-  id: string;
-  username: string;
-  display_name: string;
-  account_type: "SUB";
-  parent_user_id: string;
-  is_active: boolean;
-  created_at: string;
-  updated_at: string | null;
-}
-
-export interface CreateSubAccountRequest {
-  username: string;
-  display_name: string;
-  parent_user_id: string;
-  reason: string;
-}
-
-export interface UpdateSubAccountRequest {
-  display_name?: string;
-  is_active?: boolean;
-  reason: string;
-  request_id?: string;
-}
-
-export interface SubAccountListResponse {
-  sub_accounts: SubAccountListItem[];
-  total_count: number;
-}
-
-export async function listMasterAccounts(limit = 100, offset = 0) {
-  return adminRead<{
-    items: CustomerListItem[];
-    total: number;
-    limit: number;
-    offset: number;
-  }>(
-    `/api/admin/customers?limit=${limit}&offset=${offset}`,
-    "读取母账号列表失败",
-  );
-}
-
-export async function listSubAccounts(
-  parentUserId: string,
-): Promise<SubAccountListResponse> {
-  return adminRead<SubAccountListResponse>(
-    `/api/admin/sub-accounts?parent_user_id=${encodeURIComponent(parentUserId)}`,
-    "读取子账号列表失败",
-  );
-}
-
-export async function createSubAccount(
-  input: CreateSubAccountRequest,
-): Promise<SubAccountListItem> {
-  return adminWrite<SubAccountListItem>(
-    "/api/admin/sub-accounts",
-    {
-      username: input.username,
-      display_name: input.display_name,
-      parent_user_id: input.parent_user_id,
-      confirm: true,
-      reason: input.reason,
-    },
-    input.reason || "创建子账号",
-    "创建子账号失败",
-    undefined,
-    "POST",
-  );
-}
-
-export async function updateSubAccount(
-  subAccountId: string,
-  input: Partial<UpdateSubAccountRequest>,
-  reason: string = input.reason || "编辑子账号信息",
-): Promise<SubAccountListItem> {
-  const fields: Record<string, unknown> = {};
-  if (input.display_name !== undefined)
-    fields.display_name = input.display_name;
-  if (input.is_active !== undefined) fields.is_active = input.is_active;
-  if (input.reason !== undefined) {
-    fields.reason = input.reason;
-  }
-
-  return adminWrite<SubAccountListItem>(
-    `/api/admin/sub-accounts/${encodeURIComponent(subAccountId)}`,
-    fields,
-    reason,
-    "保存子账号信息失败",
-    undefined,
-    "PATCH",
-  );
-}
-
-export async function deleteSubAccount(
-  subAccountId: string,
-): Promise<{ deleted: boolean }> {
-  return adminWrite(
-    `/api/admin/sub-accounts/${encodeURIComponent(subAccountId)}`,
-    {},
-    "删除子账号",
-    "删除子账号失败",
-    undefined,
-    "DELETE",
-  );
 }
 
 export async function listAdminRechargeOrders(
