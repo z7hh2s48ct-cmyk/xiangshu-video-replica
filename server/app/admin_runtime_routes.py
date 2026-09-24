@@ -375,6 +375,68 @@ class ViralCurationRequest(AdminWriteContract):
     action: Literal["feature", "unfeature", "delete"]
 
 
+# 视频库与管理端搜索共用的行投影：viral_videos 左联云端媒体准备与单条转存
+# 任务，给出前端「转存 / 上首页」按钮需要的全部状态。
+_COLLECTED_VIRAL_ROW_SELECT = """
+    SELECT v.platform,v.video_id,v.category,v.title,v.author,v.duration_ms,
+        v.likes,v.comments,v.shares,v.collects,v.published_at,v.created_at,
+        v.homepage_featured,v.collection_published,v.cover_key,
+        v.native_json::jsonb->>'_statistics_checked_at' AS statistics_checked_at,
+        v.native_json::jsonb->>'_statistics_retry_at' AS statistics_retry_at,
+        (COALESCE(v.cover_url,'') != '') AS cover_required,
+        COALESCE(m.status,'NOT_STARTED') AS media_status,m.storage_uri,
+        r.status AS archive_status,r.error_message_redacted AS archive_error
+    FROM viral_videos v LEFT JOIN viral_media_preparations m
+        ON m.platform=v.platform AND m.video_id=v.video_id AND m.media_kind='video'
+    LEFT JOIN viral_refresh_tasks r ON r.platform=v.platform AND r.sort='latest'
+        AND r.collection_config_json::jsonb->>'kind'='single_archive'
+        AND r.collection_config_json::jsonb->>'video_id'=v.video_id
+"""
+
+
+def _collected_video_payload(row: dict[str, object]) -> dict[str, object]:
+    """行 → 响应：只保留视频库行字段，布尔列还原为 bool，时间戳转 ISO.
+
+    明细视图会把分组列与视频列混在一行里，这里按白名单挑列，避免把
+    ``discoveries``/``total`` 这类分组字段漏进 video 对象；ISO 化是因为
+    幂等快照层用 ``json.dumps`` 落响应，datetime 不能直接序列化。
+    """
+    item = {key: row[key] for key in _COLLECTED_VIDEO_COLUMNS if key in row}
+    item["homepage_featured"] = bool(item["homepage_featured"])
+    item["collection_published"] = bool(item["collection_published"])
+    created_at = item.get("created_at")
+    if created_at is not None and hasattr(created_at, "isoformat"):
+        item["created_at"] = created_at.isoformat()
+    return item
+
+
+# 行投影里响应侧的列名（与 _COLLECTED_VIRAL_ROW_SELECT 的别名一一对应）。
+_COLLECTED_VIDEO_COLUMNS = (
+    "platform",
+    "video_id",
+    "category",
+    "title",
+    "author",
+    "duration_ms",
+    "likes",
+    "comments",
+    "shares",
+    "collects",
+    "published_at",
+    "created_at",
+    "homepage_featured",
+    "collection_published",
+    "cover_key",
+    "statistics_checked_at",
+    "statistics_retry_at",
+    "cover_required",
+    "media_status",
+    "storage_uri",
+    "archive_status",
+    "archive_error",
+)
+
+
 @router.get("/viral/videos")
 def read_collected_viral_videos(
     _actor: AdminReader,
@@ -397,29 +459,16 @@ def read_collected_viral_videos(
             f"SELECT count(*) FROM viral_videos v WHERE {filters}", tuple(params)
         ).fetchone()[0]
         rows = conn.execute(
-            f"""SELECT v.platform,v.video_id,v.category,v.title,v.author,v.duration_ms,
-                v.likes,v.comments,v.shares,v.collects,v.published_at,v.created_at,
-                v.homepage_featured,v.collection_published,v.cover_key,
-                v.native_json::jsonb->>'_statistics_checked_at' AS statistics_checked_at,
-                v.native_json::jsonb->>'_statistics_retry_at' AS statistics_retry_at,
-                (COALESCE(v.cover_url,'') != '') AS cover_required,
-                COALESCE(m.status,'NOT_STARTED') AS media_status,m.storage_uri,
-                r.status AS archive_status,r.error_message_redacted AS archive_error
-            FROM viral_videos v LEFT JOIN viral_media_preparations m
-                ON m.platform=v.platform AND m.video_id=v.video_id AND m.media_kind='video'
-            LEFT JOIN viral_refresh_tasks r ON r.platform=v.platform AND r.sort='latest'
-                AND r.collection_config_json::jsonb->>'kind'='single_archive'
-                AND r.collection_config_json::jsonb->>'video_id'=v.video_id
-            WHERE {filters} ORDER BY v.created_at DESC,v.platform,v.video_id {PAGE_CLAUSE}""",
+            f"{_COLLECTED_VIRAL_ROW_SELECT} WHERE {filters} "
+            f"ORDER BY v.created_at DESC,v.platform,v.video_id {PAGE_CLAUSE}",
             (*params, limit, offset),
         ).fetchall()
-    items = []
-    for row in rows:
-        item = dict(row)
-        item["homepage_featured"] = bool(item["homepage_featured"])
-        item["collection_published"] = bool(item["collection_published"])
-        items.append(item)
-    return {"items": items, "total": int(total), "offset": offset, "limit": limit}
+    return {
+        "items": [_collected_video_payload(dict(row)) for row in rows],
+        "total": int(total),
+        "offset": offset,
+        "limit": limit,
+    }
 
 
 @router.get("/viral/discoveries")
@@ -471,6 +520,140 @@ def read_viral_search_discoveries(
         "videos": int(totals[2]),
         "keywords": [dict(row) for row in rows],
     }
+
+
+class ViralAdminSearchRequest(AdminWriteContract):
+    model_config = ConfigDict(extra="forbid")
+
+    keyword: str = Field(min_length=1, max_length=100)
+    platform: Literal["douyin", "wechat_channels"] = "douyin"
+    time_range: Literal["all", "day", "week", "half_year"] = "week"
+    cursor: str | None = Field(default=None, max_length=2048)
+
+
+@router.post("/viral/search")
+def search_viral_videos_for_admin(
+    payload: ViralAdminSearchRequest,
+    request: Request,
+    response: Response,
+    actor: AdminWriter,
+) -> dict[str, object]:
+    """管理端实时搜索：外呼上游 → 结果并入内容池，返回视频库同构行.
+
+    与客户侧 ``POST /api/viral/search`` 的三点区别：不预留/结算客户积分
+    （供应商成本由 ``billing_meter.meter_call`` 在无计费上下文时自动落
+    平台操作单）；不写 ``viral_search_discoveries``（管理员自己的搜索不
+    污染用户搜索统计）；命中视频直接 upsert 进内容池，响应行与视频库
+    同构，前端可以直接继续「转存到云端 / 展示到首页」。
+
+    外呼失败走 http_error 抛出：整个事务回滚（占位行一并回滚），
+    幂等键保持可用，管理员重试不冲突。
+    """
+
+    def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
+        from app.media_routes import get_media_storage
+        from app.viral_search import archive_search_covers, run_viral_search
+        from app.viral_store import update_viral_cover, upsert_viral_videos
+        from app.viral_tikhub import (
+            ViralSourceError,
+            ViralSourceUnavailable,
+            viral_source_client_from_settings,
+        )
+
+        keyword = payload.keyword.strip()
+        if not keyword:
+            raise http_error(422, "VIRAL_SEARCH_KEYWORD_REQUIRED", "搜索关键词不能为空。")
+        try:
+            client = viral_source_client_from_settings(BusinessConnection.postgres(conn))
+        except ViralSourceUnavailable as exc:
+            raise http_error(
+                503, "VIRAL_ADMIN_SEARCH_UNAVAILABLE", "爆款视频数据源暂不可用，请先配置数据源。"
+            ) from exc
+        try:
+            page = run_viral_search(
+                client,
+                keyword=keyword,
+                platform=payload.platform,
+                cursor=(payload.cursor or "").strip() or None,
+                time_range=payload.time_range,
+            )
+        except ViralSourceError as exc:
+            raise http_error(503, "VIRAL_ADMIN_SEARCH_UPSTREAM_FAILED", str(exc)) from exc
+        storage = get_media_storage(BusinessConnection.postgres(conn))
+        enriched = archive_search_covers(storage, page.items)
+        upsert_viral_videos(BusinessConnection.postgres(conn), enriched, commit=False)
+        for video in enriched:
+            if video.cover_key:
+                update_viral_cover(
+                    BusinessConnection.postgres(conn),
+                    platform=video.platform,
+                    video_id=video.video_id,
+                    cover_key=video.cover_key,
+                    commit=False,
+                )
+        items: list[dict[str, object]] = []
+        if enriched:
+            # 用内容池当前数据回显（含归档/首页状态），与视频库行同构；
+            # 顺序保持搜索返回的先后。单平台搜索，两个数组取交集不会串行。
+            # 命名行访问必须走 BusinessConnection 行工厂（dict(row)）。
+            business_conn = BusinessConnection.postgres(conn)
+            platforms = sorted({video.platform for video in enriched})
+            video_ids = [video.video_id for video in enriched]
+            found = business_conn.execute(
+                f"{_COLLECTED_VIRAL_ROW_SELECT} "
+                "WHERE v.deleted_at IS NULL AND v.platform = ANY(%s) "
+                "AND v.video_id = ANY(%s)",
+                (platforms, video_ids),
+            ).fetchall()
+            by_key = {
+                (str(row["platform"]), str(row["video_id"])): _collected_video_payload(dict(row))
+                for row in found
+            }
+            items = [
+                by_key[(video.platform, video.video_id)]
+                for video in enriched
+                if (video.platform, video.video_id) in by_key
+            ]
+        conn.execute(
+            """INSERT INTO audit_logs(id,actor_user_id,action,entity_type,entity_id,metadata_json)
+            VALUES(%s,%s,'viral_video.admin_search','viral_video',%s,%s)""",
+            (
+                str(uuid.uuid4()),
+                actor.user_id,
+                f"{payload.platform}:{keyword}",
+                json.dumps(
+                    {
+                        "keyword": keyword,
+                        "platform": payload.platform,
+                        "time_range": payload.time_range,
+                        "cursor_present": bool((payload.cursor or "").strip()),
+                        "results": len(items),
+                        "reason": payload.reason.strip(),
+                        "request_id": request_id,
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        return {
+            "items": items,
+            "cursor": page.cursor,
+            "hasMore": page.has_more,
+            "keyword": keyword,
+            "platform": payload.platform,
+            "timeRange": payload.time_range,
+        }
+
+    return write_with_idempotency(
+        request,
+        response,
+        actor,
+        payload,
+        business,
+        success_status=200,
+        unavailable_code=RUNTIME_SETTINGS_SERVICE_UNAVAILABLE,
+        unavailable_message=RUNTIME_SETTINGS_SERVICE_UNAVAILABLE_MESSAGE,
+    )
 
 
 @router.post("/viral/videos/{platform}/{video_id:path}/archive", status_code=202)

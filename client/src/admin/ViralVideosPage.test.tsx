@@ -324,4 +324,71 @@ describe("ViralVideosPage", () => {
       confirm: true,
     });
   });
+
+  it("实时搜索把命中视频并入内容池并展示可操作结果", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("/api/control/viral/search")) {
+        const payload = JSON.parse(String(init?.body));
+        expect(payload).toMatchObject({
+          keyword: "农村自建房",
+          platform: "douyin",
+          time_range: "week",
+          confirm: true,
+        });
+        expect(payload.reason).toContain("农村自建房");
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            items: [
+              {
+                ...video,
+                platform: "douyin",
+                video_id: "upstream-hit-1",
+                title: "实时搜索命中视频",
+                media_status: "NOT_STARTED",
+                storage_uri: null,
+              },
+            ],
+            cursor: "cursor-next",
+            hasMore: true,
+            keyword: "农村自建房",
+            platform: "douyin",
+            timeRange: "week",
+          }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ items: [], total: 0 }),
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    setAdminCsrfToken("csrf-curation-test");
+    render(<ViralVideosPage />);
+
+    fireEvent.change(screen.getByLabelText(/关键词/), {
+      target: { value: "农村自建房" },
+    });
+    // 页面同时有视频库筛选的「搜索」按钮，必须限定在实时搜索面板内。
+    fireEvent.click(
+      screen
+        .getByRole("region", { name: "实时搜索上游" })
+        .querySelector('button[type="submit"]') as HTMLButtonElement,
+    );
+
+    expect(await screen.findByText("实时搜索命中视频")).toBeInTheDocument();
+    // 未归档的命中视频：允许转存，暂不能上首页。
+    expect(screen.getByRole("button", { name: "转存到云端" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "展示到首页" })).toBeDisabled();
+    // 请求走管理端写契约：CSRF + 幂等键 + confirm/reason。
+    const searchCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/api/control/viral/search"),
+    );
+    expect(searchCall?.[1]?.headers).toMatchObject({
+      "X-Admin-CSRF": "csrf-curation-test",
+      "Idempotency-Key": expect.any(String),
+    });
+  });
 });

@@ -1311,3 +1311,149 @@ def test_admin_viral_discoveries_daily_summary(client: TestClient, route_state: 
     assert bad.status_code == 422
     assert bad.json()["detail"]["code"] == "VIRAL_SEARCH_DATE_INVALID"
     assert client.get(path, headers=headers).status_code == 422
+
+
+def _use_admin_search_source(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """给管理端实时搜索挂一个抖音搜索桩，返回调用记录."""
+
+    class Source:
+        def douyin_search_page(
+            self, *, keyword, category="", sort_type="1", publish_time="7", cursor=None
+        ):
+            calls.append(f"{keyword}:{publish_time}:{cursor or ''}")
+            from app.viral_tikhub import DouyinSearchPage, ViralVideo
+
+            video = ViralVideo(
+                platform="douyin",
+                video_id="admin-search-hit",
+                category="",
+                title="实时搜索命中",
+                author="作者",
+                author_avatar=None,
+                verified=False,
+                cover_url="https://cdn.example/cover.jpg",
+                duration_ms=15000,
+                likes=7,
+                comments=None,
+                shares=None,
+                collects=None,
+                published_at=None,
+                published_display=None,
+                like_display=None,
+            )
+            return DouyinSearchPage(
+                videos=[video], cursor='{"c":10,"s":"sid","b":""}', has_more=True
+            )
+
+    from app import viral_tikhub
+
+    calls: list[str] = []
+    monkeypatch.setattr(viral_tikhub, "viral_source_client_from_settings", lambda conn: Source())
+    monkeypatch.setattr(
+        "app.media_routes.get_media_storage", lambda conn: _AdminSearchFakeStorage()
+    )
+
+    def fake_iter_fetch(self, url):
+        yield b"\xff\xd8\xff\xe0fakejpeg"
+
+    from app import viral_media
+
+    monkeypatch.setattr(viral_media.UrlFetcher, "iter_fetch", fake_iter_fetch)
+    return calls
+
+
+class _AdminSearchFakeStorage:
+    """封面归档假存储：记录 put，不落盘."""
+
+    def __init__(self) -> None:
+        self.puts = 0
+
+    def head_object(self, key):
+        return None
+
+    def put_object(self, key, data, *, content_type=None):
+        self.puts += 1
+
+
+def test_admin_realtime_search_upserts_pool_without_customer_charge(
+    client: TestClient, route_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """管理端实时搜索：结果并入内容池 + 审计；不扣客户积分、不记用户发现."""
+    calls = _use_admin_search_source(monkeypatch)
+    headers = _admin_session(client)
+    body = {
+        "keyword": "农村自建房",
+        "platform": "douyin",
+        "time_range": "day",
+        "confirm": True,
+        "reason": "运营实时搜索",
+    }
+    path = "/api/control/viral/search"
+    response = client.post(
+        path, headers={**headers, "Idempotency-Key": "admin-search-1"}, json=body
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["hasMore"] is True
+    assert result["cursor"] == '{"c":10,"s":"sid","b":""}'
+    assert len(result["items"]) == 1
+    row = result["items"][0]
+    assert row["video_id"] == "admin-search-hit"
+    assert row["title"] == "实时搜索命中"
+    assert row["homepage_featured"] is False
+    assert row["cover_key"]  # 封面已归档到自有存储
+    assert calls == ["农村自建房:1:"]
+    with psycopg.connect(route_state) as conn:
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM viral_videos WHERE platform='douyin' "
+                "AND video_id='admin-search-hit'"
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM audit_logs WHERE action='viral_video.admin_search'"
+            ).fetchone()[0]
+            == 1
+        )
+        # 管理员自己的搜索不写用户发现记录，也不产生客户计费单。
+        assert conn.execute("SELECT count(*) FROM viral_search_discoveries").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM billing_operations").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM wallet_transactions").fetchone()[0] == 0
+    # 同幂等键重放：命中幂等快照，不重复外呼。
+    replay = client.post(path, headers={**headers, "Idempotency-Key": "admin-search-1"}, json=body)
+    assert replay.status_code == 200
+    assert replay.headers.get("x-idempotent-replay") == "true"
+    assert len(calls) == 1
+    # 搜索下一页：游标透传，进入内容池的仍是同一批上游命中。
+    page2 = client.post(
+        path,
+        headers={**headers, "Idempotency-Key": "admin-search-2"},
+        json={**body, "cursor": '{"c":10,"s":"sid","b":""}'},
+    )
+    assert page2.status_code == 200, page2.text
+    assert calls == ["农村自建房:1:", '农村自建房:1:{"c":10,"s":"sid","b":""}']
+
+
+def test_admin_realtime_search_requires_write_contract(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """写契约：缺确认/原因/幂等键一律拒绝，绝不免费外呼上游."""
+    _use_admin_search_source(monkeypatch)
+    headers = _admin_session(client)
+    path = "/api/control/viral/search"
+    missing_key = client.post(
+        path,
+        headers=headers,
+        json={"keyword": "农村自建房", "platform": "douyin", "confirm": True, "reason": "r"},
+    )
+    assert missing_key.status_code == 400
+    assert missing_key.json()["detail"]["code"] == "IDEMPOTENCY_KEY_REQUIRED"
+    no_reason = client.post(
+        path,
+        headers={**headers, "Idempotency-Key": "contract-1"},
+        json={"keyword": "农村自建房", "platform": "douyin", "confirm": True, "reason": " "},
+    )
+    assert no_reason.status_code == 400
+    assert no_reason.json()["detail"]["code"] == "REASON_REQUIRED"

@@ -1933,6 +1933,48 @@ export async function previewCollectedViralVideo(
 }
 
 // ---------------------------------------------------------------------------
+// 爆款实时搜索（管理端）：外呼上游并把命中视频并入内容池
+// ---------------------------------------------------------------------------
+
+export type AdminViralSearchTimeRange = "all" | "day" | "week" | "half_year";
+
+export type AdminViralSearchResult = {
+  items: CollectedViralVideo[];
+  cursor: string | null;
+  hasMore: boolean;
+  keyword: string;
+  platform: string;
+  timeRange: string;
+};
+
+/**
+ * 管理端实时搜索：走管理端写契约（confirm + reason + 幂等键），结果直接
+ * upsert 进内容池，但**不扣任何客户积分**（供应商成本记平台账）。响应行
+ * 与爆款视频库同构，可继续转存 / 展示到首页。
+ */
+export function adminSearchViralVideos(
+  payload: {
+    keyword: string;
+    platform: "douyin" | "wechat_channels";
+    time_range: AdminViralSearchTimeRange;
+    cursor?: string;
+  },
+  reason: string,
+  idempotencyKey: string,
+): Promise<AdminViralSearchResult> {
+  return adminWrite<AdminViralSearchResult>(
+    "/api/control/viral/search",
+    payload,
+    reason,
+    "搜索爆款视频失败",
+    idempotencyKey,
+    "POST",
+    // 与客户侧搜索同量级：上游检索 + 并发归档封面，远慢于普通管理读。
+    240_000,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Dashboard summary (W15 — 总览仪表盘)
 // ---------------------------------------------------------------------------
 

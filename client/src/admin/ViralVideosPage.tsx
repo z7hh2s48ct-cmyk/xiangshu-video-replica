@@ -7,13 +7,17 @@ import {
   useState,
 } from "react";
 import {
+  type AdminViralSearchTimeRange,
   adminActivationErrorMessage,
+  adminSearchViralVideos,
   archiveCollectedViralVideo,
   type CollectedViralVideo,
   curateViralVideo,
+  fetchViralRuntimeControls,
   listCollectedViralVideos,
   previewCollectedViralVideo,
   refreshCollectedVideoStatistics,
+  updateViralRuntimeControls,
 } from "../api.admin";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { PageBanner } from "./ui/PageBanner";
@@ -22,17 +26,19 @@ import { StatusBadge } from "./ui/StatusBadge";
 
 type Action = "feature" | "unfeature" | "delete" | "archive";
 
-function archiveBusy(video: CollectedViralVideo) {
+// 归档/首页状态的三个小判定被「用户搜索发现」页共用（对同一视频的
+// 操作语义必须两处一致），因此导出而非各自复制。
+export function archiveBusy(video: CollectedViralVideo) {
   return (
     video.archive_status === "PENDING" || video.archive_status === "RUNNING"
   );
 }
 
-function mediaReady(video: CollectedViralVideo) {
+export function mediaReady(video: CollectedViralVideo) {
   return video.media_status === "SUCCEEDED" && Boolean(video.storage_uri);
 }
 
-function archiveLabel(video: CollectedViralVideo) {
+export function archiveLabel(video: CollectedViralVideo) {
   if (video.archive_status === "PENDING") return "转存排队中";
   if (video.archive_status === "RUNNING") return "正在转存";
   if (mediaReady(video))
@@ -80,6 +86,23 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
     action: Action;
     key: string;
   } | null>(null);
+  // 实时搜索：外呼数据源，命中视频直接并入内容池（不扣客户积分）。
+  const [upstreamKeyword, setUpstreamKeyword] = useState("");
+  const [upstreamPlatform, setUpstreamPlatform] = useState<
+    "douyin" | "wechat_channels"
+  >("douyin");
+  const [upstreamTimeRange, setUpstreamTimeRange] =
+    useState<AdminViralSearchTimeRange>("week");
+  const [upstreamCategory, setUpstreamCategory] = useState("推荐");
+  const [upstreamResults, setUpstreamResults] = useState<
+    CollectedViralVideo[] | null
+  >(null);
+  const [upstreamCursor, setUpstreamCursor] = useState("");
+  const [upstreamHasMore, setUpstreamHasMore] = useState(false);
+  const [upstreamLoading, setUpstreamLoading] = useState(false);
+  const [upstreamError, setUpstreamError] = useState("");
+  const [upstreamNotice, setUpstreamNotice] = useState("");
+  const [collectBusy, setCollectBusy] = useState(false);
   const generation = useRef(0);
   const previewGeneration = useRef(0);
   const statisticsKeys = useRef(new Map<string, string>());
@@ -140,6 +163,24 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
             ? "视频已删除，前台不再展示。"
             : "首页展示设置已更新。",
       );
+      // 搜索结果与视频库共用一套操作，成功后同步两侧的行状态。
+      if (pending.action === "archive")
+        patchUpstream(pending.video, { archive_status: "PENDING" });
+      else if (pending.action === "feature")
+        patchUpstream(pending.video, { homepage_featured: true });
+      else if (pending.action === "unfeature")
+        patchUpstream(pending.video, { homepage_featured: false });
+      else
+        setUpstreamResults(
+          (previous) =>
+            previous?.filter(
+              (item) =>
+                !(
+                  item.platform === pending.video.platform &&
+                  item.video_id === pending.video.video_id
+                ),
+            ) ?? previous,
+        );
       setPending(null);
       setPreview(null);
       previewGeneration.current += 1;
@@ -153,6 +194,103 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
   function choose(video: CollectedViralVideo, action: Action) {
     setError("");
     setPending({ video, action, key: crypto.randomUUID() });
+  }
+
+  /** 同步搜索结果行里的归档/首页状态，避免操作后状态与视频库对不上。 */
+  function patchUpstream(
+    video: CollectedViralVideo,
+    patch: Partial<CollectedViralVideo>,
+  ) {
+    setUpstreamResults(
+      (previous) =>
+        previous?.map((item) =>
+          item.platform === video.platform && item.video_id === video.video_id
+            ? { ...item, ...patch }
+            : item,
+        ) ?? previous,
+    );
+  }
+
+  async function runUpstreamSearch(cursor?: string) {
+    if (readOnly || upstreamLoading) return;
+    const keyword = upstreamKeyword.trim();
+    if (!keyword) return;
+    setUpstreamLoading(true);
+    setUpstreamError("");
+    setUpstreamNotice("");
+    try {
+      const result = await adminSearchViralVideos(
+        {
+          keyword,
+          platform: upstreamPlatform,
+          time_range: upstreamTimeRange,
+          ...(cursor ? { cursor } : {}),
+        },
+        `实时搜索「${keyword}」`,
+        crypto.randomUUID(),
+      );
+      setUpstreamResults((previous) =>
+        cursor ? [...(previous ?? []), ...result.items] : result.items,
+      );
+      setUpstreamCursor(result.cursor ?? "");
+      setUpstreamHasMore(Boolean(result.hasMore && result.cursor));
+    } catch (cause) {
+      setUpstreamError(adminActivationErrorMessage(cause, "搜索爆款视频失败"));
+    } finally {
+      setUpstreamLoading(false);
+    }
+  }
+
+  /** 把当前搜索词加入定时采集配置，让后续采集周期持续拉取该词。 */
+  async function addUpstreamKeywordToCollection() {
+    const keyword = upstreamKeyword.trim();
+    if (readOnly || collectBusy || !keyword) return;
+    setCollectBusy(true);
+    setUpstreamError("");
+    setUpstreamNotice("");
+    try {
+      const controls = await fetchViralRuntimeControls();
+      const keywords = controls.keywords ?? [];
+      if (
+        keywords.some(
+          (item) =>
+            item.platform === upstreamPlatform && item.keyword === keyword,
+        )
+      ) {
+        setUpstreamNotice("该关键词已在采集配置里，无需重复添加。");
+        return;
+      }
+      if (keywords.length >= 20) {
+        setUpstreamError(
+          "采集关键词已达 20 条上限，请先在系统设置中移除部分关键词。",
+        );
+        return;
+      }
+      await updateViralRuntimeControls(
+        {
+          collection_enabled: controls.collection_enabled,
+          import_enabled: controls.import_enabled,
+          keywords: [
+            ...keywords,
+            {
+              platform: upstreamPlatform,
+              category: upstreamCategory.trim() || "推荐",
+              keyword,
+            },
+          ],
+          per_keyword_limit: controls.per_keyword_limit,
+          collection_interval_days: controls.collection_interval_days,
+        },
+        `实时搜索后加入采集关键词「${keyword}」`,
+      );
+      setUpstreamNotice(`已把「${keyword}」加入采集关键词，下个采集周期生效。`);
+    } catch (cause) {
+      setUpstreamError(
+        adminActivationErrorMessage(cause, "加入采集关键词失败"),
+      );
+    } finally {
+      setCollectBusy(false);
+    }
   }
 
   async function refreshStatistics() {
@@ -242,6 +380,246 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
       {statisticsProgress && (
         <PageBanner tone="notice">{statisticsProgress}</PageBanner>
       )}
+      <section className="admin-viral-upstream" aria-label="实时搜索上游">
+        <h3>实时搜索</h3>
+        <p className="admin-hint">
+          外呼数据源按关键词检索，结果直接并入下方视频库；供应商成本记平台账，不扣客户积分。搜索后可转存到云端再展示到首页。
+        </p>
+        <form
+          className="admin-toolbar admin-viral-toolbar"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void runUpstreamSearch();
+          }}
+        >
+          <label>
+            平台
+            <select
+              disabled={upstreamLoading}
+              value={upstreamPlatform}
+              onChange={(event) =>
+                setUpstreamPlatform(
+                  event.target.value as "douyin" | "wechat_channels",
+                )
+              }
+            >
+              <option value="douyin">抖音</option>
+              <option value="wechat_channels">视频号</option>
+            </select>
+          </label>
+          <label className="admin-viral-search">
+            关键词
+            <input
+              disabled={upstreamLoading}
+              value={upstreamKeyword}
+              maxLength={100}
+              placeholder="输入要搜索的关键词"
+              onChange={(event) => setUpstreamKeyword(event.target.value)}
+            />
+          </label>
+          <label>
+            时间范围
+            <select
+              disabled={upstreamLoading}
+              value={upstreamTimeRange}
+              onChange={(event) =>
+                setUpstreamTimeRange(
+                  event.target.value as AdminViralSearchTimeRange,
+                )
+              }
+            >
+              <option value="day">最近 1 天</option>
+              <option value="week">最近 7 天</option>
+              <option value="half_year">最近半年</option>
+              <option value="all">不限时间</option>
+            </select>
+          </label>
+          <button
+            type="submit"
+            disabled={upstreamLoading || !upstreamKeyword.trim()}
+          >
+            {upstreamLoading ? "搜索中…" : "搜索"}
+          </button>
+        </form>
+        {upstreamError && <PageBanner tone="error">{upstreamError}</PageBanner>}
+        {upstreamNotice && (
+          <PageBanner tone="notice">{upstreamNotice}</PageBanner>
+        )}
+        {upstreamLoading && (
+          <p role="status">正在搜索（需外呼数据源，请稍候）…</p>
+        )}
+        {upstreamResults !== null && !upstreamLoading && (
+          <>
+            {upstreamResults.length === 0 ? (
+              <p>未搜索到相关视频，可换个关键词或放宽时间范围。</p>
+            ) : (
+              <section
+                className="admin-table-scroll admin-viral-table-scroll"
+                // biome-ignore lint/a11y/noNoninteractiveTabindex: 同视频库表格，键盘用户需要聚焦滚动区域。
+                tabIndex={0}
+                aria-label="实时搜索结果"
+              >
+                <table className="admin-data-table admin-viral-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">视频</th>
+                      <th scope="col">互动</th>
+                      <th scope="col">归档 / 首页</th>
+                      <th scope="col">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {upstreamResults.map((video) => {
+                      const key = `${video.platform}:${video.video_id}`;
+                      return (
+                        <tr key={key}>
+                          <td>
+                            <div className="admin-viral-meta">
+                              <span className="admin-viral-platform">
+                                {video.platform === "douyin"
+                                  ? "抖音"
+                                  : "视频号"}
+                              </span>
+                              <span>{video.category || "未分类"}</span>
+                              <span>
+                                {video.duration_ms > 0
+                                  ? `${(video.duration_ms / 1000).toFixed(1)} 秒`
+                                  : "时长未知"}
+                              </span>
+                            </div>
+                            <strong
+                              className="admin-viral-title"
+                              title={video.title}
+                            >
+                              {video.title || "未命名视频"}
+                            </strong>
+                            <div className="admin-viral-byline">
+                              <span title={video.author}>
+                                {video.author || "未知作者"}
+                              </span>
+                            </div>
+                          </td>
+                          <td>
+                            <span>
+                              点赞 {video.likes.toLocaleString("zh-CN")}
+                            </span>
+                          </td>
+                          <td>
+                            <div className="admin-viral-status">
+                              <StatusBadge
+                                tone={
+                                  archiveLabel(video) === "归档就绪"
+                                    ? "good"
+                                    : video.media_status === "FAILED"
+                                      ? "danger"
+                                      : "warn"
+                                }
+                              >
+                                {archiveLabel(video)}
+                              </StatusBadge>
+                              <span
+                                className={
+                                  video.homepage_featured
+                                    ? "admin-viral-featured"
+                                    : "admin-viral-muted"
+                                }
+                              >
+                                {video.homepage_featured ? "展示中" : "未展示"}
+                              </span>
+                            </div>
+                          </td>
+                          <td>
+                            <div className="admin-viral-actions">
+                              {!readOnly &&
+                                archiveLabel(video) !== "归档就绪" && (
+                                  <button
+                                    type="button"
+                                    disabled={saving || archiveBusy(video)}
+                                    onClick={() => choose(video, "archive")}
+                                  >
+                                    {archiveBusy(video)
+                                      ? "后台转存中"
+                                      : "转存到云端"}
+                                  </button>
+                                )}
+                              <button
+                                type="button"
+                                disabled={
+                                  saving ||
+                                  video.media_status !== "SUCCEEDED" ||
+                                  !video.storage_uri
+                                }
+                                onClick={() => void showPreview(video)}
+                              >
+                                预览
+                              </button>
+                              {!readOnly && (
+                                <button
+                                  type="button"
+                                  disabled={
+                                    saving ||
+                                    (!video.homepage_featured &&
+                                      (video.media_status !== "SUCCEEDED" ||
+                                        !video.storage_uri))
+                                  }
+                                  onClick={() =>
+                                    choose(
+                                      video,
+                                      video.homepage_featured
+                                        ? "unfeature"
+                                        : "feature",
+                                    )
+                                  }
+                                >
+                                  {video.homepage_featured
+                                    ? "取消首页展示"
+                                    : "展示到首页"}
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </section>
+            )}
+            {upstreamHasMore && (
+              <button
+                type="button"
+                disabled={upstreamLoading}
+                onClick={() => void runUpstreamSearch(upstreamCursor)}
+              >
+                下一页（继续外呼数据源）
+              </button>
+            )}
+            {!readOnly && upstreamKeyword.trim() && (
+              <div className="admin-toolbar admin-viral-toolbar">
+                <label className="admin-viral-search">
+                  采集分类
+                  <input
+                    disabled={collectBusy}
+                    value={upstreamCategory}
+                    maxLength={32}
+                    placeholder="推荐"
+                    onChange={(event) =>
+                      setUpstreamCategory(event.target.value)
+                    }
+                  />
+                </label>
+                <button
+                  type="button"
+                  disabled={collectBusy}
+                  onClick={() => void addUpstreamKeywordToCollection()}
+                >
+                  将「{upstreamKeyword.trim()}」加入采集关键词
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </section>
       <form
         className="admin-toolbar admin-viral-toolbar"
         onSubmit={(event) => {
