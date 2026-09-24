@@ -44,6 +44,9 @@ client/src-tauri/resources/*.log
 deploy/*.env
 deploy/nginx/*.conf
 账号信息.md
+# 微信支付生产凭据（v3 密钥 / 商户证书），绝不进版本库
+账户支付.txt
+支付！！！/
 data/
 *.db
 *.db-shm
