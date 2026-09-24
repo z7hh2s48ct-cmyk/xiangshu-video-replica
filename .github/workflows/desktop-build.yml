@@ -112,7 +112,7 @@ jobs:
           output=".cargo-target/$RUST_TARGET/release/bundle/dmg"
           mkdir -p "$output"
           # Native image creation does not need a Finder automation session.
-          hdiutil create -volname "Video Replica $version" -srcfolder "$stage" \
+          hdiutil create -volname "众墅之家 AI 爆款视频工具 $version" -srcfolder "$stage" \
             -format UDZO "$output/VideoReplica_${version}_${PLATFORM}.dmg"
       - name: Verify macOS application and disk image
         if: runner.os == 'macOS'
@@ -220,5 +220,5 @@ jobs:
           API 源：\`${VITE_API_BASE_URL}\`
           EOF
           gh release create "$GITHUB_REF_NAME" release/*/* \
-            --title "短视频复刻工作台 ${GITHUB_REF_NAME}" \
+            --title "众墅之家 AI 爆款视频工具 ${GITHUB_REF_NAME}" \
             --notes-file release-notes.md
