@@ -966,6 +966,22 @@ def complete_script_from_audio_task(
     complete_source_attempt(conn, lease.id, usage=result.duration_sec)
     if result.duration_sec is not None:
         finish_source(conn, lease.id, units=result.duration_sec, succeeded=True)
+    else:
+        # 供应商没回时长的成功结果按预留预算结算：文案已经交付，绝不能
+        # 把计费单留在 PENDING（交付未扣费，且对账器按「SUCCEEDED 且有
+        # 时长」过滤，永远兜不到这一行）。
+        budget = conn.execute(
+            "SELECT budget_units FROM billing_operations WHERE source_id=%s AND service='asr' "
+            "ORDER BY billing_round DESC LIMIT 1",
+            (lease.id,),
+        ).fetchone()
+        if budget is None or budget[0] is None:
+            raise script_from_audio_error(
+                503,
+                "SCRIPT_FROM_AUDIO_BILLING_MISSING",
+                "转写计费单缺失，请联系管理员核实。",
+            )
+        finish_source(conn, lease.id, units=budget[0], succeeded=True)
     conn.commit()
 
 
