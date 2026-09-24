@@ -1451,8 +1451,10 @@ def test_content_pool_list_flags_copy_hits(source_client, route_state) -> None:
         raw.execute(
             "INSERT INTO viral_media_preparations "
             "(id, platform, video_id, media_kind, status, storage_uri) VALUES "
-            "('mp-copy',  'douyin', 'v-pool-copy',  'video', 'SUCCEEDED', 'local://media/viral/copy.mp4'), "
-            "('mp-plain', 'douyin', 'v-pool-plain', 'video', 'SUCCEEDED', 'local://media/viral/plain.mp4') "
+            "('mp-copy', 'douyin', 'v-pool-copy', 'video', 'SUCCEEDED',"
+            " 'local://media/viral/copy.mp4'), "
+            "('mp-plain', 'douyin', 'v-pool-plain', 'video', 'SUCCEEDED',"
+            " 'local://media/viral/plain.mp4') "
             "ON CONFLICT (platform, video_id, media_kind) DO UPDATE SET "
             "status='SUCCEEDED', storage_uri=excluded.storage_uri"
         )
