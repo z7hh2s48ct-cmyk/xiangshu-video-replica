@@ -7547,6 +7547,8 @@ const VIRAL_SEARCH_TIMEOUT_MS = 240_000;
 
 export type ViralPlatform = "douyin" | "wechat_channels" | "xiaohongshu";
 export type ViralSort = "hot" | "latest";
+/** 搜索时间范围（跨平台中立枚举；两个平台由服务端映射到各自的取值）。 */
+export type ViralSearchTimeRange = "all" | "day" | "week" | "half_year";
 
 export type ViralVideoItem = {
   homepageFeatured?: boolean;
@@ -7695,13 +7697,21 @@ export function newViralSearchKey(): string {
 export function searchViralVideos(
   keyword: string,
   platform: ViralPlatform,
-  options: { cursor?: string; idempotencyKey?: string } = {},
+  options: {
+    cursor?: string;
+    idempotencyKey?: string;
+    timeRange?: ViralSearchTimeRange;
+  } = {},
 ): Promise<ViralSearchResponse> {
   const payload: {
     keyword: string;
     platform: ViralPlatform;
+    time_range?: ViralSearchTimeRange;
     cursor?: string;
   } = { keyword: keyword.trim(), platform };
+  if (options.timeRange && options.timeRange !== "week") {
+    payload.time_range = options.timeRange;
+  }
   if (options.cursor) payload.cursor = options.cursor;
   return requestApiJson<ViralSearchResponse>(
     "/api/viral/search",

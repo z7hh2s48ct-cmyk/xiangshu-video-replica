@@ -1,6 +1,6 @@
 """客户搜索接口（P1）：一次翻页 = 一次外呼 + 一次计费 + 一次落库.
 
-- ``POST /api/viral/search``：关键词 + 平台（+ 游标）→ 命中视频 + 计费回执。
+- ``POST /api/viral/search``：关键词 + 平台 + 时间范围（+ 游标）→ 命中视频 + 计费回执。
 - 幂等键由 ``Idempotency-Key`` 承载，派生出 ``source_id``；同值重复请求复用
   同一计费轮次（不重复扣费），但会重新外呼（P1 不做服务端响应重放）。
 - 供应商成本：``billing_context(source_id)`` 让 ``viral_tikhub._request`` 内的
@@ -83,6 +83,9 @@ class ViralSearchRequest(BaseModel):
 
     keyword: str = Field(min_length=1, max_length=100)
     platform: Literal["douyin", "wechat_channels"] = "douyin"
+    # 与 viral_tikhub.SEARCH_TIME_RANGES 对齐的中立时间范围；缺省「一周」
+    # 与历史行为（写死近 7 天）一致。
+    time_range: Literal["all", "day", "week", "half_year"] = "week"
     cursor: str | None = Field(default=None, max_length=2048)
 
 
@@ -159,7 +162,7 @@ def search_viral_videos(
                 "message": "爆款视频数据源暂不可用，请联系管理员。",
             },
         )
-    fingerprint = f"{payload.platform}:{keyword}:{cursor or ''}"
+    fingerprint = f"{payload.platform}:{keyword}:{payload.time_range}:{cursor or ''}"
     with db.write() as (conn, actor):
         with conn:
             # 带 user_id 的 source_id 防跨用户计费串号。必须在栅栏内取 actor：
@@ -181,7 +184,11 @@ def search_viral_videos(
     try:
         with billing_context(source_id):
             page = run_viral_search(
-                client, keyword=keyword, platform=payload.platform, cursor=cursor
+                client,
+                keyword=keyword,
+                platform=payload.platform,
+                cursor=cursor,
+                time_range=payload.time_range,
             )
     except ViralSourceError as exc:
         # Release reserved credits for upstream search failure

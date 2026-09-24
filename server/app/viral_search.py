@@ -2,7 +2,7 @@
 
 搜索成为唯一内容入口后，采集调度退场（design §5.5）。本模块只做四件事：
 
-1. 按平台执行一次搜索外呼（抖音单次列表 / 视频号游标翻页）；
+1. 按平台执行一次搜索外呼（一次外呼 = 一页；两平台都按游标翻页）；
 2. 把命中视频的封面归档到自有存储（源站签名链接会过期）；
 3. 幂等地预留/推进客户侧搜索计费（每翻页一次 = 一次计量）；
 4. 把结果 upsert 进内容池、回写封面 key、记录客户发现、结算计费单。
@@ -23,8 +23,11 @@ from app.usage_billing import accept_operation, finish_source
 from app.viral_media import CoverEnricher, UrlFetcher, ViralStorage
 from app.viral_store import mark_viral_discoveries, update_viral_cover, upsert_viral_videos
 from app.viral_tikhub import (
+    DOUYIN_PUBLISH_TIME,
     PLATFORM_DOUYIN,
     PLATFORM_WECHAT,
+    SEARCH_TIME_RANGES,
+    WECHAT_PUBLISH_TIME,
     ViralSourceClient,
     ViralVideo,
 )
@@ -55,15 +58,28 @@ def run_viral_search(
     keyword: str,
     platform: str,
     cursor: str | None = None,
+    time_range: str = "week",
 ) -> ViralSearchPage:
-    """执行一次搜索外呼：抖音单次列表（无翻页）；视频号按游标翻页."""
+    """执行一次搜索外呼：一次外呼 = 一页，两个平台都按游标翻页.
+
+    抖音把上游的 offset/search_id/backtrace 打包成不透明游标下发（见
+    ``viral_tikhub.encode_douyin_search_cursor``），视频号透传上游 cursor；
+    翻一页就是一次新外呼、一次新计量。
+    """
+    if time_range not in SEARCH_TIME_RANGES:
+        raise ValueError(f"unsupported search time range: {time_range}")
     if platform == PLATFORM_WECHAT:
-        page = client.wechat_search_page(keyword=keyword, cursor=cursor)
+        page = client.wechat_search_page(
+            keyword=keyword, cursor=cursor, publish_time=WECHAT_PUBLISH_TIME[time_range]
+        )
         return ViralSearchPage(items=list(page.videos), cursor=page.cursor, has_more=page.has_more)
     if platform != PLATFORM_DOUYIN:
         raise ValueError(f"unsupported search platform: {platform}")
+    douyin_page = client.douyin_search_page(
+        keyword=keyword, publish_time=DOUYIN_PUBLISH_TIME[time_range], cursor=cursor
+    )
     return ViralSearchPage(
-        items=list(client.douyin_search(keyword=keyword)), cursor=None, has_more=False
+        items=list(douyin_page.videos), cursor=douyin_page.cursor, has_more=douyin_page.has_more
     )
 
 

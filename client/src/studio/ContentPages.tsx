@@ -12,6 +12,7 @@ import type {
   ViralImportPurpose,
   ViralImportTask,
   ViralPlatform,
+  ViralSearchTimeRange,
   ViralVideoItem,
 } from "../api";
 import {
@@ -197,6 +198,13 @@ type UploadQueueItem = {
 
 const viralInitialCount = 12;
 const viralPageSize = 12;
+// 搜索时间范围的中立枚举 → 界面文案；标题栏与选择器共用同一份。
+const viralTimeRangeLabels: Record<ViralSearchTimeRange, string> = {
+  all: "不限时间",
+  day: "最近 1 天",
+  week: "最近 7 天",
+  half_year: "最近半年",
+};
 
 function viralIdentity(video: StudioVideo) {
   return video.platformKey && video.nativeId
@@ -906,6 +914,11 @@ export function ViralPage() {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<"热门优先" | "最新">("热门优先");
   const [scope, setScope] = useState<"all" | "favorites">("all");
+  // 搜索时间范围（中立枚举，服务端映射各平台取值）；默认「一周」与历史行为一致。
+  const [timeRange, setTimeRange] = useState<ViralSearchTimeRange>("week");
+  // 翻页形态：默认把下一页追加到结果尾部；勾选「只看当前页」后整页替换。
+  const [searchPageOnly, setSearchPageOnly] = useState(false);
+  const [searchPage, setSearchPage] = useState(1);
   const [visibleCount, setVisibleCount] = useState(viralInitialCount);
   // 关键词搜索：只有显式提交才走服务端（会外呼上游并按次计费），结果整体替换列表。
   const [searchKeyword, setSearchKeyword] = useState<string>();
@@ -917,7 +930,14 @@ export function ViralPage() {
   const [searchCharged, setSearchCharged] = useState<number>();
   // 记录最近一次尝试，供「重试」复用同一个幂等键（同轮次不重复扣费）。
   const searchAttemptRef = useRef<
-    { keyword: string; cursor?: string; key: string } | undefined
+    | {
+        keyword: string;
+        cursor?: string;
+        key: string;
+        timeRange: ViralSearchTimeRange;
+        pageOnly: boolean;
+      }
+    | undefined
   >(undefined);
   // 在途搜索的序号：切平台/退出搜索时自增，让迟到响应失效。
   const searchOperationRef = useRef(0);
@@ -1053,8 +1073,16 @@ export function ViralPage() {
       keyword: string,
       cursor: string | undefined,
       idempotencyKey: string,
+      range: ViralSearchTimeRange,
+      pageOnly: boolean,
     ) => {
-      searchAttemptRef.current = { keyword, cursor, key: idempotencyKey };
+      searchAttemptRef.current = {
+        keyword,
+        cursor,
+        key: idempotencyKey,
+        timeRange: range,
+        pageOnly,
+      };
       const operation = ++searchOperationRef.current;
       const isCurrent = () => operation === searchOperationRef.current;
       setSearchBusy(true);
@@ -1063,14 +1091,17 @@ export function ViralPage() {
         const result = await searchViralVideos(keyword, platformKey, {
           cursor,
           idempotencyKey,
+          timeRange: range,
         });
         // 切平台/退出搜索会作废在途请求，迟到的结果不得再写回状态。
         if (!isCurrent()) return;
         const incoming = result.items.map(studioVideoFromViral);
         setSearchKeyword(keyword);
+        // 「只看当前页」模式下每次翻页整页替换；默认追加到已 accumulated 的结果尾部。
         setSearchResults((previous) =>
-          cursor ? [...(previous ?? []), ...incoming] : incoming,
+          cursor && !pageOnly ? [...(previous ?? []), ...incoming] : incoming,
         );
+        setSearchPage(cursor ? (page) => page + 1 : 1);
         setSearchCursor(result.cursor ?? undefined);
         setSearchHasMore(Boolean(result.hasMore && result.cursor));
         setSearchCharged(result.billing?.charged ?? 0);
@@ -1109,20 +1140,45 @@ export function ViralPage() {
   const submitSearch = useCallback(() => {
     const keyword = query.trim();
     if (review || searchBusy || !keyword) return;
-    void performSearch(keyword, undefined, newViralSearchKey());
-  }, [performSearch, query, review, searchBusy]);
+    void performSearch(
+      keyword,
+      undefined,
+      newViralSearchKey(),
+      timeRange,
+      searchPageOnly,
+    );
+  }, [performSearch, query, review, searchBusy, searchPageOnly, timeRange]);
 
   /** 翻页同样按次计量，因此也换新键。 */
   const loadMoreSearch = useCallback(() => {
     if (searchBusy || !searchKeyword || !searchCursor) return;
-    void performSearch(searchKeyword, searchCursor, newViralSearchKey());
-  }, [performSearch, searchBusy, searchCursor, searchKeyword]);
+    void performSearch(
+      searchKeyword,
+      searchCursor,
+      newViralSearchKey(),
+      timeRange,
+      searchPageOnly,
+    );
+  }, [
+    performSearch,
+    searchBusy,
+    searchCursor,
+    searchKeyword,
+    searchPageOnly,
+    timeRange,
+  ]);
 
   /** 重试复用原键：同一次尝试的失败重试不重复扣费。 */
   const retrySearch = useCallback(() => {
     const attempt = searchAttemptRef.current;
     if (searchBusy || !attempt) return;
-    void performSearch(attempt.keyword, attempt.cursor, attempt.key);
+    void performSearch(
+      attempt.keyword,
+      attempt.cursor,
+      attempt.key,
+      attempt.timeRange,
+      attempt.pageOnly,
+    );
   }, [performSearch, searchBusy]);
 
   /** 退出搜索态、恢复浏览列表；不动输入框（切平台时用它）。 */
@@ -1136,6 +1192,7 @@ export function ViralPage() {
     setSearchError(undefined);
     setSearchCharged(undefined);
     setSearchBusy(false);
+    setSearchPage(1);
   }, []);
 
   /** 「返回爆款列表」：连输入框一起清掉，否则残留关键词会继续过滤浏览列表。 */
@@ -1514,7 +1571,7 @@ export function ViralPage() {
       <header className="content-title">
         <div>
           <h1>爆款视频</h1>
-          <p>乡墅灵感，持续发现 · 最近 7 天爆款</p>
+          <p>乡墅灵感，持续发现 · {viralTimeRangeLabels[timeRange]}爆款</p>
         </div>
         <search className="content-search">
           <form
@@ -1599,6 +1656,21 @@ export function ViralPage() {
           ))}
         </div>
         <label className="content-sort">
+          <span>时间</span>
+          <select
+            aria-label="搜索时间范围"
+            value={timeRange}
+            onChange={(event) =>
+              setTimeRange(event.target.value as ViralSearchTimeRange)
+            }
+          >
+            <option value="day">最近 1 天</option>
+            <option value="week">最近 7 天</option>
+            <option value="half_year">最近半年</option>
+            <option value="all">不限时间</option>
+          </select>
+        </label>
+        <label className="content-sort">
           <span>排序</span>
           <select
             aria-label="排序方式"
@@ -1642,12 +1714,26 @@ export function ViralPage() {
       )}
       {searchActive && (
         <p className="viral-media-status" role="status">
-          搜索「{searchKeyword}」· 命中 {gridVideos.length} 条
+          搜索「{searchKeyword}」{searchPageOnly && ` · 第 ${searchPage} 页`}
+          {" · "}命中 {gridVideos.length} 条
           {searchCharged !== undefined && ` · 本次消耗 ${searchCharged} 点`}
           <Button variant="quiet" onClick={backToBrowse}>
             返回爆款列表
           </Button>
         </p>
+      )}
+      {searchActive && (
+        <label className="content-viral-pageonly">
+          <input
+            type="checkbox"
+            checked={searchPageOnly}
+            onChange={(event) => {
+              // 只影响下一次翻页的呈现方式：不做重新搜索，也不产生新的计费。
+              setSearchPageOnly(event.target.checked);
+            }}
+          />
+          只看当前页
+        </label>
       )}
       {searchBusy && (
         <p className="viral-media-status" role="status">
@@ -1735,7 +1821,11 @@ export function ViralPage() {
           disabled={searchBusy}
           onClick={loadMoreSearch}
         >
-          {searchBusy ? "正在加载…" : "加载下一页（按次计费）"}
+          {searchBusy
+            ? "正在加载…"
+            : searchPageOnly
+              ? "查看下一页（按次计费）"
+              : "加载下一页（按次计费）"}
         </button>
       )}
     </section>

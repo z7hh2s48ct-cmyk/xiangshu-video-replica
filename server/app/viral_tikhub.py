@@ -184,10 +184,90 @@ class ViralVideo:
 
 
 @dataclass(frozen=True)
+class DouyinSearchPage:
+    """一次抖音综合搜索 = 一页；翻页字段打包进不透明 ``cursor``."""
+
+    videos: list[ViralVideo]
+    cursor: str | None
+    has_more: bool
+
+
+@dataclass(frozen=True)
 class WechatSearchPage:
     videos: list[ViralVideo]
     cursor: str | None
     has_more: bool
+
+
+# 时间范围是对外中立的业务枚举；两个数据面取值不同，在此集中映射，
+# 搜索层只透传中立值。缺省「week」与历史行为（写死近 7 天）保持一致。
+SEARCH_TIME_RANGES = ("all", "day", "week", "half_year")
+DOUYIN_PUBLISH_TIME = {"all": "0", "day": "1", "week": "7", "half_year": "180"}
+WECHAT_PUBLISH_TIME = {"all": "all", "day": "day", "week": "week", "half_year": "half_year"}
+
+
+def encode_douyin_search_cursor(*, offset: int, search_id: str, backtrace: str) -> str:
+    """把抖音翻页所需的三个上游字段打包成一个不透明游标.
+
+    上游翻页要求同时回传 offset、search_id、backtrace；对客户端只暴露一个
+    不透明字符串，避免把数据源的游标结构固化成我们自己的接口契约。
+    """
+    return json.dumps(
+        {"c": offset, "s": search_id, "b": backtrace},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def decode_douyin_search_cursor(cursor: str | None) -> dict[str, Any] | None:
+    """还原翻页游标；解析失败一律按首页处理（损坏值不值得让整次搜索报错）."""
+    if not cursor:
+        return None
+    try:
+        payload = json.loads(cursor)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("c"), int):
+        return None
+    if isinstance(payload["c"], bool):
+        return None
+    return {
+        "cursor": payload["c"],
+        "search_id": str(payload.get("s") or ""),
+        "backtrace": str(payload.get("b") or ""),
+    }
+
+
+def _douyin_next_page_state(data: Mapping[str, Any]) -> tuple[str | None, bool]:
+    """从综合搜索响应里提取下一页游标与 has_more（响应是源站结构透传）.
+
+    不同接口版本把翻页字段放在 data 顶层或 data.pagination 下，这里两处
+    都兼容；search_id 兜底取 log_pb.impr_id。取不到下一页 offset 或标志位
+    明确为否时判为「没有更多」——宁可少翻一页，也不能下发一个翻不动的游标。
+    """
+    pagination = data.get("pagination")
+    nested: Mapping[str, Any] = pagination if isinstance(pagination, Mapping) else {}
+    log_pb = data.get("log_pb")
+    search_id = str(
+        data.get("search_id")
+        or nested.get("search_id")
+        or (log_pb.get("impr_id") if isinstance(log_pb, Mapping) else "")
+        or ""
+    )
+    backtrace = str(data.get("backtrace") or nested.get("backtrace") or "")
+    offset: int | None = None
+    for value in (data.get("cursor"), nested.get("offset"), nested.get("cursor")):
+        if isinstance(value, int) and not isinstance(value, bool):
+            offset = value
+            break
+    flag = data.get("has_more", data.get("has_more_status"))
+    has_more = flag in (1, "1", True) if flag is not None else offset is not None
+    if offset is None or not has_more:
+        return None, False
+    cursor_token = encode_douyin_search_cursor(
+        offset=offset, search_id=search_id, backtrace=backtrace
+    )
+    return cursor_token, True
 
 
 @dataclass(frozen=True)
@@ -549,17 +629,47 @@ class ViralSourceClient:
         sort_type: str = "1",
         publish_time: str = "7",
     ) -> list[ViralVideo]:
-        data = self._request(
-            self._transport,
-            DOUYIN_GENERAL_SEARCH_PATH,
-            {
-                "keyword": keyword,
-                "sort_type": sort_type,
-                "publish_time": publish_time,
-                "filter_duration": "0",
-                "content_type": "1",
-            },
+        """单次综合搜索（采集调度用，不翻页）."""
+        return self.douyin_search_page(
+            keyword=keyword,
+            category=category,
+            sort_type=sort_type,
+            publish_time=publish_time,
+        ).videos
+
+    def douyin_search_page(
+        self,
+        *,
+        keyword: str,
+        category: str = "",
+        sort_type: str = "1",
+        publish_time: str = "7",
+        cursor: str | None = None,
+    ) -> DouyinSearchPage:
+        """一次综合搜索 = 一页；翻页传回上一页响应派生的不透明游标."""
+        payload: dict[str, Any] = {
+            "keyword": keyword,
+            "sort_type": sort_type,
+            "publish_time": publish_time,
+            "filter_duration": "0",
+            "content_type": "1",
+        }
+        page_state = decode_douyin_search_cursor(cursor)
+        if page_state is not None:
+            payload["cursor"] = page_state["cursor"]
+            if page_state["search_id"]:
+                payload["search_id"] = page_state["search_id"]
+            if page_state["backtrace"]:
+                payload["backtrace"] = page_state["backtrace"]
+        data = self._request(self._transport, DOUYIN_GENERAL_SEARCH_PATH, payload)
+        next_cursor, has_more = _douyin_next_page_state(data)
+        return DouyinSearchPage(
+            videos=self._douyin_search_videos(data, category),
+            cursor=next_cursor,
+            has_more=has_more,
         )
+
+    def _douyin_search_videos(self, data: Mapping[str, Any], category: str) -> list[ViralVideo]:
         cards = data.get("business_data")
         videos: list[ViralVideo] = []
         if isinstance(cards, list):

@@ -236,16 +236,20 @@ class _SearchStub:
 
     def __init__(self, *, wechat=None):
         self.wechat = wechat
-        self.calls: list[tuple[str, str, str | None]] = []
+        self.calls: list[tuple[str, str, str | None, str]] = []
 
-    def douyin_search(self, *, keyword, category="", sort_type="1", publish_time="7"):
-        self.calls.append(("douyin", keyword, None))
-        return [_viral_seed()]
+    def douyin_search_page(
+        self, *, keyword, category="", sort_type="1", publish_time="7", cursor=None
+    ):
+        self.calls.append(("douyin", keyword, cursor, publish_time))
+        from app.viral_tikhub import DouyinSearchPage
+
+        return DouyinSearchPage(videos=[_viral_seed()], cursor=None, has_more=False)
 
     def wechat_search_page(
         self, *, keyword, category="", sort="hot", publish_time="week", cursor=None
     ):
-        self.calls.append(("wechat", keyword, cursor))
+        self.calls.append(("wechat", keyword, cursor, publish_time))
         return self.wechat
 
 
@@ -258,15 +262,19 @@ def test_search_date_shanghai_follows_shanghai_calendar() -> None:
 
 
 def test_run_viral_search_platform_shapes() -> None:
-    """抖音单次列表（无翻页）；视频号透传 cursor 与 has_more."""
+    """两平台都按游标翻页：抖音透传不透明游标；视频号透传上游 cursor."""
     from app.viral_search import run_viral_search
-    from app.viral_tikhub import WechatSearchPage
+    from app.viral_tikhub import DouyinSearchPage, WechatSearchPage
 
+    douyin_cursor = '{"c":10,"s":"sid-1","b":""}'
     stub = _SearchStub()
-    douyin = run_viral_search(stub, keyword="农村建房", platform="douyin")
+    stub_page = DouyinSearchPage(videos=[_viral_seed()], cursor=douyin_cursor, has_more=True)
+    stub.douyin_search_page = (  # type: ignore[method-assign]
+        lambda *, keyword, category="", sort_type="1", publish_time="7", cursor=None: stub_page
+    )
+    douyin = run_viral_search(stub, keyword="农村建房", platform="douyin", cursor="{}")
     assert [video.video_id for video in douyin.items] == ["v-1"]
-    assert douyin.cursor is None and douyin.has_more is False
-    assert stub.calls == [("douyin", "农村建房", None)]
+    assert douyin.cursor == douyin_cursor and douyin.has_more is True
 
     stub = _SearchStub(
         wechat=WechatSearchPage(
@@ -276,7 +284,22 @@ def test_run_viral_search_platform_shapes() -> None:
     wechat = run_viral_search(stub, keyword="农村建房", platform="wechat_channels", cursor="c-1")
     assert [video.video_id for video in wechat.items] == ["w-1"]
     assert wechat.cursor == "c-2" and wechat.has_more is True
-    assert stub.calls == [("wechat", "农村建房", "c-1")]
+    assert stub.calls == [("wechat", "农村建房", "c-1", "week")]
+
+
+def test_run_viral_search_maps_time_range_per_platform() -> None:
+    """中立时间范围映射到各平台取值；缺省「一周」与历史行为一致."""
+    from app.viral_search import run_viral_search
+    from app.viral_tikhub import WechatSearchPage
+
+    stub = _SearchStub()
+    run_viral_search(stub, keyword="农村建房", platform="douyin")
+    run_viral_search(stub, keyword="农村建房", platform="douyin", time_range="day")
+    wechat_stub = _SearchStub(wechat=WechatSearchPage(videos=[], cursor=None, has_more=False))
+    run_viral_search(wechat_stub, keyword="农村建房", platform="wechat_channels", time_range="all")
+    assert [call[3] for call in wechat_stub.calls] == ["all"]
+    assert stub.calls[0][3] == "7"
+    assert stub.calls[1][3] == "1"
 
 
 def test_archive_search_covers_threads_and_falls_back(monkeypatch) -> None:
@@ -566,7 +589,9 @@ def test_search_upstream_failure_refunds_and_fails_closed(
     from app.viral_tikhub import ViralSourceError
 
     class _FailingStub:
-        def douyin_search(self, *, keyword, category="", sort_type="1", publish_time="7"):
+        def douyin_search_page(
+            self, *, keyword, category="", sort_type="1", publish_time="7", cursor=None
+        ):
             raise ViralSourceError("爆款数据源暂时不可用")
 
     _patch_search_infra(monkeypatch)
@@ -645,8 +670,12 @@ def test_search_empty_result_charges_once(search_client, route_state, monkeypatc
     class _EmptyStub:
         """返回空列表的数据源桩（0 结果是一次合法交付）."""
 
-        def douyin_search(self, *, keyword, category="", sort_type="1", publish_time="7"):
-            return []
+        def douyin_search_page(
+            self, *, keyword, category="", sort_type="1", publish_time="7", cursor=None
+        ):
+            from app.viral_tikhub import DouyinSearchPage
+
+            return DouyinSearchPage(videos=[], cursor=None, has_more=False)
 
     _use_search_stub(search_client, _EmptyStub())
     headers, uid = account(search_client, "search_empty")

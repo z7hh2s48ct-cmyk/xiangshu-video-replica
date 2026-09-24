@@ -2364,6 +2364,7 @@ describe("V1.4 内容与运营页面", () => {
       expect(searchViralVideos).toHaveBeenCalledWith("庭院", "douyin", {
         cursor: undefined,
         idempotencyKey: "viral-search-key",
+        timeRange: "week",
       });
     });
 
@@ -2466,6 +2467,60 @@ describe("V1.4 内容与运营页面", () => {
       expect(first[2].idempotencyKey).toBe("key-1");
       expect(second[2].idempotencyKey).toBe("key-2");
       expect(second[2].cursor).toBe("c-2");
+    });
+
+    it("选择时间范围后搜索带上对应范围，标题栏同步展示", async () => {
+      const base = studio({ review: false });
+      searchViralVideos.mockResolvedValue(searchResponse([viralItem(98)]));
+      render(<StatefulViralPage value={base} />);
+
+      expect(
+        screen.getByText("乡墅灵感，持续发现 · 最近 7 天爆款"),
+      ).toBeInTheDocument();
+      fireEvent.change(screen.getByRole("combobox", { name: "搜索时间范围" }), {
+        target: { value: "day" },
+      });
+      expect(
+        screen.getByText("乡墅灵感，持续发现 · 最近 1 天爆款"),
+      ).toBeInTheDocument();
+
+      submitKeyword("庭院");
+
+      expect(await screen.findByText("乡墅参考 98")).toBeInTheDocument();
+      expect(searchViralVideos).toHaveBeenCalledWith(
+        "庭院",
+        "douyin",
+        expect.objectContaining({ timeRange: "day" }),
+      );
+    });
+
+    it("只看当前页模式下翻页整页替换，退出后恢复追加模式", async () => {
+      const base = studio({ review: false });
+      newViralSearchKey
+        .mockReturnValueOnce("key-1")
+        .mockReturnValueOnce("key-2");
+      searchViralVideos
+        .mockResolvedValueOnce(
+          searchResponse([viralItem(95)], { cursor: "c-2", hasMore: true }),
+        )
+        .mockResolvedValueOnce(
+          searchResponse([viralItem(96)], { cursor: "c-3", hasMore: true }),
+        );
+      render(<StatefulViralPage value={base} />);
+
+      submitKeyword("庭院");
+      await screen.findByText("乡墅参考 95");
+
+      fireEvent.click(screen.getByRole("checkbox", { name: "只看当前页" }));
+      fireEvent.click(
+        await screen.findByRole("button", { name: "查看下一页（按次计费）" }),
+      );
+
+      // 整页替换：上一页的卡片不再保留，页码指示翻到第 2 页。
+      await waitFor(() => expect(screen.queryByText("乡墅参考 95")).toBeNull());
+      expect(screen.getByText("乡墅参考 96")).toBeInTheDocument();
+      expect(screen.getByText(/第 2 页/)).toBeInTheDocument();
+      expect(searchViralVideos.mock.calls[1][2].cursor).toBe("c-2");
     });
 
     it("余额不足打开钱包并提示，不展示结果", async () => {

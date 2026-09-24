@@ -345,6 +345,89 @@ def test_douyin_search_filters_related_word_cards() -> None:
     assert request["body"]["content_type"] == "1"
 
 
+def test_douyin_search_page_encodes_cursor_and_publish_time() -> None:
+    """翻页：请求带发布时间与还原出的 offset/search_id；响应字段归一成一页."""
+
+    def aweme(video_id: str) -> dict[str, Any]:
+        return {
+            "type": 1,
+            "data": {
+                "aweme_info": {
+                    "aweme_id": video_id,
+                    "desc": "乡墅",
+                    "video": {"cover": {"url_list": ["https://cdn/c.webp"]}},
+                }
+            },
+        }
+
+    first = {
+        "code": 200,
+        "data": {
+            "business_data": [aweme("a-1")],
+            "cursor": 12,
+            "has_more": 1,
+            "log_pb": {"impr_id": "impr-1"},
+        },
+    }
+    second = {
+        "code": 200,
+        "data": {"business_data": [aweme("a-2")], "cursor": 22, "has_more": 0},
+    }
+    client, transports = _client([first, second])
+    page = client.douyin_search_page(keyword="乡墅", publish_time="1")
+    assert [video.video_id for video in page.videos] == ["a-1"]
+    assert page.has_more is True
+    first_cursor = json.loads(page.cursor or "{}")
+    assert first_cursor == {"c": 12, "s": "impr-1", "b": ""}
+    first_body = transports[0].requests[0]["body"]
+    assert first_body["publish_time"] == "1"
+    assert "cursor" not in first_body
+
+    next_page = client.douyin_search_page(keyword="乡墅", publish_time="1", cursor=page.cursor)
+    assert [video.video_id for video in next_page.videos] == ["a-2"]
+    assert next_page.has_more is False and next_page.cursor is None
+    second_body = transports[0].requests[1]["body"]
+    assert second_body["cursor"] == 12
+    assert second_body["search_id"] == "impr-1"
+
+
+def test_douyin_search_page_tolerates_pagination_nested_shape() -> None:
+    """翻页字段放在 data.pagination 下的接口版本同样可用；无翻页字段时判无更多."""
+    payload = {
+        "code": 200,
+        "data": {
+            "business_data": [],
+            "pagination": {"offset": 30, "search_id": "sid-9", "backtrace": "bt-1"},
+            "has_more_status": "1",
+        },
+    }
+    client, _ = _client([payload])
+    page = client.douyin_search_page(keyword="乡墅")
+    assert page.has_more is True
+    assert json.loads(page.cursor or "{}") == {"c": 30, "s": "sid-9", "b": "bt-1"}
+
+    bare = {"code": 200, "data": {"business_data": []}}
+    client, _ = _client([bare])
+    page = client.douyin_search_page(keyword="乡墅")
+    assert page.has_more is False and page.cursor is None
+
+
+def test_decode_douyin_search_cursor_rejects_garbage() -> None:
+    """损坏/异型游标按首页处理，绝不抛错打断搜索."""
+    from app.viral_tikhub import decode_douyin_search_cursor
+
+    assert decode_douyin_search_cursor(None) is None
+    assert decode_douyin_search_cursor("") is None
+    assert decode_douyin_search_cursor("not-json") is None
+    assert decode_douyin_search_cursor('{"c":"12"}') is None
+    assert decode_douyin_search_cursor('{"c":true}') is None
+    assert decode_douyin_search_cursor('{"c":12,"s":"s","b":"b"}') == {
+        "cursor": 12,
+        "search_id": "s",
+        "backtrace": "b",
+    }
+
+
 def test_search_filters_minecraft_results_without_rejecting_normal_mc_substrings() -> None:
     def aweme(video_id: str, title: str) -> dict[str, Any]:
         return {
