@@ -1,0 +1,60 @@
+[Unit]
+Description=Video Replica maintenance sweep (expired idempotency envelopes)
+Wants=network-online.target
+After=network-online.target
+# Persistent=true replay at boot may race a same-host PostgreSQL still coming
+# up: a small retry budget absorbs that (session review P3).
+StartLimitIntervalSec=300
+StartLimitBurst=4
+# PR review P2: when the retry budget above is exhausted the sweep stays
+# silently missed unless the failure is surfaced — the acceptance spec
+# (测试与验收规格 §3 line 99) demands cleanup-failure alerting. OnFailure=
+# fires the moment this unit enters the failed state, so the alert unit
+# emits an ALERT-priority journal record operators (and later the T37 /
+# OPS-02 alerting pipeline) can key on.
+OnFailure=video-replica-maintenance-alert.service
+
+[Service]
+Type=oneshot
+User=video-replica
+Group=video-replica
+WorkingDirectory=/opt/video-replica/app/server
+EnvironmentFile=/etc/video-replica/customer.env
+Environment=PYTHONUNBUFFERED=1
+# T14 / ACT-07: purge expired customer idempotency envelopes — the sealed
+# ciphertext, key version and recovery window are nulled under purged_at so
+# the 029 CHECK coupling keeps every purged row payload-free and the table
+# cannot grow unboundedly. Counts only in the output (no business values).
+# Later tasks (T23 reconciliation, expiry sweeps) append their own
+# ExecStart= lines here — one line per maintenance concern.
+ExecStart=/opt/video-replica/app/server/.venv/bin/python -m scripts.purge_idempotency_envelopes
+# M2 review M2: expired export ciphertext is sealed plaintext — null the
+# payload once the retention window past expiry lapses (audit columns
+# stay). Counts only in the output.
+ExecStart=/opt/video-replica/app/server/.venv/bin/python -m scripts.purge_expired_export_ciphertexts
+# M2 review M3: counter rows on fully lapsed windows can never be
+# consulted again — sweeping them keeps the table bounded (the append-only
+# failure table is the audit trail and is untouched).
+ExecStart=/opt/video-replica/app/server/.venv/bin/python -m scripts.purge_stale_rate_limit_counters
+# BILL-03: close only terminal generation reservations whose SETTLE/RELEASE
+# ledger row was lost. Active and SUBMISSION_UNCERTAIN tasks stay untouched.
+ExecStart=/opt/video-replica/app/server/.venv/bin/python -m scripts.reconcile_dangling_billing_reservations
+# Lost-callback fallback: ask WeChat directly about Native orders that sat
+# PENDING past the callback grace. A lost notification is the one failure the
+# callback path cannot repair; settlement rides the same idempotent fund path
+# as the callback, and unpaid answers are left for the expiry sweep right
+# below. Runs BEFORE the closer so a paid order is settled, not closed blind.
+# Counts only in the output.
+ExecStart=/opt/video-replica/app/server/.venv/bin/python -m scripts.reconcile_pending_native_orders
+# Close WeChat Native orders nobody paid inside their window. CLOSED still
+# settles a late callback, so this only stops orders that can no longer be paid
+# from sitting in the orders page and the reconciliation reports as PENDING.
+# Counts only in the output.
+ExecStart=/opt/video-replica/app/server/.venv/bin/python -m scripts.close_expired_native_orders
+Restart=on-failure
+RestartSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict

@@ -1,0 +1,45 @@
+{
+  "version": "0.6",
+  "duration": 3.0,
+  "aspect_ratio": "9:16",
+  "first_shot": "人物位于参考视频第一有效镜头的原始场景与机位",
+  "three_storey_rural_villa": false,
+  "visual_style": "真实手机拍摄质感",
+  "character_identity": "保持首帧中同一人物身份、脸部、年龄感和体型连续一致",
+  "character_costume": "保持参考视频或可选人物参考图确定的服饰连续一致",
+  "character_reference_mode": "SOURCE_OR_OPTIONAL_REFERENCE",
+  "shots": [
+    {
+      "index": 1,
+      "start": 0.0,
+      "end": 3.0,
+      "scene": "按参考视频填写",
+      "subject_motion": "人物镜头由 motion_observation 自动生成；B-roll 才使用此摘要",
+      "camera_motion": "按参考视频填写",
+      "relative_motion": "按参考视频填写",
+      "character_visible": true,
+      "motion_observation": {
+        "source": "REFERENCE_VIDEO",
+        "state": "STATIONARY",
+        "confidence": "HIGH",
+        "evidence_timestamps": [0.0, 1.5, 2.9],
+        "start_pose": "按连续帧填写动作起始姿态",
+        "trajectory": "按连续帧填写人物移动路径；静止时明确位置与尺度稳定",
+        "body_mechanics": "按连续帧填写重心、步态、转身或静止状态",
+        "hand_action": "分别说明左右手；无手势时明确写无主动手势",
+        "end_pose": "按连续帧填写动作结束姿态",
+        "action_phases": [
+          {
+            "start": 0.0,
+            "end": 3.0,
+            "body_action": "按参考视频填写该阶段身体动作",
+            "hand_action": "按参考视频填写该阶段左右手动作"
+          }
+        ]
+      },
+      "sound_role": "ON_CAMERA_SPEECH",
+      "spoken_text": "",
+      "lip_sync_required": true
+    }
+  ]
+}

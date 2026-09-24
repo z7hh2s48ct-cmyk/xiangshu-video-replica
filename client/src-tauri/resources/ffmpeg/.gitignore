@@ -1,0 +1,5 @@
+# 精简构建的 ffmpeg/ffprobe 二进制不入库（构建脚本见 scripts/ffmpeg-minimal/）
+ffmpeg.exe
+ffprobe.exe
+*.7z
+*.zip

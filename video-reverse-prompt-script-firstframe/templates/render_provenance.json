@@ -1,0 +1,9 @@
+{
+  "host_capability": "codex_host_imagegen",
+  "direct_image_result": false,
+  "salvaged_from_composite": false,
+  "source_first_frame_used": false,
+  "attempt": 0,
+  "candidate_filename": "",
+  "candidate_sha256": ""
+}

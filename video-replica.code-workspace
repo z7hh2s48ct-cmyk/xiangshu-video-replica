@@ -1,0 +1,29 @@
+{
+  "folders": [
+    { "name": "前端与桌面", "path": "client" },
+    { "name": "后端", "path": "server" },
+    { "name": "文档与设计", "path": "docs" },
+    { "name": "开发与检查脚本", "path": "scripts" },
+    { "name": "部署", "path": "deploy" },
+    { "name": "端到端测试", "path": "e2e" },
+    { "name": "项目配置与其他资料", "path": "." }
+  ],
+  "settings": {
+    "files.exclude": {
+      "**/node_modules": true,
+      "**/.venv": true,
+      "**/__pycache__": true,
+      "**/.pytest_cache": true,
+      "**/.mypy_cache": true,
+      "**/.ruff_cache": true,
+      "**/.uv-cache": true,
+      "**/.worktrees": true,
+      "**/target": true,
+      "**/dist": true,
+      "**/dist-admin": true
+    },
+    "search.exclude": {
+      "**/output/**": true
+    }
+  }
+}

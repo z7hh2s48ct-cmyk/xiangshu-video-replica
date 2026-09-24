@@ -1,0 +1,23 @@
+版权所有 © 2026 xiangshu-video-replica 项目组。保留所有权利。
+
+本仓库源代码以可见形式提供，仅供查阅与评估。未经版权所有者事先书面许可，任何人不得
+以任何方式使用、复制、修改、合并、发布、分发、再许可或销售本软件及其副本，也不得将
+其用于商业用途。
+
+All rights reserved.
+
+The source code in this repository is made available for viewing and evaluation
+only. No permission is granted, and no licence — express or implied — is
+provided to use, copy, modify, merge, publish, distribute, sublicense, or sell
+this software or any copy of it, in whole or in part, without the prior written
+permission of the copyright holder. Commercial use is expressly prohibited.
+
+---
+
+第三方组件不适用上述条款，各自遵循其原始许可，主要包括：
+
+- `client/src/assets/icons/` — Lucide 图标（ISC 许可）。
+- `client/public/licenses/social-auto-upload-MIT.txt` — social-auto-upload（MIT 许可）。
+- `client/src-tauri/resources/ffmpeg/` — 随安装包分发的 ffmpeg/ffprobe LGPL 构建，
+  许可与合规说明见该目录下的 `README.md`。
+- `server/app/publishers/vendor/` — 第三方发布器源码，见各目录下的 `LICENSE`。

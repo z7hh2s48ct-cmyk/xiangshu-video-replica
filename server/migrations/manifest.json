@@ -1,0 +1,648 @@
+{
+  "basis": "本清单证明「当前迁移树与最后一次记录一致」，不证明「没有历史改写」。已发布段（base..PUBLISHED_HEAD）的不可变性由 test_cw056 的内容级/关系级 sha256 承担；未合并分支重挂 down_revision 是手册 §3 允许的动作，重挂后必须重新运行 --record 并提交本文件。",
+  "graph": {
+    "bases": [
+      "001_core"
+    ],
+    "heads": [
+      "20260924T0100_oral_task_submitted_at"
+    ],
+    "parents": {
+      "001_core": null,
+      "002_settings": "001_core",
+      "003_characters": "002_settings",
+      "004_generation": "003_characters",
+      "005_remove_provider_result_url": "004_generation",
+      "006_active_storage_provider": "005_remove_provider_result_url",
+      "007_local_storage_provider": "006_active_storage_provider",
+      "008_provider_result_url": "007_local_storage_provider",
+      "009_idempotency_project_scope": "008_provider_result_url",
+      "010_add_asset_metadata": "009_idempotency_project_scope",
+      "011_add_archive_retry_count": "010_add_asset_metadata",
+      "012_character_domain": "011_add_archive_retry_count",
+      "013_character_identity_assets": "012_character_domain",
+      "014_character_image_generation": "013_character_identity_assets",
+      "015_character_asset_publication": "014_character_image_generation",
+      "016_character_reference_snapshot": "015_character_asset_publication",
+      "017_generation_task_retry_lineage": "016_character_reference_snapshot",
+      "018_remove_oss_storage": "017_generation_task_retry_lineage",
+      "019_character_simple_upload": "018_remove_oss_storage",
+      "020_deepseek_provider": "019_character_simple_upload",
+      "021_generation_batch_display_name": "020_deepseek_provider",
+      "022_internal_billing": "021_generation_batch_display_name",
+      "023_zpay_provider": "022_internal_billing",
+      "024_wallet_backfill": "023_zpay_provider",
+      "025_postgres_runtime_compatibility": "024_wallet_backfill",
+      "026_customer_security_and_billing": "025_postgres_runtime_compatibility",
+      "027_activation_code_catalog": "026_customer_security_and_billing",
+      "028_customer_devices_and_activations": "031_admin_write_idempotency",
+      "029_customer_sessions_and_idempotency": "028_customer_devices_and_activations",
+      "031_admin_write_idempotency": "027_activation_code_catalog",
+      "032_security_rate_limits": "029_customer_sessions_and_idempotency",
+      "033_batch_creation_audit": "032_security_rate_limits",
+      "034_device_fingerprint_canonical": "033_batch_creation_audit",
+      "035_export_ciphertext_purge": "034_device_fingerprint_canonical",
+      "036_low_review_constraint_guards": "035_export_ciphertext_purge",
+      "037_device_pairing_requests": "036_low_review_constraint_guards",
+      "038_admin_device_operations": "037_device_pairing_requests",
+      "039_admin_adjustments": "038_admin_device_operations",
+      "040_fix_provider_settings_constraint": "039_admin_adjustments",
+      "041_user_fair_queue": "040_fix_provider_settings_constraint",
+      "042_t37_observability_indexes": "041_user_fair_queue",
+      "043_admin_password_login": "042_t37_observability_indexes",
+      "044_customer_unit_prices": "043_admin_password_login",
+      "045_async_analysis_tasks": "044_customer_unit_prices",
+      "046_async_image_tasks": "045_async_analysis_tasks",
+      "047_async_source_frame_tasks": "046_async_image_tasks",
+      "048_async_script_rewrite_tasks": "047_async_source_frame_tasks",
+      "049_async_generation_reconcile": "048_async_script_rewrite_tasks",
+      "050_activation_license_zero_credit": "049_async_generation_reconcile",
+      "051_identity_owner_backfill": "050_activation_license_zero_credit",
+      "052_character_scene_look_tasks": "051_identity_owner_backfill",
+      "053_activation_code_archive": "052_character_scene_look_tasks",
+      "054_admin_free_grant_adjustments": "053_activation_code_archive",
+      "055_customer_batch_visibility": "054_admin_free_grant_adjustments",
+      "056_operation_cost_rates": "055_customer_batch_visibility",
+      "057_second_based_billing": "056_operation_cost_rates",
+      "058_daily_external_prices": "057_second_based_billing",
+      "059_operation_cost_records": "058_daily_external_prices",
+      "061_saved_prompt_metadata": "059_operation_cost_records",
+      "062_activation_initial_free_seconds": "061_saved_prompt_metadata",
+      "063_wallet_ledger_sequence": "062_activation_initial_free_seconds",
+      "064_hifly_provider": "063_wallet_ledger_sequence",
+      "065_oral_domain": "064_hifly_provider",
+      "066_generation_creation_kind": "065_oral_domain",
+      "067_studio_drafts": "066_generation_creation_kind",
+      "068_script_from_audio_tasks": "067_studio_drafts",
+      "069_provider_whitelist_widen": "068_script_from_audio_tasks",
+      "070_viral_video_library": "069_provider_whitelist_widen",
+      "071_studio_material_preferences": "070_viral_video_library",
+      "072_oral_clone_consent": "071_studio_material_preferences",
+      "073_oral_durable_billing": "072_oral_clone_consent",
+      "074_script_rewrite_ip_profile_snapshot": "073_oral_durable_billing",
+      "075_independent_creation": "074_script_rewrite_ip_profile_snapshot",
+      "076_studio_notification_preferences": "075_independent_creation",
+      "077_durable_script_from_audio": "076_studio_notification_preferences",
+      "078_viral_module_launch": "077_durable_script_from_audio",
+      "079_viral_favorite_page_index": "078_viral_module_launch",
+      "080_viral_link_resolution_receipts": "079_viral_favorite_page_index",
+      "081_oral_unit_price": "080_viral_link_resolution_receipts",
+      "082_publish_accounts": "081_oral_unit_price",
+      "083_recharge_orders_multi_provider": "086_remove_device_slot_constraints",
+      "086_remove_device_slot_constraints": "082_publish_accounts",
+      "089_customer_api_keys": "083_recharge_orders_multi_provider",
+      "20260912T1353_customer_discounts": "089_customer_api_keys",
+      "20260912T1400_customer_registration_credentials": "20260912T1353_customer_discounts",
+      "20260912T1900_password_customer_sessions": "20260912T1400_customer_registration_credentials",
+      "20260912T1910_xiaohongshu_link_import": "20260912T1900_password_customer_sessions",
+      "20260912T2200_customer_token_lifecycle": "20260912T1910_xiaohongshu_link_import",
+      "20260912T2330_customer_credit_pricing": "20260912T2200_customer_token_lifecycle",
+      "20260913T0630_account_credit_operations": "20260912T2330_customer_credit_pricing",
+      "20260913T1100_itemized_billing": "20260913T0630_account_credit_operations",
+      "20260913T1600_shared_viral_media": "20260913T1100_itemized_billing",
+      "20260913T1800_payment_channels": "20260913T1100_itemized_billing",
+      "20260913T1825_h3_account_pool": "20260913T1800_payment_channels",
+      "20260914T0000_local_joint_merge": [
+        "20260913T1600_shared_viral_media",
+        "20260913T1825_h3_account_pool"
+      ],
+      "20260915T1200_browser_accounts": "20260915T1600_viral_copy_cache",
+      "20260915T1600_viral_copy_cache": "20260914T0000_local_joint_merge",
+      "20260916T1400_content_objects": "20260915T1200_browser_accounts",
+      "20260916T2000_prompt_optimization_receipts": "20260916T1400_content_objects",
+      "20260917T1000_publish_records": "20260916T2000_prompt_optimization_receipts",
+      "20260918T1200_publish_account_avatar": "20260917T1000_publish_records",
+      "20260919T1000_browser_account_probe": "20260918T1200_publish_account_avatar",
+      "20260919T1000_oral_soft_delete": "20260918T1200_publish_account_avatar",
+      "20260919T1200_sub_accounts": "20260919T1000_browser_account_probe",
+      "20260919T1300_wallet_actor": "20260919T1200_sub_accounts",
+      "20260919T1500_device_parent_cascade": "20260919T1300_wallet_actor",
+      "20260920T0000_merge_parallel_heads": [
+        "20260919T1000_browser_account_probe",
+        "20260919T1000_oral_soft_delete"
+      ],
+      "20260920T0100_add_api_metadata_to_billing_ops": "20260920T0000_merge_parallel_heads",
+      "20260921T0000_merge_wallet_actor_and_billing_metadata": [
+        "20260919T1500_device_parent_cascade",
+        "20260920T0100_add_api_metadata_to_billing_ops"
+      ],
+      "20260921T1200_sub_account_quotas": "20260922T1200_recharge_packages",
+      "20260922T1200_analysis_task_failure_diagnostic": "20260922T1800_sub_account_permissions",
+      "20260922T1200_recharge_packages": "20260921T0000_merge_wallet_actor_and_billing_metadata",
+      "20260922T1500_viral_search_discoveries": "20260923T0000_open_h3_extended_modes",
+      "20260922T1600_analysis_task_request_id": "20260922T1200_analysis_task_failure_diagnostic",
+      "20260922T1800_sub_account_permissions": "20260921T1200_sub_account_quotas",
+      "20260922T2000_analysis_task_attempts": "20260922T1600_analysis_task_request_id",
+      "20260922T2200_material_preference_tags": "20260922T1500_viral_search_discoveries",
+      "20260923T0000_open_h3_extended_modes": "20260922T2000_analysis_task_attempts",
+      "20260923T1200_admin_refund_adjustment": "20260922T2200_material_preference_tags",
+      "20260923T1800_re_add_h3_extended_modes_rollout_compat": "20260923T1200_admin_refund_adjustment",
+      "20260924T0000_wechat_transaction_unique": "20260923T1800_re_add_h3_extended_modes_rollout_compat",
+      "20260924T0100_oral_task_submitted_at": "20260924T0000_wechat_transaction_unique"
+    },
+    "revision_count": 122
+  },
+  "manifest_schema_version": 1,
+  "naming_policy": {
+    "adoption_head": "089_customer_api_keys",
+    "note": "adoption_head 及其祖先为存量段（0NN_*.py），豁免。其后新增的迁移 必须用 时间戳前缀，以消除并行开发下「抢下一个号」的撞名。锚点一经采纳不再前移：它由生成器里的常量决定，--check 断言本字段等于该常量，因此无法靠重新记录来把违规命名洗白。",
+    "pattern": "^\\d{8}T\\d{4}_[a-z0-9_]+$"
+  },
+  "published_chain": {
+    "content_sha256": "1154d46f2b136845004b16de388eb1bc10c25d9dce996ebea8367366b720587e",
+    "head": "055_customer_batch_visibility",
+    "length": 54,
+    "relation_sha256": "4f27304401324fe1f453bb19e96fe178b4bb9e850501ff1cdefe45105e1f5f1a"
+  },
+  "revisions": {
+    "001_core": {
+      "file": "versions/001_core.py",
+      "sha256": "bdf036606bb9cb1aa3b6d2905279dfd87c8f58b84b72894b0f9370cb1bd7f842"
+    },
+    "002_settings": {
+      "file": "versions/002_settings.py",
+      "sha256": "fd868a2429d24db9b6cf881ee6444018bdf57b6b0b0af07fa548caa77f664c3b"
+    },
+    "003_characters": {
+      "file": "versions/003_characters.py",
+      "sha256": "768ced4f2f35c0b2d43722ef35b1643ee2a7345d0a6506f820226d502231a0da"
+    },
+    "004_generation": {
+      "file": "versions/004_generation.py",
+      "sha256": "b8ea11fcf4c37b229ec00e859fa8def6de5a8dccb90ae4d7ed12cc63e4bff0f2"
+    },
+    "005_remove_provider_result_url": {
+      "file": "versions/005_remove_provider_result_url.py",
+      "sha256": "92f55b9d441c877f615d50fcfc1f2e767e40d36a863d45da3b39713810cb7aeb"
+    },
+    "006_active_storage_provider": {
+      "file": "versions/006_active_storage_provider.py",
+      "sha256": "3a1317ad6e7c1b2a2df3ecb1c6b29b8ccb38beb5d9d617ac59dd2279fbc3f873"
+    },
+    "007_local_storage_provider": {
+      "file": "versions/007_local_storage_provider.py",
+      "sha256": "07c19d48fd360e3a66d3f0a495c94e8ff0ca697278cba1a2f22ba3c634de027e"
+    },
+    "008_provider_result_url": {
+      "file": "versions/008_provider_result_url.py",
+      "sha256": "219252913d3db758fb65a0ced3d187911df84802a3333744a631bf048823114f"
+    },
+    "009_idempotency_project_scope": {
+      "file": "versions/009_idempotency_project_scope.py",
+      "sha256": "60a5f7bb7cff6697be75b5f11e4b1bb504f3c86f6d002b6d3e839ffda5fbf846"
+    },
+    "010_add_asset_metadata": {
+      "file": "versions/010_add_asset_metadata.py",
+      "sha256": "52e6505dbaf67852b144d1b2c9fe2df1e22b54eae2cf7458d97e74b3770f3dee"
+    },
+    "011_add_archive_retry_count": {
+      "file": "versions/011_add_archive_retry_count.py",
+      "sha256": "9fd50ea99caa57f6167c8701073eacb0f26f161c34027891cdf5a7d57d5f5457"
+    },
+    "012_character_domain": {
+      "file": "versions/012_character_domain.py",
+      "sha256": "4d10984b251dcf7655ffc5176a70de509ddeec3713217abaf01f15a82de43253"
+    },
+    "013_character_identity_assets": {
+      "file": "versions/013_character_identity_assets.py",
+      "sha256": "eefcb7ea2be2d6dd8b819568504525a31e779a37d35bc7ca9713d1305facfb5c"
+    },
+    "014_character_image_generation": {
+      "file": "versions/014_character_image_generation.py",
+      "sha256": "432cf89aa184b67f78ffec60883a5e805d7b1a7765745782775f9d3d3ebdc048"
+    },
+    "015_character_asset_publication": {
+      "file": "versions/015_character_asset_publication.py",
+      "sha256": "41fba14d4a24e5d7ceab2e008281d8c0c40ea762e461ed0ae117dc3944bc2dfe"
+    },
+    "016_character_reference_snapshot": {
+      "file": "versions/016_character_reference_snapshot.py",
+      "sha256": "4287b5f2f1e43c0fd182326d426c755f458b3150faea45195a6b5af51486f596"
+    },
+    "017_generation_task_retry_lineage": {
+      "file": "versions/017_generation_task_retry_lineage.py",
+      "sha256": "9ba191d72a59b8769f1a27428c8e64134ba85e2225b3d7ea09ec140ce34220f2"
+    },
+    "018_remove_oss_storage": {
+      "file": "versions/018_remove_oss_storage.py",
+      "sha256": "d895205e9ada4d5f47b3fbc4bce5ebdf0ffe85893a284e3d0727a52477cfe056"
+    },
+    "019_character_simple_upload": {
+      "file": "versions/019_character_simple_upload.py",
+      "sha256": "b7ce0d81225c3e7c03e2b3909dd6c81297d4cd1f6d52674819c607b5385b4271"
+    },
+    "020_deepseek_provider": {
+      "file": "versions/020_deepseek_provider.py",
+      "sha256": "8b847060a0807f84e991775afde04a76114f57005fd14a8a5fc3e2e3fa5c4819"
+    },
+    "021_generation_batch_display_name": {
+      "file": "versions/021_generation_batch_display_name.py",
+      "sha256": "ca7724b8eb564127f116d0f065378c0bd0e54cd1a018654f114b1871a4137487"
+    },
+    "022_internal_billing": {
+      "file": "versions/022_internal_billing.py",
+      "sha256": "be4599a163ec107301a859a7506b5c7c16d6269617eafc57cc7176c003aef781"
+    },
+    "023_zpay_provider": {
+      "file": "versions/023_zpay_provider.py",
+      "sha256": "2b0f105014f72bd773094b9dfcec8cfc96be7525dc61b4fbed474f9ac3515873"
+    },
+    "024_wallet_backfill": {
+      "file": "versions/024_wallet_backfill.py",
+      "sha256": "4f9e54738ec4f416fd16f8fa6b272f0795e1a7078614a75654a5bbcdc9912bf4"
+    },
+    "025_postgres_runtime_compatibility": {
+      "file": "versions/025_postgres_runtime_compatibility.py",
+      "sha256": "3fa6f937ba18ffd8dc61058674f0e24dd912e91622a9bbf26559ad1432bc6447"
+    },
+    "026_customer_security_and_billing": {
+      "file": "versions/026_customer_security_and_billing.py",
+      "sha256": "ece4a3b507defd18d51f81f62de0bb3eb41fee60ae7fbaedab99a5b5e4d44100"
+    },
+    "027_activation_code_catalog": {
+      "file": "versions/027_activation_code_catalog.py",
+      "sha256": "5c0fd0f2bbaad3359fd0508e2ed27c622b9854fd5aabc93f9f788f234562dd72"
+    },
+    "028_customer_devices_and_activations": {
+      "file": "versions/028_customer_devices_and_activations.py",
+      "sha256": "23a9a2e839615823a1e64c57c1c61ff4730aad1d6544664aae2d027b35900183"
+    },
+    "029_customer_sessions_and_idempotency": {
+      "file": "versions/029_customer_sessions_and_idempotency.py",
+      "sha256": "333d5ada97dd53c1c75e389e0af43abc6ea87f8ac420fed8b64e972ea4902fa0"
+    },
+    "031_admin_write_idempotency": {
+      "file": "versions/031_admin_write_idempotency.py",
+      "sha256": "2a53b8e12487d4b0ae360231eca99392018436e49ab044619926b82b4696a5e3"
+    },
+    "032_security_rate_limits": {
+      "file": "versions/032_security_rate_limits.py",
+      "sha256": "a235a1d7116fcce7ff265167978185a543bd93800a5bfdde55cce79174d70c5f"
+    },
+    "033_batch_creation_audit": {
+      "file": "versions/033_batch_creation_audit.py",
+      "sha256": "1e46ea18a9c9552bca98c38bc3db8780600d88993d1ca859e48b5c6f870bfe56"
+    },
+    "034_device_fingerprint_canonical": {
+      "file": "versions/034_device_fingerprint_canonical.py",
+      "sha256": "b7e39c7912612a4612e2982d73a7b2a0b5ad56e637aad1bd69d2ab2d9a5e3f15"
+    },
+    "035_export_ciphertext_purge": {
+      "file": "versions/035_export_ciphertext_purge.py",
+      "sha256": "d216c4af01db59ab92818105a324d45a5ae44068bff6d1ae56ab32e030d24e1f"
+    },
+    "036_low_review_constraint_guards": {
+      "file": "versions/036_low_review_constraint_guards.py",
+      "sha256": "4bbc523b5ca2861b7559fdccc93952f63f6d130079bff6aa8b251ff75fe368fa"
+    },
+    "037_device_pairing_requests": {
+      "file": "versions/037_device_pairing_requests.py",
+      "sha256": "45778de72626df53f696a142fa87ef6ff1320ccd2ab50b2213364ac93ab660b5"
+    },
+    "038_admin_device_operations": {
+      "file": "versions/038_admin_device_operations.py",
+      "sha256": "edc84131f878fb1ebaa23f36f3abe66f2d73b5c99d34b06cf87878f9022b762d"
+    },
+    "039_admin_adjustments": {
+      "file": "versions/039_admin_adjustments.py",
+      "sha256": "d09ac829bb243038e9d8b55b8901debe94a3bdc33d0ebcefa3248a6bbc32698c"
+    },
+    "040_fix_provider_settings_constraint": {
+      "file": "versions/040_fix_provider_settings_constraint.py",
+      "sha256": "b23d0c1eb4cf46445915ae1917ac39bc69ba99d0944c200eb7304473f834b2dc"
+    },
+    "041_user_fair_queue": {
+      "file": "versions/041_user_fair_queue.py",
+      "sha256": "70be12d1c3bf80070f26c680ea700d126e82545b84dcc8f1ad3fc31c84499535"
+    },
+    "042_t37_observability_indexes": {
+      "file": "versions/042_t37_observability_indexes.py",
+      "sha256": "55a07814b91f039197c1e25602e993699c42df09cc424340245d4775b30ddeee"
+    },
+    "043_admin_password_login": {
+      "file": "versions/043_admin_password_login.py",
+      "sha256": "41a7563dad6c7e06b2adf539fd814f0b450229b5525513e670ed38dd2fbb0f43"
+    },
+    "044_customer_unit_prices": {
+      "file": "versions/044_customer_unit_prices.py",
+      "sha256": "72730877fb6c22675f7fff5ec843556035c196042aaeb78a6e2b89be56213ce3"
+    },
+    "045_async_analysis_tasks": {
+      "file": "versions/045_async_analysis_tasks.py",
+      "sha256": "aaf824cd676807a65062d2ec3f90e1b8a1955cf586908372b22d25b1d32319a1"
+    },
+    "046_async_image_tasks": {
+      "file": "versions/046_async_image_tasks.py",
+      "sha256": "ef0db797b27ff507473ae4ed321cbce1502cb0da58555c8dde1c3ab28e0d3922"
+    },
+    "047_async_source_frame_tasks": {
+      "file": "versions/047_async_source_frame_tasks.py",
+      "sha256": "2d878752a4ad29a47c8301d636bd25bf356506bce5b0add0c185104699b54d9a"
+    },
+    "048_async_script_rewrite_tasks": {
+      "file": "versions/048_async_script_rewrite_tasks.py",
+      "sha256": "ca3866a8f82896979a375d4e02cde8055da73bda9a40160e4dd854ea867707f4"
+    },
+    "049_async_generation_reconcile": {
+      "file": "versions/049_async_generation_reconcile.py",
+      "sha256": "2ff7eb029d589d10146cad6c1dd985ce9ead9af6d2f718a9d23dcf954f3a69ee"
+    },
+    "050_activation_license_zero_credit": {
+      "file": "versions/050_activation_license_zero_credit.py",
+      "sha256": "ff87ffa2d2ee497cf7f3aeef8bca133bdc9f99da3e50529fa8af57c5e866995a"
+    },
+    "051_identity_owner_backfill": {
+      "file": "versions/051_identity_owner_backfill.py",
+      "sha256": "61c4e08f82b89d40316730265f3fdf8bcccefe0f90eb4e0f548cae21dd86bce8"
+    },
+    "052_character_scene_look_tasks": {
+      "file": "versions/052_character_scene_look_tasks.py",
+      "sha256": "ac0c98d649d74ef8597811f1150e720275d548d7e5ac47587313bd4fb9171eec"
+    },
+    "053_activation_code_archive": {
+      "file": "versions/053_activation_code_archive.py",
+      "sha256": "9cca61c05102eb67a5cf41e8119bdf203055cc1398ef4708dc49f87b63832232"
+    },
+    "054_admin_free_grant_adjustments": {
+      "file": "versions/054_admin_free_grant_adjustments.py",
+      "sha256": "7988027ae76374861d20e4f3778e6119c1c1ab3ac4ab8a5c42272389a19d35a5"
+    },
+    "055_customer_batch_visibility": {
+      "file": "versions/055_customer_batch_visibility.py",
+      "sha256": "2f490d62af91b852361da3c574bacd0fef5e8f5968aab4525021b14ed41d7807"
+    },
+    "056_operation_cost_rates": {
+      "file": "versions/056_operation_cost_rates.py",
+      "sha256": "d9970059e93f409a02ab726a61197de3727044da3b903b5fec4467a7e0f35e21"
+    },
+    "057_second_based_billing": {
+      "file": "versions/057_second_based_billing.py",
+      "sha256": "8d06038d39c46d49d276ba61e4c38a9714e788101b290ca9c9b62c7fdc6e2304"
+    },
+    "058_daily_external_prices": {
+      "file": "versions/058_daily_external_prices.py",
+      "sha256": "7c1c49a5e560f45bb7a14f10827e6175bee56f0e9c09cc02ce853c692b07cec2"
+    },
+    "059_operation_cost_records": {
+      "file": "versions/059_operation_cost_records.py",
+      "sha256": "0a767c3320cc00f6aae74adb5c75a92ef974f238672f15b14a92594c23c7782b"
+    },
+    "061_saved_prompt_metadata": {
+      "file": "versions/061_saved_prompt_metadata.py",
+      "sha256": "c46d813e4be2aa5ea53691cddafc3001ff9e94b49be99b19d536a02b9cec2686"
+    },
+    "062_activation_initial_free_seconds": {
+      "file": "versions/062_activation_initial_free_seconds.py",
+      "sha256": "d117f5e9ff01224c3188667ae7039ce0b7df497fd62ca0238195a65435f13ba2"
+    },
+    "063_wallet_ledger_sequence": {
+      "file": "versions/063_wallet_ledger_sequence.py",
+      "sha256": "02cffd3a2479aaad8aa660a1fc52e67b76e64c4b14e0ad149106296a5b3ff34a"
+    },
+    "064_hifly_provider": {
+      "file": "versions/064_hifly_provider.py",
+      "sha256": "8ac300613ac6ea2124bbd7561c84dc301c26aece6cd65fd3707ee03c9e790c08"
+    },
+    "065_oral_domain": {
+      "file": "versions/065_oral_domain.py",
+      "sha256": "4f388228f48a2c2b9e431427fcf90001ce649d0a6821bdd311bb269f60484309"
+    },
+    "066_generation_creation_kind": {
+      "file": "versions/066_generation_creation_kind.py",
+      "sha256": "f9640af833e342513a90419ca2846e8dfde090025bde07b29d10fc1414e484c3"
+    },
+    "067_studio_drafts": {
+      "file": "versions/067_studio_drafts.py",
+      "sha256": "19023e89694e141f89aecef42587e4301ffcedaddb24ba533204db2b8c786609"
+    },
+    "068_script_from_audio_tasks": {
+      "file": "versions/068_script_from_audio_tasks.py",
+      "sha256": "0fa1c73da00707d231447a0c83f9e0981f02851cfa7466c364747d0ac5bf47ae"
+    },
+    "069_provider_whitelist_widen": {
+      "file": "versions/069_provider_whitelist_widen.py",
+      "sha256": "88ed0020d8819a54b1d9bf3840b648c8904a13ffcee7c50249c266a09dc3966e"
+    },
+    "070_viral_video_library": {
+      "file": "versions/070_viral_video_library.py",
+      "sha256": "237aeba6185a75b7c12041163bee123a7620e67bcfe31e0cd6425958111d02ff"
+    },
+    "071_studio_material_preferences": {
+      "file": "versions/071_studio_material_preferences.py",
+      "sha256": "06c4b27b1d1f525e2e642fea6c46f9b9d12d24e47d799fedf4438c0243d65d15"
+    },
+    "072_oral_clone_consent": {
+      "file": "versions/072_oral_clone_consent.py",
+      "sha256": "d764373609405cdef7f8b3e3d07a5b6ccb836c53fc6416f5d1667c59e215d7e2"
+    },
+    "073_oral_durable_billing": {
+      "file": "versions/073_oral_durable_billing.py",
+      "sha256": "0310ed119f4d2b3d0daafc340ec4bdbd1dab7fc6fe2e69639f6d6e402ba9d543"
+    },
+    "074_script_rewrite_ip_profile_snapshot": {
+      "file": "versions/074_script_rewrite_ip_profile_snapshot.py",
+      "sha256": "13cd984cdfd75ee38e0925c2d3603ade35d47d5892adb07c0c4c28ce035511be"
+    },
+    "075_independent_creation": {
+      "file": "versions/075_independent_creation.py",
+      "sha256": "6cc9b96802a20a7ed88104c976dd6ee10cb7fae84f5424700df5f25c168ba26d"
+    },
+    "076_studio_notification_preferences": {
+      "file": "versions/076_studio_notification_preferences.py",
+      "sha256": "dd261268a7bc7b3434f2d0448b671b2c76bb1843fc13c6198a518b69bb4234b1"
+    },
+    "077_durable_script_from_audio": {
+      "file": "versions/077_durable_script_from_audio.py",
+      "sha256": "92942b54f14bdeee2ad6f950a8e4ad753a920b63ada63e920777b3e58f782b83"
+    },
+    "078_viral_module_launch": {
+      "file": "versions/078_viral_module_launch.py",
+      "sha256": "adef36f1bf5cb63b0c36d378daac02b49f2abb1d13eb70f88dc3fae6160335e8"
+    },
+    "079_viral_favorite_page_index": {
+      "file": "versions/079_viral_favorite_page_index.py",
+      "sha256": "34164bd86b655df5de76cd9c317f0284d36270bf859506680598b92a191992b3"
+    },
+    "080_viral_link_resolution_receipts": {
+      "file": "versions/080_viral_link_resolution_receipts.py",
+      "sha256": "00ab165d6afa91e5da69f4ce5fa377ffcf92dba2e21341bfa6880b5cf803192c"
+    },
+    "081_oral_unit_price": {
+      "file": "versions/081_oral_unit_price.py",
+      "sha256": "5f34e8e2c05f552a4db5379eb38a87f423bb342d6989cc006f8575280ed9fa16"
+    },
+    "082_publish_accounts": {
+      "file": "versions/082_publish_accounts.py",
+      "sha256": "192494fd030fe92c0cdb76e5d03ebd9eb4f34e28156106f3692ba7c1dc66a475"
+    },
+    "083_recharge_orders_multi_provider": {
+      "file": "versions/083_recharge_orders_multi_provider.py",
+      "sha256": "324cfb043c38212e888f4b9c3c4039ad6f7c3638607b5e6d2aafb42f0d2a7659"
+    },
+    "086_remove_device_slot_constraints": {
+      "file": "versions/086_remove_device_slot_constraints.py",
+      "sha256": "396bb257496cf20b1127414a34c1d034f47a59cddfd032c6f744fc8921f4ec96"
+    },
+    "089_customer_api_keys": {
+      "file": "versions/089_customer_api_keys.py",
+      "sha256": "6ef35ca794f111aa8fe49e91be8cbad111697d715fd6c474ff0bc5c7aa42bef0"
+    },
+    "20260912T1353_customer_discounts": {
+      "file": "versions/20260912T1353_customer_discounts.py",
+      "sha256": "4f1122f0febc80e56d8b8323c1c5f858912a9bdb3eaad35ddb41d31521a1e6ba"
+    },
+    "20260912T1400_customer_registration_credentials": {
+      "file": "versions/20260912T1400_customer_registration_credentials.py",
+      "sha256": "a6ea47206cac5268b4ab835449986afbee0210b9c9327479ed613686fcba4b38"
+    },
+    "20260912T1900_password_customer_sessions": {
+      "file": "versions/20260912T1900_password_customer_sessions.py",
+      "sha256": "c9490aa905b0e9a76c52152f2c6181a26c396bb66b7775a9eb4bf65d120faefc"
+    },
+    "20260912T1910_xiaohongshu_link_import": {
+      "file": "versions/20260912T1910_xiaohongshu_link_import.py",
+      "sha256": "6bacd017e9bd4f8a7e86ece5fc97565125bd68e1d43a6f1485cc4b119e0fff12"
+    },
+    "20260912T2200_customer_token_lifecycle": {
+      "file": "versions/20260912T2200_customer_token_lifecycle.py",
+      "sha256": "b3423c91283f5e087423703be203aa6f5209703108b0aace4c39f40b3515beda"
+    },
+    "20260912T2330_customer_credit_pricing": {
+      "file": "versions/20260912T2330_customer_credit_pricing.py",
+      "sha256": "ca99eba7576ea2a3dd2eec09416b3ec796af8b8812d7c2707f18bb88643aa6c1"
+    },
+    "20260913T0630_account_credit_operations": {
+      "file": "versions/20260913T0630_account_credit_operations.py",
+      "sha256": "02cd722dae061e59cf0cbad938c32944d26632c8dd31ecb1a2014dcc8bb38649"
+    },
+    "20260913T1100_itemized_billing": {
+      "file": "versions/20260913T1100_itemized_billing.py",
+      "sha256": "746dc4624ccdd74a92ba75bde5198892d4139ada8371bdce29b2c5495df61764"
+    },
+    "20260913T1600_shared_viral_media": {
+      "file": "versions/20260913T1600_shared_viral_media.py",
+      "sha256": "c53790ad711ec8b278e56aa0ab6c5059f2e1921b6b14c61c81f638d98105d683"
+    },
+    "20260913T1800_payment_channels": {
+      "file": "versions/20260913T1800_payment_channels.py",
+      "sha256": "e16a1837f851ef45dc7847cea14014afacf6d7af81e1d406ea98f4730996ae5c"
+    },
+    "20260913T1825_h3_account_pool": {
+      "file": "versions/20260913T1825_h3_account_pool.py",
+      "sha256": "3b12b253ca704dec636db5b370859043cba20a0760ac58c094227f1fb9e62c59"
+    },
+    "20260914T0000_local_joint_merge": {
+      "file": "versions/20260914T0000_local_joint_merge.py",
+      "sha256": "b12aba64ee6f0eaf23d177699dd30171c639e6660c876f80a4fe32b008d3cca8"
+    },
+    "20260915T1200_browser_accounts": {
+      "file": "versions/20260915T1200_browser_accounts.py",
+      "sha256": "2e3b953e31c602cade86ce8d947ba0ccbc53b94287893967e58214582632e976"
+    },
+    "20260915T1600_viral_copy_cache": {
+      "file": "versions/20260915T1600_viral_copy_cache.py",
+      "sha256": "1c59d6cc39815140e1af931e60b71000a3dd925d8304c9068fff1199c4106b70"
+    },
+    "20260916T1400_content_objects": {
+      "file": "versions/20260916T1400_content_objects.py",
+      "sha256": "3e2c9b91b03c61bbc4e8e098cb7a2ac4b5fa6e6214bbdc1b3946a72a9034689d"
+    },
+    "20260916T2000_prompt_optimization_receipts": {
+      "file": "versions/20260916T2000_prompt_optimization_receipts.py",
+      "sha256": "b9c036e4764501cdaf0b7e4f9b82684ba99f4435ec39f8e96328bd8bd6eacbc6"
+    },
+    "20260917T1000_publish_records": {
+      "file": "versions/20260917T1000_publish_records.py",
+      "sha256": "f6ca32e0cd0c01b83495b193ca735490e4371ce3ad7eae387ed049e19cdabb32"
+    },
+    "20260918T1200_publish_account_avatar": {
+      "file": "versions/20260918T1200_publish_account_avatar.py",
+      "sha256": "611889e506e11161b6ca0489b4b94400987b3f1c58f59dfd25f9895a934b6787"
+    },
+    "20260919T1000_browser_account_probe": {
+      "file": "versions/20260919T1000_browser_account_probe.py",
+      "sha256": "f896ecb25e85af081468d591014057233aca189f8ae3c1dbfd60bdeb52d18eb6"
+    },
+    "20260919T1000_oral_soft_delete": {
+      "file": "versions/20260919T1000_oral_soft_delete.py",
+      "sha256": "52d26412eedbd704371fda842dadb57d84df614b984945e52e2f9eb739d16602"
+    },
+    "20260919T1200_sub_accounts": {
+      "file": "versions/20260919T1200_sub_accounts.py",
+      "sha256": "64ebd1d2c001fc7545a12c1a2c660f97fada849b9f37934deba2fca51f0a88fb"
+    },
+    "20260919T1300_wallet_actor": {
+      "file": "versions/20260919T1300_wallet_actor.py",
+      "sha256": "87823884431813b9948ceed88714e72e7d4bfcd9c548084db7986b6fd98b6cec"
+    },
+    "20260919T1500_device_parent_cascade": {
+      "file": "versions/20260919T1500_device_parent_cascade.py",
+      "sha256": "960869b5a33c5c50762d9574c52f6bd56bd9e843844fb4061a6597a49a5afe06"
+    },
+    "20260920T0000_merge_parallel_heads": {
+      "file": "versions/20260920T0000_merge_parallel_heads.py",
+      "sha256": "f3f050f8b57cb5657c80df5307a6f16f81209491cb1bc3a8113f8e440eac4a79"
+    },
+    "20260920T0100_add_api_metadata_to_billing_ops": {
+      "file": "versions/20260920T0100_add_api_metadata_to_billing_ops.py",
+      "sha256": "c4c3baf18801bb21dece43e1d6ee525ef3cdca3b88d4dc9816510e37619b2460"
+    },
+    "20260921T0000_merge_wallet_actor_and_billing_metadata": {
+      "file": "versions/20260921T0000_merge_wallet_actor_and_billing_metadata.py",
+      "sha256": "02804ed76b9bb5c8451906581c5b2ed91f300adea831dffec839d8e1a85eabfa"
+    },
+    "20260921T1200_sub_account_quotas": {
+      "file": "versions/20260921T1200_sub_account_quotas.py",
+      "sha256": "0cffd0f09c379004d42ad4af79618798455796cd44169673ee38cef94ed0c677"
+    },
+    "20260922T1200_analysis_task_failure_diagnostic": {
+      "file": "versions/20260922T1200_analysis_task_failure_diagnostic.py",
+      "sha256": "d5013f5944dfc7e8577d93eb24ba8c3484b7d9b23696238e0d813aa3ff06d0de"
+    },
+    "20260922T1200_recharge_packages": {
+      "file": "versions/20260922T1200_recharge_packages.py",
+      "sha256": "40203dc6a8529974447a15812c16c0071203c5f1ac8b5d3c2e8712aa9ad410e3"
+    },
+    "20260922T1500_viral_search_discoveries": {
+      "file": "versions/20260922T1500_viral_search_discoveries.py",
+      "sha256": "c6032339731b2ec183e07345d79c649d6dc0ff9510328aca6d436a3555189ecd"
+    },
+    "20260922T1600_analysis_task_request_id": {
+      "file": "versions/20260922T1600_analysis_task_request_id.py",
+      "sha256": "5640fd928f2cce23aa63a8d8bd8ef7283132b15e95bdb75213320e527a66d89b"
+    },
+    "20260922T1800_sub_account_permissions": {
+      "file": "versions/20260922T1800_sub_account_permissions.py",
+      "sha256": "07825f5942d643b6ad9ba18dc1f34b6d3bc5b340fa39ff63c05f80e37003eb7e"
+    },
+    "20260922T2000_analysis_task_attempts": {
+      "file": "versions/20260922T2000_analysis_task_attempts.py",
+      "sha256": "94660c279da2698e0d37d184699a20f5458f278beda5006aab2f6b5b316216b2"
+    },
+    "20260922T2200_material_preference_tags": {
+      "file": "versions/20260922T2200_material_preference_tags.py",
+      "sha256": "39995cbab5af6fa017075edf247c5dc587263795f757b73f5c20a97215be905d"
+    },
+    "20260923T0000_open_h3_extended_modes": {
+      "file": "versions/20260923T0000_open_h3_extended_modes.py",
+      "sha256": "5e35abd36eebeee5909b0099744e226d463999c9ce5c89f8b8236ddb34f0575d"
+    },
+    "20260923T1200_admin_refund_adjustment": {
+      "file": "versions/20260923T1200_admin_refund_adjustment.py",
+      "sha256": "d31eff3ef4c8e16d1fe34266c3f4714f3daa9111f875f6b7baef2efa8283c7ed"
+    },
+    "20260923T1800_re_add_h3_extended_modes_rollout_compat": {
+      "file": "versions/20260923T1800_re_add_h3_extended_modes_rollout_compat.py",
+      "sha256": "aa7c41648f4286831edf99ca81e78d4e7cbafe38c9a379efb60172fc9fa0f87a"
+    },
+    "20260924T0000_wechat_transaction_unique": {
+      "file": "versions/20260924T0000_wechat_transaction_unique.py",
+      "sha256": "635669f99b59735f92a32c5544622edb91c6f7c3274f9aa476879c6db645ac08"
+    },
+    "20260924T0100_oral_task_submitted_at": {
+      "file": "versions/20260924T0100_oral_task_submitted_at.py",
+      "sha256": "1b3e8901bf03977d9e2d89ccd962816094af5b211709cb89f6423e10bedcdade"
+    }
+  },
+  "task": "MIGRATION-GUARD-20260912"
+}

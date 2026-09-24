@@ -1,0 +1,24 @@
+[Unit]
+Description=Video Replica maintenance sweep FAILURE alert
+Documentation=file:/opt/video-replica/app/docs/evidence/T14-EVIDENCE.md
+
+# Pulled in via OnFailure= from video-replica-maintenance.service when the
+# purge retry budget is exhausted (PR review P2). Without this hook a missed
+# daily sweep — PostgreSQL down, repeated purge errors — stays silent while
+# expired AEAD envelopes linger past their recovery window, contrary to the
+# acceptance spec (客户版测试与验收规格-V3.md §3, line 99: "密文清理延迟和
+# 清理失败触发指标与告警"). The journal alert emitted here is the hook the
+# T37 / OPS-02 structured-logging and alerting pipeline consumes in
+# production; on a bare host it is already operator-visible via
+# `journalctl -p err`.
+
+[Service]
+Type=oneshot
+# ALERT-priority journal record: survives without any external metrics
+# stack, and `journalctl -t video-replica-maintenance -p alert` selects it.
+# The maintenance unit runs several sweeps (idempotency-envelope purge,
+# export-ciphertext purge, stale rate-limit counter purge, dangling billing
+# reservation reconcile) — a failed unit means whichever ExecStart failed
+# stayed undone, so the recovery instruction lists the journal as the source
+# of truth and every sweep for the re-run checklist.
+ExecStart=/bin/sh -c "echo 'ALERT: video-replica-maintenance failed after its retry budget — one or more daily sweeps stayed undone (idempotency-envelope purge / export-ciphertext purge / stale rate-limit counter purge / dangling billing reservation reconcile). Inspect journalctl -u video-replica-maintenance.service to find the failed ExecStart, restore PostgreSQL, then re-run the affected scripts: .venv/bin/python -m scripts.purge_idempotency_envelopes; .venv/bin/python -m scripts.purge_expired_export_ciphertexts; .venv/bin/python -m scripts.purge_stale_rate_limit_counters; .venv/bin/python -m scripts.reconcile_dangling_billing_reservations' | systemd-cat -t video-replica-maintenance -p alert"

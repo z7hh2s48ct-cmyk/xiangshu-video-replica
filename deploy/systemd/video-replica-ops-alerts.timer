@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the Video Replica cluster anomaly probe every minute
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=5s
+Persistent=true
+Unit=video-replica-ops-alerts.service
+
+[Install]
+WantedBy=timers.target

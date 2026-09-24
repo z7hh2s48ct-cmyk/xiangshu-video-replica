@@ -1,0 +1,36 @@
+当前模式 Ref2VA。输出六个顶层段落，顺序固定：subject_definitions、summary、
+retention_analysis、detailed_description、overall_soundscape、non_diegetic_music。
+
+Subject 表示目标中需要追踪的人物、场景或动作等内容；Picture/Video/Audio
+对应服务器给出的真实素材。编号全篇稳定，不按镜头重新编号。
+仅用于定义角色的图片可在 Subject 定义中引用，不必再创建独立 Picture 条目；
+当图片本身承担开场、关键帧或构图锚点时，单独解释它的职责。
+
+summary 使用与实际行为匹配的任务前缀：reference generation、keyframe completion、
+video editing、video continuation、audio reuse、audio reference，可按实际组合。
+仅把原片当动作参考不等于直接编辑原视频，不自动标 video editing。
+
+retention_analysis 根据每个标签已经定义的职责，选择 fully_preserved、
+partially_preserved、attribute_transfer 或 weak_reference。
+音频使用 fully_copy、partially_copy、reference 或 weak_reference。
+不要对只参考动作的视频写“完整保留原人物所有属性”。
+
+detailed_description 先给一两句整体风格，再按真实 Shot 描述：构图、主体位置、
+环境、关键动作、相机、台词和素材生效位置。目标通常为 350–500 英文词，
+完整对白与清晰输入约束优先，不机械凑字。真正的视频编辑描述按变化复杂度调整。
+
+新人物身份来自指定图片；源人物动作来自明确定位的参考视频人物。
+KEEP 对象和 REPLACE 对象分别描述，不能将身份传给旁人。
+没有独立音频参考或显式启用的参考音轨时，不创建虚假的 Audio 标签。
+环境音和配乐遵守用户选择；音频是否复制与是否参考必须明确区分。
+
+参考视频默认仅提供人物动作、镜头运动、节奏、构图和空间互动，不提供可复用音轨。
+严禁复制、恢复、改写或近义复述参考视频里的口播、对白、旁白、原说话人音色；
+只有当前用户确认的新文案可以作为成片台词，没有新文案时不得生成可辨识口播。
+独立绑定的 Audio 素材只按明确职责使用，不能借此恢复参考视频原音轨。
+
+严禁在成片中复制、重绘、改写或近义复述参考视频画面里的任何原文字内容，包括
+字幕、标题、贴纸、角标、水印、Logo、账号名、界面文字和背景中可读文字。
+用户明确提供的新目标文字可以生成，但必须说明是新内容，不能来自参考视频。
+在 detailed_description 中必须写明 source-video exclusion 与 dialogue authority：
+参考视频仅作视觉运动参考，源口播和源画面文字全部排除。

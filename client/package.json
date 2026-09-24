@@ -1,0 +1,36 @@
+{
+  "name": "@video-replica/client",
+  "version": "2.2.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b && vite build",
+    "build:admin": "tsc -b && vite build --config vite.admin.config.ts",
+    "check": "biome check . && tsc -b && vitest run",
+    "dev": "vite",
+    "format": "biome check --write .",
+    "generate:api": "openapi-typescript http://127.0.0.1:8000/openapi.json -o src/generated/api.ts",
+    "tauri": "tauri",
+    "test": "vitest run",
+    "verify:customer-bundle": "node ../scripts/verify_customer_bundle.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.11.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.8",
+    "@tauri-apps/cli": "2.11.4",
+    "@testing-library/jest-dom": "7.0.1",
+    "@testing-library/react": "16.3.2",
+    "@types/node": "26.2.0",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@vitejs/plugin-react": "6.0.5",
+    "openapi-typescript": "7.13.0",
+    "typescript": "5.9.3",
+    "vite": "8.2.1",
+    "vitest": "4.1.10"
+  }
+}

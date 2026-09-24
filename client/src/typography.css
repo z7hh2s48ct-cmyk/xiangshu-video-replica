@@ -1,0 +1,13 @@
+/* Shared across customer, admin, desktop and legacy embedded panels. */
+:root {
+  --font-caption: 12px;
+  --font-label: 13px;
+  --font-body: 14px;
+  --font-subtitle: 16px;
+  --font-section: 18px;
+  --font-lead: 20px;
+  --font-title: 24px;
+  --font-metric: 28px;
+  --font-display: 32px;
+  font-size: var(--font-body);
+}

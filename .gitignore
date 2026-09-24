@@ -1,0 +1,91 @@
+.DS_Store
+.omx/
+.omc/
+.claude/
+.serena/
+
+# Skill 运行时产物
+video_reverse_runs/
+
+# Frontend
+node_modules/
+dist/
+# CW-019 管理端独立构建制品（npm run build:admin）
+dist-admin/
+coverage/
+*.tsbuildinfo
+client/vite.config.js
+client/vite.config.d.ts
+# 运行时验证产物（截图 / Playwright / 诊断输出）
+output/
+
+# Python
+.venv/
+.uv-cache/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.py[cod]
+
+# Rust / Tauri
+target/
+.cargo-target/
+client/src-tauri/gen/
+client/src-tauri/icons/android/
+client/src-tauri/icons/ios/
+# 桌面端运行日志（API / Worker 本地调试输出，不进版本库）
+client/src-tauri/resources/*.log
+
+# Local runtime data and secrets
+.env
+.env.*
+!.env.example
+deploy/*.env
+deploy/nginx/*.conf
+账号信息.md
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# ChatGPT 项目同步工具生成的镜像副本
+AGENTS_副本.md
+# 运行时验证产物（UI 截图等）
+.verify/
+# 后台服务日志
+nohup.out
+.worktrees/
+worktree/
+# Playwright customer E2E artifacts
+test-results/
+playwright-report/
+# 本地工具链与发布工作区（2026-09-02 上线前整改：均不进版本库）
+.gstack/
+.tmp-tools/
+.release/
+artifacts/
+# 视觉 QA 临时记录与热修复快照
+design-qa.md
+/*.tar.gz
+e2e/customer/run/
+
+# 前端审核包交付 zip（内容已解压入库，以同名目录为准，避免二进制重复膨胀）
+# Playwright MCP 受控浏览器会话产物（截图/快照日志）
+.playwright-mcp/
+
+# 本地 PR 创建辅助脚本（各 worktree 自用，不入库；凭据只走环境变量）
+/create-*-pr.py
+/create-admin-prs.py
+
+# 内部资料不进版本库（本仓库公开发布；任务台账、验收证据与设计图册另行存放）
+docs/evidence/
+docs/design/
+docs/business/
+docs/superpowers/
+docs/prompt-spec/
+docs/reference/
+outputs/
+archive/
+.qoder/
+.zcode/

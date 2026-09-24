@@ -1,0 +1,191 @@
+# Customer V3 same-origin ingress. Replace the example host/certificate paths
+# before enabling this file. Uvicorn proxy parsing must remain disabled: the
+# application verifies this Nginx peer and parses the single rewritten client IP.
+
+upstream video_replica_customer_api {
+    # Share peer health state across all Nginx workers; without a zone,
+    # max_fails/fail_timeout removal is worker-local and another worker can
+    # keep selecting a backend that /ready already proved unavailable.
+    zone video_replica_customer_api 64k;
+    least_conn;
+    # Open-source Nginx passive health removal: /ready's configured http_503
+    # is an unsuccessful attempt, so one failed probe removes that process
+    # from ordinary /api selection for 30 seconds. Do not raise max_fails:
+    # doing so leaves a known-not-ready process eligible for customer traffic.
+    server 127.0.0.1:8001 max_fails=1 fail_timeout=30s;
+    server 127.0.0.1:8002 max_fails=1 fail_timeout=30s;
+    keepalive 32;
+}
+
+server {
+    listen 80 default_server;
+    server_name _;
+    return 444;
+}
+
+server {
+    listen 443 ssl default_server;
+    server_name _;
+    ssl_reject_handshake on;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name video.example.com;
+
+    ssl_certificate /etc/letsencrypt/live/video.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/video.example.com/privkey.pem;
+
+    root /opt/video-replica/app/client/dist;
+    index index.html;
+    client_max_body_size 2g;
+
+    # Backward-compatible dependency-free process health. Keep this exact
+    # location ahead of the SPA fallback so browser health checks and legacy
+    # monitors receive JSON instead of index.html.
+    location = /health {
+        proxy_pass http://video_replica_customer_api;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For 127.0.0.2;
+        proxy_next_upstream error timeout http_502 http_503 http_504;
+        proxy_next_upstream_tries 2;
+    }
+
+    location = /live {
+        proxy_pass http://video_replica_customer_api;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        # A same-host monitor's 127.0.0.1 client address otherwise equals the
+        # Nginx-to-Uvicorn peer and trips the application's fail-closed check
+        # for accidental Uvicorn proxy-header rewriting. This operational-only
+        # loopback sentinel keeps those two identities distinct; business
+        # routes must continue forwarding the real $remote_addr below.
+        proxy_set_header X-Forwarded-For 127.0.0.2;
+        proxy_next_upstream error timeout http_502 http_503 http_504;
+        proxy_next_upstream_tries 2;
+    }
+
+    location = /ready {
+        # Dependency-heavy PG/COS probes are for a same-host monitor only.
+        # If the monitor is on a dedicated private subnet, replace these
+        # loopback entries with its exact least-privilege CIDR; never expose
+        # /ready to arbitrary public clients.
+        allow 127.0.0.1;
+        allow ::1;
+        deny all;
+        proxy_pass http://video_replica_customer_api;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        # Same operational-only loopback sentinel as /live above.
+        proxy_set_header X-Forwarded-For 127.0.0.2;
+        proxy_next_upstream error timeout http_502 http_503 http_504;
+        proxy_next_upstream_tries 2;
+    }
+
+    # T37 process-local metrics. A same-host collector scrapes both API
+    # processes independently; these paths never enter the public /api lane
+    # and a separate metrics hostname is deliberately not introduced (the
+    # application enforces the one canonical customer Host). The collector
+    # reads the Bearer token from /etc/video-replica/metrics.token and Nginx
+    # forwards it unchanged; this file never contains the token itself.
+    location = /internal/metrics/api-1 {
+        allow 127.0.0.1;
+        allow ::1;
+        deny all;
+        proxy_pass http://127.0.0.1:8001/metrics;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For 127.0.0.2;
+    }
+
+    location = /internal/metrics/api-2 {
+        allow 127.0.0.1;
+        allow ::1;
+        deny all;
+        proxy_pass http://127.0.0.1:8002/metrics;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For 127.0.0.2;
+    }
+
+    location ^~ /api/ {
+        proxy_pass http://video_replica_customer_api;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        # CW-019: strip any client-supplied control-plane token, matching every
+        # proxy block in internal-p0.conf.example. This is a prefix location, so it
+        # does forward /api/control/* to the same upstream. Customer production
+        # authenticates those routes with the per-operator admin_session cookie and
+        # never reads this header (control_auth.get_control_route_user), so clearing
+        # it costs nothing here; it is defence in depth for a host whose
+        # VIDEO_REPLICA_CUSTOMER_PRODUCTION is misconfigured, where the legacy
+        # get_control_user path would otherwise compare an attacker-supplied token
+        # against CONTROL_PROXY_TOKEN_DIGEST.
+        proxy_set_header X-Control-Proxy-Token "";
+        # Business handlers legitimately return 502/503/504 for provider or
+        # storage failures. Only transport failures prove this API process is
+        # unhealthy; dependency status removal belongs to /ready above.
+        proxy_next_upstream error timeout;
+        proxy_next_upstream_tries 2;
+        proxy_request_buffering off;
+        proxy_read_timeout 300s;
+    }
+
+    # CW-019: customer and admin are two independent build artifacts, no longer
+    # one compiled SPA. `client/dist` (root above) is the customer shell shipped
+    # with Tauri and this ingress; `client/dist-admin` is the admin console,
+    # built by `npm run build:admin` with base `/admin/`. The customer artifact
+    # physically contains no admin entry (scripts/verify_customer_bundle.mjs
+    # asserts this in CI), so /admin must be served from dist-admin.
+    # deploy/customer-git-rollout.sh builds and replaces both artifacts in the same
+    # run; this location block must already exist before the first such release,
+    # otherwise the rollout's /admin probe fails on purpose and the run rolls back.
+    #
+    # Access control note — read before deciding to publish /admin. This example
+    # serves the admin *shell* to the public internet. The shell grants no data by
+    # itself: on a customer-production host every /api/admin and /api/control route
+    # authenticates the per-operator admin_session cookie established by the ASX1
+    # exchange (server/app/control_auth.py: get_control_route_user), and the legacy
+    # single-admin proxy-token identity is rejected outright there. But the shell
+    # still discloses the entire management API surface to unauthenticated clients:
+    # endpoint paths, field names, and the semantics of activation-code batches, the
+    # audit centre and forced sign-out. Do not assume /api/control/ is blocked at
+    # the proxy — the `location ^~ /api/` prefix above forwards it to the same
+    # upstream. If the operator does not want the console reachable publicly, add
+    # the same `allow`/`deny all` + `auth_basic` block used by
+    # internal-p0.conf.example inside `location ^~ /admin/` below.
+    location = /admin {
+        return 301 /admin/;
+    }
+
+    location ^~ /admin/ {
+        alias /opt/video-replica/app/client/dist-admin/;
+        try_files $uri $uri/ /admin/index.html;
+    }
+
+    # The customer workspace is a browser-route SPA, so auth cookies never
+    # cross an origin boundary.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
+
+# Nginx does not retry POST/PATCH/PUT requests unless `non_idempotent` is
+# explicitly added above. Do not add it: paid-provider submissions rely on
+# application idempotency and must never be replayed by the proxy. Do not add
+# application HTTP statuses to the /api retry list: route-level provider 503s
+# must not quarantine otherwise healthy API processes.

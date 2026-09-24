@@ -1,0 +1,1104 @@
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import * as api from "../api";
+import * as adminApi from "../api.admin";
+import { CustomersPage } from "./CustomersPage";
+
+// Mock the admin API module
+vi.mock("../api.admin", () => ({
+  getAccountCreditSummary: vi.fn().mockResolvedValue({
+    user_id: "user-1",
+    available_credits: 0,
+    reserved_credits: 0,
+    total_consumed_credits: 0,
+    software_consumed_credits: 0,
+    other_consumed_credits: 0,
+    tokens: [],
+  }),
+  getLegacyCreditConversion: vi
+    .fn()
+    .mockRejectedValue(new Error("已有新积分，不适用转换")),
+  listCustomers: vi.fn(),
+  fetchCustomerUnitPrice: vi.fn(),
+  updateCustomerUnitPrice: vi.fn(),
+  createCustomerAdjustment: vi.fn(),
+  listAdminRechargeOrders: vi.fn(),
+  listAdminWalletTransactions: vi.fn(),
+  listDevices: vi.fn(),
+  listCustomerSessions: vi.fn(),
+  listAdminAdjustments: vi.fn().mockResolvedValue({
+    items: [],
+    total: 0,
+    limit: 20,
+    offset: 0,
+  }),
+  AdminCustomerError: class extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = "AdminCustomerError";
+    }
+  },
+  AdminAdjustmentError: class extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = "AdminAdjustmentError";
+    }
+  },
+  AdminActivationError: class extends Error {
+    readonly status: number | undefined;
+    constructor(message: string, status?: number) {
+      super(message);
+      this.name = "AdminActivationError";
+      this.status = status;
+    }
+  },
+}));
+
+vi.mock("../api", () => ({
+  downloadCustomersCsv: vi.fn().mockResolvedValue(undefined),
+}));
+
+describe("CustomersPage (ADM-02 / T33)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    window.sessionStorage.clear();
+    vi.mocked(adminApi.fetchCustomerUnitPrice).mockResolvedValue({
+      user_id: "user-1",
+      unit_price_fen: 1000,
+      custom_unit_price_fen: null,
+      default_unit_price_fen: 1000,
+      min_recharge_fen: 1000,
+      recharge_step_fen: 1000,
+      updated_at: null,
+      request_id: "request-price-read",
+    });
+    vi.mocked(adminApi.listAdminRechargeOrders).mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 3,
+      offset: 0,
+    });
+    vi.mocked(adminApi.listAdminWalletTransactions).mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 3,
+      offset: 0,
+    });
+    vi.mocked(adminApi.listDevices).mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 3,
+      offset: 0,
+    });
+    vi.mocked(adminApi.listCustomerSessions).mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 3,
+      offset: 0,
+    });
+  });
+
+  it("renders customer list with pagination", async () => {
+    const mockCustomers = [
+      {
+        user_id: "user-1",
+        username: "customer-1",
+        created_at: "2026-08-24T10:00:00Z",
+        activation_code: "ABC-123",
+        status: "active",
+        generation_total: 8,
+        generation_succeeded: 5,
+        generation_failed: 1,
+        generation_in_progress: 1,
+        generation_attention: 1,
+        credits_spent: 5,
+      },
+      {
+        user_id: "user-2",
+        username: "customer-2",
+        created_at: "2026-08-24T11:00:00Z",
+        activation_code: "DEF-456",
+        status: "active",
+      },
+    ];
+
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: mockCustomers,
+      total: 2,
+      limit: 20,
+      offset: 0,
+    });
+
+    render(<CustomersPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("customer-1")).toBeInTheDocument();
+      expect(screen.getByText("customer-2")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("第 1 / 1 页（共 2 位）")).toBeInTheDocument();
+    expect(screen.getByText("成功 5 / 8")).toBeInTheDocument();
+    const headers = within(screen.getByRole("table", { name: "客户列表" }))
+      .getAllByRole("columnheader")
+      .map((cell) => cell.textContent);
+    expect(headers).toEqual([
+      "用户名",
+      "客户 ID",
+      "注册时间",
+      "状态",
+      "可用额度",
+      "累计消耗",
+      "生成情况",
+      "操作",
+    ]);
+    expect(screen.getByLabelText("customer-1 已结算消耗")).toHaveTextContent(
+      "5",
+    );
+    const firstDataRow = screen
+      .getAllByRole("row")
+      .find((row) => row.textContent?.includes("customer-1"));
+    expect(firstDataRow).toBeDefined();
+    expect(
+      within(firstDataRow as HTMLElement)
+        .getAllByRole("cell")
+        .map((cell) => cell.textContent?.replace(/\s+/g, " ").trim()),
+    ).toEqual([
+      "customer-1",
+      "user-1",
+      // 与 formatDateTime 的展示契约一致：固定 Asia/Shanghai，
+      // 否则期望值随 runner 时区漂移（CI 为 UTC，本地为 +8）。
+      new Date(mockCustomers[0].created_at).toLocaleString("zh-CN", {
+        hour12: false,
+        timeZone: "Asia/Shanghai",
+      }),
+      "活跃",
+      "0 积分",
+      "5 积分",
+      "成功 5 / 8 失败 1 · 进行中 1",
+      "展开详情",
+    ]);
+  });
+
+  it("shows loading state while fetching customers", () => {
+    vi.mocked(adminApi.listCustomers).mockImplementation(
+      () => new Promise(() => {}), // Never resolves
+    );
+
+    render(<CustomersPage />);
+
+    expect(screen.getByText("加载中...")).toBeInTheDocument();
+  });
+
+  it("handles API error gracefully", async () => {
+    vi.mocked(adminApi.listCustomers).mockRejectedValue(
+      new adminApi.AdminCustomerError("网络错误"),
+    );
+
+    render(<CustomersPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("加载失败：网络错误")).toBeInTheDocument();
+    });
+  });
+
+  it("supports pagination navigation", async () => {
+    const mockCustomers = Array.from({ length: 20 }, (_, i) => ({
+      user_id: `user-${i}`,
+      username: `user-${i}`,
+      created_at: "2026-08-24T10:00:00Z",
+      activation_code: `CODE-${i}`,
+      status: "active",
+    }));
+
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: mockCustomers,
+      total: 50,
+      limit: 20,
+      offset: 0,
+    });
+
+    render(<CustomersPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("第 1 / 3 页（共 50 位）")).toBeInTheDocument();
+    });
+
+    const nextPageButton = screen.getByRole("button", { name: "下一页" });
+    fireEvent.click(nextPageButton);
+
+    expect(adminApi.listCustomers).toHaveBeenCalledWith({
+      limit: 20,
+      offset: 20,
+    });
+  });
+
+  it("supports filtering by username", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 20,
+      offset: 0,
+    });
+
+    render(<CustomersPage />);
+
+    const filterInput = screen.getByPlaceholderText("按用户名筛选");
+    fireEvent.change(filterInput, { target: { value: "customer-1" } });
+    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+
+    expect(adminApi.listCustomers).toHaveBeenCalledWith({
+      limit: 20,
+      offset: 0,
+      username_filter: "customer-1",
+    });
+  });
+
+  it("applies filter drafts together and ignores an older response arriving last", async () => {
+    let resolveOld!: (
+      value: Awaited<ReturnType<typeof adminApi.listCustomers>>,
+    ) => void;
+    vi.mocked(adminApi.listCustomers).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveOld = resolve;
+      }),
+    );
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [
+        {
+          user_id: "new-id",
+          username: "new-user",
+          status: "active",
+          created_at: "2026-09-13T10:00:00Z",
+          activation_code: "",
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+    render(<CustomersPage />);
+    fireEvent.change(screen.getByLabelText("最低余额"), {
+      target: { value: "10" },
+    });
+    fireEvent.change(screen.getByLabelText("注册起始"), {
+      target: { value: "2026-09-01" },
+    });
+    expect(adminApi.listCustomers).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    await screen.findByText("new-user");
+    resolveOld({ items: [], total: 0, limit: 20, offset: 0 });
+    await waitFor(() =>
+      expect(screen.getByText("new-user")).toBeInTheDocument(),
+    );
+    expect(adminApi.listCustomers).toHaveBeenCalledTimes(2);
+  });
+
+  it("exports the same date, status and balance filters as the list", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 20,
+      offset: 0,
+    });
+    render(<CustomersPage />);
+
+    fireEvent.change(screen.getByLabelText("注册起始"), {
+      target: { value: "2026-09-01" },
+    });
+    fireEvent.change(screen.getByLabelText("注册截止"), {
+      target: { value: "2026-09-05" },
+    });
+    fireEvent.change(screen.getByLabelText("最低余额"), {
+      target: { value: "10" },
+    });
+    fireEvent.change(screen.getByLabelText("最高余额"), {
+      target: { value: "500" },
+    });
+    fireEvent.change(screen.getByLabelText("客户状态"), {
+      target: { value: "active" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("按用户名筛选"), {
+      target: { value: "customer-1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出列表 CSV" }));
+
+    expect(api.downloadCustomersCsv).toHaveBeenCalledWith({
+      status: "active",
+      username: "customer-1",
+      createdFrom: "2026-09-01",
+      createdTo: "2026-09-05",
+      balanceMin: 10,
+      balanceMax: 500,
+    });
+  });
+
+  it("opens the adjustment history for the selected customer", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [
+        {
+          user_id: "user-1",
+          username: "customer-1",
+          created_at: "2026-08-24T10:00:00Z",
+          activation_code: "ABC-123",
+          status: "active",
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+
+    render(<CustomersPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("customer-1")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "展开详情" }));
+    expect(
+      screen.queryByRole("button", { name: "调账历史" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "复制客户 ID" }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens a focused customer detail and returns to the filtered list", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [
+        {
+          user_id: "user-1",
+          username: "customer-1",
+          created_at: "2026-08-24T10:00:00Z",
+          activation_code: "ABC-123",
+          status: "active",
+          generation_total: 8,
+          generation_succeeded: 5,
+          generation_failed: 1,
+          generation_in_progress: 1,
+          generation_attention: 1,
+          credits_spent: 5,
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+
+    render(<CustomersPage />);
+
+    fireEvent.change(await screen.findByPlaceholderText("按用户名筛选"), {
+      target: { value: "customer-1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    await waitFor(() => {
+      expect(adminApi.listCustomers).toHaveBeenLastCalledWith(
+        expect.objectContaining({ username_filter: "customer-1" }),
+      );
+    });
+    const toggle = await screen.findByRole("button", { name: "展开详情" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(toggle);
+
+    expect(screen.queryByRole("table", { name: "客户列表" })).toBeNull();
+    const detailPanel = screen
+      .getByRole("heading", { name: "customer-1" })
+      .closest("div");
+    expect(detailPanel).not.toBeNull();
+    expect(
+      screen.getByRole("region", { name: "客户核心指标" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("累计消耗")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", {
+        name: "调账历史",
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "← 返回客户列表" }),
+    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(adminApi.listAdminRechargeOrders).toHaveBeenCalledWith({
+        userId: "user-1",
+        limit: 3,
+        offset: 0,
+      });
+      expect(adminApi.listAdminWalletTransactions).toHaveBeenCalledWith({
+        userId: "user-1",
+        limit: 3,
+        offset: 0,
+      });
+      // 任务书 C（2026-09-18）第 2 项：客户详情恢复设备视图，
+      // 进入详情即按 user_id 拉取该客户的 BOUND 设备。
+      // 本条此前断言 listDevices 不被调用，是 PR #102 删除设备页后的固化状态，
+      // 随任务书 C 反转；会话与调账仍未在详情内直连，两条否定断言保持。
+      expect(adminApi.listDevices).toHaveBeenCalledWith({
+        status: "BOUND",
+        userId: "user-1",
+        limit: 50,
+      });
+      expect(adminApi.listCustomerSessions).not.toHaveBeenCalled();
+      expect(adminApi.listAdminAdjustments).not.toHaveBeenCalled();
+    });
+    expect(
+      screen.getByRole("region", { name: "客户设备" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("该客户当前没有已绑定设备。")).toBeInTheDocument();
+    expect(screen.queryByText("绑定设备")).not.toBeInTheDocument();
+    expect(screen.queryByText("登录设备")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "查看设备" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "查看会话" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("冻结额度")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "← 返回客户列表" }));
+
+    expect(
+      await screen.findByRole("table", { name: "客户列表" }),
+    ).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("按用户名筛选")).toHaveValue(
+      "customer-1",
+    );
+  });
+
+  it("loads and updates the customer's effective recharge price", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [
+        {
+          user_id: "user-1",
+          username: "customer-1",
+          created_at: "2026-08-24T10:00:00Z",
+          activation_code: "ABC-123",
+          status: "active",
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+    vi.mocked(adminApi.updateCustomerUnitPrice).mockResolvedValue({
+      user_id: "user-1",
+      unit_price_fen: 880,
+      custom_unit_price_fen: 880,
+      default_unit_price_fen: 1000,
+      min_recharge_fen: 1000,
+      recharge_step_fen: 880,
+      updated_at: "2026-08-29T10:00:00Z",
+      request_id: "request-price-write",
+    });
+
+    render(<CustomersPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+
+    expect(await screen.findByText(/当前 ¥10.00 \/ 秒/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("售价（元/秒）"), {
+      target: { value: "8.8" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存客户售价" }));
+
+    await screen.findByRole("dialog", { name: "修改客户售价" });
+    expect(screen.queryByLabelText("操作原因")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认保存" }));
+
+    await waitFor(() => {
+      expect(adminApi.updateCustomerUnitPrice).toHaveBeenCalledWith(
+        "user-1",
+        880,
+        "更新客户售价",
+      );
+    });
+    expect(await screen.findByText("客户售价已保存")).toBeInTheDocument();
+  });
+
+  it("grants free credits through the audited FREE_GRANT adjustment", async () => {
+    // 首步填写事由，自动单号在确认及重试时保持一致。
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [
+        {
+          user_id: "user-1",
+          username: "customer-1",
+          created_at: "2026-08-24T10:00:00Z",
+          activation_code: "ABC-123",
+          status: "active",
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+    vi.mocked(adminApi.createCustomerAdjustment).mockResolvedValue({
+      adjustment_id: "adj-free-1",
+      order_id: "order-free-1",
+      credits: "10",
+      amount_fen: "0",
+      pricing_scope: "CUSTOMER_STANDARD",
+      wallet_balance_after: 60,
+      source_document_type: "FREE_GRANT",
+      source_document_ref: "PROMO-2026-09-001",
+      request_id: "request-free-grant",
+    });
+
+    let view = render(<CustomersPage operatorId="admin-retry" />);
+    fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+
+    fireEvent.change(await screen.findByLabelText("发放积分"), {
+      target: { value: "10" },
+    });
+    expect(screen.queryByLabelText("来源单号")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("事由"), {
+      target: { value: "新客活动发放" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发放赠送积分" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "发放赠送积分" });
+    expect(within(dialog).queryByRole("textbox")).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(dialog).toHaveTextContent("新客活动发放");
+    expect(dialog).toHaveTextContent("GRANT-");
+    expect(adminApi.createCustomerAdjustment).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(adminApi.createCustomerAdjustment).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "发放赠送积分" }));
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [
+        {
+          user_id: "user-1",
+          username: "customer-1",
+          created_at: "2026-08-24T10:00:00Z",
+          activation_code: "ABC-123",
+          status: "active",
+          available_credits: 60,
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+    vi.mocked(adminApi.createCustomerAdjustment).mockRejectedValueOnce(
+      new Error("结果未知，请重试"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认发放" }));
+    await screen.findByText("结果未知，请重试");
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(screen.getByLabelText("积分来源")).toBeDisabled();
+    expect(screen.getByLabelText("发放积分")).toBeDisabled();
+    expect(screen.getByLabelText("事由")).toBeDisabled();
+    expect(screen.getByText(/上次发放结果尚未确认/)).toHaveTextContent(
+      "新客活动发放",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "← 返回客户列表" }));
+    fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    expect(screen.getByLabelText("发放积分")).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "重试确认上次发放" }),
+    ).toBeEnabled();
+
+    view.unmount();
+    const otherOperatorView = render(
+      <CustomersPage operatorId="other-admin" />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    expect(screen.getByLabelText("发放积分")).toBeEnabled();
+    expect(screen.getByRole("button", { name: "发放赠送积分" })).toBeEnabled();
+    otherOperatorView.unmount();
+
+    view = render(<CustomersPage operatorId="admin-retry" />);
+    fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    expect(screen.getByLabelText("发放积分")).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "重试确认上次发放" }));
+    vi.mocked(adminApi.createCustomerAdjustment).mockRejectedValueOnce(
+      new adminApi.AdminActivationError("会话已失效", 403),
+    );
+    fireEvent.click(
+      within(
+        await screen.findByRole("dialog", { name: "发放赠送积分" }),
+      ).getByRole("button", { name: "确认发放" }),
+    );
+    await screen.findByText("会话已失效");
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(screen.getByLabelText("发放积分")).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "重试确认上次发放" }));
+    fireEvent.click(
+      within(
+        await screen.findByRole("dialog", { name: "发放赠送积分" }),
+      ).getByRole("button", { name: "确认发放" }),
+    );
+
+    await waitFor(() => {
+      expect(adminApi.createCustomerAdjustment).toHaveBeenCalledWith(
+        "user-1",
+        {
+          sourceDocumentType: "FREE_GRANT",
+          sourceDocumentRef: expect.stringMatching(/^GRANT-[a-f0-9-]+$/),
+          credits: 10,
+        },
+        "新客活动发放",
+        expect.any(String),
+      );
+    });
+    expect(await screen.findByText(/已发放 10 赠送积分/)).toBeInTheDocument();
+    expect(
+      vi.mocked(adminApi.createCustomerAdjustment).mock.calls,
+    ).toHaveLength(3);
+    expect(vi.mocked(adminApi.createCustomerAdjustment).mock.calls[1]).toEqual(
+      vi.mocked(adminApi.createCustomerAdjustment).mock.calls[0],
+    );
+    expect(vi.mocked(adminApi.createCustomerAdjustment).mock.calls[2]).toEqual(
+      vi.mocked(adminApi.createCustomerAdjustment).mock.calls[0],
+    );
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole("region", { name: "客户核心指标" })).getByText(
+          "60",
+        ),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.getAllByRole("region", { name: "账号积分查账" }),
+    ).toHaveLength(1);
+  });
+
+  it("restores an in-flight free-credit intent before its response arrives", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [
+        {
+          user_id: "user-1",
+          username: "customer-1",
+          created_at: "2026-08-24T10:00:00Z",
+          activation_code: "ABC-123",
+          status: "active",
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+    const success = {
+      adjustment_id: "adj-in-flight",
+      order_id: "order-in-flight",
+      credits: "12",
+      amount_fen: "0",
+      pricing_scope: "CUSTOMER_STANDARD",
+      wallet_balance_after: 62,
+      source_document_type: "FREE_GRANT",
+      source_document_ref: "GRANT-IN-FLIGHT",
+      request_id: "request-in-flight",
+    };
+    let resolveFirst: ((value: typeof success) => void) | undefined;
+    let resolveSecond: ((value: typeof success) => void) | undefined;
+    const firstRequest = new Promise<typeof success>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const secondRequest = new Promise<typeof success>((resolve) => {
+      resolveSecond = resolve;
+    });
+    vi.mocked(adminApi.createCustomerAdjustment)
+      .mockImplementationOnce(() => firstRequest)
+      .mockImplementationOnce(() => secondRequest)
+      .mockResolvedValue(success);
+
+    let view = render(<CustomersPage operatorId="admin-in-flight" />);
+    fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    fireEvent.change(await screen.findByLabelText("发放积分"), {
+      target: { value: "12" },
+    });
+    fireEvent.change(screen.getByLabelText("事由"), {
+      target: { value: "在途请求恢复" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发放赠送积分" }));
+    fireEvent.click(
+      within(
+        await screen.findByRole("dialog", { name: "发放赠送积分" }),
+      ).getByRole("button", { name: "确认发放" }),
+    );
+    await waitFor(() =>
+      expect(adminApi.createCustomerAdjustment).toHaveBeenCalledTimes(1),
+    );
+
+    view.unmount();
+    view = render(<CustomersPage operatorId="admin-in-flight" />);
+    fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    expect(screen.getByLabelText("发放积分")).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "重试确认上次发放" }));
+    fireEvent.click(
+      within(
+        await screen.findByRole("dialog", { name: "发放赠送积分" }),
+      ).getByRole("button", { name: "确认发放" }),
+    );
+    await waitFor(() =>
+      expect(adminApi.createCustomerAdjustment).toHaveBeenCalledTimes(2),
+    );
+
+    await act(async () => {
+      resolveFirst?.(success);
+      await firstRequest;
+    });
+    view.unmount();
+    view = render(<CustomersPage operatorId="admin-in-flight" />);
+    fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    expect(screen.getByLabelText("发放积分")).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "重试确认上次发放" }));
+    fireEvent.click(
+      within(
+        await screen.findByRole("dialog", { name: "发放赠送积分" }),
+      ).getByRole("button", { name: "确认发放" }),
+    );
+
+    expect(await screen.findByText(/已发放 12 赠送积分/)).toBeInTheDocument();
+    expect(
+      vi.mocked(adminApi.createCustomerAdjustment).mock.calls,
+    ).toHaveLength(3);
+    expect(vi.mocked(adminApi.createCustomerAdjustment).mock.calls[1]).toEqual(
+      vi.mocked(adminApi.createCustomerAdjustment).mock.calls[0],
+    );
+    expect(vi.mocked(adminApi.createCustomerAdjustment).mock.calls[2]).toEqual(
+      vi.mocked(adminApi.createCustomerAdjustment).mock.calls[0],
+    );
+    await act(async () => {
+      resolveSecond?.(success);
+      await secondRequest;
+    });
+  });
+
+  it("ignores a successful response after its free-credit section unmounts", async () => {
+    const customer = {
+      user_id: "user-1",
+      username: "customer-1",
+      created_at: "2026-08-24T10:00:00Z",
+      activation_code: "ABC-123",
+      status: "active",
+    };
+    vi.mocked(adminApi.listCustomers)
+      .mockResolvedValueOnce({
+        items: [customer],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      })
+      .mockRejectedValue(new Error("刷新失败"));
+    const firstGrant = {
+      adjustment_id: "adj-first",
+      order_id: "order-first",
+      credits: "10",
+      amount_fen: "0",
+      pricing_scope: "CUSTOMER_STANDARD",
+      wallet_balance_after: 60,
+      source_document_type: "FREE_GRANT",
+      source_document_ref: "GRANT-FIRST",
+      request_id: "request-first",
+    };
+    const secondGrant = {
+      ...firstGrant,
+      adjustment_id: "adj-second",
+      order_id: "order-second",
+      credits: "20",
+      wallet_balance_after: 80,
+      source_document_ref: "GRANT-SECOND",
+      request_id: "request-second",
+    };
+    let resolveOriginal: ((value: typeof firstGrant) => void) | undefined;
+    const originalRequest = new Promise<typeof firstGrant>((resolve) => {
+      resolveOriginal = resolve;
+    });
+    vi.mocked(adminApi.createCustomerAdjustment)
+      .mockImplementationOnce(() => originalRequest)
+      .mockResolvedValueOnce(firstGrant)
+      .mockResolvedValue(secondGrant);
+
+    render(<CustomersPage operatorId="admin-late-success" />);
+    fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    fireEvent.change(await screen.findByLabelText("发放积分"), {
+      target: { value: "10" },
+    });
+    fireEvent.change(screen.getByLabelText("事由"), {
+      target: { value: "第一笔" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发放赠送积分" }));
+    fireEvent.click(
+      within(
+        await screen.findByRole("dialog", { name: "发放赠送积分" }),
+      ).getByRole("button", { name: "确认发放" }),
+    );
+    await waitFor(() =>
+      expect(adminApi.createCustomerAdjustment).toHaveBeenCalledTimes(1),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "← 返回客户列表" }));
+    fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    fireEvent.click(screen.getByRole("button", { name: "重试确认上次发放" }));
+    fireEvent.click(
+      within(
+        await screen.findByRole("dialog", { name: "发放赠送积分" }),
+      ).getByRole("button", { name: "确认发放" }),
+    );
+    expect(await screen.findByText(/已发放 10 赠送积分/)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("发放积分"), {
+      target: { value: "20" },
+    });
+    fireEvent.change(screen.getByLabelText("事由"), {
+      target: { value: "第二笔" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发放赠送积分" }));
+    fireEvent.click(
+      within(
+        await screen.findByRole("dialog", { name: "发放赠送积分" }),
+      ).getByRole("button", { name: "确认发放" }),
+    );
+    expect(await screen.findByText(/已发放 20 赠送积分/)).toBeInTheDocument();
+
+    await act(async () => {
+      resolveOriginal?.(firstGrant);
+      await originalRequest;
+    });
+    expect(
+      within(screen.getByRole("region", { name: "客户核心指标" })).getByText(
+        "80",
+      ),
+    ).toBeInTheDocument();
+    expect(vi.mocked(adminApi.createCustomerAdjustment).mock.calls[1]).toEqual(
+      vi.mocked(adminApi.createCustomerAdjustment).mock.calls[0],
+    );
+    expect(
+      vi.mocked(adminApi.createCustomerAdjustment).mock.calls[2]?.[3],
+    ).not.toBe(vi.mocked(adminApi.createCustomerAdjustment).mock.calls[0]?.[3]);
+  });
+
+  it("does not send a free-credit request when durable intent storage fails", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [
+        {
+          user_id: "user-1",
+          username: "customer-1",
+          created_at: "2026-08-24T10:00:00Z",
+          activation_code: "ABC-123",
+          status: "active",
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+    const storageSpy = vi
+      .spyOn(Storage.prototype, "setItem")
+      .mockImplementation(() => {
+        throw new Error("storage unavailable");
+      });
+
+    render(<CustomersPage operatorId="admin-storage-failure" />);
+    fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    fireEvent.change(await screen.findByLabelText("发放积分"), {
+      target: { value: "8" },
+    });
+    fireEvent.change(screen.getByLabelText("事由"), {
+      target: { value: "存储失败不得发送" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发放赠送积分" }));
+    fireEvent.click(
+      within(
+        await screen.findByRole("dialog", { name: "发放赠送积分" }),
+      ).getByRole("button", { name: "确认发放" }),
+    );
+
+    expect(
+      await screen.findByText(/无法安全保存待确认发放/),
+    ).toBeInTheDocument();
+    expect(adminApi.createCustomerAdjustment).not.toHaveBeenCalled();
+    storageSpy.mockRestore();
+  });
+
+  it("releases a rejected free-credit intent so the operator can correct it", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [
+        {
+          user_id: "user-1",
+          username: "customer-1",
+          created_at: "2026-08-24T10:00:00Z",
+          activation_code: "ABC-123",
+          status: "active",
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+    vi.mocked(adminApi.createCustomerAdjustment).mockRejectedValueOnce(
+      new adminApi.AdminActivationError("事由不符合要求", 422),
+    );
+
+    render(<CustomersPage operatorId="admin-rejected" />);
+    fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    fireEvent.change(await screen.findByLabelText("发放积分"), {
+      target: { value: "10" },
+    });
+    fireEvent.change(screen.getByLabelText("事由"), {
+      target: { value: "待修正事由" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发放赠送积分" }));
+    fireEvent.click(
+      within(
+        await screen.findByRole("dialog", { name: "发放赠送积分" }),
+      ).getByRole("button", { name: "确认发放" }),
+    );
+    await screen.findByText("事由不符合要求");
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+
+    expect(screen.getByLabelText("积分来源")).toBeEnabled();
+    expect(screen.getByLabelText("发放积分")).toBeEnabled();
+    expect(screen.getByLabelText("事由")).toBeEnabled();
+    expect(screen.getByRole("button", { name: "发放赠送积分" })).toBeEnabled();
+  });
+
+  it("keeps customer pricing read-only for auditors", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [
+        {
+          user_id: "user-1",
+          username: "customer-1",
+          created_at: "2026-08-24T10:00:00Z",
+          activation_code: "ABC-123",
+          status: "active",
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+
+    render(<CustomersPage readOnly />);
+    fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+
+    expect(
+      await screen.findByText("审计员仅可查看定价，不能修改。"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "保存客户售价" })).toBeNull();
+  });
+
+  it("shows empty state when no customers exist", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 20,
+      offset: 0,
+    });
+
+    render(<CustomersPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("暂无客户数据")).toBeInTheDocument();
+    });
+  });
+
+  it("displays customer status badges correctly", async () => {
+    const mockCustomers = [
+      {
+        user_id: "user-1",
+        username: "active-user",
+        created_at: "2026-08-24T10:00:00Z",
+        activation_code: "ABC-123",
+        status: "active",
+      },
+      {
+        user_id: "user-2",
+        username: "suspended-user",
+        created_at: "2026-08-24T11:00:00Z",
+        activation_code: "DEF-456",
+        status: "suspended",
+      },
+    ];
+
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: mockCustomers,
+      total: 2,
+      limit: 20,
+      offset: 0,
+    });
+
+    render(<CustomersPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("活跃")).toBeInTheDocument();
+      expect(screen.getByText("已暂停")).toBeInTheDocument();
+    });
+  });
+
+  // 总览快捷入口（customerAdjustments）落到本页的接入验证：
+  // intent 必须产生"下文"，否则入口只是换了个页签。
+  describe("导航意图落地", () => {
+    const oneCustomer = {
+      items: [
+        {
+          user_id: "user-1",
+          username: "customer-1",
+          created_at: "2026-08-24T10:00:00Z",
+          activation_code: "ABC-123",
+          status: "active",
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    };
+
+    it("guides the adjustment intent to the filter and the grant form", async () => {
+      vi.mocked(adminApi.listCustomers).mockResolvedValue(oneCustomer);
+      const scrollIntoView = vi.fn();
+      Element.prototype.scrollIntoView = scrollIntoView;
+
+      render(<CustomersPage initialIntent="customerAdjustments" />);
+
+      expect(
+        await screen.findByText(
+          /后台加款与赠送积分在客户详情内完成.*赠送积分.*区块/,
+        ),
+      ).toBeInTheDocument();
+      expect(screen.getByPlaceholderText("按用户名筛选")).toHaveFocus();
+
+      fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+      expect(
+        screen.getByRole("button", { name: "发放赠送积分" }),
+      ).toBeInTheDocument();
+      await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+    });
+
+    it("keeps the adjustment guidance out of the auditor view", async () => {
+      vi.mocked(adminApi.listCustomers).mockResolvedValue(oneCustomer);
+
+      render(<CustomersPage initialIntent="customerAdjustments" readOnly />);
+
+      await screen.findByText("customer-1");
+      expect(
+        screen.queryByText(/后台加款与赠送积分在客户详情内完成/),
+      ).not.toBeInTheDocument();
+    });
+
+    it("adds no guidance banner without an intent", async () => {
+      vi.mocked(adminApi.listCustomers).mockResolvedValue(oneCustomer);
+
+      render(<CustomersPage />);
+
+      await screen.findByText("customer-1");
+      expect(
+        screen.queryByText(/后台加款与赠送积分在客户详情内完成/),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByText(/激活码发放与查询不在客户管理页/),
+      ).not.toBeInTheDocument();
+      expect(screen.getByPlaceholderText("按用户名筛选")).not.toHaveFocus();
+    });
+  });
+});

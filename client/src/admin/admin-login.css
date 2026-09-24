@@ -1,0 +1,201 @@
+/* ADMIN-UI-AUDIT-20260911: 管理端登录门（gate）样式。
+ * 只服务 AdminApp 认证阶段（登录 / 恢复凭据 / 设置密码），命名空间
+ * `.admin-login`，不触碰既有 admin-* 类。设计令牌复用 `.admin-shell`
+ * 定义的 --admin-*（基础样式表 styles.css 由管理端入口显式导入，
+ * 契约见 entryContract.test.ts）。布局参考 Stripe / Vercel / 阿里云 RAM
+ * 等运营后台登录门的共性：左品牌价值区 + 右表单卡，窄屏折叠单列。 */
+
+.admin-shell--gate {
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.admin-login {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(320px, 430px);
+  gap: clamp(28px, 5vw, 72px);
+  align-items: center;
+  width: min(1080px, 100%);
+}
+
+.admin-login__brand {
+  display: grid;
+  gap: 18px;
+}
+
+.admin-login__brand-mark {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.admin-login__brand-mark img {
+  width: min(100%, 260px);
+  height: auto;
+  object-fit: contain;
+  filter: invert(1) grayscale(1) sepia(1) saturate(3) hue-rotate(355deg);
+  mix-blend-mode: screen;
+}
+
+.admin-login__brand h1 {
+  margin: 0;
+  font-size: clamp(24px, 3.2vw, 28px);
+  letter-spacing: 0.04em;
+}
+
+.admin-login__brand p {
+  max-width: 46ch;
+  margin: 0;
+  color: var(--admin-copy-soft);
+  font-size: var(--font-body);
+  line-height: 1.8;
+}
+
+.admin-login__points {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  color: var(--admin-copy-faint);
+  font-size: var(--font-label);
+  line-height: 1.7;
+  list-style: none;
+}
+
+.admin-login__points li {
+  position: relative;
+  padding-left: 18px;
+}
+
+.admin-login__points li::before {
+  content: "";
+  position: absolute;
+  top: 8px;
+  left: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--admin-accent);
+  opacity: 0.75;
+}
+
+.admin-login__card {
+  display: grid;
+  gap: 14px;
+  border: 1px solid var(--admin-line);
+  border-radius: 28px;
+  background:
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.03),
+      rgba(255, 255, 255, 0.01)
+    ),
+    var(--admin-panel-strong);
+  box-shadow: var(--admin-shadow);
+  padding: clamp(24px, 3vw, 36px);
+  backdrop-filter: blur(18px);
+}
+
+.admin-login__card h2 {
+  margin: 0;
+  font-size: var(--font-section);
+  letter-spacing: 0.03em;
+}
+
+.admin-login__status {
+  margin: 0;
+  color: var(--admin-copy-soft);
+}
+
+.admin-login__hint {
+  margin: 0;
+  color: var(--admin-copy-faint);
+  font-size: var(--font-label);
+  line-height: 1.7;
+}
+
+.admin-login__form {
+  display: grid;
+  gap: 14px;
+}
+
+.admin-login__control {
+  display: grid;
+  gap: 7px;
+  color: var(--admin-copy-soft);
+  font-size: var(--font-label);
+}
+
+.admin-login__control input {
+  border: 1px solid var(--admin-line-strong);
+  border-radius: 10px;
+  background: rgba(9, 12, 18, 0.55);
+  color: var(--admin-copy);
+  min-height: 42px;
+  padding: 0 12px;
+}
+
+.admin-login__control input:focus-visible {
+  outline: 2px solid var(--admin-accent);
+  outline-offset: 1px;
+}
+
+.admin-login__password-row {
+  display: flex;
+  gap: 8px;
+}
+
+.admin-login__password-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.admin-login__toggle {
+  border: 1px solid var(--admin-line-strong);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--admin-copy-soft);
+  font-size: var(--font-label);
+  min-height: 42px;
+  padding: 0 14px;
+}
+
+.admin-login__submit {
+  min-height: 44px;
+  margin-top: 4px;
+  background: linear-gradient(
+    135deg,
+    var(--admin-accent-strong),
+    var(--admin-accent)
+  );
+  color: #201a0d;
+  font-weight: 700;
+}
+
+.admin-login__submit:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+.admin-login__link {
+  justify-self: start;
+  background: transparent;
+  color: var(--admin-copy-faint);
+  font-size: var(--font-label);
+  padding: 4px 0;
+}
+
+.admin-login__link:hover {
+  color: var(--admin-accent-strong);
+}
+
+@media (max-width: 900px) {
+  .admin-login {
+    grid-template-columns: minmax(0, 1fr);
+    width: min(460px, 100%);
+  }
+
+  .admin-login__points {
+    display: none;
+  }
+}

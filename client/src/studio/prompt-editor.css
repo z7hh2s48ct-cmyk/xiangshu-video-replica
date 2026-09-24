@@ -1,0 +1,45 @@
+.h3-prompt-editor {
+  position: relative;
+  width: 100%;
+}
+.h3-prompt-tools {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+.h3-prompt-tools button {
+  min-width: 32px;
+  min-height: 32px;
+  cursor: pointer;
+}
+.h3-prompt-tools button:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+.h3-prompt-editor textarea {
+  width: 100%;
+  box-sizing: border-box;
+}
+.h3-prompt-editor > [role="status"] {
+  margin: 6px 0;
+  color: var(--studio-gold, #e5aa36);
+  font-size: var(--font-label, 14px);
+}
+.h3-prompt-editor pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.h3-prompt-tools button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 10px;
+  color: var(--studio-gold, #e5aa36);
+  background: transparent;
+  border: 1px solid #665025;
+  border-radius: 6px;
+  font-size: var(--font-caption, 13px);
+}

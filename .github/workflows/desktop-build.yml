@@ -1,0 +1,147 @@
+name: Desktop installers
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_base_url:
+        description: Customer HTTPS API origin
+        type: string
+        required: true
+        default: https://video.zszhj.cn
+  push:
+    # The task branch makes the first build reviewable before merging to main.
+    branches: [main, feat/desktop-actions-20260917]
+    paths:
+      - 'client/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.cargo/**'
+      - '.github/workflows/desktop-build.yml'
+      - 'scripts/release/collect-desktop-artifacts.mjs'
+      - 'scripts/require_customer_api_base.mjs'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-installers-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x86_64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+            bundle_dir: nsis
+            config: src-tauri/tauri.customer.conf.json
+            binary_arch: x86_64
+          - platform: macos-arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+            bundles: app
+            bundle_dir: dmg
+            config: src-tauri/tauri.macos.conf.json
+            binary_arch: arm64
+          - platform: macos-x86_64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            bundles: app
+            bundle_dir: dmg
+            config: src-tauri/tauri.macos.conf.json
+            binary_arch: x86_64
+    defaults:
+      run:
+        shell: bash
+    env:
+      VITE_API_BASE_URL: ${{ inputs.api_base_url || 'https://video.zszhj.cn' }}
+      RUST_TARGET: ${{ matrix.target }}
+      BUNDLE_CONFIG: ${{ matrix.config }}
+      BUNDLE_TYPES: ${{ matrix.bundles }}
+      BUNDLE_DIR: ${{ matrix.bundle_dir }}
+      BINARY_ARCH: ${{ matrix.binary_arch }}
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Validate customer API origin
+        run: npm run require:customer-api-base
+      - name: Install Rust target
+        run: |
+          rustup toolchain install stable --profile minimal --target "$RUST_TARGET"
+          rustup default stable
+      - name: Install JavaScript dependencies
+        run: npm ci
+      - name: Scan source for secrets
+        run: npm run check:security
+      - name: Build desktop installer
+        run: |
+          sign_args=()
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            sign_args=(--no-sign)
+          fi
+          npm run tauri --workspace client -- build \
+            --config "$BUNDLE_CONFIG" --bundles "$BUNDLE_TYPES" \
+            --target "$RUST_TARGET" --ci "${sign_args[@]}" \
+            -- --locked --no-default-features
+      - name: Create macOS disk image
+        if: runner.os == 'macOS'
+        run: |
+          apps=(".cargo-target/$RUST_TARGET/release/bundle/macos/"*.app)
+          [[ ${#apps[@]} -eq 1 && -d "${apps[0]}" ]]
+          stage=$(mktemp -d "$RUNNER_TEMP/desktop-dmg.XXXXXX")
+          ditto "${apps[0]}" "$stage/$(basename "${apps[0]}")"
+          ln -s /Applications "$stage/Applications"
+          version=$(node -p 'require("./package.json").version')
+          output=".cargo-target/$RUST_TARGET/release/bundle/dmg"
+          mkdir -p "$output"
+          # Native image creation does not need a Finder automation session.
+          hdiutil create -volname "Video Replica $version" -srcfolder "$stage" \
+            -format UDZO "$output/VideoReplica_${version}_${PLATFORM}.dmg"
+      - name: Verify macOS application and disk image
+        if: runner.os == 'macOS'
+        run: |
+          apps=(".cargo-target/$RUST_TARGET/release/bundle/macos/"*.app)
+          images=(".cargo-target/$RUST_TARGET/release/bundle/dmg/"*.dmg)
+          [[ ${#apps[@]} -eq 1 && -d "${apps[0]}" ]]
+          [[ ${#images[@]} -eq 1 && -f "${images[0]}" ]]
+          codesign --verify --deep --strict "${apps[0]}"
+          lipo "${apps[0]}/Contents/MacOS/video-replica-desktop" -verify_arch "$BINARY_ARCH"
+          hdiutil verify "${images[0]}"
+      - name: Collect installer and provenance
+        run: |
+          node scripts/release/collect-desktop-artifacts.mjs "$PLATFORM" \
+            ".cargo-target/$RUST_TARGET/release/bundle/$BUNDLE_DIR" \
+            "output/desktop/$PLATFORM"
+          # Keep provenance beside the installer; never upload the whole workspace.
+          test -f "output/desktop/$PLATFORM/manifest.json"
+          test -f "output/desktop/$PLATFORM/SHA256SUMS.txt"
+          test -f "output/desktop/$PLATFORM/RELEASE-CHANNEL.txt"
+      - name: Upload downloadable installer
+        id: artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-${{ matrix.platform }}-${{ github.run_number }}-${{ github.run_attempt }}
+          path: output/desktop/${{ matrix.platform }}/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - name: Show download link
+        env:
+          ARTIFACT_URL: ${{ steps.artifact.outputs.artifact-url }}
+        run: |
+          printf '### %s\n\n[下载安装包](%s)\n\nAPI: `%s`\n\n内测构建：Windows 未签名，macOS ad-hoc 签名、未公证。产物保留 7 天。\n' \
+            "$PLATFORM" "$ARTIFACT_URL" "$VITE_API_BASE_URL" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,45 @@
+# Loki configuration file.
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: boltdb-shipper
+      object_store: filesystem
+      schema: v11
+      index:
+        pool:
+          max_idle_conns: 100
+
+storage_config:
+  boltdb_shipper:
+    active_index_directory: /var/lib/loki/index
+    cache_location: /var/lib/loki/cache
+    shared_store: filesystem
+  filesystem:
+    directory: /var/lib/loki/chunks
+
+limits_config:
+  enforce_metric_name: false
+  rejection_limit_message_size_mb: 50
+  ingestion_rate_mb: 10
+  ingestion_burst_size_mb: 20
+  retention_period: 720h  # 30 days
+
+chunk_store_config:
+  read_index_cache_ttl: 1h
+
+table_manager:
+  retention_deletion_policy:
+    - name: 30day-retention
+      type: retention
+      retention_period: 720h  # 30 days
+  retention_deletion_poll_interval: 5m
+
+ruler:
+  alertmanager_url: http://alertmanager:9093
