@@ -37,6 +37,7 @@ SERVICES: dict[str, Service] = {
     "viral_data": Service("爆款视频数据请求", "call", "tikhub", "viral"),
     "viral_search": Service("爆款视频搜索", "call", "tikhub", "viral"),
     "viral_search_refresh": Service("爆款视频刷新", "call", "tikhub", "viral"),
+    "viral_statistics": Service("爆款视频互动统计", "call", "tikhub", "viral"),
     "link_resolution": Service("链接解析", "call", "douyidou", "workbench"),
     "prompt_optimize": Service("提示词 AI 优化", "call", "apilio", "workbench"),
     "avatar_clone": Service("口播分身创建", "call", "hifly", "people"),
@@ -90,6 +91,7 @@ SERVICE_INTERFACE: dict[str, str] = {
     "viral_data": "viral_extract",
     "viral_search": "viral_extract",
     "viral_search_refresh": "viral_extract",  # Refresh uses same discount interface
+    "viral_statistics": "viral_extract",
     "link_resolution": "link_resolution",
     "prompt_optimize": "prompt_optimize",
     "avatar_clone": "oral",

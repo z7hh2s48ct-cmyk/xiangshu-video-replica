@@ -87,16 +87,21 @@ def _has_statistics(detail: WechatVideoDetail) -> bool:
     )
 
 
-def refresh_viral_statistics(
+def refresh_viral_statistics_billed(
     conn: BusinessConnection,
     client: ViralSourceClient | None,
     video_ids: list[str],
-) -> list[ViralVideo]:
-    """补采已有视频号条目的互动数，并返回数据库中的最新条目."""
+) -> tuple[list[ViralVideo], int]:
+    """补采视频号互动数，返回 (最新条目, 实际外呼详情次数).
+
+    实际外呼次数只统计真正触发了一次视频号详情外呼的条目（``pending``）：已命中
+    24h 成功缓存、冷却期内、或缺少资源标识的条目不产生外呼、不计费。计费方按
+    「每一次真实外呼对应一次扣费」据此结算。
+    """
     with _refresh_lock:
         videos = _load_wechat_videos(conn, video_ids)
         if client is None:
-            return videos
+            return videos, 0
 
         pending: list[ViralVideo] = []
         for video in videos:
@@ -112,6 +117,7 @@ def refresh_viral_statistics(
                 )
                 continue
             pending.append(video)
+        fetched = len(pending)
 
         futures: dict[Future[WechatVideoDetail], ViralVideo] = {}
         with ThreadPoolExecutor(max_workers=STATISTICS_MAX_WORKERS) as pool:
@@ -142,4 +148,14 @@ def refresh_viral_statistics(
                     detail=detail,
                 )
 
-        return _load_wechat_videos(conn, video_ids)
+        return _load_wechat_videos(conn, video_ids), fetched
+
+
+def refresh_viral_statistics(
+    conn: BusinessConnection,
+    client: ViralSourceClient | None,
+    video_ids: list[str],
+) -> list[ViralVideo]:
+    """补采已有视频号条目的互动数，并返回数据库中的最新条目."""
+    videos, _ = refresh_viral_statistics_billed(conn, client, video_ids)
+    return videos

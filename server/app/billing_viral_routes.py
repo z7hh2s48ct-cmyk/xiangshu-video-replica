@@ -17,9 +17,10 @@ from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
 from app.viral_collection_billing import collection_batch_rows
 from app.viral_routes import ViralStatisticsResponse, _item
-from app.viral_statistics import _load_wechat_videos
 
 router = APIRouter(tags=["viral-billing"])
+
+STATISTICS_SERVICE = "viral_statistics"
 
 
 class RefreshRequest(BaseModel):
@@ -32,12 +33,72 @@ def refresh_statistics(
     db: BusinessDbDep,
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=128)],
 ) -> ViralStatisticsResponse:
-    with db.write() as (conn, _actor):
-        return ViralStatisticsResponse(
-            items=[
-                _item(video) for video in _load_wechat_videos(conn, sorted(set(payload.videoIds)))
-            ]
+    """按需补采视频号互动统计并按实际外呼次数计费.
+
+    与 ``/videos/statistics``（只读缓存、免费）不同，这里触发真实视频号详情外呼，
+    因此走 fail-closed 资费守卫 + RESERVE→SETTLE：预留以请求条数为上限，结算按实际
+    触发的外呼次数（24h 缓存命中不产生外呼、不计费）。供应商成本由 ``viral_tikhub``
+    内的 ``meter_call("viral_data")`` 自动落平台侧，与客户零售价无关。
+    """
+    from app.permissions import require_not_auditor
+    from app.usage_billing import accept_operation, finish_source
+    from app.viral_search_routes import require_priced_viral_service
+    from app.viral_statistics import refresh_viral_statistics_billed
+    from app.viral_tikhub import ViralSourceUnavailable, viral_source_client_from_settings
+
+    video_ids = sorted(set(payload.videoIds))
+    key = idempotency_key.strip()
+
+    # 栅栏内：权威身份 + fail-closed 资费守卫 + 数据源可用性 + 预留计费。
+    with db.write() as (conn, actor):
+        with conn:
+            require_not_auditor(
+                conn,
+                actor=actor,
+                action="viral.statistics",
+                entity_type="viral_video",
+                entity_id="batch",
+            )
+            require_priced_viral_service(
+                conn, STATISTICS_SERVICE, error_code="VIRAL_STATISTICS_UNPRICED"
+            )
+            try:
+                client = viral_source_client_from_settings(conn)
+            except ViralSourceUnavailable as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail={"code": "VIRAL_STATISTICS_UNAVAILABLE", "message": str(exc)},
+                ) from exc
+            source_id = f"viral-statistics:{actor.id}:{key}"
+            accept_operation(
+                conn,
+                user_id=actor.id,
+                service=STATISTICS_SERVICE,
+                source_id=source_id,
+                units=len(video_ids),
+                request_fingerprint=",".join(video_ids),
+            )
+
+    # 补采在独立事务里（内部按视频逐条 commit）；供应商成本由 meter_call 落平台侧。
+    with pg_transaction() as raw:
+        videos, fetched = refresh_viral_statistics_billed(
+            BusinessConnection.postgres(raw), client, video_ids
         )
+
+    # 结算：按实际外呼次数。单条失败已在 refresh 内部降级为库值，不会抛到这一层。
+    with db.write() as (conn, completed_actor):
+        with conn:
+            if completed_actor.id != actor.id:
+                raise HTTPException(status_code=401, detail={"code": "SESSION_REPLACED"})
+            finish_source(
+                conn,
+                source_id,
+                units=fetched,
+                succeeded=True,
+                service=STATISTICS_SERVICE,
+            )
+
+    return ViralStatisticsResponse(items=[_item(video) for video in videos])
 
 
 class BatchApiUsageDetail(BaseModel):

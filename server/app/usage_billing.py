@@ -555,12 +555,13 @@ def reconcile_operations(conn: BusinessConnection, *, limit: int = 100) -> int:
     # reservation settles in the same transaction that persists the result, so
     # a PENDING row past the window means nothing was delivered. Release it; a
     # retry opens a new billing round through reserve_search_operation.
-    # ``viral_search_refresh`` shares this window so a crash between its
-    # reservation and delivery cannot freeze the reserved credits forever
-    # (launch review H-3).
+    # ``viral_search_refresh`` and the statistics refresh share this window so a
+    # crash between their reservation and delivery cannot freeze the reserved
+    # credits forever (launch review H-3).
     searches = conn.execute(
         "SELECT id FROM billing_operations WHERE state='PENDING' "
-        "AND service IN ('viral_search', 'viral_search_refresh') AND user_id IS NOT NULL "
+        "AND service IN ('viral_search', 'viral_search_refresh', 'viral_statistics') "
+        "AND user_id IS NOT NULL "
         "AND created_at<now()-interval '30 "
         "minutes' "
         "ORDER BY created_at LIMIT %s",
