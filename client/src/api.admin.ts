@@ -1815,6 +1815,20 @@ export async function updateViralVideoAvailability(
   );
 }
 
+export async function collectViralNow(
+  reason: string,
+  idempotencyKey?: string,
+): Promise<{ queued: boolean }> {
+  return adminWrite(
+    "/api/control/viral/collect",
+    {},
+    reason,
+    "立即采集失败",
+    idempotencyKey,
+    "POST",
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Operation rates (W10 — 费率管理：上游成本费率与对外售价)
 // ---------------------------------------------------------------------------

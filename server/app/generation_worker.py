@@ -1764,10 +1764,20 @@ def run_pg_worker_once(
 def run_pg_collection_once(*, worker_id: str, storage: StorageAdapter) -> int:
     """Dedicated collector: never run in the customer generation worker pool.
 
-    P1 起采集调度与采集计费停用：本进程只消费显式入队的任务
-    （admin 单条归档 / 失败重试），不再自动入队、不再触发客户采集扣费
-    （设计 §5.5 / §12）。供应商成本仍由 meter_call 记平台单。
+    每轮三件事，顺序有先后：
+    1. 定时采集入队——按 ``next_collection_at`` 到点自动入队（关键词采集 +
+       共享账单批次），恢复 P1 前被停用的调度；
+    2. 共享账单结算——把上一轮已确认的采集请求按成员扣费（供应商一次、客户
+       按成员扣，见 ``viral_collection_billing.settle_collection_charges``）；
+    3. 消费一个在队任务（关键词采集 / admin 单条归档 / 失败重试）。
+    供应商成本仍由 ``meter_call`` 记平台单；客户侧按共享账单批次快照价扣分。
     """
+    from app.viral_collection import enqueue_due_viral_collections
+    from app.viral_collection_billing import settle_collection_charges
+
+    with pg_transaction() as raw:
+        enqueue_due_viral_collections(BusinessConnection.postgres(raw))
+    settle_collection_charges()
     with pg_transaction() as raw:
         lease = acquire_viral_refresh_task(BusinessConnection.postgres(raw), worker_id=worker_id)
     if lease is None:

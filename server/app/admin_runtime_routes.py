@@ -370,6 +370,57 @@ def update_viral_video_availability(
     )
 
 
+@router.post("/viral/collect", status_code=202)
+def collect_viral_now(
+    payload: AdminWriteContract,
+    request: Request,
+    response: Response,
+    actor: AdminWriter,
+) -> dict[str, object]:
+    """立即采集：置 ``next_collection_at`` 为当前并直接入队一次关键词采集.
+
+    与定时采集共用 ``enqueue_due_viral_collections``：关键词、平台、每词上限与
+    共享账单批次都在同一事务内建立；若已有在队/在制的采集任务则本次不重复入队
+    （与定时调度一致，避免并发采集互踩）。
+    """
+    from app.viral_collection import enqueue_due_viral_collections
+
+    def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
+        control = conn.execute(
+            "SELECT collection_enabled, keywords_json FROM viral_runtime_controls WHERE id = 1"
+        ).fetchone()
+        if control is None or not bool(control[0]):
+            raise http_error(409, "VIRAL_COLLECTION_PAUSED", "后台采集已暂停，请先开启采集服务。")
+        if not json.loads(str(control[1] or "[]")):
+            raise http_error(409, "VIRAL_COLLECTION_KEYWORDS_REQUIRED", "请先配置采集关键词。")
+        # 置 next_collection_at 为当前，让 enqueue_due_viral_collections 判为「到期」立即入队。
+        conn.execute(
+            "UPDATE viral_runtime_controls SET next_collection_at = CURRENT_TIMESTAMP WHERE id = 1"
+        )
+        enqueue_due_viral_collections(BusinessConnection.postgres(conn))
+        conn.execute(
+            "INSERT INTO audit_logs(id,actor_user_id,action,entity_type,entity_id,metadata_json) "
+            "VALUES(%s,%s,'viral_collection.collect_now','viral_runtime_controls','1',%s)",
+            (
+                str(uuid.uuid4()),
+                actor.user_id,
+                json.dumps({"request_id": request_id, "reason": payload.reason.strip()}),
+            ),
+        )
+        return {"queued": True}
+
+    return write_with_idempotency(
+        request,
+        response,
+        actor,
+        payload,
+        business,
+        success_status=202,
+        unavailable_code=RUNTIME_SETTINGS_SERVICE_UNAVAILABLE,
+        unavailable_message=RUNTIME_SETTINGS_SERVICE_UNAVAILABLE_MESSAGE,
+    )
+
+
 class ViralCurationRequest(AdminWriteContract):
     model_config = ConfigDict(extra="forbid")
     action: Literal["feature", "unfeature", "delete"]
@@ -658,7 +709,10 @@ def search_viral_videos_for_admin(
 
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         from app.media_routes import get_media_storage
-        from app.viral_search import archive_search_covers, run_viral_search
+        from app.viral_search import (
+            archive_search_covers_bounded,
+            run_viral_search_bounded,
+        )
         from app.viral_store import update_viral_cover, upsert_viral_videos
         from app.viral_tikhub import (
             ViralSourceError,
@@ -676,7 +730,9 @@ def search_viral_videos_for_admin(
                 503, "VIRAL_ADMIN_SEARCH_UNAVAILABLE", "爆款视频数据源暂不可用，请先配置数据源。"
             ) from exc
         try:
-            page = run_viral_search(
+            # 限时外呼：服务器 DNS/出网挂起是 urllib 超时盖不住的盲区，
+            # 必须有界失败，否则外呼挂在本写事务里直到被 PG 会话超时击穿。
+            page = run_viral_search_bounded(
                 client,
                 keyword=keyword,
                 platform=payload.platform,
@@ -685,8 +741,16 @@ def search_viral_videos_for_admin(
             )
         except ViralSourceError as exc:
             raise http_error(503, "VIRAL_ADMIN_SEARCH_UPSTREAM_FAILED", str(exc)) from exc
+        except TimeoutError as exc:
+            raise http_error(
+                503, "VIRAL_ADMIN_SEARCH_UPSTREAM_TIMEOUT", "搜索服务响应超时，请稍后重试。"
+            ) from exc
         storage = get_media_storage(BusinessConnection.postgres(conn))
-        enriched = archive_search_covers(storage, page.items)
+        try:
+            enriched = archive_search_covers_bounded(storage, page.items)
+        except TimeoutError:
+            # 封面归档超时不放弃整页结果：未归档条目保留源站链接兜底。
+            enriched = page.items
         upsert_viral_videos(BusinessConnection.postgres(conn), enriched, commit=False)
         for video in enriched:
             if video.cover_key:
