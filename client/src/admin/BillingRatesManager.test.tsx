@@ -339,7 +339,8 @@ test("saving unchanged credit displays preserves the original sub-cent cost", as
     ],
   });
   render(<BillingRatesManager />);
-  await screen.findByText("0.00000003");
+  // 成本展示四舍五入到 1 位小数；亚分成本在点击「配置」后的输入框里仍保留全精度。
+  await screen.findByText("0.0");
   fireEvent.click(screen.getByRole("button", { name: "配置 视频生成 · 768P" }));
   expect(screen.getByLabelText("售价（积分 / 秒）")).toHaveValue("1");
   fireEvent.click(screen.getByRole("button", { name: "保存" }));

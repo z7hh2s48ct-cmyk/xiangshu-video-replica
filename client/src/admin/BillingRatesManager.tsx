@@ -69,16 +69,12 @@ type TariffHistory = {
   current_version: number;
   items: TariffHistoryItem[];
 };
-// 默认地址与服务端各 Provider 常量一致；配置覆盖与密钥在服务配置页管理。
-const providerAddresses: Record<string, string> = {
-  metaso: "https://metaso.cn",
-  apilio: "https://api.apilio.ai",
-  deepseek: "https://api.deepseek.com",
-  hifly: "https://hfw-api.hifly.cc",
-  dashscope: "https://dashscope.aliyuncs.com",
-  tikhub: "https://api.tikhub.io",
-  douyidou: "https://gateway.diadi.cn",
-};
+// 展示时统一四舍五入到 1 位小数；配置输入框仍保留全精度，便于精确编辑。
+function roundToOneDecimal(value: string | null | undefined): string {
+  if (value === null || value === undefined || value === "") return "";
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed.toFixed(1) : value;
+}
 
 export function BillingRatesManager({
   readOnly = false,
@@ -381,10 +377,6 @@ export function BillingRatesManager({
             <strong>{service.name}</strong>
             <code>{service.service}</code>
           </td>
-          <td>
-            <span>{service.provider}</span>
-            <small>{providerAddresses[service.provider] ?? "见服务配置"}</small>
-          </td>
           <td>每{unit}</td>
           <td>
             {editing ? (
@@ -402,7 +394,7 @@ export function BillingRatesManager({
             ) : locked ? (
               "按零费用核算"
             ) : (
-              displayedCost ||
+              roundToOneDecimal(displayedCost) ||
               (service.tariff.unit_cost_fen === null
                 ? "待配置"
                 : "请设置充值换算")
@@ -521,7 +513,6 @@ export function BillingRatesManager({
               <thead>
                 <tr>
                   <th>费用科目 / API</th>
-                  <th>服务商 / 默认地址</th>
                   <th>单位</th>
                   <th>成本（积分）</th>
                   <th>售价（积分）</th>
@@ -548,13 +539,6 @@ export function BillingRatesManager({
                             <strong>{service.name}</strong>
                             <code>{service.service}</code>
                           </td>
-                          <td>
-                            <span>{service.provider}</span>
-                            <small>
-                              {providerAddresses[service.provider] ??
-                                "见服务配置"}
-                            </small>
-                          </td>
                           <td>每{unit}</td>
                           <td>
                             {editing ? (
@@ -574,7 +558,7 @@ export function BillingRatesManager({
                                 }
                               />
                             ) : (
-                              displayedCost ||
+                              roundToOneDecimal(displayedCost) ||
                               (service.tariff.unit_cost_fen === null
                                 ? "待配置"
                                 : "请设置充值换算")
@@ -592,8 +576,10 @@ export function BillingRatesManager({
                                 placeholder="未配置"
                                 disabled={busy || readOnly}
                               />
+                            ) : service.tariff.unit_credits != null ? (
+                              roundToOneDecimal(service.tariff.unit_credits)
                             ) : (
-                              (service.tariff.unit_credits ?? "未配置")
+                              "未配置"
                             )}
                           </td>
                           <td>
@@ -722,7 +708,6 @@ export function BillingRatesManager({
                 <thead>
                   <tr>
                     <th>费用科目 / API</th>
-                    <th>服务商 / 默认地址</th>
                     <th>单位</th>
                     <th>成本（积分）</th>
                     <th>售价（积分）</th>
