@@ -93,6 +93,25 @@ def test_viral_search_service_registered_in_billing_catalog() -> None:
     assert set(SERVICE_INTERFACE) == set(SERVICES)
 
 
+def test_viral_statistics_service_registered_in_billing_catalog() -> None:
+    """viral_statistics 科目：call/tikhub/viral，可客户收费、复用 viral_extract 折扣接口."""
+    from app.billing_catalog import (
+        INTERFACE_KEYS,
+        SERVICE_INTERFACE,
+        SERVICES,
+        interface_for_service,
+    )
+
+    service = SERVICES["viral_statistics"]
+    assert service.name == "爆款视频互动统计"
+    assert service.unit == "call"
+    assert service.provider == "tikhub"
+    assert service.module == "viral"
+    assert service.customer_charge_allowed is True
+    assert interface_for_service("viral_statistics") == "viral_extract"
+    assert SERVICE_INTERFACE["viral_statistics"] in INTERFACE_KEYS
+
+
 def _viral_seed(platform: str = "douyin", video_id: str = "v-1"):
     from app.viral_tikhub import ViralVideo
 
@@ -337,7 +356,7 @@ def test_archive_search_covers_threads_and_falls_back(monkeypatch) -> None:
 
 
 def test_reserve_search_operation_rounds_and_replays(client, route_state) -> None:
-    """计费轮次：PENDING/SUCCEEDED 幂等复用；FAILED 后重试才开新轮次重新预留."""
+    """计费轮次：仅 PENDING（在途重试）复用；已终态一律开新一轮，每次真实外呼都扣费."""
     from app.usage_billing import finish_operation
     from app.viral_search import reserve_search_operation
 
@@ -362,7 +381,7 @@ def test_reserve_search_operation_rounds_and_replays(client, route_state) -> Non
             "DO UPDATE SET enabled=true, unit_credits=3"
         )
     first = reserve()
-    assert reserve() == first  # PENDING 幂等：同轮次复用同一单，不重复扣费
+    assert reserve() == first  # PENDING 幂等：在途重试复用同一单，不重复扣费
     with psycopg.connect(route_state) as raw:
         finish_operation(
             BusinessConnection.postgres(raw), operation_id=first, units=0, succeeded=False
@@ -373,7 +392,8 @@ def test_reserve_search_operation_rounds_and_replays(client, route_state) -> Non
         finish_operation(
             BusinessConnection.postgres(raw), operation_id=second, units=1, succeeded=True
         )
-    assert reserve() == second  # SUCCEEDED 不重复扣费
+    third = reserve()  # SUCCEEDED 后再调用必须开新一轮：每次真实外呼都扣费
+    assert third != second
     with psycopg.connect(route_state) as raw:
         rounds = [
             row[0]
@@ -382,12 +402,14 @@ def test_reserve_search_operation_rounds_and_replays(client, route_state) -> Non
                 "WHERE source_id='viral-search:k1' ORDER BY billing_round"
             ).fetchall()
         ]
-        assert rounds == [1, 2]
+        assert rounds == [1, 2, 3]
+        # 50 −3（第 2 轮成功结算）−3（第 3 轮在途预留）= 44 可用、3 预留；
+        # 第 1 轮失败已释放，不扣费。
         assert tuple(
             raw.execute(
                 "SELECT available_credits, reserved_credits FROM wallets WHERE user_id=%s", (uid,)
             ).fetchone()
-        ) == (47, 0)
+        ) == (44, 3)
 
 
 def test_persist_viral_search_writes_pool_discoveries_and_billing(client, route_state) -> None:
@@ -628,6 +650,74 @@ def test_search_upstream_failure_refunds_and_fails_closed(
         ) == (50, 0)
 
 
+def test_run_viral_search_bounded_times_out() -> None:
+    """限时外呼：外呼挂起时按 deadline 抛 TimeoutError，不再无限等待."""
+    import time as time_module
+
+    from app.viral_search import run_viral_search_bounded
+
+    class _HangingStub:
+        def douyin_search_page(self, **_kwargs):
+            time_module.sleep(1.0)
+            raise AssertionError("超时后不再关心外呼结果")
+
+    started = time_module.monotonic()
+    try:
+        run_viral_search_bounded(
+            _HangingStub(), keyword="乡墅", platform="douyin", deadline_seconds=0.1
+        )
+    except TimeoutError:
+        elapsed = time_module.monotonic() - started
+        # 远小于挂起外呼的 1 秒，证明是有界返回而不是跟着外呼一起挂住。
+        assert elapsed < 0.9
+    else:
+        raise AssertionError("挂起的外呼必须以 TimeoutError 结束")
+
+
+def test_search_upstream_timeout_releases_and_fails_closed(
+    search_client, route_state, monkeypatch
+) -> None:
+    """服务端搜索总时限：外呼挂起时返回 503 有界错误并释放预留，客户端不再干等到自己的超时."""
+
+    def _hung_search(*_args, **_kwargs):
+        raise TimeoutError("search deadline exceeded")
+
+    monkeypatch.setattr("app.viral_search_routes.run_viral_search_bounded", _hung_search)
+    _patch_search_infra(monkeypatch)
+    _use_search_stub(search_client, _SearchStub())
+    headers, uid = account(search_client, "search_hang")
+    with psycopg.connect(route_state) as raw:
+        raw.execute(
+            "UPDATE wallets SET available_credits=50, reserved_credits=0 WHERE user_id=%s", (uid,)
+        )
+        raw.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_credits) "
+            "VALUES('viral_search',true,3) ON CONFLICT (service) "
+            "DO UPDATE SET enabled=true, unit_credits=3"
+        )
+    response = search_client.post(
+        "/api/viral/search",
+        headers={**headers, "Idempotency-Key": "search-hang-1"},
+        json={"keyword": "农村建房", "platform": "douyin"},
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "VIRAL_SEARCH_UPSTREAM_TIMEOUT"
+    assert "超时" in response.json()["detail"]["message"]
+    with psycopg.connect(route_state) as raw:
+        assert (
+            raw.execute(
+                "SELECT state FROM billing_operations WHERE source_id=%s",
+                (f"viral-search:{uid}:search-hang-1",),
+            ).fetchone()[0]
+            == "FAILED"
+        )
+        assert tuple(
+            raw.execute(
+                "SELECT available_credits, reserved_credits FROM wallets WHERE user_id=%s", (uid,)
+            ).fetchone()
+        ) == (50, 0)
+
+
 def test_search_insufficient_credits_fails_closed(search_client, route_state, monkeypatch) -> None:
     """额度不足：402 INSUFFICIENT_CREDITS，不扣预留、不落发现记录（设计 §5.2）."""
     _patch_search_infra(monkeypatch)
@@ -712,8 +802,12 @@ def test_search_empty_result_charges_once(search_client, route_state, monkeypatc
         )
 
 
-def test_search_replay_reuses_billing_round(search_client, route_state, monkeypatch) -> None:
-    """同幂等键重放：同一计费单同一轮次，不重复扣费."""
+def test_search_replay_after_success_charges_again(search_client, route_state, monkeypatch) -> None:
+    """同幂等键在成功交付后重放：开新一轮计费并再次扣费（每次真实外呼都扣费）.
+
+    旧行为复用 SUCCEEDED 轮次（重放免计费），同一幂等键可以被无限免费重刷
+    上游（同关键词每次结果都会更新），违反「使用必须扣费」。
+    """
     _patch_search_infra(monkeypatch)
     _use_search_stub(search_client, _SearchStub())
     headers, uid = account(search_client, "search_replay")
@@ -738,20 +832,21 @@ def test_search_replay_reuses_billing_round(search_client, route_state, monkeypa
     )
     assert first.status_code == 200, first.text
     assert second.status_code == 200, second.text
-    assert second.json()["billing"] == first.json()["billing"]
+    # 两次调用各自扣 3 积分。
+    assert first.json()["billing"] == {"charged": 3, "unit": "call"}
+    assert second.json()["billing"] == {"charged": 3, "unit": "call"}
     with psycopg.connect(route_state) as raw:
-        assert (
-            raw.execute(
-                "SELECT count(*) FROM billing_operations WHERE source_id=%s",
-                (f"viral-search:{uid}:search-replay-1",),
-            ).fetchone()[0]
-            == 1
-        )
+        rows = raw.execute(
+            "SELECT billing_round, state, charged_credits FROM billing_operations "
+            "WHERE source_id=%s ORDER BY billing_round",
+            (f"viral-search:{uid}:search-replay-1",),
+        ).fetchall()
+        assert [tuple(row) for row in rows] == [(1, "SUCCEEDED", 3), (2, "SUCCEEDED", 3)]
         assert tuple(
             raw.execute(
                 "SELECT available_credits, reserved_credits FROM wallets WHERE user_id=%s", (uid,)
             ).fetchone()
-        ) == (47, 0)
+        ) == (44, 0)
 
 
 class _RefreshStub:
@@ -1018,6 +1113,55 @@ def test_reconcile_releases_stale_refresh_reservations(client, route_state) -> N
         assert (
             raw.execute(
                 "SELECT state FROM billing_operations WHERE service='viral_search_refresh' "
+                "AND source_id=%s AND user_id=%s",
+                (source_id, uid),
+            ).fetchone()[0]
+            == "FAILED"
+        )
+
+
+def test_reconcile_releases_stale_statistics_reservations(client, route_state) -> None:
+    """崩溃残留的 viral_statistics PENDING 预留必须被 30 分钟窗口释放."""
+    from app.db_portable import BusinessConnection
+    from app.usage_billing import accept_operation, reconcile_operations
+
+    headers, uid = account(client, "stat_rec")
+    del headers
+    source_id = f"viral-statistics:{uid}:crash-1"
+    with psycopg.connect(route_state) as raw:
+        raw.execute(
+            "UPDATE wallets SET available_credits=50, reserved_credits=0 WHERE user_id=%s", (uid,)
+        )
+        raw.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_credits) "
+            "VALUES('viral_statistics',true,2) ON CONFLICT (service) "
+            "DO UPDATE SET enabled=true, unit_credits=2"
+        )
+        conn = BusinessConnection.postgres(raw)
+        accept_operation(
+            conn,
+            user_id=uid,
+            service="viral_statistics",
+            source_id=source_id,
+            units=3,
+        )
+        raw.execute("SET session_replication_role = replica")
+        raw.execute(
+            "UPDATE billing_operations SET created_at = now() - interval '31 minutes' "
+            "WHERE service='viral_statistics' AND source_id=%s AND user_id=%s",
+            (source_id, uid),
+        )
+        raw.execute("SET session_replication_role = DEFAULT")
+        assert reconcile_operations(conn) >= 1
+    with psycopg.connect(route_state) as raw:
+        assert tuple(
+            raw.execute(
+                "SELECT available_credits, reserved_credits FROM wallets WHERE user_id=%s", (uid,)
+            ).fetchone()
+        ) == (50, 0)
+        assert (
+            raw.execute(
+                "SELECT state FROM billing_operations WHERE service='viral_statistics' "
                 "AND source_id=%s AND user_id=%s",
                 (source_id, uid),
             ).fetchone()[0]
@@ -1390,6 +1534,40 @@ def test_source_douyin_returns_play_url_without_decode_key(source_client, route_
     assert response.status_code == 200, response.text
     assert response.json()["fullUrl"] == "https://cdn.example/douyin.mp4"
     assert response.json()["decodeKey"] is None
+
+
+def test_source_replay_after_success_charges_again(source_client, route_state) -> None:
+    """直链下发：同幂等键在成功后重放同样计费（每次真实外呼都扣费）.
+
+    直链是时效性的，免费重放等于无限刷直链；只有 PENDING 在途重试才复用轮次。
+    """
+    _use_source_stub(source_client, _SourceStub())
+    headers, uid = account(source_client, "source_replay")
+    with psycopg.connect(route_state) as raw:
+        _seed_source_video(raw, uid, platform="douyin", video_id="v-source-rp")
+    for call_key in ("source-replay-1", "source-replay-1"):
+        response = source_client.post(
+            "/api/viral/videos/source",
+            headers={**headers, "Idempotency-Key": call_key},
+            json={"platform": "douyin", "videoId": "v-source-rp"},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["billing"] == {"charged": 2, "unit": "call"}
+    with psycopg.connect(route_state) as raw:
+        rounds = [
+            tuple(row)
+            for row in raw.execute(
+                "SELECT billing_round, state, charged_credits FROM billing_operations "
+                "WHERE user_id=%s AND service=%s AND source_id=%s ORDER BY billing_round",
+                (uid, _SOURCE_SERVICE, f"viral-source:{uid}:source-replay-1"),
+            ).fetchall()
+        ]
+        assert rounds == [(1, "SUCCEEDED", 2), (2, "SUCCEEDED", 2)]
+        assert tuple(
+            raw.execute(
+                "SELECT available_credits, reserved_credits FROM wallets WHERE user_id=%s", (uid,)
+            ).fetchone()
+        ) == (46, 0)
 
 
 def test_source_releases_reservation_when_upstream_omits_decode_key(

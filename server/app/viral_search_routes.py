@@ -1,8 +1,9 @@
 """客户搜索接口（P1）：一次翻页 = 一次外呼 + 一次计费 + 一次落库.
 
 - ``POST /api/viral/search``：关键词 + 平台 + 时间范围（+ 游标）→ 命中视频 + 计费回执。
-- 幂等键由 ``Idempotency-Key`` 承载，派生出 ``source_id``；同值重复请求复用
-  同一计费轮次（不重复扣费），但会重新外呼（P1 不做服务端响应重放）。
+- 幂等键由 ``Idempotency-Key`` 承载，派生出 ``source_id``；只有 PENDING（在途
+  重试）复用同一计费轮次，已终态的轮次一律开新一轮——**每一次真实外呼都
+  对应一次扣费**（SUCCEEDED 后同键重放不再是免费重刷）。
 - 供应商成本：``billing_context(source_id)`` 让 ``viral_tikhub._request`` 内的
   meter_call 自动落客户单的 source attempt；客户侧预留由
   ``reserve_search_operation`` 完成，落库成功后 ``persist_viral_search`` 结算。
@@ -29,13 +30,18 @@ from app.usage_billing import finish_source
 from app.viral_routes import ViralVideoItem
 from app.viral_search import (
     SEARCH_SERVICE,
-    archive_search_covers,
+    archive_search_covers_bounded,
     persist_viral_search,
     reserve_search_operation,
-    run_viral_search,
+    run_viral_search_bounded,
     search_date_shanghai,
 )
-from app.viral_store import list_viral_discoveries
+from app.viral_store import (
+    ViralAvailability,
+    favorite_viral_video_ids,
+    list_viral_discoveries,
+    viral_video_availabilities,
+)
 from app.viral_tikhub import (
     ViralSourceClient,
     ViralSourceError,
@@ -114,8 +120,19 @@ ViralSearchSourceClientDep = Annotated[
 ]
 
 
-def _search_item(video: ViralVideo, *, has_copy: bool) -> ViralVideoItem:
-    item = ViralVideoItem(**video.to_client_dict(), hasCopy=has_copy)
+def _search_item(
+    video: ViralVideo,
+    *,
+    has_copy: bool,
+    is_favorite: bool = False,
+    availability: ViralAvailability = "available",
+) -> ViralVideoItem:
+    item = ViralVideoItem(
+        **video.to_client_dict(),
+        hasCopy=has_copy,
+        isFavorite=is_favorite,
+        availability=availability,
+    )
     if not video.cover_key:
         item.coverUrl = None
     if item.coverUrl and item.coverUrl.startswith("/"):
@@ -163,6 +180,22 @@ def search_viral_videos(
             },
         )
     fingerprint = f"{payload.platform}:{keyword}:{payload.time_range}:{cursor or ''}"
+
+    def _release_pending() -> None:
+        """外呼失败/超时后释放预留（0 单位、未成功），避免凭空扣费."""
+        with db.write() as (fail_conn, _fail_actor):
+            with fail_conn:
+                latest = fail_conn.execute(
+                    "SELECT state FROM billing_operations WHERE service=%s "
+                    "AND source_id=%s AND user_id=%s "
+                    "ORDER BY billing_round DESC LIMIT 1 FOR UPDATE",
+                    (SEARCH_SERVICE, source_id, actor.id),
+                ).fetchone()
+                if latest is not None and str(latest["state"]) == "PENDING":
+                    finish_source(
+                        fail_conn, source_id, units=0, succeeded=False, service=SEARCH_SERVICE
+                    )
+
     with db.write() as (conn, actor):
         with conn:
             # 带 user_id 的 source_id 防跨用户计费串号。必须在栅栏内取 actor：
@@ -183,7 +216,10 @@ def search_viral_videos(
             storage = get_media_storage(conn)
     try:
         with billing_context(source_id):
-            page = run_viral_search(
+            # 限时外呼：DNS/出网挂起是 urllib 超时盖不住的盲区，必须在
+            # 服务端有界失败，否则客户端只能等到自己的 240s 并把请求
+            # 报成 "Failed to fetch"。
+            page = run_viral_search_bounded(
                 client,
                 keyword=keyword,
                 platform=payload.platform,
@@ -192,38 +228,30 @@ def search_viral_videos(
             )
     except ViralSourceError as exc:
         # Release reserved credits for upstream search failure
-        with db.write() as (fail_conn, _fail_actor):
-            with fail_conn:
-                latest = fail_conn.execute(
-                    "SELECT state FROM billing_operations WHERE service=%s "
-                    "AND source_id=%s AND user_id=%s "
-                    "ORDER BY billing_round DESC LIMIT 1 FOR UPDATE",
-                    (SEARCH_SERVICE, source_id, actor.id),
-                ).fetchone()
-                if latest is not None and str(latest["state"]) == "PENDING":
-                    finish_source(
-                        fail_conn, source_id, units=0, succeeded=False, service=SEARCH_SERVICE
-                    )
+        _release_pending()
         raise HTTPException(
             status_code=503,
             detail={"code": "VIRAL_SEARCH_UPSTREAM_FAILED", "message": str(exc)},
         ) from exc
+    except TimeoutError as exc:
+        _release_pending()
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "VIRAL_SEARCH_UPSTREAM_TIMEOUT",
+                "message": "搜索服务响应超时，请稍后重试。",
+            },
+        ) from exc
     except Exception:
         # Fallback: release reserved credits for all unexpected exceptions
-        with db.write() as (fail_conn, _fail_actor):
-            with fail_conn:
-                latest = fail_conn.execute(
-                    "SELECT state FROM billing_operations WHERE service=%s "
-                    "AND source_id=%s AND user_id=%s "
-                    "ORDER BY billing_round DESC LIMIT 1 FOR UPDATE",
-                    (SEARCH_SERVICE, source_id, actor.id),
-                ).fetchone()
-                if latest is not None and str(latest["state"]) == "PENDING":
-                    finish_source(
-                        fail_conn, source_id, units=0, succeeded=False, service=SEARCH_SERVICE
-                    )
+        _release_pending()
         raise
-    enriched = archive_search_covers(storage, page.items)
+    try:
+        # 封面归档同样限时；超时不放弃整页结果——未归档条目保留源站
+        # 链接兜底（archive_search_covers 的既有语义）。
+        enriched = archive_search_covers_bounded(storage, page.items)
+    except TimeoutError:
+        enriched = page.items
     searched_at = datetime.now(UTC).isoformat()
     with db.write() as (conn, completed_actor):
         with conn:
@@ -250,9 +278,21 @@ def search_viral_videos(
             hits = cached_transcripts(
                 conn, [(video.platform, video.video_id) for video in enriched]
             )
+            video_ids = [video.video_id for video in enriched]
+            favorite_ids = favorite_viral_video_ids(
+                conn, user_id=actor.id, platform=payload.platform, video_ids=video_ids
+            )
+            availability_by_id = viral_video_availabilities(
+                conn, platform=payload.platform, video_ids=video_ids
+            )
     return ViralSearchResponse(
         items=[
-            _search_item(video, has_copy=(video.platform, video.video_id) in hits)
+            _search_item(
+                video,
+                has_copy=(video.platform, video.video_id) in hits,
+                is_favorite=video.video_id in favorite_ids,
+                availability=availability_by_id.get(video.video_id, "available"),
+            )
             for video in enriched
         ],
         cursor=page.cursor,
