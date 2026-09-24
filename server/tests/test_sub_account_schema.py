@@ -33,8 +33,9 @@ WALLET_TX_TABLE = "wallet_transactions"
 
 # 重挂后链尾：#188 recharge_packages 之后是 Phase 3a sub_account_quotas、
 # Phase 3b sub_account_permissions，再叠加 BILLING-OBS-20260922 三个 analysis 迁移
-# 及其后的 REFUND 调账、1800 部署垫片、20260924T0000 交易号唯一索引与 20260924T0100 口播提交时刻列。
-_HEAD_REVISION = "20260924T0100_oral_task_submitted_at"
+# 及其后的 REFUND 调账、1800 部署垫片、20260924T0000 交易号唯一索引、
+# 20260924T0100 口播提交时刻列与 20260924T0200 口播隐藏偏好表。
+_HEAD_REVISION = "20260924T0200_customer_oral_task_visibility"
 # 1200 adds the sub-account columns; 1300 adds the wallet actor column;
 # 1500 + the 20260921T0000 merge revision sit on top of 1300, with the
 # BILLING-OBS revisions (failure diagnostic, request id, attempt history)

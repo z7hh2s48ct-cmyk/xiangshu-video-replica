@@ -81,9 +81,9 @@ REPO_ROOT = SERVER_DIR.parent
 # （五列身份约束）、两个非 partial 查询索引；全 Text 列，无 FK/CHECK/jsonb/timestamptz 增量。
 # 合并 main 后：本分支的 20260923T1800_re_add_h3_extended_modes_rollout_compat 追加于
 # main 链尾（20260923T1200_admin_refund_adjustment）之上；上线评审 P1-1 的
-# 20260924T0000_wechat_transaction_unique 与 P1-2 的 20260924T0100_oral_task_submitted_at
-# 再依次叠加其上，故链尾为该值。
-HEAD_REVISION = "20260924T0100_oral_task_submitted_at"
+# 20260924T0000_wechat_transaction_unique、P1-2 的 20260924T0100_oral_task_submitted_at
+# 与 20260924T0200_customer_oral_task_visibility 再依次叠加其上，故链尾为该值。
+HEAD_REVISION = "20260924T0200_customer_oral_task_visibility"
 
 # 最后一个已发布（受支持）起点。其后的 056…090 与本迁移尚未随任何受支持版本发布，
 # 故冻结范围止于此——把未发布 revision 也纳入哈希会让每次新增迁移都必须改常量，
@@ -142,15 +142,19 @@ HEAD_SCHEMA_COUNTS = {
     # 部分唯一索引兜底：partial_indexes 37 → 38；digest 重算（见下）。
     # 20260924T0100 给 oral_tasks 增加 submitted_at（口播轮询看播计时锚点，
     # 可空 Text 无默认）：columns 1221 → 1222；digest 重算（见下）。
+    # 20260924T0200 新增 customer_oral_task_visibility（账号级隐藏口播任务，
+    # 两列复合主键 + 两条 CASCADE 外键，hidden_at 走 Text）：tables 103 → 104、
+    # columns 1222 → 1225、primary_keys 103 → 104、foreign_keys 193 → 195；
+    # digest 重算（见下）。
     "check_constraints": 323,
-    "columns": 1222,
-    "foreign_keys": 193,
+    "columns": 1225,
+    "foreign_keys": 195,
     "identity_columns": 0,
     "jsonb_columns": 6,
     "partial_indexes": 38,
-    "primary_keys": 103,
+    "primary_keys": 104,
     "sequences": 4,
-    "tables": 103,
+    "tables": 104,
     "timestamptz_columns": 56,
     "triggers": 27,
     "unique_constraints": 39,
@@ -212,6 +216,7 @@ HEAD_TABLE_NAMES = (
     "customer_discounts",
     "customer_fencing_write_evidence",
     "customer_idempotency_envelopes",
+    "customer_oral_task_visibility",
     "customer_session_events",
     "customer_session_state",
     "customer_unit_prices",
@@ -350,7 +355,7 @@ HEAD_TABLE_NAMES = (
 #  两侧原来的 digest 都不能用——本分支那条是接在 viral 之后的旧链、main 那条只到
 #  MATERIAL-UX，合并后 head 变成接在 MATERIAL-UX 之后的本分支迁移，约束文本随之变化，
 #  digest 必然要重算。由 scripts/ci/migration_manifest.py --print-schema 在 PG 上重算后粘贴。
-HEAD_SCHEMA_DIGEST = "cc7118a596a977db69f412c5e21dc1075ee888df5c399aab11910114217847ef"
+HEAD_SCHEMA_DIGEST = "11c132eaf1b496d42cf4495be265335f19649f86644165a6c17b9c2c5c9bd470"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (
