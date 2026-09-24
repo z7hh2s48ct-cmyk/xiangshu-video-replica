@@ -192,7 +192,6 @@ describe("CharacterLibrary", () => {
         return { items, next_cursor: null, total: items.length };
       },
     );
-    vi.spyOn(window, "confirm").mockReturnValue(true);
   });
 
   it("从 Studio 指定人物进入时直接打开该人物的场景造型", async () => {
@@ -844,7 +843,7 @@ describe("CharacterLibrary", () => {
     expect(screen.queryByRole("button", { name: "改名" })).toBeNull();
   });
 
-  it("deletes a character after confirmation", async () => {
+  it("deletes a character after confirming in the delete dialog", async () => {
     vi.mocked(api.listSimpleCharacterLibrary).mockResolvedValue([entry]);
 
     render(<CharacterLibrary userRole="employee" userId="employee_1" />);
@@ -853,27 +852,69 @@ describe("CharacterLibrary", () => {
       await screen.findByRole("button", { name: "删除人物 林夏" }),
     );
 
-    expect(window.confirm).toHaveBeenCalledWith(
-      expect.stringContaining("删除“林夏”？"),
-    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "删除人物 林夏",
+    });
+    expect(
+      within(dialog).getByRole("radio", { name: /连同资产一起删除/ }),
+    ).toBeChecked();
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认删除" }));
+
     await waitFor(() =>
       expect(api.deleteSimpleCharacterIdentity).toHaveBeenCalledWith(
         "identity-1",
+        { keepAssets: false, removeProjectRefs: false },
       ),
     );
     expect(await screen.findByText(/人物“林夏”已删除。/)).toBeInTheDocument();
     expect(screen.queryByText("林夏")).toBeNull();
   });
 
-  it("keeps the character when the delete confirmation is dismissed", async () => {
+  it("keeps assets and releases project refs when those options are chosen", async () => {
     vi.mocked(api.listSimpleCharacterLibrary).mockResolvedValue([entry]);
-    vi.spyOn(window, "confirm").mockReturnValue(false);
 
     render(<CharacterLibrary userRole="employee" userId="employee_1" />);
 
     fireEvent.click(
       await screen.findByRole("button", { name: "删除人物 林夏" }),
     );
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "删除人物 林夏",
+    });
+    fireEvent.click(
+      within(dialog).getByRole("radio", { name: /只删除人物，保留素材/ }),
+    );
+    fireEvent.click(
+      within(dialog).getByRole("checkbox", {
+        name: "同时移除项目选用记录",
+      }),
+    );
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认删除" }));
+
+    await waitFor(() =>
+      expect(api.deleteSimpleCharacterIdentity).toHaveBeenCalledWith(
+        "identity-1",
+        { keepAssets: true, removeProjectRefs: true },
+      ),
+    );
+    expect(await screen.findByText(/素材已保留在素材库/)).toBeInTheDocument();
+    expect(screen.queryByText("林夏")).toBeNull();
+  });
+
+  it("keeps the character when the delete dialog is dismissed", async () => {
+    vi.mocked(api.listSimpleCharacterLibrary).mockResolvedValue([entry]);
+
+    render(<CharacterLibrary userRole="employee" userId="employee_1" />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "删除人物 林夏" }),
+    );
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "删除人物 林夏",
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
 
     expect(api.deleteSimpleCharacterIdentity).not.toHaveBeenCalled();
     expect(screen.getByText("林夏")).toBeInTheDocument();

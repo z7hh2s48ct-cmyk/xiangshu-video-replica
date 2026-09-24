@@ -272,6 +272,8 @@ function PersonCard({
     person.photoCount ?? (review ? person.photoIds.length : undefined);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [deleteMode, setDeleteMode] = useState<"purge" | "keep">("purge");
+  const [removeProjectRefs, setRemoveProjectRefs] = useState(false);
   // 删除是级联硬删：oral_avatars / oral_voices 对 person_identities 的外键是
   // ON DELETE CASCADE，口播成片与声音试听样例的 asset 行也在删除清单内，最后
   // 还会清理对象存储。逐条列出，别让用户以为只是「从列表移除」。
@@ -287,7 +289,10 @@ function PersonCard({
     try {
       // 审核示例没有真实身份可删，只做本地移除。
       if (!review) {
-        await deleteSimpleCharacterIdentity(person.id);
+        await deleteSimpleCharacterIdentity(person.id, {
+          keepAssets: deleteMode === "keep",
+          removeProjectRefs,
+        });
         refresh();
       } else {
         updateData((current) => ({
@@ -296,7 +301,11 @@ function PersonCard({
         }));
       }
       setConfirmingDelete(false);
-      notify(`人物「${person.name}」已删除。`);
+      notify(
+        deleteMode === "keep"
+          ? `人物「${person.name}」已删除，素材已保留在素材库。`
+          : `人物「${person.name}」已删除。`,
+      );
     } catch (cause) {
       // 三种 409（账务历史 / 进行中任务 / 已被项目选用）后端返回的 message
       // 本身就是可直接展示的中文原因，原样透出比再包一层兜底更有用。
@@ -358,7 +367,11 @@ function PersonCard({
           <Button
             variant="quiet"
             disabled={deleting}
-            onClick={() => setConfirmingDelete(true)}
+            onClick={() => {
+              setDeleteMode("purge");
+              setRemoveProjectRefs(false);
+              setConfirmingDelete(true);
+            }}
           >
             <Icon name="close" size={16} />
             删除
@@ -372,17 +385,57 @@ function PersonCard({
         >
           <div className="oral-upload-panel">
             <p className="oral-dialog-intro">
-              确定删除人物「{person.name}」吗？以下内容会被一并删除，
-              <strong>不可撤销</strong>：
+              确定删除人物「{person.name}」吗？此操作<strong>不可撤销</strong>
+              ，请选择关联素材的处理方式：
             </p>
-            <ul className="person-delete-casualties">
-              {casualties.map((item) => (
-                <li key={item}>{item}</li>
-              ))}
-            </ul>
+            <fieldset className="copy-methods" disabled={deleting}>
+              <legend>素材处理</legend>
+              <label>
+                <input
+                  type="radio"
+                  name="person-delete-mode"
+                  checked={deleteMode === "purge"}
+                  onChange={() => setDeleteMode("purge")}
+                />
+                <strong>连同资产一起删除</strong>
+                <small>该人物的全部图片、成片与样本一并删除</small>
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name="person-delete-mode"
+                  checked={deleteMode === "keep"}
+                  onChange={() => setDeleteMode("keep")}
+                />
+                <strong>只删除人物，保留素材</strong>
+                <small>
+                  形象照片、场景照、口播成片与声音样本转存素材库「我的上传」；
+                  口播分身与声音档案配置会一并删除
+                </small>
+              </label>
+            </fieldset>
+            {deleteMode === "purge" ? (
+              <ul className="person-delete-casualties">
+                {casualties.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            ) : null}
+            <label className="oral-consent">
+              <input
+                aria-label="同时移除项目选用记录"
+                checked={removeProjectRefs}
+                disabled={deleting}
+                type="checkbox"
+                onChange={(event) => setRemoveProjectRefs(event.target.checked)}
+              />
+              <span>
+                若该人物已被项目选用，同时移除项目选用记录
+                （项目会回到「未选择人物」状态，可重新选择）
+              </span>
+            </label>
             <p className="oral-dialog-intro">
-              若该人物已产生口播账务、存在进行中的任务或已被项目选用，
-              后端会拒绝删除并说明原因。
+              若该人物已产生口播账务或存在进行中的任务，后端会拒绝删除并说明原因。
             </p>
             <div className="oral-dialog-actions">
               <Button
