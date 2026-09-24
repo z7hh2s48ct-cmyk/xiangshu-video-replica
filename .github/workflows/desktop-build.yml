@@ -11,6 +11,9 @@ on:
   push:
     # The task branch makes the first build reviewable before merging to main.
     branches: [main, feat/desktop-actions-20260917]
+    # v* 标签是正式发布入口：打 tag 必发三平台包并挂到 GitHub Releases
+    # （标签推送不适用 paths 过滤，保证发版不受改动路径影响）。
+    tags: ['v*']
     paths:
       - 'client/**'
       - 'package.json'
@@ -145,3 +148,77 @@ jobs:
         run: |
           printf '### %s\n\n[下载安装包](%s)\n\nAPI: `%s`\n\n内测构建：Windows 未签名，macOS ad-hoc 签名、未公证。产物保留 7 天。\n' \
             "$PLATFORM" "$ARTIFACT_URL" "$VITE_API_BASE_URL" >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    # 正式发布：只有 v* 标签触发。三个平台全部构建成功才发布，
+    # 任何一个平台失败都不能挂出残缺的 Release。
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      VITE_API_BASE_URL: ${{ inputs.api_base_url || 'https://video.zszhj.cn' }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify tag matches package version
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+            printf '标签 %s 与 package.json 版本 v%s 不一致，拒绝发布。\n' \
+              "$GITHUB_REF_NAME" "$version" >&2
+            exit 1
+          fi
+      - name: Download all installer artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: desktop-*
+          path: artifacts
+      - name: Collect release files
+        run: |
+          mkdir -p release
+          # 产物目录名带 run_number/run_attempt 后缀，还原出平台名；
+          # Release 资产必须全局唯一，校验和与清单按平台改名后随包上传。
+          for dir in artifacts/desktop-*/; do
+            name=$(basename "$dir")
+            platform=${name#desktop-}
+            platform=${platform%-[0-9]*-[0-9]*}
+            mkdir -p "release/$platform"
+            find "$dir" -maxdepth 1 -type f \( -name '*.exe' -o -name '*.dmg' \) \
+              -exec cp {} "release/$platform/" \;
+            [[ -n $(find "release/$platform" -maxdepth 1 -type f \( -name '*.exe' -o -name '*.dmg' \) -print -quit) ]]
+            cp "$dir/SHA256SUMS.txt" "release/$platform/SHA256SUMS-$platform.txt"
+            cp "$dir/manifest.json" "release/$platform/manifest-$platform.json"
+          done
+          installers=$(find release -type f \( -name '*.exe' -o -name '*.dmg' \) | wc -l)
+          [[ "$installers" -eq 3 ]] || {
+            printf '期望 3 个安装包（Win + mac 双架构），实际 %d 个。\n' "$installers" >&2
+            exit 1
+          }
+          ls -lR release
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > release-notes.md <<EOF
+          ## 安装包（${GITHUB_REF_NAME}）
+
+          - Windows x86_64：NSIS 安装器（未签名，SmartScreen 首次运行需「仍要运行」）
+          - macOS Apple Silicon / Intel：DMG（ad-hoc 签名、未公证，首次打开需右键 → 打开）
+
+          每个平台目录内含 \`SHA256SUMS-<platform>.txt\` 可校验完整性；
+          \`manifest-<platform>.json\` 记录版本、源码 SHA 与 API 源。
+
+          API 源：\`${VITE_API_BASE_URL}\`
+          EOF
+          gh release create "$GITHUB_REF_NAME" release/*/* \
+            --title "短视频复刻工作台 ${GITHUB_REF_NAME}" \
+            --notes-file release-notes.md
