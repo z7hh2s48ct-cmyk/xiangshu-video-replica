@@ -478,9 +478,14 @@ def test_desktop_installer_workflow_builds_three_internal_test_targets() -> None
     assert "output/desktop/${{ matrix.platform }}" in workflow
     for filename in ("manifest.json", "SHA256SUMS.txt", "RELEASE-CHANNEL.txt"):
         assert filename in workflow
-    assert "contents: write" not in workflow
+    # 发布通道按 ref 收敛：v* 标签触发的 release 任务要创建 GitHub Release，
+    # 是整个工作流唯一允许 contents: write 的位置；三个构建 job 本体保持只读。
+    # 发布实现固定为 gh CLI，第三方发布动作仍然被禁。
+    build_half, release_half = workflow.split("  release:", 1)
+    assert "contents: write" not in build_half
+    assert "contents: write" in release_half
     assert "softprops/action-gh-release" not in workflow
-    assert "gh release" not in workflow
+    assert "gh release create" in workflow
 
 
 def test_macos_tauri_overlay_builds_dmg_without_distribution_signing() -> None:
