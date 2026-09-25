@@ -150,6 +150,8 @@ export type StudioVideo = {
   hasPlayableAudio?: boolean;
   /** 共享文案缓存命中：卡片可展示「已有文案」角标。 */
   hasCopy?: boolean;
+  /** 爆款源视频时长（毫秒）：详情页按时长分流复刻入口（≤15s 才可复刻）。 */
+  durationMs?: number;
   playUrl?: string | null;
 };
 export type StudioTask = {
