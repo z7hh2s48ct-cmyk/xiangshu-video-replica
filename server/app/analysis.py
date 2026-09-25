@@ -30,10 +30,11 @@ ANALYSIS_KIND = "analysis"
 SHOT_CARD_KIND = "shot_card"
 SCHEMA_VERSION = "b3.analysis.v1"
 APILIO_DEFAULT_BASE_URL = "https://api.apilio.ai"
-# 图像语义检查（人物识别源图、首帧复核）仍用这个模型：它们在 2026-09-20 的
-# 故障里表现为 URLError/TimeoutError（网络层），没有证据说明模型名有问题，
-# 所以不跟着视频拆解一起换。
-APILIO_GEMINI_MODEL = "gemini-3.1-pro-preview"
+# 图像语义检查（人物识别源图、首帧复核）2026-09-26 起与视频拆解统一用
+# gemini-3.8-flash：业务确认两链路同用正式版 flash。此前单独留在 preview 名
+# 上是因为 2026-09-20 故障无证据指向模型名；现在任何默认槽位都不再使用
+# preview 名（曾发生过无预警下线）。
+APILIO_GEMINI_MODEL = "gemini-3.8-flash"
 # 视频拆解单独一个默认值：2026-09-20 线上拆解 100% 失败在上游 HTTP 400，
 # preview 模型疑似已下线，改用正式版。上游再次调整时，设置页的「视频分析
 # 模型」可直接覆盖这里，不必等下一次发版。
