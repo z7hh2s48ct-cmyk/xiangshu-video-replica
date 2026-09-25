@@ -1083,6 +1083,27 @@ describe("V1.4 内容与运营页面", () => {
     expect(value.navigate).not.toHaveBeenCalled();
   });
 
+  it("下载遇余额不足时打开钱包侧栏并透传服务端文案", async () => {
+    viralCacheBridge.cacheAvailable.mockReturnValue(true);
+    viralCacheBridge.ensureViralCacheForVideo.mockRejectedValueOnce(
+      Object.assign(new Error("积分不足，本次需要 6 积分。"), {
+        code: "INSUFFICIENT_CREDITS",
+      }),
+    );
+    const value = studio({ review: false });
+    useStudio.mockReturnValue(value);
+    render(<ViralPage />);
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "下载视频 农村建房预算，别只盯着主体",
+      }),
+    );
+
+    await waitFor(() => expect(value.openLive).toHaveBeenCalledWith("wallet"));
+    expect(value.notify).toHaveBeenCalledWith("积分不足，本次需要 6 积分。");
+  });
+
   it("桌面端爆款详情提取文案改走本地抽音轨上传，不再导入参考素材", () => {
     viralCacheBridge.cacheAvailable.mockReturnValue(true);
     const value = studio({
