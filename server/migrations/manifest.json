@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20260924T0200_customer_oral_task_visibility"
+      "20260926T0000_viral_homepage_rank"
     ],
     "parents": {
       "001_core": null,
@@ -139,9 +139,10 @@
       "20260923T1800_re_add_h3_extended_modes_rollout_compat": "20260923T1200_admin_refund_adjustment",
       "20260924T0000_wechat_transaction_unique": "20260923T1800_re_add_h3_extended_modes_rollout_compat",
       "20260924T0100_oral_task_submitted_at": "20260924T0000_wechat_transaction_unique",
-      "20260924T0200_customer_oral_task_visibility": "20260924T0100_oral_task_submitted_at"
+      "20260924T0200_customer_oral_task_visibility": "20260924T0100_oral_task_submitted_at",
+      "20260926T0000_viral_homepage_rank": "20260924T0200_customer_oral_task_visibility"
     },
-    "revision_count": 123
+    "revision_count": 124
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -647,6 +648,10 @@
     "20260924T0200_customer_oral_task_visibility": {
       "file": "versions/20260924T0200_customer_oral_task_visibility.py",
       "sha256": "fc84caaebc8c7967b06e057a7f49d0020891cf5eee6cca52a54cdd8aa6baac67"
+    },
+    "20260926T0000_viral_homepage_rank": {
+      "file": "versions/20260926T0000_viral_homepage_rank.py",
+      "sha256": "ec9afc00c3fde86783dcbdd9d23c7b915df0834a3cf52bde07e2f335d9445ada"
     }
   },
   "task": "MIGRATION-GUARD-20260912"

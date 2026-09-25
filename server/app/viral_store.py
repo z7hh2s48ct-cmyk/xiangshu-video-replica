@@ -81,6 +81,9 @@ _ORDER_BY = {
 
 _AVAILABILITY_VALUES = {"available", "hidden", "unavailable"}
 
+# featured 排序中「未置顶」的哨兵：int4 上限，等价于 NULLS LAST。
+_VIRAL_RANK_SENTINEL = 2147483647
+
 # Metadata is staged by the collector; only a completed batch is published.
 # Keep this predicate common to page rows and totals.
 _PUBLISHED_SQL = """
@@ -122,6 +125,7 @@ def _row_to_video(row: Any) -> ViralVideo:
         cover_url=mapping.get("cover_url"),
         cover_key=mapping.get("cover_key"),
         homepage_featured=bool(mapping.get("homepage_featured")),
+        homepage_rank=mapping.get("homepage_rank"),
         duration_ms=int(mapping.get("duration_ms") or 0),
         likes=int(mapping.get("likes") or 0),
         comments=mapping.get("comments"),
@@ -255,20 +259,36 @@ def list_viral_videos(conn: BusinessConnection, *, platform: str, sort: str) -> 
     return [_row_to_video(row) for row in rows if not is_irrelevant_viral_video(str(row["title"]))]
 
 
-def _cursor_values(video: ViralVideo, sort: str) -> tuple[int, int, str]:
+def _cursor_values(video: ViralVideo, sort: str, *, featured: bool = False) -> tuple[object, ...]:
+    """游标键：非 featured 为 3 元键；featured 前置置顶序（哨兵=未置顶）."""
     published_at = video.published_at if video.published_at is not None else -1
+    if featured:
+        # featured 排序以置顶序为先：NULLS LAST 用 int4 上限哨兵编码进游标。
+        rank = video.homepage_rank if video.homepage_rank is not None else _VIRAL_RANK_SENTINEL
+        if sort == "latest":
+            return (rank, published_at, video.likes, video.video_id)
+        return (rank, video.likes, published_at, video.video_id)
     if sort == "latest":
-        return published_at, video.likes, video.video_id
-    return video.likes, published_at, video.video_id
+        return (published_at, video.likes, video.video_id)
+    return (video.likes, published_at, video.video_id)
 
 
-def _encode_cursor(video: ViralVideo, *, platform: str, sort: str, data_version: str | None) -> str:
+def _encode_cursor(
+    video: ViralVideo,
+    *,
+    platform: str,
+    sort: str,
+    data_version: str | None,
+    featured: bool = False,
+) -> str:
     payload = {
-        "v": 2,
+        # v3：featured 游标的 k 首位携带置顶序（哨兵=未置顶）；v2 为无置顶序
+        # 的旧格式，仅非 featured 查询可继续消费。
+        "v": 3 if featured else 2,
         "p": platform,
         "s": sort,
         "d": data_version,
-        "k": list(_cursor_values(video, sort)),
+        "k": list(_cursor_values(video, sort, featured=featured)),
     }
     encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
     return urlsafe_b64encode(encoded).decode("ascii").rstrip("=")
@@ -276,26 +296,27 @@ def _encode_cursor(video: ViralVideo, *, platform: str, sort: str, data_version:
 
 def _decode_cursor(
     cursor: str, *, platform: str, sort: str
-) -> tuple[tuple[int, int, str], str | None]:
+) -> tuple[tuple[object, ...], str | None]:
     try:
         padded = cursor + "=" * (-len(cursor) % 4)
         payload = json.loads(urlsafe_b64decode(padded.encode("ascii")))
         values = payload["k"]
+        version = payload.get("v")
         if (
-            payload.get("v") != 2
+            version not in (2, 3)
             or payload.get("p") != platform
             or payload.get("s") != sort
             or not isinstance(values, list)
-            or len(values) != 3
-            or not isinstance(values[0], int)
-            or not isinstance(values[1], int)
-            or not isinstance(values[2], str)
+            or (version == 2 and len(values) != 3)
+            or (version == 3 and len(values) != 4)
+            or not all(isinstance(value, int) for value in values[:-1])
+            or not isinstance(values[-1], str)
         ):
             raise ValueError
         data_version = payload.get("d")
         if data_version is not None and not isinstance(data_version, str):
             raise ValueError
-        return (values[0], values[1], values[2]), data_version
+        return tuple(values), data_version
     except (
         AttributeError,
         binascii.Error,
@@ -312,7 +333,17 @@ def validate_viral_cursor(cursor: str, *, platform: str, sort: str) -> None:
     _decode_cursor(cursor, platform=platform, sort=sort)
 
 
-def _page_boundary_sql(sort: str, values: tuple[int, int, str]) -> tuple[str, tuple[object, ...]]:
+def _page_boundary_sql(
+    sort: str, values: tuple[object, ...], *, featured: bool = False
+) -> tuple[str, tuple[object, ...]]:
+    if featured:
+        rank, *rest = values
+        base_sql, base_params = _page_boundary_sql(sort, tuple(rest))
+        flat = " ".join(base_sql.split())
+        return (
+            f"AND (COALESCE(homepage_rank, %s) > %s OR (COALESCE(homepage_rank, %s) = %s {flat}))",
+            (_VIRAL_RANK_SENTINEL, rank, _VIRAL_RANK_SENTINEL, rank, *base_params),
+        )
     first, second, video_id = values
     if sort == "latest":
         return (
@@ -369,6 +400,9 @@ def list_viral_video_page(
 ) -> ViralVideoPage:
     """Read one stable keyset page without loading all video rows into memory."""
     order = _ORDER_BY.get(sort, _ORDER_BY["hot"])
+    if featured_only:
+        # 置顶序优先（NULLS LAST），同序内保持原排序，运营可控首页顺序。
+        order = f"homepage_rank ASC NULLS LAST, {order}"
     now = _collection_window_end(conn, platform)
     cutoff = now - int(timedelta(days=7).total_seconds())
     data_version = viral_fetched_at(conn, platform=platform, sort=sort)
@@ -379,13 +413,18 @@ def list_viral_video_page(
         boundary, cursor_version = _decode_cursor(cursor, platform=platform, sort=sort)
         if cursor_version != data_version:
             raise InvalidViralCursorError("viral video cursor data version changed")
+        if featured_only and len(boundary) != 4:
+            # 升级前的 v2 旧游标不含置顶序：静默回到第一页，避免分页死循环。
+            boundary = None
     collected: list[ViralVideo] = []
     exhausted = False
     chunk_size = max(32, min(100, limit * 2))
 
     while len(collected) <= limit and not exhausted:
         boundary_sql, boundary_params = (
-            _page_boundary_sql(sort, boundary) if boundary is not None else ("", ())
+            _page_boundary_sql(sort, boundary, featured=featured_only)
+            if boundary is not None
+            else ("", ())
         )
         rows = conn.execute(
             f"""
@@ -415,7 +454,7 @@ def list_viral_video_page(
                 collected.append(video)
                 if len(collected) > limit:
                     break
-        boundary = _cursor_values(_row_to_video(rows[-1]), sort)
+        boundary = _cursor_values(_row_to_video(rows[-1]), sort, featured=featured_only)
 
     items = collected[:limit]
     has_more = len(collected) > limit
@@ -431,6 +470,7 @@ def list_viral_video_page(
                 platform=platform,
                 sort=sort,
                 data_version=data_version,
+                featured=featured_only,
             )
             if has_more and items
             else None

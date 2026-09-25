@@ -423,7 +423,7 @@ def collect_viral_now(
 
 class ViralCurationRequest(AdminWriteContract):
     model_config = ConfigDict(extra="forbid")
-    action: Literal["feature", "unfeature", "delete"]
+    action: Literal["feature", "unfeature", "delete", "pin", "unpin"]
 
 
 # 视频库与管理端搜索共用的行投影：viral_videos 左联云端媒体准备与单条转存
@@ -431,7 +431,7 @@ class ViralCurationRequest(AdminWriteContract):
 _COLLECTED_VIRAL_ROW_SELECT = """
     SELECT v.platform,v.video_id,v.category,v.title,v.author,v.duration_ms,
         v.likes,v.comments,v.shares,v.collects,v.published_at,v.created_at,
-        v.homepage_featured,v.collection_published,v.cover_key,
+        v.homepage_featured,v.collection_published,v.homepage_rank,v.cover_key,
         v.native_json::jsonb->>'_statistics_checked_at' AS statistics_checked_at,
         v.native_json::jsonb->>'_statistics_retry_at' AS statistics_retry_at,
         (COALESCE(v.cover_url,'') != '') AS cover_required,
@@ -477,6 +477,7 @@ _COLLECTED_VIDEO_COLUMNS = (
     "created_at",
     "homepage_featured",
     "collection_published",
+    "homepage_rank",
     "cover_key",
     "statistics_checked_at",
     "statistics_retry_at",
@@ -1059,12 +1060,14 @@ def curate_collected_viral_video(
 
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         row = conn.execute(
-            "SELECT cover_url,cover_key FROM viral_videos WHERE platform=%s AND video_id=%s "
-            "AND deleted_at IS NULL FOR UPDATE",
+            "SELECT cover_url,cover_key,homepage_featured,homepage_rank FROM viral_videos "
+            "WHERE platform=%s AND video_id=%s AND deleted_at IS NULL FOR UPDATE",
             (platform, video_id),
         ).fetchone()
         if row is None:
             raise http_error(404, "VIRAL_VIDEO_NOT_FOUND", "视频不存在或已删除。")
+        if payload.action in ("pin", "unpin") and not row[2]:
+            raise http_error(409, "VIRAL_VIDEO_NOT_FEATURED", "只有已展示到首页的视频才能置顶。")
         if payload.action == "feature":
             ready = conn.execute(
                 "SELECT 1 FROM viral_media_preparations WHERE platform=%s AND video_id=%s "
@@ -1093,15 +1096,36 @@ def curate_collected_viral_video(
                 raise http_error(
                     409, "VIRAL_VIDEO_UNAVAILABLE", "该视频已下架或隐藏，请先恢复可用状态。"
                 )
+        # 置顶序（T4）：只有 pin 写入（取当前最小序-1，可叠加置顶），
+        # unpin/unfeature/delete 归还 NULL=回到默认顺序。展示到首页不写序，
+        # 未置顶的展示视频按既有 hot/latest 默认序排在置顶视频之后。
+        next_rank: int | None = None
+        if payload.action == "pin":
+            min_rank = conn.execute(
+                "SELECT COALESCE(MIN(homepage_rank),1)-1 FROM viral_videos "
+                "WHERE deleted_at IS NULL AND homepage_featured=1"
+            ).fetchone()
+            assert min_rank is not None  # 聚合查询恒有一行
+            next_rank = int(min_rank[0])
+        # pin/unpin 不改变展示状态（前置守卫已确保处于展示中）。
+        featured_value = (
+            1
+            if payload.action == "feature"
+            else int(row[2])
+            if payload.action in ("pin", "unpin")
+            else 0
+        )
         conn.execute(
             """UPDATE viral_videos SET homepage_featured=%s,
                 collection_published=CASE WHEN %s THEN 1 ELSE collection_published END,
-                deleted_at=CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE deleted_at END
+                deleted_at=CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE deleted_at END,
+                homepage_rank=%s
             WHERE platform=%s AND video_id=%s""",
             (
-                int(payload.action == "feature"),
+                featured_value,
                 payload.action == "feature",
                 payload.action == "delete",
+                next_rank,
                 platform,
                 video_id,
             ),
@@ -1127,6 +1151,7 @@ def curate_collected_viral_video(
             "platform": platform,
             "video_id": video_id,
             "homepage_featured": payload.action == "feature",
+            "homepage_rank": next_rank,
             "deleted": payload.action == "delete",
         }
 

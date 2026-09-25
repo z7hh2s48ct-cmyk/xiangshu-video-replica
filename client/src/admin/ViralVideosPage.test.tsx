@@ -248,6 +248,52 @@ describe("ViralVideosPage", () => {
       expect(screen.queryByText("庭院施工案例")).not.toBeInTheDocument(),
     );
   });
+  it("已展示视频可置顶并在列表中标记，取消置顶回到默认", async () => {
+    let pinned = false;
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method === "PATCH") {
+        const payload = JSON.parse(String(init.body));
+        if (payload.action === "pin") pinned = true;
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          items: [
+            {
+              ...video,
+              homepage_featured: true,
+              homepage_rank: pinned ? 0 : null,
+            },
+          ],
+          total: 1,
+        }),
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    setAdminCsrfToken("csrf-curation-test");
+    render(<ViralVideosPage />);
+    expect(await screen.findByText("展示中")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "置顶" }));
+    fireEvent.change(screen.getByLabelText("操作原因"), {
+      target: { value: "首页重点推荐" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认操作" }));
+    await screen.findByText("已置顶，客户端首页将优先展示该视频。");
+    const patch = fetchMock.mock.calls.find(
+      ([, init]) => init?.method === "PATCH",
+    );
+    expect(patch?.[0]).toContain("/curation");
+    expect(JSON.parse(String(patch?.[1]?.body))).toMatchObject({
+      action: "pin",
+      confirm: true,
+      reason: "首页重点推荐",
+    });
+    expect(screen.getByText("已置顶")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "取消置顶" })).toBeEnabled();
+  });
+
   it("只读账号可以查看数据，不能设置首页或删除", async () => {
     setup();
     render(<ViralVideosPage readOnly />);

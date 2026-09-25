@@ -24,7 +24,7 @@ import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
 import { StatusBadge } from "./ui/StatusBadge";
 
-type Action = "feature" | "unfeature" | "delete" | "archive";
+type Action = "feature" | "unfeature" | "delete" | "archive" | "pin" | "unpin";
 
 // 归档/首页状态的三个小判定被「用户搜索发现」页共用（对同一视频的
 // 操作语义必须两处一致），因此导出而非各自复制。
@@ -161,7 +161,11 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
           ? "已提交后台转存，可刷新数据查看进度。归档不会自动修改首页展示。"
           : pending.action === "delete"
             ? "视频已删除，前台不再展示。"
-            : "首页展示设置已更新。",
+            : pending.action === "pin"
+              ? "已置顶，客户端首页将优先展示该视频。"
+              : pending.action === "unpin"
+                ? "已取消置顶，该视频恢复默认首页顺序。"
+                : "首页展示设置已更新。",
       );
       // 搜索结果与视频库共用一套操作，成功后同步两侧的行状态。
       if (pending.action === "archive")
@@ -812,7 +816,11 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
                                 : "admin-viral-muted"
                             }
                           >
-                            {video.homepage_featured ? "展示中" : "未展示"}
+                            {video.homepage_featured
+                              ? video.homepage_rank == null
+                                ? "展示中"
+                                : "已置顶"
+                              : "未展示"}
                           </span>
                         </div>
                       </td>
@@ -872,6 +880,20 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
                               {video.homepage_featured
                                 ? "取消首页展示"
                                 : "展示到首页"}
+                            </button>
+                          )}
+                          {!readOnly && video.homepage_featured && (
+                            <button
+                              type="button"
+                              disabled={saving}
+                              onClick={() =>
+                                choose(
+                                  video,
+                                  video.homepage_rank == null ? "pin" : "unpin",
+                                )
+                              }
+                            >
+                              {video.homepage_rank == null ? "置顶" : "取消置顶"}
                             </button>
                           )}
                         </div>
@@ -968,16 +990,24 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
             ? "转存单条视频"
             : pending?.action === "delete"
               ? "删除爆款视频"
-              : "更新首页展示"
+              : pending?.action === "pin"
+                ? "置顶爆款视频"
+                : pending?.action === "unpin"
+                  ? "取消置顶"
+                  : "更新首页展示"
         }
         description={
           pending?.action === "archive"
             ? "后台将获取此视频并转存到已配置的云存储，可能产生供应商调用费用。已完成的视频文件会复用；不会重新搜索整个列表或修改首页展示。请填写操作原因。"
             : pending?.action === "delete"
               ? "该视频会从前台移除，后续采集也不会重新展示。已导入项目的素材保留。"
-              : pending?.action === "unfeature"
-                ? "取消后首页不再展示，视频仍保留在爆款列表。请填写操作原因。"
-                : "已归档视频会自动补齐封面后展示到首页。请填写操作原因。"
+              : pending?.action === "pin"
+                ? "置顶后该视频在客户端首页排到最前，可多次置顶叠加优先级。请填写操作原因。"
+                : pending?.action === "unpin"
+                  ? "取消后该视频回到首页默认顺序，仍保持展示。请填写操作原因。"
+                  : pending?.action === "unfeature"
+                    ? "取消后首页不再展示，视频仍保留在爆款列表。请填写操作原因。"
+                    : "已归档视频会自动补齐封面后展示到首页。请填写操作原因。"
         }
         confirmLabel="确认操作"
         onClose={() => setPending(null)}
