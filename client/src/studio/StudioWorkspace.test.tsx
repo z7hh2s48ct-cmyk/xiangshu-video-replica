@@ -86,6 +86,8 @@ const live = vi.hoisted(() => ({
     }),
   ),
   extractViralCopy: vi.fn(),
+  // 爆款正文交付与计费点：默认未命中，具体用例再覆盖。
+  claimExtractedViralCopy: vi.fn(async (): Promise<string | null> => null),
 }));
 vi.mock("./live", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -2499,6 +2501,65 @@ describe("V1.4 workspace integration", () => {
       expect(screen.getByLabelText("来源原文")).toHaveValue(
         "后台已经完成的转写文案",
       );
+    });
+
+    it("恢复爆款提取任务时正文按 claim 取回并回填", async () => {
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      // 服务端门禁后的爆款任务：正文为 null，仅带视频身份。
+      live.loadLatestScriptFromUpload.mockResolvedValueOnce({
+        id: "asr-viral",
+        status: "SUCCEEDED",
+        result: { text: null },
+        sourceAssetId: "asset-1",
+        copyClaimRequired: true,
+        viralSource: { platform: "douyin", videoId: "v-native-1" },
+      });
+      live.claimExtractedViralCopy.mockResolvedValueOnce(
+        "claim 回执取回的爆款文案",
+      );
+      const state = createState("workbench");
+      state.draft.projectId = "project-1";
+      state.draft.sourceAssetId = "asset-1";
+      render(<StudioWorkspace currentUser={reviewUser} initialState={state} />);
+
+      expect(
+        await screen.findByText(/文案提取已完成.*恢复到当前草稿/),
+      ).toBeInTheDocument();
+      expect(live.claimExtractedViralCopy).toHaveBeenCalledWith(
+        "douyin",
+        "v-native-1",
+      );
+      fireEvent.click(screen.getByRole("button", { name: "文案工坊" }));
+      expect(screen.getByLabelText("来源原文")).toHaveValue(
+        "claim 回执取回的爆款文案",
+      );
+    });
+
+    it("恢复爆款任务时获取未完成则不回填正文并提示补齐", async () => {
+      live.loadStudioData.mockResolvedValue(emptyStudioData);
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      live.loadLatestScriptFromUpload.mockResolvedValueOnce({
+        id: "asr-viral-miss",
+        status: "SUCCEEDED",
+        result: { text: null },
+        sourceAssetId: "asset-1",
+        copyClaimRequired: true,
+        viralSource: { platform: "douyin", videoId: "v-native-2" },
+      });
+      // claim 未命中（返回 null）：正文拿不到，不能把空文案写进草稿。
+      live.claimExtractedViralCopy.mockResolvedValueOnce(null);
+      const state = createState("workbench");
+      state.draft.projectId = "project-1";
+      state.draft.sourceAssetId = "asset-1";
+      render(<StudioWorkspace currentUser={reviewUser} initialState={state} />);
+
+      expect(
+        await screen.findByText(/还未完成「获取」结算/),
+      ).toBeInTheDocument();
+      // 正文没拿到就不算交付：不出现「已恢复」提示，也不写进草稿。
+      expect(screen.queryByText(/文案提取已完成，已恢复到当前草稿/)).toBeNull();
+      expect(live.persistCloudDraft).not.toHaveBeenCalled();
     });
 
     it("恢复任务长时间停在 RUNNING 时停止轮询并放行手动提取", async () => {

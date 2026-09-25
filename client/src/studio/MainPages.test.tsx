@@ -1035,6 +1035,8 @@ describe("V1.4 工作台新版首页布局", () => {
     expect(value.extractScriptFromUpload).toHaveBeenCalledWith(
       "project-home",
       "asset-home",
+      undefined,
+      { platformKey: "douyin", nativeId: "native-home" },
     );
   });
 

@@ -936,6 +936,8 @@ function transactionTypeLabel(type: WalletTransaction["type"]): string {
     RESERVE: "任务冻结",
     SETTLE: "成功结算",
     RELEASE: "失败返还",
+    // 管理端审计调账的反向记账（20260923T1200_admin_refund_adjustment）。
+    REFUND: "退款调账",
   }[type];
 }
 

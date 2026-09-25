@@ -983,7 +983,10 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** Read Material Usages */
+    /**
+     * Read Material Usages
+     * @description MATERIAL-UX-10：单素材按需使用记录（owner 围栏；直出成片恒为空）。
+     */
     get: operations["read_material_usages_api_studio_materials__material_id__usages_get"];
     put?: never;
     post?: never;
@@ -1000,7 +1003,10 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** Read Material Tags */
+    /**
+     * Read Material Tags
+     * @description MATERIAL-UX-05：当前用户可见素材的标签聚合计数（count DESC, tag ASC）。
+     */
     get: operations["read_material_tags_api_studio_materials_tags_get"];
     put?: never;
     post?: never;
@@ -1366,7 +1372,8 @@ export interface paths {
     get: operations["read_oral_generation_task_api_oral_tasks__task_id__get"];
     put?: never;
     post?: never;
-    delete?: never;
+    /** Delete Oral Task Record */
+    delete: operations["delete_oral_task_record_api_oral_tasks__task_id__delete"];
     options?: never;
     head?: never;
     patch?: never;
@@ -1931,6 +1938,40 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/control/settings/providers/{provider}/paid-test": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Paid Test Control Provider
+     * @description 付费探针（管理端入口）：验证供应商账号能否真正跑通一次**计费**调用。
+     *
+     *     与紧邻的免费 `connection-test` 是**同构但不同级**的一对：免费探针只读、
+     *     普通 POST；付费探针可能真实扣费，因此按敏感写走既有管理写契约
+     *     （`Idempotency-Key` + `confirm` + 非空 `reason`），并在同一事务里落一条
+     *     `provider_settings.paid_test` 审计——旧 `/api/admin` 版不写审计，而
+     *     同文件的 `diagnostic-test` 写，这条不对称在此处补齐。
+     *
+     *     幂等键不是仪式：一次网络歧义重试若变成第二次付费调用就是真实的重复扣费，
+     *     快照层让重放直接回放首次结果（`X-Idempotent-Replay: true`）。
+     *
+     *     审计写在探针**成功返回之后**：探针抛错（含当前真实供应商客户端尚未接入的
+     *     501 存根）时没有任何付费动作发生，也就没有可 attest 的事实；而且写契约的
+     *     事务语义会让抛错前的写入回滚，提前写审计反而会得到「开发态留下、生产态被
+     *     回滚」的不一致。
+     */
+    post: operations["paid_test_control_provider_api_control_settings_providers__provider__paid_test_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/control/settings/runtime": {
     parameters: {
       query?: never;
@@ -2138,7 +2179,14 @@ export interface paths {
     put?: never;
     /**
      * Create Admin Adjustment
-     * @description Create an admin adjustment: PAID order + CHARGE + wallet + audit row.
+     * @description Create an admin adjustment.
+     *
+     *     Forward (``credits >= 1``): PAID order + CHARGE + wallet + audit row.
+     *
+     *     Reverse (``credits < 0``, only for ``REVERSAL_SOURCE_DOCUMENT_TYPES``):
+     *     wallet decrement + ``REFUND`` ledger row + audit row, **no order row**
+     *     (see the module-level D2/D4 notes). The real money refund happens in the
+     *     ZPay back office and is aligned to this row by ``source_document_ref``.
      */
     post: operations["create_admin_adjustment_api_control_customers__user_id__adjustments_post"];
     delete?: never;
@@ -2640,7 +2688,15 @@ export interface paths {
     };
     get?: never;
     put?: never;
-    /** Refresh Statistics */
+    /**
+     * Refresh Statistics
+     * @description 按需补采视频号互动统计并按实际外呼次数计费.
+     *
+     *     与 ``/videos/statistics``（只读缓存、免费）不同，这里触发真实视频号详情外呼，
+     *     因此走 fail-closed 资费守卫 + RESERVE→SETTLE：预留以请求条数为上限，结算按实际
+     *     触发的外呼次数（24h 缓存命中不产生外呼、不计费）。供应商成本由 ``viral_tikhub``
+     *     内的 ``meter_call("viral_data")`` 自动落平台侧，与客户零售价无关。
+     */
     post: operations["refresh_statistics_api_viral_videos_statistics_refresh_post"];
     delete?: never;
     options?: never;
@@ -2972,6 +3028,30 @@ export interface paths {
     patch: operations["update_viral_video_availability_api_control_viral_videos__platform___video_id__availability_patch"];
     trace?: never;
   };
+  "/api/control/viral/collect": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Collect Viral Now
+     * @description 立即采集：置 ``next_collection_at`` 为当前并直接入队一次关键词采集.
+     *
+     *     与定时采集共用 ``enqueue_due_viral_collections``：关键词、平台、每词上限与
+     *     共享账单批次都在同一事务内建立；若已有在队/在制的采集任务则本次不重复入队
+     *     （与定时调度一致，避免并发采集互踩）。
+     */
+    post: operations["collect_viral_now_api_control_viral_collect_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/control/viral/videos": {
     parameters: {
       query?: never;
@@ -2983,6 +3063,85 @@ export interface paths {
     get: operations["read_collected_viral_videos_api_control_viral_videos_get"];
     put?: never;
     post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/viral/discoveries": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Read Viral Search Discoveries
+     * @description 搜索发现每日汇总（运营视图）：按关键词×平台的热度分组.
+     *
+     *     一行 = 一个 (keyword, platform) 分组；`users`/`videos` 为去重覆盖数。
+     *     明细（谁在什么时候搜到什么）由客户侧 `GET /api/viral/search/discoveries`
+     *     与内容池 `GET /api/control/viral/videos` 交叉查看。
+     */
+    get: operations["read_viral_search_discoveries_api_control_viral_discoveries_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/viral/discoveries/detail": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Read Viral Discovery Details
+     * @description 用户搜索记录的逐条明细：按 (关键词×平台×视频) 分组，左联内容池.
+     *
+     *     聚合视图（``GET /viral/discoveries``）只回答「哪个词最热」；运营要据此
+     *     把具体视频转存/上首页时需要这一层：每行带视频的归档与首页状态，操作
+     *     语义与视频库完全一致。内容池里已删除的视频 ``video`` 为 null，仅保留
+     *     发现记录。日期错误码与聚合端点一致（不设 max_length，避免 FastAPI 的
+     *     参数校验 422 抢在业务错误码之前返回）。
+     */
+    get: operations["read_viral_discovery_details_api_control_viral_discoveries_detail_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/viral/search": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Search Viral Videos For Admin
+     * @description 管理端实时搜索：外呼上游 → 结果并入内容池，返回视频库同构行.
+     *
+     *     与客户侧 ``POST /api/viral/search`` 的三点区别：不预留/结算客户积分
+     *     （供应商成本由 ``billing_meter.meter_call`` 在无计费上下文时自动落
+     *     平台操作单）；不写 ``viral_search_discoveries``（管理员自己的搜索不
+     *     污染用户搜索统计）；命中视频直接 upsert 进内容池，响应行与视频库
+     *     同构，前端可以直接继续「转存到云端 / 展示到首页」。
+     *
+     *     外呼失败走 http_error 抛出：整个事务回滚（占位行一并回滚），
+     *     幂等键保持可用，管理员重试不冲突。
+     */
+    post: operations["search_viral_videos_for_admin_api_control_viral_search_post"];
     delete?: never;
     options?: never;
     head?: never;
@@ -3055,6 +3214,46 @@ export interface paths {
     head?: never;
     /** Curate Collected Viral Video */
     patch: operations["curate_collected_viral_video_api_control_viral_videos__platform___video_id__curation_patch"];
+    trace?: never;
+  };
+  "/api/control/viral/videos/curation:batch": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Curate Collected Viral Videos Batch */
+    post: operations["curate_collected_viral_videos_batch_api_control_viral_videos_curation_batch_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/viral/overview": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Read Viral Library Overview
+     * @description 爆款视频库概览（只读）：数字卡与采集计划所需的计数与时间.
+     *
+     *     与列表端同口径（``deleted_at IS NULL`` + 平台白名单），避免「概览说
+     *     有 1200 条、列表翻不到」这类对不上的数。今日新增按上海日历归属。
+     */
+    get: operations["read_viral_library_overview_api_control_viral_overview_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
     trace?: never;
   };
   "/api/control/settings/queue-mode": {
@@ -3450,7 +3649,7 @@ export interface paths {
     head?: never;
     /**
      * Update Sub Account
-     * @description Update display_name / is_active; deactivation revokes the live session.
+     * @description Update display_name / is_active / account_type; deactivation revokes the session.
      */
     patch: operations["update_sub_account_api_customer_sub_accounts__sub_account_id__patch"];
     trace?: never;
@@ -3499,8 +3698,105 @@ export interface paths {
      *     owns the configuration row only. The billing lock does not span this
      *     transaction: at most one already-accepted, still in-flight operation can
      *     land under the previous cap; every later one re-reads the new value.
+     *     A SUB_ADMIN caller may set plain SUB caps only (its grant's scope).
      */
     put: operations["set_sub_account_quota_api_customer_sub_accounts__sub_account_id__quota_put"];
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/sub-accounts/{sub_account_id}/permissions": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    /**
+     * Set Sub Account Permissions
+     * @description Set (or, with the full grant, clear) the sub-account's feature permissions.
+     *
+     *     Saving the unrestricted value deletes the row — 'unrestricted' has
+     *     exactly one spelling. Enforcement lives at the feature doors themselves
+     *     (``accept_operation``, the Token lane, publish-account binding); this
+     *     endpoint owns the configuration row only. A SUB_ADMIN caller may
+     *     configure plain SUB rows only — the admin grant itself stays
+     *     master-only business.
+     */
+    put: operations["set_sub_account_permissions_api_customer_sub_accounts__sub_account_id__permissions_put"];
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/account/password/change": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Change Password
+     * @description 用当前密码换新密码，并让所有端的活跃会话立即失效。
+     *
+     *     哈希在事务外完成：策略不过关就没必要拿行锁，也不该把一次拒绝变成一次锁等待。
+     */
+    post: operations["change_password_api_customer_account_password_change_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/sessions/revoke-all": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Revoke All Sessions
+     * @description 立即下线本账号的全部登录（「退出所有设备」）。
+     *
+     *     与改密是两条独立的自救路径：怀疑凭据泄漏时先改密，怀疑只是某台设备被人
+     *     用着时先下线。**这条会把调用方自己也下线**——单会话架构下没有「除当前
+     *     会话外」可言（见模块 docstring），前端据此把用户带回登录页。
+     */
+    post: operations["revoke_all_sessions_api_customer_sessions_revoke_all_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/sessions/history": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Session History
+     * @description 调用方自己的登录/会话事件，最新在前（只含非凭据字段）。
+     *
+     *     心跳被排除在外：它每分钟一条，混进来会把真正的事件（登录、切换设备、退出、
+     *     超时）冲走，而这张表存在的意义恰恰是让用户看见那几个事件。
+     */
+    get: operations["session_history_api_customer_sessions_history_get"];
+    put?: never;
     post?: never;
     delete?: never;
     options?: never;
@@ -3523,7 +3819,16 @@ export interface paths {
     put?: never;
     /** Create Customer Api Key */
     post: operations["create_customer_api_key_api_customer_api_keys_post"];
-    delete?: never;
+    /**
+     * Revoke All Customer Api Keys
+     * @description Soft-revoke every live key of this customer; idempotent (0 on a re-run).
+     *
+     *     The "my account may be compromised" self-service lever: revoking one key at
+     *     a time leaves the rest live if the caller stops halfway, so the whole set is
+     *     revoked in a single statement. Rows are kept (``revoked_at`` stamped) — the
+     *     ledger and the audit trail read history, they never rewrite it.
+     */
+    delete: operations["revoke_all_customer_api_keys_api_customer_api_keys_delete"];
     options?: never;
     head?: never;
     patch?: never;
@@ -4085,6 +4390,66 @@ export interface paths {
     };
     /** List Customer Wallet Transactions */
     get: operations["list_customer_wallet_transactions_api_customer_wallet_transactions_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/wallet/transactions/export": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Export wallet transactions to CSV
+     * @description Streams wallet transaction rows as a UTF-8 encoded CSV file. Intended for bulk export workflows (B3).
+     *
+     *     Headers:
+     *     - Content-Disposition: attachment; filename=wallet-transactions-YYYYMM.csv
+     *     - Content-Type: text/csv; charset=utf-8
+     *     - X-Export-Truncated: true 表示行数撞到 limit，文件不是全量
+     *
+     *     Columns (与消费记录页表格的列一一对应，顺序即表头顺序；这里用半角逗号，与 CSV 分隔符一致):
+     *     时间,类型,可用积分变化,待结算变化,业务,Token 组,任务 ID,凭证版本,认证来源,操作人
+     *
+     *     选择 business / auth_source 等筛选时，导出与列表端点走**同一份** WHERE 子句，所以「界面上有几行」与「CSV 里有几行」始终一致。
+     */
+    get: operations["export_customer_wallet_transactions_csv_api_customer_wallet_transactions_export_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/wallet/consumption-by-business": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Customer Consumption By Business
+     * @description 近 N 天按业务汇总的消费构成（审计方案 F / P1 清单 #10）。
+     *
+     *     只统计 ``SETTLE``：预扣会随后被结算或退回，把它算进来会让同一笔消费出现两次；
+     *     退回也不是消费。没有关联 operation 的历史行归到 ``other``（界面显示为「其他」）。
+     *
+     *     **业务键用客户口径的 12 类**（``sub_account_permissions.SERVICE_FEATURE``），不是
+     *     计费科目本身：``billing_operations.service`` 存的是 ``video_768p`` / ``video_2k``
+     *     这类科目名，前端没有任何一份映射覆盖它们（消费构成于是把原始科目名原样显示出来），
+     *     而筛选下拉、子账号权限矩阵用的都是 ``video`` 这类业务键。同一功能在界面里出现
+     *     「视频生成」与「video_768p」两个名字，客户会当成两种服务；两档视频规格也本该合成
+     *     一项。归一到业务键后，前端只需要 ``BUSINESS_FEATURES`` 一份中文名。
+     */
+    get: operations["customer_consumption_by_business_api_customer_wallet_consumption_by_business_get"];
     put?: never;
     post?: never;
     delete?: never;
@@ -4727,6 +5092,61 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/viral/videos/cache-reclaim": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Audit Local Viral Cache
+     * @description 回答「这些本地缓存条目还有没有服务端来源」，供桌面端回收。
+     *
+     *     只读、不计费：回收动作发生在用户机器上，但判据必须由服务端给出——删除与下架
+     *     都不会在客户端的旧分页数据里留下痕迹。
+     */
+    post: operations["audit_local_viral_cache_api_viral_videos_cache_reclaim_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/viral/videos/source": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Fetch Viral Video Source
+     * @description 下发源站直链（视频号额外**同批**下发 ``decode_key``），不代理下载、不落存储.
+     *
+     *     P2 客户端本地缓存的前置：客户端拿到直链后自行多线程取回并在本地解密
+     *     （决策 #17），平台不再代理下载、也不再为播放生成签名流（§6.3）。这与既有
+     *     ``/videos/media`` 的区别正在于此——后者是 ``cached_only`` 且回服务端签名 URL。
+     *
+     *     ``decode_key`` 每次请求都会变化，客户端必须与 ``fullUrl`` 同批取用、不得缓存；
+     *     因此本响应不做任何服务端缓存。
+     *
+     *     计费：走既有 ``viral_search_refresh``（爆款视频刷新）科目，按次 1 单位。
+     *     它是真实的上游调用，与 ``viral_search`` 一样必须受 fail-closed 资费守卫约束，
+     *     否则漏配即「能取直链但不收钱」。只有 PENDING（在途重试）复用同一计费轮次，
+     *     已终态的轮次一律开新一轮——每一次真实外呼都对应一次扣费。
+     */
+    post: operations["fetch_viral_video_source_api_viral_videos_source_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/viral/covers/{platform}/{video_id}": {
     parameters: {
       query?: never;
@@ -4774,10 +5194,71 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** Get Viral Video Detail */
+    /**
+     * Get Viral Video Detail
+     * @description 免费读取单条爆款视频：工作区搜索与旧客户端的只读路径.
+     *
+     *     「查看详情」的计费产品走 ``POST /videos/detail``。本端点不扣费，且它下发的
+     *     字段与免费列表完全同源（列表本就免费返回同样的字段），所以它不是绕过计费的
+     *     入口，只是同一条内容在库里的读取口径。
+     */
     get: operations["get_viral_video_detail_api_viral_videos__platform___video_id__get"];
     put?: never;
     post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/viral/videos/detail": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Open Viral Video Detail
+     * @description 打开爆款视频详情：读内容池 + 按次计费（同一付费账号同一条视频只扣一次）.
+     *
+     *     计费口径（已拍板）：详情与统计字段在同一个响应里返回，因此只算一次「查看详情」；
+     *     浏览、缓存、播放都不在本端点计费。预留在 ``accept_operation``、结算在
+     *     ``finish_source``，两者与内容读取同处一个事务——内容读不到（404/409）或事务
+     *     回滚时预留一并消失，**失败不扣费**。
+     *
+     *     免费分支有三类，客户端据 ``billing`` 区分：已购买（``deduped``）、已下架 /
+     *     不可用（``billable=false``）、以及审核账号读取**已购买**内容（不产生新扣费）。
+     *     审核账号不得产生新的客户扣费，所以首次购买前先过 ``require_not_auditor``；
+     *     这与 ``/videos/source`` 等计费端点同一口径。
+     */
+    post: operations["open_viral_video_detail_api_viral_videos_detail_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/viral/videos/copy/claim": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Claim Viral Video Copy
+     * @description 获取共享文案：命中缓存即扣一次「获取文案」费并下发正文，未命中不扣费.
+     *
+     *     共享缓存的写入方是转写链路（``POST /videos/copy`` 与工作台文案工坊），它们各自
+     *     付转写费；本端点是**交付侧**的计费点：谁拿到文案谁付费，秒回别人的转写结果不
+     *     例外。未命中时如实回 null 且分文不扣——没有交付就没有收费。
+     */
+    post: operations["claim_viral_video_copy_api_viral_videos_copy_claim_post"];
     delete?: never;
     options?: never;
     head?: never;
@@ -4829,6 +5310,133 @@ export interface paths {
     get: operations["read_viral_import_task_api_viral_import_tasks__task_id__get"];
     put?: never;
     post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/viral/videos/copy": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Extract Viral Video Copy
+     * @description 客户端本地抽出的音轨 → 上传 → ASR 转写 → 回填（决策 #15 / #18）.
+     *
+     *     这是「停用采集」的前提：文案链路不再需要平台留存的媒体归档。客户端上传的是它
+     *     自己从**本地缓存的原视频**里抽出的单声道 m4a，服务端只做校验、登记与转写编排。
+     *
+     *     计费与工作台上传链路同一科目（``asr`` 按秒）：预留写在任务入队事务里，结算与
+     *     清理都交给既有 Worker。共享文案缓存命中时直接返回文案——不建任务、不预留转写费，
+     *     但交付本身照样扣一次「获取文案」费（``viral_copy``，同账号同视频只扣一次），
+     *     否则这条秒回就成了绕开 ``/videos/copy/claim`` 的免费旁路。
+     *
+     *     入库走既有 ``script_from_audio_tasks`` 租约体系（用户 2026-09-23 拍板方案 a）：
+     *     断点续跑、``SUBMISSION_UNCERTAIN`` 不确定态、按秒预留结算与 ``viral_script_cache``
+     *     的历史回溯都由该链路原样提供，这里不另开一条轻量写入路径。
+     */
+    post: operations["extract_viral_video_copy_api_viral_videos_copy_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/viral/search": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Search Viral Videos
+     * @description 搜索爆款视频并按次计费.
+     *
+     *     不声明 ``AuthenticatedUser``：它会在**请求级**连接上做一次加行锁的会话校验，
+     *     而下方多次 ``db.write()`` 会用**另一条**池连接对同一行再取锁 —— 自死锁，
+     *     只能靠 PG 的 idle_in_transaction_session_timeout(60s) 解开。鉴权由栅栏权威
+     *     完成（fenced_pg_transaction 在行锁下复核会话并抛 401），此处无需预解析。
+     */
+    post: operations["search_viral_videos_api_viral_search_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/viral/search/copy": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Viral Search Copy
+     * @description 只读文案状态：有没有、什么时候写的、本账号是不是已经买过.
+     *
+     *     **不下发正文**：文案是零售内容，正文只能从 ``POST /videos/copy/claim`` 取，扣费
+     *     与交付在同一处发生。本端点不触发下载/上传/ASR，也不计费；旧客户端拿到的
+     *     ``text`` 变成 null 会按「未命中」重走一次提取，由上传链路计费，不会白拿。
+     */
+    get: operations["get_viral_search_copy_api_viral_search_copy_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/viral/search/discoveries": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Viral Search Discoveries
+     * @description 客户'我的发现'（按天，默认今天·上海时区）：发现记录左联内容池.
+     */
+    get: operations["list_viral_search_discoveries_api_viral_search_discoveries_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/viral/search/refresh": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Refresh Viral Video
+     * @description 刷新单条视频资源.
+     *
+     *     不声明 ``AuthenticatedUser``：它会在**请求级**连接上做一次加行锁的会话校验
+     *     （auth.py 的 verify_session_context 走 FOR UPDATE），而下方 ``db.write()`` 的
+     *     栅栏事务会用**另一条**池连接对同一行再取一次锁 —— 自死锁，靠 PG 的
+     *     idle_in_transaction_session_timeout(60s) 才解开。鉴权由栅栏权威完成
+     *     （fenced_pg_transaction 在行锁下复核会话并抛 401），此处无需预解析。
+     */
+    post: operations["refresh_viral_video_api_viral_search_refresh_post"];
     delete?: never;
     options?: never;
     head?: never;
@@ -5844,85 +6452,6 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  "/api/admin/sub-accounts": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    /**
-     * List Sub Accounts
-     * @description List all sub-accounts under a master account.
-     */
-    get: operations["list_sub_accounts_api_admin_sub_accounts_get"];
-    put?: never;
-    /**
-     * Create Sub Account
-     * @description Create a sub-account under a master account.
-     */
-    post: operations["create_sub_account_api_admin_sub_accounts_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/admin/sub-accounts/{sub_account_id}": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get?: never;
-    put?: never;
-    post?: never;
-    /**
-     * Delete Sub Account
-     * @description Delete a sub-account, purging its session-state/device footprint first.
-     *
-     *     Those rows go before the user row in the same transaction (their
-     *     ``user_id`` FKs carry no CASCADE). Business history (ledger, tasks) and
-     *     the append-only session-event log (029) are deliberately never deleted:
-     *     when such rows pin the account the DELETE answers 409 and the operator
-     *     deactivates instead.
-     */
-    delete: operations["delete_sub_account_api_admin_sub_accounts__sub_account_id__delete"];
-    options?: never;
-    head?: never;
-    /**
-     * Update Sub Account
-     * @description Update sub-account details (display_name, status).
-     */
-    patch: operations["update_sub_account_api_admin_sub_accounts__sub_account_id__patch"];
-    trace?: never;
-  };
-  "/api/admin/sub-accounts/{sub_account_id}/password": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get?: never;
-    put?: never;
-    /**
-     * Reset Sub Account Password
-     * @description Set or rotate a sub-account's login password.
-     *
-     *     Writing ``registration_source='admin_create'`` alongside the hash is what
-     *     admits the account on the shared password-session rule (login and session
-     *     fence). Re-running rotates the password in place; an unknown sub row is
-     *     answered 404. The plaintext never touches the database or the audit trail.
-     */
-    post: operations["reset_sub_account_password_api_admin_sub_accounts__sub_account_id__password_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
   "/health": {
     parameters: {
       query?: never;
@@ -6551,6 +7080,15 @@ export interface components {
       /** Idempotency Key */
       idempotency_key: string;
     };
+    /** Body_extract_viral_video_copy_api_viral_videos_copy_post */
+    Body_extract_viral_video_copy_api_viral_videos_copy_post: {
+      /** Platform */
+      platform: string;
+      /** Videoid */
+      videoId: string;
+      /** File */
+      file: string;
+    };
     /** Body_generate_global_simple_character_api_simple_characters_generate_post */
     Body_generate_global_simple_character_api_simple_characters_generate_post: {
       /** File */
@@ -6641,6 +7179,21 @@ export interface components {
       platform: "douyin" | "wechat_channels" | "xiaohongshu";
       /** Account Id */
       account_id?: string | null;
+    };
+    /**
+     * BulkRevokeResponse
+     * @description How many live keys the bulk revoke actually retired (0 = nothing to do).
+     */
+    BulkRevokeResponse: {
+      /** Revoked */
+      revoked: number;
+    };
+    /** ChangePasswordRequest */
+    ChangePasswordRequest: {
+      /** Current Password */
+      current_password: string;
+      /** New Password */
+      new_password: string;
     };
     /** CharacterAsset */
     CharacterAsset: {
@@ -7236,6 +7789,29 @@ export interface components {
         | components["schemas"]["SourceFrameCharacterFeatures"]
         | null;
     };
+    /** ConsumptionByBusinessItem */
+    ConsumptionByBusinessItem: {
+      /** Business */
+      business: string;
+      /** Credits */
+      credits: number;
+    };
+    /**
+     * ConsumptionByBusinessResponse
+     * @description 近 N 天的消费构成（审计方案 F / P1 清单 #10）。
+     *
+     *     口径：只算 ``SETTLE``（真正结算掉的消费），不含退回与充值；窗口是**滚动**
+     *     的 N×24 小时，不做自然日对齐——「最近 30 天」按滚动窗口解释更直白，也免得
+     *     在时区边界上多一层解释。
+     */
+    ConsumptionByBusinessResponse: {
+      /** Days */
+      days: number;
+      /** Total Credits */
+      total_credits: number;
+      /** Items */
+      items: components["schemas"]["ConsumptionByBusinessItem"][];
+    };
     /** ControlGenerationRecord */
     ControlGenerationRecord: {
       /** Record Id */
@@ -7330,6 +7906,25 @@ export interface components {
       /** Failure Reasons */
       failure_reasons: components["schemas"]["AnalysisFailureReason"][];
     };
+    /**
+     * ControlProviderPaidTestRequest
+     * @description 付费探针的写契约信封（confirm + reason；幂等键走 header）。
+     *
+     *     与同段的免费 `connection-test`（普通 POST）不同：付费探针可能真实扣费，
+     *     因此按「敏感写」处理，走 `_run_control_settings_write` 的同一套信封。
+     */
+    ControlProviderPaidTestRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+    };
     /** ControlProviderSettingsUpdate */
     ControlProviderSettingsUpdate: {
       /**
@@ -7415,7 +8010,13 @@ export interface components {
        * Type
        * @enum {string}
        */
-      type: "CHARGE" | "RESERVE" | "SETTLE" | "RELEASE" | "CONVERSION";
+      type:
+        | "CHARGE"
+        | "RESERVE"
+        | "SETTLE"
+        | "RELEASE"
+        | "CONVERSION"
+        | "REFUND";
       /** Available Delta */
       available_delta: number;
       /** Reserved Delta */
@@ -7515,6 +8116,20 @@ export interface components {
       amount_fen: number;
       /** Package Id */
       package_id?: string | null;
+    };
+    /** CreateSubAccountRequest */
+    CreateSubAccountRequest: {
+      /** Username */
+      username: string;
+      /** Display Name */
+      display_name: string;
+      /** Password */
+      password?: string | null;
+      /** Monthly Quota Credits */
+      monthly_quota_credits?: number | null;
+      permissions?:
+        | components["schemas"]["SetSubAccountPermissionsRequest"]
+        | null;
     };
     /**
      * CreatedApiKeyResponse
@@ -8305,6 +8920,8 @@ export interface components {
        * @enum {string}
        */
       ratio: "adaptive" | "21:9" | "16:9" | "4:3" | "1:1" | "3:4" | "9:16";
+      /** Resolution */
+      resolution?: ("768P" | "2K") | null;
       /** Project Id */
       project_id?: string | null;
       /** Analysis Version Id */
@@ -8498,15 +9115,30 @@ export interface components {
     };
     /** IndependentCapabilities */
     IndependentCapabilities: {
-      /** Extended Modes Enabled */
+      /**
+       * Extended Modes Enabled
+       * @default true
+       */
       extended_modes_enabled: boolean;
-      /** T2V Enabled */
+      /**
+       * T2V Enabled
+       * @default true
+       */
       t2v_enabled: boolean;
-      /** I2V Enabled */
+      /**
+       * I2V Enabled
+       * @default true
+       */
       i2v_enabled: boolean;
-      /** R2V Enabled */
+      /**
+       * R2V Enabled
+       * @default true
+       */
       r2v_enabled: boolean;
-      /** Last Frame Enabled */
+      /**
+       * Last Frame Enabled
+       * @default true
+       */
       last_frame_enabled: boolean;
       /**
        * L2V Enabled
@@ -8681,34 +9313,6 @@ export interface components {
       /** Count */
       count: number;
     };
-    /** MaterialTagItem */
-    MaterialTagItem: {
-      /** Tag */
-      tag: string;
-      /** Count */
-      count: number;
-    };
-    /** MaterialUsage */
-    MaterialUsage: {
-      /** Task Id */
-      task_id: string;
-      /**
-       * Kind
-       * @enum {string}
-       */
-      kind: "generation" | "oral";
-      /** Status */
-      status: string;
-      /** Created At */
-      created_at: string;
-    };
-    /** MaterialUsagesResponse */
-    MaterialUsagesResponse: {
-      /** Total */
-      total: number;
-      /** Items */
-      items: components["schemas"]["MaterialUsage"][];
-    };
     /** MaterialGroupsResponse */
     MaterialGroupsResponse: {
       /** Items */
@@ -8733,7 +9337,7 @@ export interface components {
       /** Project Title */
       project_title?: string | null;
       /** Tags */
-      tags: string[];
+      tags?: string[];
       /** Width */
       width?: number | null;
       /** Height */
@@ -8741,7 +9345,7 @@ export interface components {
       /** Aspect Ratio */
       aspect_ratio?: number | null;
       /** Audio Purpose */
-      audio_purpose?: "oral_audio" | "voice_clone" | "reference" | null;
+      audio_purpose?: ("oral_audio" | "voice_clone" | "reference") | null;
       /** Title */
       title: string;
       /** Group */
@@ -8817,6 +9421,16 @@ export interface components {
       /** Unavailable Ids */
       unavailable_ids: string[];
     };
+    /**
+     * MaterialTagItem
+     * @description MATERIAL-UX-05：当前用户可见素材的标签聚合计数。
+     */
+    MaterialTagItem: {
+      /** Tag */
+      tag: string;
+      /** Count */
+      count: number;
+    };
     /** MaterialUpdateRequest */
     MaterialUpdateRequest: {
       /** Title */
@@ -8872,6 +9486,33 @@ export interface components {
       upload_required: boolean;
       /** Reused From Asset Id */
       reused_from_asset_id?: string | null;
+    };
+    /**
+     * MaterialUsage
+     * @description MATERIAL-UX-10：引用该素材的一个任务。
+     */
+    MaterialUsage: {
+      /** Task Id */
+      task_id: string;
+      /**
+       * Kind
+       * @enum {string}
+       */
+      kind: "generation" | "oral";
+      /** Status */
+      status: string;
+      /** Created At */
+      created_at: string;
+    };
+    /**
+     * MaterialUsagesResponse
+     * @description MATERIAL-UX-10：单素材按需的使用记录（不做列表批量聚合）。
+     */
+    MaterialUsagesResponse: {
+      /** Total */
+      total: number;
+      /** Items */
+      items: components["schemas"]["MaterialUsage"][];
     };
     /** OralBillingReconcileRequest */
     OralBillingReconcileRequest: {
@@ -9022,6 +9663,13 @@ export interface components {
       pairing_request_id: string;
       /** Status */
       status: string;
+    };
+    /** PasswordChangeResponse */
+    PasswordChangeResponse: {
+      /** Changed */
+      changed: boolean;
+      /** Sessions Revoked */
+      sessions_revoked: number;
     };
     /** PasswordLoginRequest */
     PasswordLoginRequest: {
@@ -9422,6 +10070,8 @@ export interface components {
        * @enum {string}
        */
       ratio: "adaptive" | "21:9" | "16:9" | "4:3" | "1:1" | "3:4" | "9:16";
+      /** Resolution */
+      resolution?: ("768P" | "2K") | null;
       /** Project Id */
       project_id?: string | null;
       /** Analysis Version Id */
@@ -9902,15 +10552,6 @@ export interface components {
       /** Replace Device Id */
       replace_device_id: string;
     };
-    /** ResetSubAccountPasswordRequest */
-    ResetSubAccountPasswordRequest: {
-      /** Password */
-      password: string;
-      /** Reason */
-      reason: string;
-      /** Request Id */
-      request_id?: string | null;
-    };
     /** RuntimeSettingsRequest */
     RuntimeSettingsRequest: {
       /** Max Generation Count Per Batch */
@@ -10053,7 +10694,7 @@ export interface components {
     /** ScriptFromAudioResult */
     ScriptFromAudioResult: {
       /** Text */
-      text: string;
+      text?: string | null;
       /** Duration Sec */
       duration_sec?: number | null;
       /** Language */
@@ -10072,6 +10713,12 @@ export interface components {
       /** Attempt */
       attempt: number;
       result: components["schemas"]["ScriptFromAudioResult"] | null;
+      viral_source?: components["schemas"]["ScriptFromAudioViralSource"] | null;
+      /**
+       * Copy Claim Required
+       * @default false
+       */
+      copy_claim_required: boolean;
       /** Error Code */
       error_code: string | null;
       /** Error Message */
@@ -10086,6 +10733,16 @@ export interface components {
       started_at: string | null;
       /** Completed At */
       completed_at: string | null;
+    };
+    /**
+     * ScriptFromAudioViralSource
+     * @description 任务关联的爆款视频身份；客户端凭它回「获取文案」接口取正文.
+     */
+    ScriptFromAudioViralSource: {
+      /** Platform */
+      platform: string;
+      /** Video Id */
+      video_id: string;
     };
     /** ScriptRequest */
     ScriptRequest: {
@@ -10216,6 +10873,26 @@ export interface components {
       /** Selected Asset Ids */
       selected_asset_ids?: string[] | null;
     };
+    /** SessionEventItem */
+    SessionEventItem: {
+      /** Occurred At */
+      occurred_at: string;
+      /** Event */
+      event: string;
+      /** Device Name */
+      device_name: string | null;
+      /** Platform */
+      platform: string | null;
+      /** Reason */
+      reason: string | null;
+    };
+    /** SessionHistoryResponse */
+    SessionHistoryResponse: {
+      /** Items */
+      items: components["schemas"]["SessionEventItem"][];
+      /** Total */
+      total: number;
+    };
     /** SessionRevokeRequest */
     SessionRevokeRequest: {
       /**
@@ -10231,10 +10908,27 @@ export interface components {
       /** Session Epoch */
       session_epoch: number;
     };
+    /**
+     * SessionRevokeResponse
+     * @description 被下线的在线会话数（0 = 本来就没有在线会话）。
+     */
+    SessionRevokeResponse: {
+      /** Revoked Sessions */
+      revoked_sessions: number;
+    };
     /** SetSubAccountPasswordRequest */
     SetSubAccountPasswordRequest: {
       /** Password */
       password: string;
+    };
+    /** SetSubAccountPermissionsRequest */
+    SetSubAccountPermissionsRequest: {
+      /** Businesses */
+      businesses: string[];
+      /** Allow Api Keys */
+      allow_api_keys: boolean;
+      /** Allow Publish Accounts */
+      allow_publish_accounts: boolean;
     };
     /** SetSubAccountQuotaRequest */
     SetSubAccountQuotaRequest: {
@@ -10903,6 +11597,15 @@ export interface components {
         [key: string]: unknown;
       }[];
     };
+    /** UpdateSubAccountRequest */
+    UpdateSubAccountRequest: {
+      /** Display Name */
+      display_name?: string | null;
+      /** Is Active */
+      is_active?: boolean | null;
+      /** Account Type */
+      account_type?: ("SUB" | "SUB_ADMIN") | null;
+    };
     /** UploadIntentRequest */
     UploadIntentRequest: {
       /** Project Id */
@@ -11028,6 +11731,35 @@ export interface components {
       /** Fps */
       fps?: number | null;
     };
+    /** ViralAdminSearchRequest */
+    ViralAdminSearchRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /** Keyword */
+      keyword: string;
+      /**
+       * Platform
+       * @default douyin
+       * @enum {string}
+       */
+      platform: "douyin" | "wechat_channels";
+      /**
+       * Time Range
+       * @default week
+       * @enum {string}
+       */
+      time_range: "all" | "day" | "week" | "half_year";
+      /** Cursor */
+      cursor?: string | null;
+    };
     /** ViralAvailabilityResponse */
     ViralAvailabilityResponse: {
       /**
@@ -11061,6 +11793,115 @@ export interface components {
        */
       status: "AVAILABLE" | "HIDDEN" | "UNAVAILABLE";
     };
+    /**
+     * ViralBatchCurationRequest
+     * @description 批量策展：一次请求对多条视频做同一动作（单事务 + 一条幂等键）.
+     *
+     *     语义与单条完全一致（同样的归档与封面门槛），只是把 N 次点击合成一次
+     *     审计动作；批量里任何一条不满足条件就整批取消，避免「删了一半」这种
+     *     说不清的状态。
+     */
+    ViralBatchCurationRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /**
+       * Action
+       * @enum {string}
+       */
+      action: "feature" | "unfeature" | "delete";
+      /** Items */
+      items: components["schemas"]["ViralBatchTarget"][];
+    };
+    /** ViralBatchTarget */
+    ViralBatchTarget: {
+      /**
+       * Platform
+       * @enum {string}
+       */
+      platform: "douyin" | "wechat_channels";
+      /** Video Id */
+      video_id: string;
+    };
+    /** ViralCacheReclaimRequest */
+    ViralCacheReclaimRequest: {
+      /** Platform */
+      platform: string;
+      /** Videoids */
+      videoIds: string[];
+    };
+    /** ViralCacheReclaimResponse */
+    ViralCacheReclaimResponse: {
+      /** Platform */
+      platform: string;
+      /** Reclaim */
+      reclaim: string[];
+    };
+    /**
+     * ViralCopyBilling
+     * @description 获取文案的计费回执（服务端权威值，客户端只展示）.
+     */
+    ViralCopyBilling: {
+      /** Charged */
+      charged: number;
+      /** Unit */
+      unit: string;
+      /**
+       * Deduped
+       * @default false
+       */
+      deduped: boolean;
+      /**
+       * Billable
+       * @default true
+       */
+      billable: boolean;
+    };
+    /** ViralCopyClaimRequest */
+    ViralCopyClaimRequest: {
+      /** Platform */
+      platform: string;
+      /** Videoid */
+      videoId: string;
+    };
+    /** ViralCopyClaimResponse */
+    ViralCopyClaimResponse: {
+      /** Text */
+      text: string | null;
+      /** Updatedat */
+      updatedAt: string | null;
+      billing: components["schemas"]["ViralCopyBilling"];
+    };
+    /** ViralCopyExtractionResponse */
+    ViralCopyExtractionResponse: {
+      /** Text */
+      text?: string | null;
+      /** Updatedat */
+      updatedAt?: string | null;
+      billing?: components["schemas"]["ViralCopyBilling"] | null;
+      /** Projectid */
+      projectId?: string | null;
+      /** Sourceassetid */
+      sourceAssetId?: string | null;
+      /** Taskid */
+      taskId?: string | null;
+    };
+    /** ViralCopyStatusResponse */
+    ViralCopyStatusResponse: {
+      /** Available */
+      available: boolean;
+      /** Updatedat */
+      updatedAt: string | null;
+      /** Purchased */
+      purchased: boolean;
+    };
     /** ViralCurationRequest */
     ViralCurationRequest: {
       /**
@@ -11078,6 +11919,59 @@ export interface components {
        * @enum {string}
        */
       action: "feature" | "unfeature" | "delete";
+    };
+    /**
+     * ViralDetailBilling
+     * @description 查看详情的计费回执（服务端权威值，客户端只展示）.
+     */
+    ViralDetailBilling: {
+      /** Charged */
+      charged: number;
+      /** Unit */
+      unit: string;
+      /**
+       * Deduped
+       * @default false
+       */
+      deduped: boolean;
+      /**
+       * Billable
+       * @default true
+       */
+      billable: boolean;
+    };
+    /** ViralDetailRequest */
+    ViralDetailRequest: {
+      /** Platform */
+      platform: string;
+      /** Videoid */
+      videoId: string;
+    };
+    /** ViralDetailViewResponse */
+    ViralDetailViewResponse: {
+      item: components["schemas"]["ViralVideoItem"];
+      billing: components["schemas"]["ViralDetailBilling"];
+    };
+    /** ViralDiscoveriesResponse */
+    ViralDiscoveriesResponse: {
+      /** Date */
+      date: string;
+      /** Total */
+      total: number;
+      /** Items */
+      items: components["schemas"]["ViralDiscoveryItem"][];
+    };
+    /** ViralDiscoveryItem */
+    ViralDiscoveryItem: {
+      /** Platform */
+      platform: string;
+      /** Videoid */
+      videoId: string;
+      /** Keyword */
+      keyword: string;
+      /** Searchedat */
+      searchedAt: string;
+      video: components["schemas"]["ViralVideoItem"] | null;
     };
     /** ViralFavoriteMutationResponse */
     ViralFavoriteMutationResponse: {
@@ -11317,6 +12211,97 @@ export interface components {
       /** Collection Interval Days */
       collection_interval_days?: (1 | 7) | null;
     };
+    /** ViralSearchBilling */
+    ViralSearchBilling: {
+      /** Charged */
+      charged: number;
+      /** Unit */
+      unit: string;
+    };
+    /** ViralSearchRefreshBilling */
+    ViralSearchRefreshBilling: {
+      /** Charged */
+      charged: number;
+      /** Unit */
+      unit: string;
+    };
+    /** ViralSearchRefreshRequest */
+    ViralSearchRefreshRequest: {
+      /** Platform */
+      platform: string;
+      /** Videoid */
+      videoId: string;
+    };
+    /** ViralSearchRefreshResponse */
+    ViralSearchRefreshResponse: {
+      /** Video */
+      video: {
+        [key: string]: unknown;
+      };
+      billing: components["schemas"]["ViralSearchRefreshBilling"];
+    };
+    /** ViralSearchRequest */
+    ViralSearchRequest: {
+      /** Keyword */
+      keyword: string;
+      /**
+       * Platform
+       * @default douyin
+       * @enum {string}
+       */
+      platform: "douyin" | "wechat_channels";
+      /**
+       * Time Range
+       * @default week
+       * @enum {string}
+       */
+      time_range: "all" | "day" | "week" | "half_year";
+      /** Cursor */
+      cursor?: string | null;
+    };
+    /** ViralSearchResponse */
+    ViralSearchResponse: {
+      /** Items */
+      items: components["schemas"]["ViralVideoItem"][];
+      /** Cursor */
+      cursor: string | null;
+      /** Hasmore */
+      hasMore: boolean;
+      billing: components["schemas"]["ViralSearchBilling"];
+    };
+    /** ViralSourceBilling */
+    ViralSourceBilling: {
+      /** Charged */
+      charged: number;
+      /** Unit */
+      unit: string;
+    };
+    /** ViralSourceRequest */
+    ViralSourceRequest: {
+      /** Platform */
+      platform: string;
+      /** Videoid */
+      videoId: string;
+    };
+    /** ViralSourceResponse */
+    ViralSourceResponse: {
+      /** Platform */
+      platform: string;
+      /** Videoid */
+      videoId: string;
+      /** Fullurl */
+      fullUrl: string;
+      /** Decodekey */
+      decodeKey?: string | null;
+      /**
+       * Contenttype
+       * @default video/mp4
+       */
+      contentType: string;
+      /** Expiresat */
+      expiresAt: string;
+      billing: components["schemas"]["ViralSourceBilling"];
+    };
     /** ViralStatisticsRequest */
     ViralStatisticsRequest: {
       /** Videoids */
@@ -11384,11 +12369,21 @@ export interface components {
        */
       isFavorite: boolean;
       /**
+       * Hascopy
+       * @default false
+       */
+      hasCopy: boolean;
+      /**
        * Availability
        * @default available
        * @enum {string}
        */
       availability: "available" | "hidden" | "unavailable";
+      /**
+       * Detailcharged
+       * @default false
+       */
+      detailCharged: boolean;
     };
     /** VoiceCloneRequest */
     VoiceCloneRequest: {
@@ -11430,6 +12425,12 @@ export interface components {
       limit: number;
       /** Offset */
       offset: number;
+      /** Sub Account Summary */
+      sub_account_summary?:
+        | {
+            [key: string]: string | number;
+          }[]
+        | null;
     };
     /**
      * WalletTransactionPricing
@@ -11475,7 +12476,13 @@ export interface components {
        * Type
        * @enum {string}
        */
-      type: "CHARGE" | "RESERVE" | "SETTLE" | "RELEASE" | "CONVERSION";
+      type:
+        | "CHARGE"
+        | "RESERVE"
+        | "SETTLE"
+        | "RELEASE"
+        | "CONVERSION"
+        | "REFUND";
       /** Available Delta */
       available_delta: number;
       /** Reserved Delta */
@@ -11555,50 +12562,6 @@ export interface components {
       key?: string | null;
       /** Enabled Channels */
       enabled_channels: ("alipay" | "wxpay")[];
-    };
-    /** CreateSubAccountRequest */
-    app__customer_sub_account_routes__CreateSubAccountRequest: {
-      /** Username */
-      username: string;
-      /** Display Name */
-      display_name: string;
-      /** Password */
-      password?: string | null;
-      /** Monthly Quota Credits */
-      monthly_quota_credits?: number | null;
-    };
-    /** UpdateSubAccountRequest */
-    app__customer_sub_account_routes__UpdateSubAccountRequest: {
-      /** Display Name */
-      display_name?: string | null;
-      /** Is Active */
-      is_active?: boolean | null;
-    };
-    /** CreateSubAccountRequest */
-    app__sub_account_routes__CreateSubAccountRequest: {
-      /** Username */
-      username: string;
-      /** Display Name */
-      display_name: string;
-      /** Parent User Id */
-      parent_user_id: string;
-      /** Initial Password */
-      initial_password?: string | null;
-      /** Reason */
-      reason: string;
-      /** Request Id */
-      request_id?: string | null;
-    };
-    /** UpdateSubAccountRequest */
-    app__sub_account_routes__UpdateSubAccountRequest: {
-      /** Display Name */
-      display_name?: string | null;
-      /** Is Active */
-      is_active?: boolean | null;
-      /** Reason */
-      reason: string;
-      /** Request Id */
-      request_id?: string | null;
     };
   };
   responses: never;
@@ -13753,8 +14716,8 @@ export interface operations {
         person_id?: string | null;
         project_id?: string | null;
         tag?: string | null;
-        orientation?: "portrait" | "landscape" | "square" | null;
-        trashed?: boolean | null;
+        orientation?: ("portrait" | "landscape" | "square") | null;
+        trashed?: boolean;
         page?: number;
         page_size?: number;
       };
@@ -13819,6 +14782,40 @@ export interface operations {
       };
     };
   };
+  read_material_usages_api_studio_materials__material_id__usages_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
+      };
+      path: {
+        material_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["MaterialUsagesResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   read_material_tags_api_studio_materials_tags_get: {
     parameters: {
       query?: never;
@@ -13838,38 +14835,6 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["MaterialTagItem"][];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  read_material_usages_api_studio_materials__material_id__usages_get: {
-    parameters: {
-      query?: never;
-      header?: {
-        "X-Dev-User-Id"?: string | null;
-        Authorization?: string | null;
-      };
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["MaterialUsagesResponse"];
         };
       };
       /** @description Validation Error */
@@ -14772,6 +15737,35 @@ export interface operations {
       };
     };
   };
+  delete_oral_task_record_api_oral_tasks__task_id__delete: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        task_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   refresh_oral_generation_task_api_oral_tasks__task_id__refresh_post: {
     parameters: {
       query?: never;
@@ -15530,7 +16524,14 @@ export interface operations {
       query?: {
         user_id?: string | null;
         type?:
-          | ("CHARGE" | "RESERVE" | "SETTLE" | "RELEASE" | "CONVERSION")
+          | (
+              | "CHARGE"
+              | "RESERVE"
+              | "SETTLE"
+              | "RELEASE"
+              | "CONVERSION"
+              | "REFUND"
+            )
           | null;
         username?: string | null;
         created_from?: string | null;
@@ -15832,6 +16833,43 @@ export interface operations {
       };
     };
   };
+  paid_test_control_provider_api_control_settings_providers__provider__paid_test_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Control-Proxy-Token"?: string | null;
+      };
+      path: {
+        provider: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ControlProviderPaidTestRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ProviderTestResult"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   update_control_runtime_settings_api_control_settings_runtime_patch: {
     parameters: {
       query?: never;
@@ -15981,7 +17019,14 @@ export interface operations {
       query?: {
         user_id?: string | null;
         type?:
-          | ("CHARGE" | "RESERVE" | "SETTLE" | "RELEASE" | "CONVERSION")
+          | (
+              | "CHARGE"
+              | "RESERVE"
+              | "SETTLE"
+              | "RELEASE"
+              | "CONVERSION"
+              | "REFUND"
+            )
           | null;
         username?: string | null;
         created_from?: string | null;
@@ -17604,7 +18649,14 @@ export interface operations {
     parameters: {
       query?: {
         type?:
-          | ("CHARGE" | "RESERVE" | "SETTLE" | "RELEASE" | "CONVERSION")
+          | (
+              | "CHARGE"
+              | "RESERVE"
+              | "SETTLE"
+              | "RELEASE"
+              | "CONVERSION"
+              | "REFUND"
+            )
           | null;
         username?: string | null;
         created_from?: string | null;
@@ -17901,10 +18953,46 @@ export interface operations {
       };
     };
   };
+  collect_viral_now_api_control_viral_collect_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AdminWriteContract"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   read_collected_viral_videos_api_control_viral_videos_get: {
     parameters: {
       query?: {
         platform?: ("douyin" | "wechat_channels") | null;
+        status?: ("ready" | "pending" | "failed" | "featured") | null;
         query?: string;
         offset?: number;
         limit?: number;
@@ -17914,6 +19002,100 @@ export interface operations {
       cookie?: never;
     };
     requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_viral_search_discoveries_api_control_viral_discoveries_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+    };
+  };
+  read_viral_discovery_details_api_control_viral_discoveries_detail_get: {
+    parameters: {
+      query?: {
+        date?: string | null;
+        keyword?: string | null;
+        platform?: ("douyin" | "wechat_channels") | null;
+        offset?: number;
+        limit?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  search_viral_videos_for_admin_api_control_viral_search_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ViralAdminSearchRequest"];
+      };
+    };
     responses: {
       /** @description Successful Response */
       200: {
@@ -18080,6 +19262,63 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  curate_collected_viral_videos_batch_api_control_viral_videos_curation_batch_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ViralBatchCurationRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_viral_library_overview_api_control_viral_overview_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
         };
       };
     };
@@ -18601,7 +19840,7 @@ export interface operations {
     };
     requestBody: {
       content: {
-        "application/json": components["schemas"]["app__customer_sub_account_routes__CreateSubAccountRequest"];
+        "application/json": components["schemas"]["CreateSubAccountRequest"];
       };
     };
     responses: {
@@ -18671,7 +19910,7 @@ export interface operations {
     };
     requestBody: {
       content: {
-        "application/json": components["schemas"]["app__customer_sub_account_routes__UpdateSubAccountRequest"];
+        "application/json": components["schemas"]["UpdateSubAccountRequest"];
       };
     };
     responses: {
@@ -18771,6 +20010,127 @@ export interface operations {
       };
     };
   };
+  set_sub_account_permissions_api_customer_sub_accounts__sub_account_id__permissions_put: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        sub_account_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["SetSubAccountPermissionsRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  change_password_api_customer_account_password_change_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ChangePasswordRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["PasswordChangeResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  revoke_all_sessions_api_customer_sessions_revoke_all_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["SessionRevokeResponse"];
+        };
+      };
+    };
+  };
+  session_history_api_customer_sessions_history_get: {
+    parameters: {
+      query?: {
+        limit?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["SessionHistoryResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   list_customer_api_keys_api_customer_api_keys_get: {
     parameters: {
       query?: never;
@@ -18820,6 +20180,26 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  revoke_all_customer_api_keys_api_customer_api_keys_delete: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["BulkRevokeResponse"];
         };
       };
     };
@@ -19799,6 +21179,73 @@ export interface operations {
           | ("session" | "api_key" | "internal" | "historical")
           | null;
         transaction_type?:
+          | (
+              | "CHARGE"
+              | "RESERVE"
+              | "SETTLE"
+              | "RELEASE"
+              | "CONVERSION"
+              | "REFUND"
+            )
+          | null;
+        business?:
+          | (
+              | "video"
+              | "oral"
+              | "recharge"
+              | "character"
+              | "first_frame"
+              | "analysis"
+              | "rewrite"
+              | "asr"
+              | "link_resolution"
+              | "prompt_optimize"
+              | "avatar_clone"
+              | "voice_clone"
+              | "viral_data"
+            )
+          | null;
+        started_at?: string | null;
+        ended_at?: string | null;
+        sub_account_id?: string | null;
+        group_by_sub_account?: boolean;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["WalletTransactionPage"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  export_customer_wallet_transactions_csv_api_customer_wallet_transactions_export_get: {
+    parameters: {
+      query?: {
+        limit?: number;
+        offset?: number;
+        token_group_id?: string | null;
+        auth_source?:
+          | ("session" | "api_key" | "internal" | "historical")
+          | null;
+        transaction_type?:
           | ("CHARGE" | "RESERVE" | "SETTLE" | "RELEASE" | "CONVERSION")
           | null;
         business?:
@@ -19820,6 +21267,36 @@ export interface operations {
           | null;
         started_at?: string | null;
         ended_at?: string | null;
+        sub_account_id?: string | null;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  customer_consumption_by_business_api_customer_wallet_consumption_by_business_get: {
+    parameters: {
+      query?: {
+        days?: number;
       };
       header?: never;
       path?: never;
@@ -19833,7 +21310,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["WalletTransactionPage"];
+          "application/json": components["schemas"]["ConsumptionByBusinessResponse"];
         };
       };
       /** @description Validation Error */
@@ -21067,6 +22544,77 @@ export interface operations {
       };
     };
   };
+  audit_local_viral_cache_api_viral_videos_cache_reclaim_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ViralCacheReclaimRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ViralCacheReclaimResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  fetch_viral_video_source_api_viral_videos_source_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "Idempotency-Key"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ViralSourceRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ViralSourceResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   get_viral_cover_api_viral_covers__platform___video_id__get: {
     parameters: {
       query?: never;
@@ -21157,6 +22705,72 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["ViralVideoItem"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  open_viral_video_detail_api_viral_videos_detail_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ViralDetailRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ViralDetailViewResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  claim_viral_video_copy_api_viral_videos_copy_claim_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ViralCopyClaimRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ViralCopyClaimResponse"];
         };
       };
       /** @description Validation Error */
@@ -21296,6 +22910,180 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["ViralImportTaskResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  extract_viral_video_copy_api_viral_videos_copy_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "Idempotency-Key"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "multipart/form-data": components["schemas"]["Body_extract_viral_video_copy_api_viral_videos_copy_post"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ViralCopyExtractionResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  search_viral_videos_api_viral_search_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "Idempotency-Key"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ViralSearchRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ViralSearchResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  get_viral_search_copy_api_viral_search_copy_get: {
+    parameters: {
+      query: {
+        videoId: string;
+        platform?: "douyin" | "wechat_channels";
+      };
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ViralCopyStatusResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_viral_search_discoveries_api_viral_search_discoveries_get: {
+    parameters: {
+      query?: {
+        date?: string | null;
+      };
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ViralDiscoveriesResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  refresh_viral_video_api_viral_search_refresh_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "Idempotency-Key"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ViralSearchRefreshRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ViralSearchRefreshResponse"];
         };
       };
       /** @description Validation Error */
@@ -23629,7 +25417,10 @@ export interface operations {
   };
   delete_identity_api_simple_characters_identities__identity_id__delete: {
     parameters: {
-      query?: never;
+      query?: {
+        asset_mode?: "delete" | "keep";
+        remove_project_refs?: boolean;
+      };
       header?: never;
       path: {
         identity_id: string;
@@ -23678,182 +25469,6 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["SimpleCharacterResponse"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  list_sub_accounts_api_admin_sub_accounts_get: {
-    parameters: {
-      query: {
-        /** @description Master account ID */
-        parent_user_id: string;
-      };
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            [key: string]: unknown;
-          };
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  create_sub_account_api_admin_sub_accounts_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["app__sub_account_routes__CreateSubAccountRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            [key: string]: unknown;
-          };
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  delete_sub_account_api_admin_sub_accounts__sub_account_id__delete: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        sub_account_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            [key: string]: unknown;
-          };
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  update_sub_account_api_admin_sub_accounts__sub_account_id__patch: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        sub_account_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["app__sub_account_routes__UpdateSubAccountRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            [key: string]: unknown;
-          };
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  reset_sub_account_password_api_admin_sub_accounts__sub_account_id__password_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        sub_account_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["ResetSubAccountPasswordRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            [key: string]: unknown;
-          };
         };
       };
       /** @description Validation Error */

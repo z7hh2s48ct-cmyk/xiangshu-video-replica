@@ -1860,6 +1860,49 @@ describe("提取文案任务绑定", () => {
       vi.useRealTimers();
     }
   });
+  it("爆款任务成功时轮询返回 null 正文，由调用方凭 claim 回执交付", async () => {
+    vi.useFakeTimers();
+    try {
+      api.createScriptFromAudioTask.mockResolvedValue({ id: "audio-gated" });
+      api.getScriptFromAudioTask.mockResolvedValue({
+        id: "audio-gated",
+        status: "SUCCEEDED",
+        result: { text: null, duration_sec: 12.5, language: "zh" },
+        copy_claim_required: true,
+        viral_source: { platform: "douyin", video_id: "v-1" },
+      });
+      const result = live.awaitScriptFromAudioTask("audio-gated");
+      await vi.advanceTimersByTimeAsync(2000);
+      await expect(result).resolves.toEqual({
+        text: null,
+        taskId: "audio-gated",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("latest 恢复映射携带爆款身份与 claim 门禁标记", async () => {
+    api.getLatestScriptFromAudioTask.mockResolvedValue({
+      id: "audio-viral",
+      status: "SUCCEEDED",
+      result: { text: null },
+      source_asset_id: "asset-a",
+      copy_claim_required: true,
+      viral_source: { platform: "douyin", video_id: "v-9" },
+    });
+    await expect(live.loadLatestScriptFromUpload("project-a")).resolves.toEqual(
+      {
+        id: "audio-viral",
+        status: "SUCCEEDED",
+        result: { text: null },
+        errorMessage: undefined,
+        sourceAssetId: "asset-a",
+        viralSource: { platform: "douyin", videoId: "v-9" },
+        copyClaimRequired: true,
+      },
+    );
+  });
   it("提供只读 latest 恢复合同，保留来源资产与错误", async () => {
     api.getLatestScriptFromAudioTask.mockResolvedValue({
       id: "audio-a",
@@ -1875,6 +1918,9 @@ describe("提取文案任务绑定", () => {
         result: null,
         errorMessage: "音轨错误",
         sourceAssetId: "asset-a",
+        // 爆款任务正文按 claim 下发：恢复映射要带上视频身份与门禁标记。
+        viralSource: undefined,
+        copyClaimRequired: false,
       },
     );
   });

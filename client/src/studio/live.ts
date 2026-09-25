@@ -1670,11 +1670,13 @@ export async function loadPersonAssets(
 }
 
 /** 提取文案管线（script-from-audio）：提交任务 → 每 2 秒轮询 → 终态返回。
- * 成功返回转写全文；失败抛出带服务端文案的 Error（含 SUBMISSION_UNCERTAIN）。 */
+ * 成功返回转写结果；爆款任务的正文为 null——服务端任务接口不下发正文，调用方要凭
+ * 任务的 viral_source 回「获取文案」claim 取（那里才是交付与计费点）。失败抛出带
+ * 服务端文案的 Error（含 SUBMISSION_UNCERTAIN）。 */
 export async function extractScriptFromUpload(
   projectId: string,
   assetId: string,
-): Promise<{ text: string; taskId: string }> {
+): Promise<{ text: string | null; taskId: string }> {
   const submitted = await createScriptFromAudioTask(
     projectId,
     assetId,
@@ -1683,16 +1685,17 @@ export async function extractScriptFromUpload(
   return awaitScriptFromAudioTask(submitted.id);
 }
 
-/** 轮询既有提取任务直到终态（2s × 150 = 5 分钟上限，长音频异步转写兜底）。 */
+/** 轮询既有提取任务直到终态（2s × 150 = 5 分钟上限，长音频异步转写兜底）。
+ * 爆款任务成功时 text 为 null（正文按 claim 回执下发），见 extractScriptFromUpload。 */
 export async function awaitScriptFromAudioTask(
   taskId: string,
-): Promise<{ text: string; taskId: string }> {
+): Promise<{ text: string | null; taskId: string }> {
   const maxAttempts = 150;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     await new Promise((resolve) => window.setTimeout(resolve, 2000));
     const task = await getScriptFromAudioTask(taskId);
     if (task.status === "SUCCEEDED" && task.result) {
-      return { text: task.result.text, taskId: task.id };
+      return { text: task.result.text ?? null, taskId: task.id };
     }
     if (task.status === "FAILED" || task.status === "SUBMISSION_UNCERTAIN") {
       throw new Error(task.error_message || "文案提取失败，请稍后重试。");
@@ -1771,8 +1774,8 @@ export async function startViralCopyExtraction(video: {
  * 转写完成后取回文案：这里才是首提取者的交付与计费点.
  *
  * 他已为这次转写付过 ASR 按秒费用，但拿到手的文案本身同样要付一次「获取文案」费
- * （已拍板口径：谁拿到文案谁付费，没有双重标准）。未命中缓存（例如服务端还没写完）
- * 返回 null，调用方以任务结果兜底。
+ * （已拍板口径：谁拿到文案谁付费，没有双重标准）。未命中缓存或获取失败返回 null——
+ * 服务端任务接口不再兜底下发正文，调用方提示用户重新提取补齐。
  */
 export async function claimExtractedViralCopy(
   platformKey: string,
@@ -1791,6 +1794,14 @@ export async function loadLatestScriptFromUpload(projectId: string) {
         result: task.result,
         errorMessage: task.error_message ?? undefined,
         sourceAssetId: task.source_asset_id ?? undefined,
+        // 爆款任务正文按 claim 下发：恢复轮询要凭这份身份回「获取文案」取正文。
+        viralSource: task.viral_source
+          ? {
+              platform: task.viral_source.platform,
+              videoId: task.viral_source.video_id,
+            }
+          : undefined,
+        copyClaimRequired: task.copy_claim_required ?? false,
       }
     : null;
 }
