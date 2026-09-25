@@ -174,7 +174,8 @@ def refresh_viral_video(
             )
             source_id = f"viral-refresh:{actor.id}:{key}"
             fingerprint = f"{payload.platform}:{payload.videoId}:{key}"
-            # 预留计费
+            # 预留计费。只有 PENDING（在途重试）复用轮次；SUCCEEDED 也开
+            # 新一轮，保证每一次真实外呼都对应一次扣费。
             latest = conn.execute(
                 "SELECT billing_round, state FROM billing_operations "
                 "WHERE user_id=%s AND service=%s "
@@ -184,7 +185,7 @@ def refresh_viral_video(
             billing_round = 1
             if latest is not None:
                 billing_round = int(latest["billing_round"])
-                if str(latest["state"]) in {"FAILED", "CANCELLED"}:
+                if str(latest["state"]) != "PENDING":
                     billing_round += 1
             # 返回值按仓库既有惯例丢弃：结算走 source_id + service 定位
             # （见 usage_billing.finish_source），与其余 10 处调用点一致。

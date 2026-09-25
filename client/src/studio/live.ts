@@ -1158,6 +1158,7 @@ export function studioVideoFromViral(item: ViralVideoItem): StudioVideo {
     tags: item.tags,
     homepageFeatured: Boolean(item.homepageFeatured),
     hasPlayableAudio: item.hasPlayableAudio,
+    hasCopy: item.hasCopy === true,
     playUrl: item.playUrl,
   };
 }

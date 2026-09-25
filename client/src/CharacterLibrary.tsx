@@ -97,6 +97,11 @@ export function CharacterLibrary({
   const [editingName, setEditingName] = useState("");
   const [busyRenameId, setBusyRenameId] = useState("");
   const [busyDeleteId, setBusyDeleteId] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<SimpleLibraryEntry | null>(
+    null,
+  );
+  const [deleteMode, setDeleteMode] = useState<"purge" | "keep">("purge");
+  const [deleteRemoveProjectRefs, setDeleteRemoveProjectRefs] = useState(false);
   const [busyRegenerateId, setBusyRegenerateId] = useState("");
   const [lightboxId, setLightboxId] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -509,21 +514,35 @@ export function CharacterLibrary({
     }
   }
 
-  async function handleDelete(entry: SimpleLibraryEntry) {
-    const confirmed = window.confirm(
-      `删除“${entry.display_name}”？该人物的授权图片、五视图拼合图与全部视角图将一并删除，且无法恢复。`,
-    );
-    if (!confirmed) {
+  // 删除确认弹窗：默认连同资产彻底删除；「保留素材」把用户见过的图片与成片
+  // 转存素材库「我的上传」。项目选用记录只有显式勾选才会被释放。
+  function requestDelete(entry: SimpleLibraryEntry) {
+    setDeleteMode("purge");
+    setDeleteRemoveProjectRefs(false);
+    setDeleteTarget(entry);
+  }
+
+  async function confirmDelete() {
+    const entry = deleteTarget;
+    if (!entry || busyDeleteId !== "") {
       return;
     }
     setBusyDeleteId(entry.identity_id);
     setError("");
     try {
-      await deleteSimpleCharacterIdentity(entry.identity_id);
+      await deleteSimpleCharacterIdentity(entry.identity_id, {
+        keepAssets: deleteMode === "keep",
+        removeProjectRefs: deleteRemoveProjectRefs,
+      });
       setEntries((current) =>
         current.filter((item) => item.identity_id !== entry.identity_id),
       );
-      setMessage(`人物“${entry.display_name}”已删除。`);
+      setMessage(
+        deleteMode === "keep"
+          ? `人物“${entry.display_name}”已删除，素材已保留在素材库。`
+          : `人物“${entry.display_name}”已删除。`,
+      );
+      setDeleteTarget(null);
       onChanged?.();
     } catch (deleteError) {
       setError(errorMessage(deleteError, "删除人物失败，请稍后重试。"));
@@ -776,7 +795,7 @@ export function CharacterLibrary({
                               aria-label={`删除人物 ${entry.display_name}`}
                               className="secondary-button"
                               disabled={busyDeleteId !== ""}
-                              onClick={() => void handleDelete(entry)}
+                              onClick={() => requestDelete(entry)}
                               type="button"
                             >
                               {busyDeleteId === entry.identity_id
@@ -818,6 +837,106 @@ export function CharacterLibrary({
           onSceneCreated={onChanged}
           previewUrls={previewUrls}
         />
+      ) : null}
+      {deleteTarget ? (
+        // biome-ignore lint/a11y/noStaticElementInteractions: 点遮罩关闭是鼠标增强；键盘用户由下方取消按钮兜底。
+        // biome-ignore lint/a11y/useKeyWithClickEvents: 键盘用户走弹窗内按钮完成取消或确认。
+        <div
+          className="character-lightbox"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              setDeleteTarget(null);
+            }
+          }}
+        >
+          <div
+            aria-label={`删除人物 ${deleteTarget.display_name}`}
+            aria-modal="true"
+            className="character-lightbox__dialog"
+            role="dialog"
+          >
+            <div className="character-lightbox__head">
+              <div>
+                <span className="character-detail__eyebrow">删除人物</span>
+                <h3 className="character-lightbox__title">
+                  {deleteTarget.display_name}
+                </h3>
+                <p>此操作不可撤销，请选择关联素材的处理方式。</p>
+              </div>
+              <button
+                aria-label="取消删除"
+                className="secondary-button"
+                onClick={() => setDeleteTarget(null)}
+                type="button"
+              >
+                取消
+              </button>
+            </div>
+            <fieldset
+              className="character-delete-options"
+              disabled={busyDeleteId !== ""}
+            >
+              <label>
+                <input
+                  type="radio"
+                  name="character-delete-mode"
+                  checked={deleteMode === "purge"}
+                  onChange={() => setDeleteMode("purge")}
+                />
+                <strong>连同资产一起删除</strong>
+                <small>
+                  授权图片、五视图、场景造型、口播分身与声音档案全部删除
+                </small>
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name="character-delete-mode"
+                  checked={deleteMode === "keep"}
+                  onChange={() => setDeleteMode("keep")}
+                />
+                <strong>只删除人物，保留素材</strong>
+                <small>
+                  形象照片、场景照、口播成片与声音样本转存素材库「我的上传」
+                </small>
+              </label>
+            </fieldset>
+            <label className="character-delete-project-refs">
+              <input
+                aria-label="同时移除项目选用记录"
+                checked={deleteRemoveProjectRefs}
+                disabled={busyDeleteId !== ""}
+                type="checkbox"
+                onChange={(event) =>
+                  setDeleteRemoveProjectRefs(event.target.checked)
+                }
+              />
+              <span>
+                若该人物已被项目选用，同时移除项目选用记录
+                （项目会回到「未选择人物」状态，可重新选择）
+              </span>
+            </label>
+            <div className="character-delete-actions">
+              <button
+                className="secondary-button"
+                onClick={() => setDeleteTarget(null)}
+                type="button"
+              >
+                取消
+              </button>
+              <button
+                className="primary-button"
+                disabled={busyDeleteId !== ""}
+                onClick={() => void confirmDelete()}
+                type="button"
+              >
+                {busyDeleteId === deleteTarget.identity_id
+                  ? "正在删除…"
+                  : "确认删除"}
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
     </section>
   );

@@ -4,7 +4,7 @@
     "targets": ["app", "dmg"],
     "resources": [],
     "icon": ["icons/icon.icns"],
-    "longDescription": "连接客户云服务的短视频复刻 macOS 桌面端。",
+    "longDescription": "连接客户云服务的众墅之家 AI 爆款视频工具 macOS 桌面端。",
     "macOS": {
       "signingIdentity": "-"
     }

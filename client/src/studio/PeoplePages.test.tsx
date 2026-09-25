@@ -373,12 +373,46 @@ describe("PeoplePages", () => {
     expect(text).toMatch(/口播分身/);
     expect(text).toMatch(/声音/);
     expect(text).toMatch(/不可撤销/);
+    expect(text).toMatch(/只删除人物，保留素材/);
 
     fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
     await waitFor(() =>
-      expect(api.deleteSimpleCharacterIdentity).toHaveBeenCalledWith("p1"),
+      expect(api.deleteSimpleCharacterIdentity).toHaveBeenCalledWith("p1", {
+        keepAssets: false,
+        removeProjectRefs: false,
+      }),
     );
     await waitFor(() => expect(refresh).toHaveBeenCalled());
+  });
+
+  it("选择「保留素材」并勾选移除项目选用时按选项调用删除接口", async () => {
+    review = false;
+    api.deleteSimpleCharacterIdentity.mockResolvedValue(undefined);
+    render(<PeoplePage />);
+
+    const card = screen.getByText("测试人物").closest("article");
+    fireEvent.click(
+      within(card as HTMLElement).getByRole("button", { name: "删除" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("radio", { name: /只删除人物，保留素材/ }),
+    );
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "同时移除项目选用记录" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+
+    await waitFor(() =>
+      expect(api.deleteSimpleCharacterIdentity).toHaveBeenCalledWith("p1", {
+        keepAssets: true,
+        removeProjectRefs: true,
+      }),
+    );
+    await waitFor(() =>
+      expect(notify).toHaveBeenCalledWith(
+        expect.stringContaining("素材已保留在素材库"),
+      ),
+    );
   });
 
   it("人物有账务历史时删除失败，原样展示后端给出的中文原因", async () => {

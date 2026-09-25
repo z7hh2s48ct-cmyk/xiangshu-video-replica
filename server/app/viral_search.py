@@ -35,6 +35,12 @@ from app.viral_tikhub import (
 SEARCH_SERVICE = "viral_search"
 SEARCH_COVER_MAX_BYTES = 10 * 1024 * 1024
 SEARCH_COVER_WORKERS = 8
+# 一次搜索（外呼 + 封面归档）的服务端总时限。必须显著小于客户端 240s 与
+# nginx proxy_read_timeout 300s：urllib 的 socket 超时管不到 DNS 解析
+# （getaddrinfo 是无超时的阻塞调用），服务器出网/DNS 异常时外呼会无限
+# 挂起，路由必须在有界时间内给出带 CORS 头的 HTTP 响应，否则客户端只能
+# 等到自己的超时并把请求报成 "Failed to fetch"。
+SEARCH_DEADLINE_SECONDS = 150.0
 
 
 @dataclass(frozen=True)
@@ -83,6 +89,52 @@ def run_viral_search(
     )
 
 
+def run_viral_search_bounded(
+    client: ViralSourceClient,
+    *,
+    keyword: str,
+    platform: str,
+    cursor: str | None = None,
+    time_range: str = "week",
+    deadline_seconds: float = SEARCH_DEADLINE_SECONDS,
+) -> ViralSearchPage:
+    """把一次搜索外呼关进带总时限的工作线程（DNS 挂起也能按时返回）.
+
+    超时抛 ``TimeoutError``，由路由转成 503 并释放预留。底层线程无法强杀，
+    超时后仍在后台跑完（结果弃用），因此 ``shutdown(wait=False)`` 立即返回，
+    绝不能让线程池的隐式 join 把调用方重新拖回无界等待。
+    """
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="viral-search-bounded")
+    try:
+        future = pool.submit(
+            run_viral_search,
+            client,
+            keyword=keyword,
+            platform=platform,
+            cursor=cursor,
+            time_range=time_range,
+        )
+        return future.result(timeout=deadline_seconds)
+    finally:
+        pool.shutdown(wait=False)
+
+
+def archive_search_covers_bounded(
+    storage: ViralStorage,
+    videos: list[ViralVideo],
+    *,
+    max_workers: int = SEARCH_COVER_WORKERS,
+    deadline_seconds: float = SEARCH_DEADLINE_SECONDS,
+) -> list[ViralVideo]:
+    """封面归档的限时版本；超时同样抛 ``TimeoutError``，已完成的封面保留."""
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="viral-cover-bounded")
+    try:
+        future = pool.submit(archive_search_covers, storage, videos, max_workers=max_workers)
+        return future.result(timeout=deadline_seconds)
+    finally:
+        pool.shutdown(wait=False)
+
+
 def archive_search_covers(
     storage: ViralStorage,
     videos: list[ViralVideo],
@@ -104,10 +156,14 @@ def reserve_search_operation(
     source_id: str,
     request_fingerprint: str,
 ) -> str:
-    """幂等预留一次搜索计费（1 单位）；失败/取消后的重试才开新轮次.
+    """幂等预留一次搜索计费（1 单位）；每次真实外呼都必须对应一次扣费.
 
-    同一 ``source_id``（= 幂等键派生）在 PENDING/SUCCEEDED 状态下复用原单，
-    不重复扣费；FAILED/CANCELLED 表示本次搜索未成功交付，重试重新预留。
+    轮次语义（防“使用未扣费”）：
+    - **PENDING**（同一次尝试的在途重试/并发重放）复用同一轮次，不重复扣费，
+      指纹或用量不一致会被 ``accept_operation`` 判 409；
+    - **FAILED/CANCELLED**（本次搜索未成功交付）重试开新一轮重新预留；
+    - **SUCCEEDED** 同样开新一轮——旧行为复用轮次会让同一幂等键免费重刷
+      上游（同关键词每次结果都会更新），出现“调用了但没扣费”。
     """
     latest = conn.execute(
         "SELECT billing_round, state FROM billing_operations WHERE user_id=%s AND service=%s "
@@ -117,7 +173,7 @@ def reserve_search_operation(
     billing_round = 1
     if latest is not None:
         billing_round = int(latest["billing_round"])
-        if str(latest["state"]) in {"FAILED", "CANCELLED"}:
+        if str(latest["state"]) != "PENDING":
             billing_round += 1
     return accept_operation(
         conn,

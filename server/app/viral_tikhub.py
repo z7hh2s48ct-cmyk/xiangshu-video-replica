@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import html
 import json
@@ -556,6 +557,20 @@ def normalize_wechat_item(item: Mapping[str, Any], category: str) -> ViralVideo 
 # ---------------------------------------------------------------------------
 
 
+def _maybe_gunzip(payload: bytes) -> bytes:
+    """响应体按 gzip 魔数嗅探解压；未压缩内容原样返回.
+
+    请求带 ``Accept-Encoding: gzip`` 后源站可能返回压缩体（urllib 不会自动
+    解压）；按魔数而不是响应头判断，这样自建传输桩与忽略该头的网关都兼容。
+    """
+    if len(payload) >= 2 and payload[:2] == b"\x1f\x8b":
+        try:
+            return gzip.decompress(payload)
+        except OSError as exc:
+            raise ViralSourceError("爆款数据源返回了无法解析的响应") from exc
+    return payload
+
+
 class ViralSourceClient:
     """统一爆款数据源客户端（一次实例对应一个已配置的 api_key）."""
 
@@ -588,6 +603,10 @@ class ViralSourceClient:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Accept": "application/json",
+            # 服务器与数据源之间是跨境链路、带宽有限，而搜索响应是大体积
+            # JSON（数 MB）。开启 gzip 后传输体积通常缩到一个量级以下，
+            # 是不换线路前提下唯一有效的提速手段。
+            "Accept-Encoding": "gzip",
             "Content-Type": "application/json",
         }
         from app.billing_meter import meter_call, set_api_type
@@ -604,7 +623,7 @@ class ViralSourceClient:
             with meter_call("viral_data", units=billing_units):
                 content = transport.request("POST", url, headers=headers, body=body)
         try:
-            envelope = json.loads(content)
+            envelope = json.loads(_maybe_gunzip(content))
         except json.JSONDecodeError as exc:
             raise ViralSourceError("爆款数据源返回了无法解析的响应") from exc
         if not isinstance(envelope, dict):

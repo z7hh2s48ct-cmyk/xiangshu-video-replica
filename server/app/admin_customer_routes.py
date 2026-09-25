@@ -1074,7 +1074,7 @@ def list_customers(
                 "  FROM wallet_transactions WHERE type = 'SETTLE' GROUP BY user_id"
                 ") spend ON spend.user_id = aca.user_id "
                 f"{where} "
-                "ORDER BY aca.activated_at, aca.id "
+                "ORDER BY aca.activated_at DESC, aca.id DESC "
                 f"{PAGE_CLAUSE}",
                 (*params, bounded_limit, bounded_offset),
             ).fetchall()
@@ -1203,7 +1203,7 @@ def export_customers_csv(
                 "SELECT u.username, COALESCE(ac.masked_code, '账号注册'), aca.activated_at, "
                 "COALESCE(ac.status, CASE WHEN u.is_active = 1 THEN 'ACTIVE' ELSE 'SUSPENDED' END) "
                 + CUSTOMER_ACCOUNT_FROM
-                + f"{where} ORDER BY aca.activated_at, aca.id LIMIT %s",
+                + f"{where} ORDER BY aca.activated_at DESC, aca.id DESC LIMIT %s",
                 (*params, max(1, min(limit, 5000))),
             ).fetchall()
             write_audit(

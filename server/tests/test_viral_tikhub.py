@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import gzip
 import io
 import json
 import logging
@@ -426,6 +427,58 @@ def test_decode_douyin_search_cursor_rejects_garbage() -> None:
         "search_id": "s",
         "backtrace": "b",
     }
+
+
+def test_douyin_search_accepts_gzip_response_and_requests_compression() -> None:
+    """跨境链路优化：请求带 Accept-Encoding: gzip，压缩响应体透明解压."""
+
+    class GzipTransport:
+        """返回 gzip 压缩体的传输桩."""
+
+        def __init__(self, payload: dict[str, Any]) -> None:
+            self.payload = payload
+            self.headers: dict[str, str] | None = None
+
+        def request(self, method: str, url: str, *, headers, body=None) -> bytes:
+            self.headers = dict(headers)
+            raw = json.dumps(self.payload, ensure_ascii=False).encode("utf-8")
+            return gzip.compress(raw)
+
+    envelope = {
+        "code": 200,
+        "data": {
+            "business_data": [
+                {
+                    "type": 1,
+                    "data": {
+                        "aweme_info": {
+                            "aweme_id": "gz-1",
+                            "desc": "乡墅",
+                            "video": {"cover": {"url_list": ["https://cdn/c.webp"]}},
+                        }
+                    },
+                }
+            ]
+        },
+    }
+    transport = GzipTransport(envelope)
+    client = ViralSourceClient(api_key="test-key", transport=transport)
+    videos = client.douyin_search(keyword="乡墅")
+    assert [video.video_id for video in videos] == ["gz-1"]
+    assert transport.headers is not None
+    assert transport.headers.get("Accept-Encoding") == "gzip"
+
+
+def test_douyin_search_rejects_corrupt_gzip_body() -> None:
+    """gzip 魔数命中但解压失败：转成中性的数据源错误，不让 OSError 裸抛."""
+
+    class CorruptGzipTransport:
+        def request(self, method: str, url: str, *, headers, body=None) -> bytes:
+            return b"\x1f\x8bnot-really-gzip"
+
+    client = ViralSourceClient(api_key="test-key", transport=CorruptGzipTransport())
+    with pytest.raises(ViralSourceError):
+        client.douyin_search(keyword="乡墅")
 
 
 def test_search_filters_minecraft_results_without_rejecting_normal_mc_substrings() -> None:

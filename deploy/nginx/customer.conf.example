@@ -17,6 +17,17 @@ upstream video_replica_customer_api {
     keepalive 32;
 }
 
+# 网关自答的错误响应（上游连接失败 → 502、读超时 → 504）由 Nginx 直接生成，
+# 不经过后端 CORSMiddleware，因此没有 CORS 头；浏览器会把这类响应整体拦下
+# （fetch 抛 "Failed to fetch"），客户端无法区分网络故障与业务失败。
+# 仅在「Nginx 自答的 502/504」（响应状态 502/504 且上游没有回过状态码）时
+# 补一个 CORS 回显头；正常响应与上游真实返回的错误由后端自带 CORS 头，
+# 这里输出空值 = 不加头，避免出现重复 Allow-Origin 反而破坏 CORS 校验。
+map "$status:$upstream_status" $gateway_cors_origin {
+    default "";
+    ~^50[24]:$ $http_origin;
+}
+
 server {
     listen 80 default_server;
     server_name _;
@@ -143,6 +154,9 @@ server {
         proxy_next_upstream_tries 2;
         proxy_request_buffering off;
         proxy_read_timeout 300s;
+        # 网关自答错误页的 CORS 回显（见文件头 map 说明）：值为空时不输出，
+        # 正常响应与上游真实错误不受影响。
+        add_header Access-Control-Allow-Origin $gateway_cors_origin always;
     }
 
     # CW-019: customer and admin are two independent build artifacts, no longer

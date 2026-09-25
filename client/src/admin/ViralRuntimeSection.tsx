@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import {
   adminActivationErrorMessage,
+  collectViralNow,
   fetchViralRuntimeControls,
   updateViralRuntimeControls,
   updateViralVideoAvailability,
@@ -13,6 +14,7 @@ import { StatusBadge } from "./ui/StatusBadge";
 
 type PendingAction =
   | "collection"
+  | "collect"
   | "import"
   | "availability"
   | "keywords"
@@ -67,6 +69,22 @@ export function ViralRuntimeSection({
     void load();
   }, [load]);
 
+  // 采集进行中（有排队/执行中的刷新任务，或某平台处于「采集中」）时轮询刷新，
+  // 让「立即采集」与定时采集都有进度回显；采集结束后轮询自动停止。
+  const collectionActive =
+    controls !== undefined &&
+    (controls.pending_refreshes > 0 ||
+      controls.running_refreshes > 0 ||
+      controls.platforms.some((item) => item.refresh_status === "refreshing"));
+
+  useEffect(() => {
+    if (!collectionActive) return;
+    const timer = window.setInterval(() => {
+      void load();
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [collectionActive, load]);
+
   async function confirm() {
     if (!controls || !pending) return;
     const reason =
@@ -74,9 +92,11 @@ export function ViralRuntimeSection({
         ? "更新视频可用状态"
         : pending === "collection"
           ? "更新爆款视频采集开关"
-          : pending === "keywords"
-            ? "更新爆款视频采集设置"
-            : "更新爆款视频导入开关";
+          : pending === "collect"
+            ? "立即采集爆款视频"
+            : pending === "keywords"
+              ? "更新爆款视频采集设置"
+              : "更新爆款视频导入开关";
     setSaving(true);
     setError("");
     setNotice("");
@@ -90,6 +110,10 @@ export function ViralRuntimeSection({
           reason,
         );
         setNotice("视频可用状态已更新。");
+      } else if (pending === "collect") {
+        await collectViralNow(reason);
+        await load();
+        setNotice("已触发立即采集，下方状态会实时更新采集进度。");
       } else {
         const next = await updateViralRuntimeControls(
           {
@@ -338,6 +362,13 @@ export function ViralRuntimeSection({
               </button>
               <button type="button" onClick={() => setPending("import")}>
                 {controls.import_enabled ? "暂停导入" : "恢复导入"}
+              </button>
+              <button
+                type="button"
+                disabled={!controls.collection_enabled}
+                onClick={() => setPending("collect")}
+              >
+                立即采集
               </button>
             </div>
           ) : null}

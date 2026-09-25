@@ -38,6 +38,7 @@ from app.character_identity import REQUIRED_CHARACTER_VIEW_TYPES
 from app.character_image_generation import deterministic_png
 from app.db_pg import close_pg_pool
 from app.db_portable import BusinessConnection
+from app.materials import list_materials
 from app.media import storage_key_from_uri
 from app.simple_character import (
     SimpleCharacterCreationResult,
@@ -82,6 +83,41 @@ def _seed_user(pg: psycopg.Connection, user_id: str) -> None:
 def _clean_ux14(dsn: str) -> None:
     """删除全部 ux14- 行（先子表后父表满足外键），绝不 TRUNCATE 共享表."""
     with psycopg.connect(dsn, autocommit=True) as conn:
+        # 项目选用记录对 character_versions 是 RESTRICT，必须先于版本清理删除。
+        conn.execute(
+            """
+            DELETE FROM character_reference_selections
+            WHERE project_id LIKE %s
+               OR character_version_id IN (
+                   SELECT version.id FROM character_versions AS version
+                   WHERE version.persona_id IN (
+                       SELECT persona.id FROM character_personas AS persona
+                       WHERE persona.identity_id IN (
+                           SELECT identity.id FROM person_identities AS identity
+                           WHERE identity.owner_user_id LIKE %s
+                       )
+                   )
+               )
+            """,
+            (LIKE_UX14, LIKE_UX14),
+        )
+        conn.execute(
+            """
+            DELETE FROM project_main_characters
+            WHERE project_id LIKE %s
+               OR character_version_id IN (
+                   SELECT version.id FROM character_versions AS version
+                   WHERE version.persona_id IN (
+                       SELECT persona.id FROM character_personas AS persona
+                       WHERE persona.identity_id IN (
+                           SELECT identity.id FROM person_identities AS identity
+                           WHERE identity.owner_user_id LIKE %s
+                       )
+                   )
+               )
+            """,
+            (LIKE_UX14, LIKE_UX14),
+        )
         conn.execute(
             """
             DELETE FROM character_asset_reviews
@@ -141,6 +177,8 @@ def _clean_ux14(dsn: str) -> None:
             (LIKE_UX14,),
         )
         conn.execute("DELETE FROM person_identities WHERE owner_user_id LIKE %s", (LIKE_UX14,))
+        conn.execute("DELETE FROM versions WHERE project_id LIKE %s", (LIKE_UX14,))
+        conn.execute("DELETE FROM projects WHERE id LIKE %s", (LIKE_UX14,))
         conn.execute("DELETE FROM assets WHERE created_by_user_id LIKE %s", (LIKE_UX14,))
         conn.execute("DELETE FROM content_objects WHERE scope_owner LIKE %s", (LIKE_UX14,))
         conn.execute("DELETE FROM audit_logs WHERE actor_user_id LIKE %s", (LIKE_UX14,))
@@ -523,3 +561,342 @@ def test_delete_cleanup_dedupes_objects_shared_by_approved_and_generated_rows(
     assert metadata["deleted_asset_count"] == 12
     assert metadata["storage_cleanup_planned_count"] == 7
     assert metadata["shared_storage_object_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 删除模式：keep 保留用户见过的资产并转存素材库；项目选用可显式释放
+# ---------------------------------------------------------------------------
+
+
+def _seed_project_with_selection(
+    pg: psycopg.Connection,
+    *,
+    project_id: str,
+    owner_user_id: str,
+    character_version_id: str,
+    project_name: str = "UX14 观测项目",
+) -> None:
+    """建 ux14 项目 + 源画面版本 + 指向该人物版本的选用记录与主角绑定."""
+    pg.execute(
+        "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, %s)",
+        (project_id, owner_user_id, project_name),
+    )
+    asset_id = f"{project_id}-src"
+    pg.execute(
+        "INSERT INTO assets (id, project_id, kind, storage_uri, sha256, size_bytes, "
+        "content_type, created_by_user_id) VALUES (%s, %s, 'reference_video', %s, %s, "
+        "1024, 'video/mp4', %s)",
+        (asset_id, project_id, f"cos://{BUCKET}/{asset_id}.mp4", "c" * 64, owner_user_id),
+    )
+    source_version_id = f"{project_id}-srcver"
+    pg.execute(
+        "INSERT INTO versions (id, project_id, asset_id, kind, version_number, "
+        "payload_json, created_by_user_id) VALUES (%s, %s, %s, 'analysis', 1, %s, %s)",
+        (
+            source_version_id,
+            project_id,
+            asset_id,
+            json.dumps({"schema_version": 1}),
+            owner_user_id,
+        ),
+    )
+    pg.execute(
+        "INSERT INTO character_reference_selections (id, project_id, "
+        "source_frame_version_id, character_version_id, selected_by) "
+        "VALUES (%s, %s, %s, %s, %s)",
+        (
+            f"{project_id}-sel",
+            project_id,
+            source_version_id,
+            character_version_id,
+            owner_user_id,
+        ),
+    )
+    pg.execute(
+        "INSERT INTO project_main_characters (project_id, version_id, "
+        "character_version_id, selected_by_user_id) VALUES (%s, %s, %s, %s)",
+        (project_id, source_version_id, character_version_id, owner_user_id),
+    )
+
+
+def test_delete_keep_mode_converts_seen_assets_to_materials(
+    pg: psycopg.Connection, bus: BusinessConnection
+) -> None:
+    """asset_mode="keep"：人物硬删，用户见过的资产转存素材库「我的上传」.
+
+    UX14 单份化下 approved（保留）与 generated（删除）共享同一存储 key，
+    保留行必须算作存活引用，否则清理会把 approved 仍指向的字节删掉。
+    """
+    user_id = _new_user("keep")
+    _seed_user(pg, user_id)
+    actor = _actor(user_id)
+    storage = _storage()
+    source = _create_source_png(b"ux14-keep-source")
+
+    created = create_simple_character(
+        bus,
+        actor=actor,
+        project_id=None,
+        storage=storage,
+        source_content=source,
+        source_content_type="image/png",
+        display_name=DISPLAY_NAME,
+        persona_name=PERSONA_NAME,
+        image_provider=None,
+    )
+    _assert_single_object_budget(storage)
+
+    plan = delete_simple_character_identity(
+        bus,
+        actor=actor,
+        identity_id=created.identity_id,
+        storage_for_uri=lambda _conn, _uri: storage,
+        asset_mode="keep",
+    )
+    # 删除集只有 5 行 generated 候选；其 key 与保留的 approved 行共享，
+    # 全部按存活引用处理，存储字节一个都不能动。
+    assert len(plan.targets) == 5
+    assert all(target.still_referenced for target in plan.targets)
+    result = cleanup_deleted_character_objects(plan)
+    assert result.deleted_count == 0
+    assert result.failed_count == 0
+    assert len(storage._objects) == 7
+
+    # 人物域表清空；保留的 7 行资产转成 material_* 并归属人物所有者。
+    identities = pg.execute(
+        "SELECT count(*) FROM person_identities WHERE owner_user_id = %s", (user_id,)
+    ).fetchone()
+    assert identities is not None and identities[0] == 0
+    kept_rows = pg.execute(
+        "SELECT kind, project_id, created_by_user_id FROM assets WHERE created_by_user_id = %s",
+        (user_id,),
+    ).fetchall()
+    assert len(kept_rows) == 7
+    for kept_row in kept_rows:
+        assert kept_row["kind"] == "material_image"
+        assert kept_row["project_id"] is None
+
+    # 转存后即可被素材库按「我的上传」列出。
+    page = list_materials(
+        bus,
+        actor=actor,
+        media_type=None,
+        source="upload",
+        query=None,
+        page=1,
+        page_size=50,
+    )
+    assert page.total == 7
+    assert {item.group for item in page.items} == {"我的上传"}
+    assert all(item.source == "upload" for item in page.items)
+
+    # 审计记录保留口径。
+    audit = pg.execute(
+        "SELECT metadata_json FROM audit_logs WHERE actor_user_id = %s "
+        "AND action = 'simple_character.delete'",
+        (user_id,),
+    ).fetchone()
+    assert audit is not None
+    metadata = json.loads(str(audit["metadata_json"]))
+    assert metadata["asset_mode"] == "keep"
+    assert metadata["kept_asset_count"] == 7
+    assert metadata["deleted_asset_count"] == 5
+
+
+def test_delete_reports_blocking_project_names_in_conflict(
+    pg: psycopg.Connection, bus: BusinessConnection
+) -> None:
+    """未勾选移除选用时仍 409，且文案直接点名阻断的项目。"""
+    user_id = _new_user("conflict")
+    _seed_user(pg, user_id)
+    actor = _actor(user_id)
+    storage = _storage()
+    source = _create_source_png(b"ux14-conflict-source")
+
+    created = create_simple_character(
+        bus,
+        actor=actor,
+        project_id=None,
+        storage=storage,
+        source_content=source,
+        source_content_type="image/png",
+        display_name=DISPLAY_NAME,
+        persona_name=PERSONA_NAME,
+        image_provider=None,
+    )
+    project_id = _new_user("conflict-project")
+    project_name = f"UX14 项目-{project_id}"
+    _seed_project_with_selection(
+        pg,
+        project_id=project_id,
+        owner_user_id=user_id,
+        character_version_id=created.character_version_id,
+        project_name=project_name,
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        delete_simple_character_identity(
+            bus,
+            actor=actor,
+            identity_id=created.identity_id,
+            storage_for_uri=lambda _conn, _uri: storage,
+        )
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail["code"] == "IDENTITY_IN_USE"
+    assert project_name in str(excinfo.value.detail["message"])
+    still_there = pg.execute(
+        "SELECT count(*) FROM person_identities WHERE id = %s", (created.identity_id,)
+    ).fetchone()
+    assert still_there is not None and still_there[0] == 1
+
+
+def test_delete_remove_project_refs_releases_own_projects(
+    pg: psycopg.Connection, bus: BusinessConnection
+) -> None:
+    """勾选移除选用：selections/bindings 清空，项目本体保留，人物可删。"""
+    user_id = _new_user("release")
+    _seed_user(pg, user_id)
+    actor = _actor(user_id)
+    storage = _storage()
+    source = _create_source_png(b"ux14-release-source")
+
+    created = create_simple_character(
+        bus,
+        actor=actor,
+        project_id=None,
+        storage=storage,
+        source_content=source,
+        source_content_type="image/png",
+        display_name=DISPLAY_NAME,
+        persona_name=PERSONA_NAME,
+        image_provider=None,
+    )
+    project_id = _new_user("release-project")
+    _seed_project_with_selection(
+        pg,
+        project_id=project_id,
+        owner_user_id=user_id,
+        character_version_id=created.character_version_id,
+    )
+
+    delete_simple_character_identity(
+        bus,
+        actor=actor,
+        identity_id=created.identity_id,
+        storage_for_uri=lambda _conn, _uri: storage,
+        remove_project_refs=True,
+    )
+    identities = pg.execute(
+        "SELECT count(*) FROM person_identities WHERE id = %s", (created.identity_id,)
+    ).fetchone()
+    assert identities is not None and identities[0] == 0
+    selections = pg.execute(
+        "SELECT count(*) FROM character_reference_selections WHERE project_id = %s",
+        (project_id,),
+    ).fetchone()
+    assert selections is not None and selections[0] == 0
+    bindings = pg.execute(
+        "SELECT count(*) FROM project_main_characters WHERE project_id = %s",
+        (project_id,),
+    ).fetchone()
+    assert bindings is not None and bindings[0] == 0
+    projects = pg.execute("SELECT count(*) FROM projects WHERE id = %s", (project_id,)).fetchone()
+    assert projects is not None and projects[0] == 1
+    audit = pg.execute(
+        "SELECT metadata_json FROM audit_logs WHERE actor_user_id = %s "
+        "AND action = 'simple_character.delete'",
+        (user_id,),
+    ).fetchone()
+    assert audit is not None
+    metadata = json.loads(str(audit["metadata_json"]))
+    assert metadata["removed_project_selection_count"] >= 1
+
+
+def test_delete_keep_mode_still_blocks_on_project_selection(
+    pg: psycopg.Connection, bus: BusinessConnection
+) -> None:
+    """keep 只改变资产去向，项目选用的显式性约束不放松。"""
+    user_id = _new_user("keeplock")
+    _seed_user(pg, user_id)
+    actor = _actor(user_id)
+    storage = _storage()
+    source = _create_source_png(b"ux14-keeplock-source")
+
+    created = create_simple_character(
+        bus,
+        actor=actor,
+        project_id=None,
+        storage=storage,
+        source_content=source,
+        source_content_type="image/png",
+        display_name=DISPLAY_NAME,
+        persona_name=PERSONA_NAME,
+        image_provider=None,
+    )
+    project_id = _new_user("keeplock-project")
+    _seed_project_with_selection(
+        pg,
+        project_id=project_id,
+        owner_user_id=user_id,
+        character_version_id=created.character_version_id,
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        delete_simple_character_identity(
+            bus,
+            actor=actor,
+            identity_id=created.identity_id,
+            storage_for_uri=lambda _conn, _uri: storage,
+            asset_mode="keep",
+        )
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail["code"] == "IDENTITY_IN_USE"
+
+
+def test_delete_cannot_release_foreign_projects_for_non_admin(
+    pg: psycopg.Connection, bus: BusinessConnection
+) -> None:
+    """非 admin 不能借删除人物清掉他人项目的选用记录，仍 409 并点名项目。"""
+    user_id = _new_user("foreign")
+    _seed_user(pg, user_id)
+    actor = _actor(user_id)
+    storage = _storage()
+    source = _create_source_png(b"ux14-foreign-source")
+
+    created = create_simple_character(
+        bus,
+        actor=actor,
+        project_id=None,
+        storage=storage,
+        source_content=source,
+        source_content_type="image/png",
+        display_name=DISPLAY_NAME,
+        persona_name=PERSONA_NAME,
+        image_provider=None,
+    )
+    other_user_id = _new_user("foreign-other")
+    _seed_user(pg, other_user_id)
+    project_id = _new_user("foreign-project")
+    _seed_project_with_selection(
+        pg,
+        project_id=project_id,
+        owner_user_id=other_user_id,
+        character_version_id=created.character_version_id,
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        delete_simple_character_identity(
+            bus,
+            actor=actor,
+            identity_id=created.identity_id,
+            storage_for_uri=lambda _conn, _uri: storage,
+            remove_project_refs=True,
+        )
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail["code"] == "IDENTITY_IN_USE"
+    assert "其他负责人" in str(excinfo.value.detail["message"])
+    selections = pg.execute(
+        "SELECT count(*) FROM character_reference_selections WHERE project_id = %s",
+        (project_id,),
+    ).fetchone()
+    assert selections is not None and selections[0] == 1

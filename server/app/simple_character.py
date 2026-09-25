@@ -20,7 +20,7 @@ import zlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import cast
+from typing import Literal, cast
 
 from fastapi import HTTPException
 
@@ -1829,19 +1829,36 @@ class CharacterStorageCleanupResult:
     failed_count: int
 
 
+def _project_list_message(project_names: list[str], template: str) -> str:
+    shown = "、".join(f"《{name}》" for name in project_names[:3])
+    if len(project_names) > 3:
+        shown += f"等 {len(project_names)} 个项目"
+    return template.format(names=shown)
+
+
 def delete_simple_character_identity(
     conn: BusinessConnection,
     *,
     actor: CurrentUser,
     identity_id: str,
     storage_for_uri: StorageResolver,
+    asset_mode: Literal["delete", "keep"] = "delete",
+    remove_project_refs: bool = False,
 ) -> CharacterStorageCleanupPlan:
     """Delete an identity together with every derived character record.
 
-    In-flight tasks and project selections block deletion. Storage targets are
-    resolved while their rows still exist, but object I/O is deliberately
-    returned to the route so it runs only after the database transaction has
-    committed.
+    In-flight tasks and billing history block deletion. Project selections
+    block too, unless ``remove_project_refs`` releases the actor's own
+    projects in-transaction (foreign projects always block for non-admins).
+    Storage targets are resolved while their rows still exist, but object
+    I/O is deliberately returned to the route so it runs only after the
+    database transaction has committed.
+
+    ``asset_mode="keep"`` spares the assets the user has actually seen
+    (source upload, published views and sheets, succeeded oral results,
+    voice demos): their rows survive the deletion and are rebranded into
+    standalone material assets so they remain visible in the material
+    library. Unpublished candidates are still deleted.
     """
     require_not_auditor(
         conn,
@@ -1923,27 +1940,57 @@ def delete_simple_character_identity(
         )
 
     # Project character selections reference versions with ON DELETE RESTRICT;
-    # removing a character a project still relies on must stay explicit.
-    used_project = conn.execute(
+    # removing a character a project still relies on must stay explicit. With
+    # remove_project_refs the deletion carries that explicitness itself, but
+    # only for projects the actor controls — a non-admin cannot release
+    # someone else's project, and admin keeps working on every project.
+    blocking_projects = conn.execute(
         """
-        SELECT selection.project_id
+        SELECT DISTINCT project.name AS project_name, project.owner_user_id AS owner_user_id
         FROM character_reference_selections AS selection
         JOIN character_versions AS version ON version.id = selection.character_version_id
         JOIN character_personas AS persona ON persona.id = version.persona_id
+        JOIN projects AS project ON project.id = selection.project_id
         WHERE persona.identity_id = %s
-        LIMIT 1
         """,
         (identity_id,),
-    ).fetchone()
-    if used_project:
-        raise character_error(
-            409,
-            "IDENTITY_IN_USE",
-            "人物已被项目选用，请先在项目中移除该角色后再删除。",
+    ).fetchall()
+    releasable_project_count = 0
+    foreign_project_names: list[str] = []
+    unreleased_project_names: list[str] = []
+    for project_row in blocking_projects:
+        if actor.role != "admin" and str(project_row["owner_user_id"]) != actor.id:
+            foreign_project_names.append(str(project_row["project_name"]))
+        elif remove_project_refs:
+            releasable_project_count += 1
+        else:
+            unreleased_project_names.append(str(project_row["project_name"]))
+    blocking_messages = []
+    if foreign_project_names:
+        blocking_messages.append(
+            _project_list_message(
+                foreign_project_names,
+                "人物仍被项目{names}选用，该项目由其他负责人管理，"
+                "请先在对应项目中移除该角色后再删除。",
+            )
         )
+    if unreleased_project_names:
+        blocking_messages.append(
+            _project_list_message(
+                unreleased_project_names,
+                "人物已被项目{names}选用，请先在项目中移除该角色，"
+                "或删除时选择同时移除项目选用记录。",
+            )
+        )
+    if blocking_messages:
+        raise character_error(409, "IDENTITY_IN_USE", "；".join(blocking_messages))
 
     asset_ids = _identity_asset_ids(conn, identity_id)
-    placeholders = ",".join("%s" for _ in asset_ids)
+    kept_asset_ids: set[str] = set()
+    if asset_mode == "keep":
+        kept_asset_ids = _identity_kept_asset_ids(conn, identity_id) & asset_ids
+    deletable_asset_ids = asset_ids - kept_asset_ids
+    placeholders = ",".join("%s" for _ in deletable_asset_ids)
     asset_rows = (
         conn.execute(
             # content_object_id is selected so the registry check below can exclude
@@ -1951,9 +1998,9 @@ def delete_simple_character_identity(
             # are content-addressed every identity would look "still referenced" by
             # itself and its bytes would never be reclaimed.
             f"SELECT id, storage_uri, content_object_id FROM assets WHERE id IN ({placeholders})",  # noqa: S608,E501
-            tuple(asset_ids),
+            tuple(deletable_asset_ids),
         ).fetchall()
-        if asset_ids
+        if deletable_asset_ids
         else []
     )
 
@@ -1970,13 +2017,14 @@ def delete_simple_character_identity(
             # Two ways these bytes outlive the identity: another asset still points
             # at the same URI (the same portrait backing a second identity), or a
             # content_objects row owns them with no asset row of its own. Both are
-            # checked now, excluding this identity's own assets, which are deleted
-            # in the transaction below.
+            # checked now, excluding exactly the rows being deleted — in keep mode
+            # the kept rows share storage keys with delete rows (approved reuses
+            # generated keys), so they must count as live references here.
             own_content_id = asset["content_object_id"]
             still_referenced = content_store.object_referenced_by_another_asset(
                 conn,
                 storage_uri=uri,
-                excluding_asset_ids=list(asset_ids),
+                excluding_asset_ids=sorted(deletable_asset_ids),
             ) or content_store.object_referenced_by_content_registry(
                 conn,
                 provider=storage.provider,
@@ -2012,10 +2060,30 @@ def delete_simple_character_identity(
         WHERE persona.identity_id = %s
     """
     with conn:
+        if remove_project_refs:
+            removed_selection_count = int(
+                conn.execute(
+                    f"SELECT COUNT(*) FROM character_reference_selections WHERE character_version_id IN ({version_ids_sql})",  # noqa: S608,E501
+                    (identity_id,),
+                ).fetchone()[0]
+            )
+            # Selections RESTRICT the version delete and must go first; dropping
+            # the binding row too leaves the project in its pristine "choose a
+            # character" state instead of a dangling SET NULL row.
+            conn.execute(
+                f"DELETE FROM character_reference_selections WHERE character_version_id IN ({version_ids_sql})",  # noqa: S608,E501
+                (identity_id,),
+            )
+            conn.execute(
+                f"DELETE FROM project_main_characters WHERE character_version_id IN ({version_ids_sql})",  # noqa: S608,E501
+                (identity_id,),
+            )
+        else:
+            removed_selection_count = 0
         # Registry references are dropped before the cascade removes the asset rows,
         # in the same transaction, so a failed identity delete cannot leave a count
         # already decremented. The bytes are only *scheduled* for reclaim here.
-        content_store.release_assets_content_objects(conn, asset_ids=list(asset_ids))
+        content_store.release_assets_content_objects(conn, asset_ids=sorted(deletable_asset_ids))
         conn.execute(
             "DELETE FROM character_generation_tasks WHERE character_version_id IN "
             f"({version_ids_sql})",  # noqa: S608
@@ -2049,10 +2117,30 @@ def delete_simple_character_identity(
             (identity_id,),
         )
         conn.execute("DELETE FROM person_identities WHERE id = %s", (identity_id,))
-        if asset_ids:
+        if deletable_asset_ids:
             conn.execute(
                 f"DELETE FROM assets WHERE id IN ({placeholders})",
-                tuple(asset_ids),
+                tuple(deletable_asset_ids),
+            )
+        if kept_asset_ids:
+            # Rebrand the kept rows into standalone materials: the material
+            # library only surfaces uploads via kind material_* with a
+            # non-null creator (assets here already have project_id NULL),
+            # and creator is the identity owner, not whoever happened to
+            # generate the row.
+            kept_placeholders = ",".join("%s" for _ in kept_asset_ids)
+            conn.execute(
+                f"""
+                UPDATE assets SET
+                    kind = CASE
+                        WHEN content_type LIKE 'audio/%%' THEN 'material_audio'
+                        WHEN content_type LIKE 'video/%%' THEN 'material_video'
+                        ELSE 'material_image'
+                    END,
+                    created_by_user_id = %s
+                WHERE id IN ({kept_placeholders})
+                """,  # noqa: S608
+                (str(row["owner_user_id"]), *sorted(kept_asset_ids)),
             )
 
     cleanup_targets = tuple(cleanup_targets_by_object.values())
@@ -2068,6 +2156,10 @@ def delete_simple_character_identity(
             "storage_cleanup_planned_count": len(cleanup_targets),
             "shared_storage_object_count": shared_object_count,
             "storage_resolution_failed_count": storage_resolution_failed_count,
+            "asset_mode": asset_mode,
+            "kept_asset_count": len(kept_asset_ids),
+            "removed_project_selection_count": removed_selection_count,
+            "released_project_count": releasable_project_count,
         },
     )
     return CharacterStorageCleanupPlan(
@@ -2185,6 +2277,71 @@ def _identity_asset_ids(conn: BusinessConnection, identity_id: str) -> set[str]:
         if contact_id is not None:
             asset_ids.add(contact_id)
     return asset_ids
+
+
+def _identity_kept_asset_ids(conn: BusinessConnection, identity_id: str) -> set[str]:
+    """Assets worth keeping when deleting with ``asset_mode="keep"``.
+
+    Mirrors what the material library already surfaces for this identity —
+    approved views of published versions, published contact sheets, succeeded
+    oral results and voice demos — plus the original upload. Anything the
+    user never saw (unpublished candidates, hidden generated objects, failed
+    task outputs) deliberately stays on the delete path.
+    """
+    kept: set[str] = set()
+    identity = conn.execute(
+        """
+        SELECT authorization_asset_id, source_asset_id
+        FROM person_identities WHERE id = %s
+        """,
+        (identity_id,),
+    ).fetchone()
+    if identity is not None:
+        for column in ("authorization_asset_id", "source_asset_id"):
+            value = identity[column]
+            if value is not None:
+                kept.add(str(value))
+
+    for row in conn.execute(
+        """
+        SELECT view.asset_id
+        FROM character_assets AS view
+        JOIN character_versions AS version ON version.id = view.character_version_id
+        JOIN character_personas AS persona ON persona.id = version.persona_id
+        WHERE persona.identity_id = %s AND view.asset_id IS NOT NULL
+          AND version.status = 'PUBLISHED' AND view.review_status = 'APPROVED'
+        """,
+        (identity_id,),
+    ).fetchall():
+        kept.add(str(row[0]))
+
+    for row in conn.execute(
+        """
+        SELECT version.publication_snapshot_json AS snapshot_json
+        FROM character_versions AS version
+        JOIN character_personas AS persona ON persona.id = version.persona_id
+        WHERE persona.identity_id = %s AND version.status = 'PUBLISHED'
+        """,
+        (identity_id,),
+    ).fetchall():
+        contact_id = _snapshot_contact_sheet_asset_id(row)
+        if contact_id is not None:
+            kept.add(contact_id)
+
+    for row in conn.execute(
+        """
+        SELECT result_asset_id AS asset_id
+        FROM oral_tasks
+        WHERE identity_id = %s AND status = 'SUCCEEDED' AND result_asset_id IS NOT NULL
+        UNION
+        SELECT demo_asset_id AS asset_id
+        FROM oral_voices
+        WHERE identity_id = %s AND demo_asset_id IS NOT NULL
+        """,
+        (identity_id, identity_id),
+    ).fetchall():
+        kept.add(str(row[0]))
+    return kept
 
 
 def validate_simple_character_source(

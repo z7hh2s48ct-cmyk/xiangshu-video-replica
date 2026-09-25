@@ -587,7 +587,7 @@ def test_customer_desktop_build_is_the_sole_default_target() -> None:
 
     # --- base config IS the customer foundation (the sole default) ---
     assert base_config["identifier"] == "com.xiangshu.video-replica.customer"
-    assert base_config["productName"] == "短视频复刻客户云工作台"
+    assert base_config["productName"] == "众墅之家 AI 爆款视频工具"
     assert base_config["app"]["windows"][0]["url"] == "customer"
     assert base_config["app"]["windows"][0]["title"] == ""
     # 2026-09-23 用户明确授权：客户云客户端带 ffmpeg，用于本地抽音轨（P2 本地
@@ -595,7 +595,7 @@ def test_customer_desktop_build_is_the_sole_default_target() -> None:
     # 因此改为精确白名单而不是「必须为空」。
     assert base_config["bundle"]["resources"] == ["resources/ffmpeg/*"]
     assert base_config["bundle"]["publisher"] == "Xiangshu Video Replica"
-    assert base_config["bundle"]["windows"]["nsis"]["startMenuFolder"] == "短视频复刻客户云工作台"
+    assert base_config["bundle"]["windows"]["nsis"]["startMenuFolder"] == "众墅之家 AI 爆款视频工具"
     # No local-API loopback in the default CSP: the customer WebView only ever
     # talks to an explicit HTTPS backend.
     assert "127.0.0.1:8000" not in base_config["app"]["security"]["csp"]
@@ -648,16 +648,16 @@ def test_customer_desktop_build_is_the_sole_default_target() -> None:
     assert "url.port" in origin_guard
 
     # --- version chain (single source: the base config) ---
-    assert base_config["version"] == "2.3.0"
+    assert base_config["version"] == "2.4.0"
     assert root_package["version"] == base_config["version"]
     assert client_package["version"] == base_config["version"]
     assert package_lock["version"] == base_config["version"]
     assert package_lock["packages"][""]["version"] == base_config["version"]
     assert package_lock["packages"]["client"]["version"] == base_config["version"]
-    assert 'name = "video-replica-desktop"\nversion = "2.3.0"' in cargo_lock
-    assert 'version = "2.3.0"' in cargo_toml.split("[lib]", maxsplit=1)[0]
-    assert 'version = "2.3.0"' in server_package.split("[project]", maxsplit=1)[1]
-    assert 'version="2.3.0"' in server_main
+    assert 'name = "video-replica-desktop"\nversion = "2.4.0"' in cargo_lock
+    assert 'version = "2.4.0"' in cargo_toml.split("[lib]", maxsplit=1)[0]
+    assert 'version = "2.4.0"' in server_package.split("[project]", maxsplit=1)[1]
+    assert 'version="2.4.0"' in server_main
 
     # --- installer hook content (unchanged) ---
     assert "$LOCALAPPDATA\\短视频复刻工作台\\uninstall.exe" in customer_installer_hooks

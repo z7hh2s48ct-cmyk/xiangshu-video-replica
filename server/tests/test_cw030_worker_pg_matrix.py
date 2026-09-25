@@ -1456,6 +1456,63 @@ def test_empty_asr_text_refunds_customer_and_preserves_actual_duration_cost(pg_s
     assert _task_status(pg_state, "script_from_audio_tasks", "asr-cost") == "FAILED"
 
 
+def test_asr_success_without_duration_settles_at_reserved_budget(pg_state):
+    """成功结果缺时长时按预留预算结算：文案已交付，不允许「交付未扣费」.
+
+    供应商没回 duration 的转写仍然成功交付了文案；旧行为直接跳过结算，
+    计费单永远 PENDING（对账器按「SUCCEEDED 且有时长」过滤，兜不到），
+    用户白拿文案。
+    """
+    from app.asr import TranscriptResult
+    from app.db_pg import pg_transaction
+    from app.db_portable import BusinessConnection
+    from app.script_from_audio import complete_script_from_audio_task
+    from app.usage_billing import accept_operation, begin_source_attempt
+
+    _seed_base(pg_state)
+    _seed_source_frame_task(pg_state, task_id="asr-nodur-asset")
+    _seed_audio_task(pg_state, task_id="asr-nodur")
+    lease = _audio_lease(pg_state, "asr-nodur-worker")
+    _exec(
+        pg_state,
+        "INSERT INTO wallets(user_id,available_credits) VALUES('u1',100) ON CONFLICT(user_id) "
+        "DO UPDATE SET available_credits=100",
+    )
+    _exec(
+        pg_state,
+        "INSERT INTO billing_tariffs(service,enabled,unit_credits,unit_cost_fen) "
+        "VALUES('asr',true,2,0.25)",
+    )
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        accept_operation(conn, user_id="u1", service="asr", source_id="asr-nodur", units=20)
+        begin_source_attempt(conn, "asr-nodur")
+    with pg_transaction() as raw:
+        complete_script_from_audio_task(
+            BusinessConnection.postgres(raw),
+            lease=lease,
+            result=TranscriptResult(text="完整文案", duration_sec=None, language="zh"),
+        )
+    assert _task_status(pg_state, "script_from_audio_tasks", "asr-nodur") == "SUCCEEDED"
+    assert (
+        _one(
+            pg_state,
+            "SELECT state FROM billing_operations WHERE source_id='asr-nodur' AND service='asr'",
+        )
+        == "SUCCEEDED"
+    )
+    assert (
+        _one(
+            pg_state,
+            "SELECT charged_credits FROM billing_operations "
+            "WHERE source_id='asr-nodur' AND service='asr'",
+        )
+        == 40
+    )
+    assert _one(pg_state, "SELECT available_credits FROM wallets WHERE user_id='u1'") == 60
+    assert _one(pg_state, "SELECT reserved_credits FROM wallets WHERE user_id='u1'") == 0
+
+
 # ---------------------------------------------------------------------------
 # G. ASR — script_from_audio_tasks on the PG lane
 # ---------------------------------------------------------------------------

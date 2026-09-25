@@ -31,7 +31,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  ffmpeg-windows-binaries:
+    name: Build LGPL ffmpeg for the Windows installer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # 客户云安装包需要 ffmpeg 做本地抽音轨；Windows runner 跑不了 Linux 容器，
+      # 因此在 Linux 上交叉编译出 Windows exe，再以 artifact 交给 windows 构建。
+      # 脚本内部对二进制做 LGPL 静态断言，产物一定是 LGPL 构建。
+      - name: Cross-compile static Windows ffmpeg/ffprobe (LGPL)
+        run: bash scripts/ffmpeg-minimal/build.sh "$RUNNER_TEMP/ffmpeg-out"
+      - name: Upload ffmpeg binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ffmpeg-windows-lgpl
+          path: ${{ runner.temp }}/ffmpeg-out/*.exe
+          if-no-files-found: error
+          retention-days: 1
+
   build:
+    needs: ffmpeg-windows-binaries
     name: Build ${{ matrix.platform }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
@@ -90,6 +113,14 @@ jobs:
         run: npm ci
       - name: Scan source for secrets
         run: npm run check:security
+      # bundle.resources 现在包含 ffmpeg.exe/ffprobe.exe，缺失会让 tauri build
+      # 直接失败，所以必须在打包前把 ffmpeg 产物放到 resources/ffmpeg/。
+      - name: Download ffmpeg binaries
+        if: runner.os == 'Windows'
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: ffmpeg-windows-lgpl
+          path: client/src-tauri/resources/ffmpeg
       - name: Build desktop installer
         run: |
           sign_args=()
@@ -112,7 +143,7 @@ jobs:
           output=".cargo-target/$RUST_TARGET/release/bundle/dmg"
           mkdir -p "$output"
           # Native image creation does not need a Finder automation session.
-          hdiutil create -volname "Video Replica $version" -srcfolder "$stage" \
+          hdiutil create -volname "众墅之家 AI 爆款视频工具 $version" -srcfolder "$stage" \
             -format UDZO "$output/VideoReplica_${version}_${PLATFORM}.dmg"
       - name: Verify macOS application and disk image
         if: runner.os == 'macOS'
@@ -220,5 +251,5 @@ jobs:
           API 源：\`${VITE_API_BASE_URL}\`
           EOF
           gh release create "$GITHUB_REF_NAME" release/*/* \
-            --title "短视频复刻工作台 ${GITHUB_REF_NAME}" \
+            --title "众墅之家 AI 爆款视频工具 ${GITHUB_REF_NAME}" \
             --notes-file release-notes.md

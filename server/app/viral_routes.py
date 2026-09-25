@@ -519,7 +519,8 @@ def fetch_viral_video_source(
 
     计费：走既有 ``viral_search_refresh``（爆款视频刷新）科目，按次 1 单位。
     它是真实的上游调用，与 ``viral_search`` 一样必须受 fail-closed 资费守卫约束，
-    否则漏配即「能取直链但不收钱」。幂等键相同则复用同一计费轮次，重试不重复扣费。
+    否则漏配即「能取直链但不收钱」。只有 PENDING（在途重试）复用同一计费轮次，
+    已终态的轮次一律开新一轮——每一次真实外呼都对应一次扣费。
     """
     key = (idempotency_key or "").strip()
     if not key or len(key) > 128:
@@ -574,7 +575,9 @@ def fetch_viral_video_source(
             billing_round = 1
             if latest is not None:
                 billing_round = int(latest["billing_round"])
-                if str(latest["state"]) in {"FAILED", "CANCELLED"}:
+                # 只有 PENDING（在途重试）复用轮次；SUCCEEDED 也开新一轮，
+                # 否则同一幂等键可以免费反复刷新一条视频的源站直链。
+                if str(latest["state"]) != "PENDING":
                     billing_round += 1
             accept_operation(
                 conn,

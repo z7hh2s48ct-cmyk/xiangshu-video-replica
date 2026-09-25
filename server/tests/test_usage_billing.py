@@ -541,11 +541,12 @@ def test_collection_settlement_recovers_once_and_never_retries_insufficient_bala
         )
 
 
-def test_scheduled_collector_records_platform_cost_without_charging_customers(
+def test_scheduled_collector_records_platform_cost_before_settlement(
     client, route_state, monkeypatch
 ):
-    """P1 停用采集计费后的 collector 语义：显式入队的任务照常消费、供应商成本
-    照记平台单（user_id IS NULL），但不再产生任何客户采集扣费."""
+    """采集调度恢复后：显式入队的任务照常消费、供应商成本照记平台单
+    （user_id IS NULL）。客户按成员扣费由 ``settle_collection_charges`` 在任务
+    完成后结算——本轮结算先于任务执行，故本轮仍无客户扣费（下一轮才结算）。"""
     from app.billing_meter import meter_call
     from app.generation_worker import run_pg_collection_once
     from app.storage import FakeStorageAdapter
@@ -644,9 +645,12 @@ def test_acquire_no_longer_enqueues_scheduled_collection(client, route_state):
         )
 
 
-def test_collector_does_not_settle_legacy_confirmed_collection_requests(client, route_state):
-    """P1 停用采集计费：即使库里存留"已确认未结算"的历史平台请求，collector
-    空轮也不再触发任何客户结算（settle 触发路径已摘除）."""
+def test_collector_settles_legacy_confirmed_collection_requests(client, route_state):
+    """恢复采集计费：collector 空轮会结算库中「已确认未结算」的历史平台请求.
+
+    采集调度恢复后，``run_pg_collection_once`` 每轮调用 ``settle_collection_charges``，
+    把已确认（SUCCEEDED）的共享采集请求按成员扣费（供应商一次、客户按成员扣）。
+    """
     from app.generation_worker import run_pg_collection_once
     from app.storage import FakeStorageAdapter
     from app.viral_collection_billing import create_collection_batch
@@ -715,13 +719,13 @@ def test_collector_does_not_settle_legacy_confirmed_collection_requests(client, 
                 "WHERE p.collection_batch_id=%s",
                 (batch,),
             ).fetchone()[0]
-            == 0
+            == 1
         )
         assert (
             raw.execute(
                 "SELECT available_credits FROM wallets WHERE user_id=%s", (user,)
             ).fetchone()[0]
-            == 100
+            == 98
         )
 
 

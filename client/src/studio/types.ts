@@ -148,6 +148,8 @@ export type StudioVideo = {
   likeDisplay?: string | null;
   tags?: string[];
   hasPlayableAudio?: boolean;
+  /** 共享文案缓存命中：卡片可展示「已有文案」角标。 */
+  hasCopy?: boolean;
   playUrl?: string | null;
 };
 export type StudioTask = {

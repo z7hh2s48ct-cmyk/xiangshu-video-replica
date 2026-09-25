@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "短视频复刻客户云工作台",
-  "version": "2.3.0",
+  "productName": "众墅之家 AI 爆款视频工具",
+  "version": "2.4.0",
   "identifier": "com.xiangshu.video-replica.customer",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -38,7 +38,7 @@
     ],
     "publisher": "Xiangshu Video Replica",
     "category": "Productivity",
-    "shortDescription": "短视频复刻客户云工作台",
+    "shortDescription": "众墅之家 AI 爆款视频工具",
     "longDescription": "连接客户云服务的短视频复刻 Windows 桌面端，不包含本地 API 或 Worker 启动器。",
     "icon": [
       "icons/32x32.png",
@@ -59,7 +59,7 @@
         "compression": "lzma",
         "installerIcon": "icons/icon.ico",
         "uninstallerIcon": "icons/icon.ico",
-        "startMenuFolder": "短视频复刻客户云工作台"
+        "startMenuFolder": "众墅之家 AI 爆款视频工具"
       }
     }
   }

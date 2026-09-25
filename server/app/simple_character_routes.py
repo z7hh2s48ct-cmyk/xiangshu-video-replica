@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 import sqlite3
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import uuid4
 
 from fastapi import (
@@ -788,6 +788,8 @@ def read_latest_character_sheet_task(
 def delete_identity(
     identity_id: str,
     db: BusinessDbDep,
+    asset_mode: Literal["delete", "keep"] = "delete",
+    remove_project_refs: bool = False,
 ) -> Response:
     cleanup_plan = None
     delete_actor = None
@@ -798,6 +800,8 @@ def delete_identity(
             actor=actor,
             identity_id=identity_id,
             storage_for_uri=storage_for_asset,
+            asset_mode=asset_mode,
+            remove_project_refs=remove_project_refs,
         )
         delete_actor = actor
 

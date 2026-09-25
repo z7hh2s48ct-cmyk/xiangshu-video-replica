@@ -2108,7 +2108,7 @@ export async function downloadGenerationResult(
     await downloadMaterialAsset(assetId, filename);
     return { status: "started" };
   }
-  return downloadVideoResult(
+  return downloadVideoToFile(
     async () => (await getGenerationResultDownloadUrl(assetId)).url,
     filename,
   );
@@ -2128,7 +2128,7 @@ export async function downloadGenerationTaskResult(
     }
     return downloadGenerationResult(task.result_asset_id, filename);
   }
-  return downloadVideoResult(
+  return downloadVideoToFile(
     () => createGenerationTaskPreviewUrl(taskId),
     filename,
   );
@@ -2166,7 +2166,12 @@ export async function openVideoDownloadFolder(
   }
 }
 
-async function downloadVideoResult(
+/**
+ * 通用「选位置 → blob 传输 → 等完成」的桌面下载管线；爆款本地缓存下载
+ * （viralCache.downloadViralVideoFile）复用同一条管线，Url 可以是任何
+ * WebView 可取到字节的地址（含 asset 协议的本地缓存文件）。
+ */
+export async function downloadVideoToFile(
   getUrl: () => Promise<string>,
   filename: string,
 ): Promise<VideoDownloadResult> {
@@ -3578,11 +3583,23 @@ export async function updateSimpleCharacterProfile(
   );
 }
 
+export interface DeleteSimpleCharacterOptions {
+  /** true 时保留用户见过的资产（转存素材库「我的上传」），仅删除人物档案。 */
+  keepAssets?: boolean;
+  /** true 时同时移除本人项目中对该人物的选用记录（他人项目仍会 409）。 */
+  removeProjectRefs?: boolean;
+}
+
 export async function deleteSimpleCharacterIdentity(
   identityId: string,
+  options: DeleteSimpleCharacterOptions = {},
 ): Promise<void> {
+  const params = new URLSearchParams();
+  if (options.keepAssets) params.set("asset_mode", "keep");
+  if (options.removeProjectRefs) params.set("remove_project_refs", "true");
+  const suffix = params.size ? `?${params.toString()}` : "";
   const response = await requestApi(
-    `/api/simple-characters/identities/${encodeURIComponent(identityId)}`,
+    `/api/simple-characters/identities/${encodeURIComponent(identityId)}${suffix}`,
     { method: "DELETE" },
   );
   if (!response.ok) {
@@ -7571,6 +7588,8 @@ export type ViralVideoItem = {
   likeDisplay: string | null;
   tags: string[];
   hasPlayableAudio: boolean;
+  /** 共享文案缓存命中：该视频的文案已被提取过（信息性标记，不计费）。 */
+  hasCopy?: boolean;
   /** 源平台播放地址；真实列表播放统一由服务端媒体管线转存后使用。 */
   playUrl: string | null;
   isFavorite?: boolean;
@@ -8031,6 +8050,75 @@ export function createViralCopyExtraction(
       body: form,
     },
     VIRAL_COPY_UPLOAD_TIMEOUT_MS,
+  );
+}
+
+/** 「我的搜索记录」条目：发现记录左联内容池，视频已删除时 video 为 null。 */
+export type ViralSearchDiscoveryItem = {
+  platform: ViralPlatform;
+  videoId: string;
+  keyword: string;
+  searchedAt: string;
+  video: ViralVideoItem | null;
+};
+
+export type ViralSearchDiscoveriesResponse = {
+  date: string;
+  total: number;
+  items: ViralSearchDiscoveryItem[];
+};
+
+/**
+ * 我的搜索记录（按天，默认今天·上海时区）：纯读路径，不计费。
+ *
+ * 与管理端「用户搜索发现」共享同一份发现记录，但这里只读当前登录用户自己的。
+ */
+export function listViralSearchDiscoveries(
+  date?: string,
+): Promise<ViralSearchDiscoveriesResponse> {
+  const query = new URLSearchParams();
+  if (date) query.set("date", date);
+  const suffix = query.size ? `?${query}` : "";
+  return requestApiJson<ViralSearchDiscoveriesResponse>(
+    `/api/viral/search/discoveries${suffix}`,
+    "读取搜索记录失败",
+    {},
+    VIRAL_LIST_TIMEOUT_MS,
+  );
+}
+
+/** 单条刷新的响应：更新后的视频摘要 + 计费回执（按次 1 单位）。 */
+export type ViralResourceRefreshResponse = {
+  video: {
+    platform: ViralPlatform;
+    videoId: string;
+    title: string;
+    author: string;
+    coverUrl: string | null;
+  };
+  billing: ViralSearchBilling;
+};
+
+/**
+ * 刷新单条抖音视频的封面/播放资源（按次计费，仅支持抖音）。
+ *
+ * 服务端按「视频 ID 当关键词」模拟搜索并精确匹配回原视频；视频号没有对应的
+ * 详情映射链路，调用前调用方应只对抖音条目展示该入口。
+ */
+export function refreshViralVideoResource(
+  platform: ViralPlatform,
+  videoId: string,
+  idempotencyKey: string,
+): Promise<ViralResourceRefreshResponse> {
+  return requestApiJson<ViralResourceRefreshResponse>(
+    "/api/viral/search/refresh",
+    "刷新视频资源失败",
+    {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({ platform, videoId }),
+    },
+    VIRAL_SEARCH_TIMEOUT_MS,
   );
 }
 
