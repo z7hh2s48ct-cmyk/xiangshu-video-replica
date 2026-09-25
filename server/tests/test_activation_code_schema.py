@@ -31,7 +31,7 @@ EVENTS_TABLE = "activation_code_events"
 # 重挂后链尾：#188 recharge_packages 之后是 Phase 3a sub_account_quotas、
 # Phase 3b sub_account_permissions，再叠加 BILLING-OBS-20260922 三个 analysis 迁移
 # 及其后的 REFUND 调账、1800 部署垫片、20260924T0000 交易号唯一索引与 20260924T0100 口播提交时刻列。
-_HEAD_REVISION = "20260924T0200_customer_oral_task_visibility"
+_HEAD_REVISION = "20260926T0000_viral_homepage_rank"
 
 
 def _pg_dsn() -> str:
