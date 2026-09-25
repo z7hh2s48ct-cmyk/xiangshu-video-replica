@@ -9,6 +9,7 @@ import type {
   MaterialSort,
   MaterialTagItem,
   MaterialUsagesResponse,
+  ViralDetailBilling,
   ViralImportPurpose,
   ViralImportTask,
   ViralPlatform,
@@ -24,7 +25,6 @@ import {
   downloadMaterialAsset,
   downloadVideoToFile,
   evictMaterialCachedPreview,
-  fetchViralVideo,
   fetchViralVideoSource,
   fetchViralVideoStatistics,
   getAssetDownloadUrl,
@@ -34,6 +34,7 @@ import {
   getMaterialUsages,
   getStudioDraft,
   getViralImportTask,
+  getWorkspacePricing,
   hideMaterial,
   listMaterialGroups,
   listMaterials,
@@ -41,9 +42,9 @@ import {
   listViralFavorites,
   listViralVideos,
   newViralSearchKey,
+  openViralVideoDetail,
   putMaterial,
   refreshViralVideoResource,
-  refreshViralVideoStatistics,
   removeViralFavorite,
   resolveMaterials,
   saveStudioDraft,
@@ -93,6 +94,7 @@ import {
   formatCacheBytes,
   listViralCache,
   openViralCacheFolder,
+  reclaimViralCache,
   useViralAutoCache,
   useViralCacheProgress,
   type ViralCachedItem,
@@ -315,6 +317,30 @@ function updateViralStatistics(
   }));
 }
 
+/** 「查看详情」单价：按次计费、同账号同视频只扣一次，已购买过的条目不再报价。 */
+function useViralDetailPrice(enabled: boolean) {
+  const [credits, setCredits] = useState<number>();
+  useEffect(() => {
+    if (!enabled) return;
+    let active = true;
+    void getWorkspacePricing()
+      .then((pricing) => {
+        const price = pricing.prices.find(
+          (item) => item.subject === "viral_detail",
+        );
+        if (active) setCredits(price ? price.unit_credits : undefined);
+      })
+      .catch(() => {
+        // 报价读不到就不报价：按钮仍可点，真实费用以服务端回执为准。
+        if (active) setCredits(undefined);
+      });
+    return () => {
+      active = false;
+    };
+  }, [enabled]);
+  return credits;
+}
+
 function useViralStatistics(videos: StudioVideo[], enabled: boolean) {
   const { updateData } = useStudio();
   const attemptedIds = useRef(new Set<string>());
@@ -343,52 +369,6 @@ function useViralStatistics(videos: StudioVideo[], enabled: boolean) {
   }, [enabled, pendingKey, updateData]);
 
   return error;
-}
-
-function RefreshStatisticsButton({ videos }: { videos: StudioVideo[] }) {
-  const { updateData } = useStudio();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const key = useRef<{ fingerprint: string; value: string } | null>(null);
-  const saving = useRef(false);
-  const ids = videos
-    .filter(
-      (video) => video.platformKey === "wechat_channels" && video.nativeId,
-    )
-    .map((video) => video.nativeId as string)
-    .slice(0, 12);
-  if (!ids.length) return null;
-  async function refreshStatistics() {
-    if (saving.current) return;
-    const fingerprint = JSON.stringify([...ids].sort());
-    if (key.current?.fingerprint !== fingerprint)
-      key.current = { fingerprint, value: crypto.randomUUID() };
-    saving.current = true;
-    setBusy(true);
-    setError("");
-    try {
-      const result = await refreshViralVideoStatistics(ids, key.current.value);
-      updateViralStatistics(updateData, result.items);
-      key.current = null;
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "数据刷新失败");
-    } finally {
-      saving.current = false;
-      setBusy(false);
-    }
-  }
-  return (
-    <div>
-      <button
-        type="button"
-        disabled={busy}
-        onClick={() => void refreshStatistics()}
-      >
-        {busy ? "正在刷新…" : "读取最新已采集数据"}
-      </button>
-      {error && <p role="alert">{error}</p>}
-    </div>
-  );
 }
 
 /** 点击播放：真实平台视频先走媒体管线，测试夹具可直接使用 playUrl。 */
@@ -434,8 +414,8 @@ function useViralPlayback(
         setPlayback({ status: "playing", src: localUrl });
         return;
       }
-      // 未命中：先把缓存踢起来（视频号这一步会取一次**计费**直链），并明确告诉
-      // 用户此刻为什么播不了——而不是默默回落到服务端取流。
+      // 未命中：先把缓存踢起来（数据源是云端归档，不计费），并明确告诉用户
+      // 此刻为什么播不了——而不是默默回落到服务端取流。
       void ensureViralCacheForVideo(video).catch(() => {
         // 失败状态由卡片角标呈现，这里不再重复提示。
       });
@@ -731,7 +711,8 @@ function ViralCacheUsage({ revision }: { revision: number }) {
 /** 缓存角标 + 细进度条（决策 #16）。总长度未知时只画角标，不画进度条。 */
 function ViralCacheBadge({ progress }: { progress: ViralCacheProgress }) {
   const label = CACHE_BADGE_LABELS[progress.state];
-  const hint = progress.state === "failed" ? (progress.error ?? label) : label;
+  // 失败/未就绪都带上原因：角标只有四个字，细节放悬浮说明里。
+  const hint = progress.error ?? label;
   const ratio = cacheProgressRatio(progress);
   return (
     <>
@@ -760,6 +741,7 @@ function ViralCard({
   onFavoriteChange,
   availability = "available",
   cacheProgress,
+  detailPrice,
 }: {
   video: StudioVideo;
   active: boolean;
@@ -768,6 +750,8 @@ function ViralCard({
   onFavoriteChange: (saved: boolean) => void;
   availability?: ViralVideoItem["availability"];
   cacheProgress?: ViralCacheProgress;
+  /** 「查看详情」单价（积分）；未知时不报价，费用以服务端回执为准。 */
+  detailPrice?: number;
 }) {
   const { review, navigate, notify } = useStudio();
   const playerRef = useRef<HTMLVideoElement | null>(null);
@@ -818,20 +802,7 @@ function ViralCard({
           }
           return;
         }
-        await ensureViralCacheForVideo({
-          platformKey,
-          nativeId,
-          playUrl: video.playUrl ?? null,
-        });
-        // 抖音没有直链时 ensure 是空操作（不会入队），先查缓存：
-        // 有就用缓存，没有就明确失败，不能掉进 awaitViralCacheReady 的长等待。
-        if (platformKey !== "wechat_channels" && !video.playUrl) {
-          const existing = await viralCacheLocalUrl(platformKey, nativeId);
-          if (!existing) {
-            notify("该视频暂无可下载的源，请稍后重试。");
-            return;
-          }
-        }
+        await ensureViralCacheForVideo({ platformKey, nativeId });
         await awaitViralCacheReady(platformKey, nativeId);
         const assetUrl = await viralCacheLocalUrl(platformKey, nativeId);
         if (!assetUrl) {
@@ -875,7 +846,16 @@ function ViralCard({
         onSavedChange={onFavoriteChange}
       />
       <div className="viral-card-body">
-        <h3>{video.title}</h3>
+        {/* 标题即入口：与「查看详情」同一动作，用户按直觉点标题就能进详情。 */}
+        <h3>
+          <button
+            type="button"
+            className="viral-card-title"
+            onClick={openDetail}
+          >
+            {video.title}
+          </button>
+        </h3>
         <div className="viral-card-tags">
           {video.hasCopy && (
             <span
@@ -883,6 +863,14 @@ function ViralCard({
               title="文案已提取过，可在文案工坊直接复用"
             >
               已有文案
+            </span>
+          )}
+          {video.detailCharged && (
+            <span
+              className="viral-card-detail-paid"
+              title="「查看详情」已购买，再次查看不再扣积分"
+            >
+              已查看
             </span>
           )}
           {video.tags?.slice(0, 6).map((tag) => (
@@ -893,7 +881,11 @@ function ViralCard({
         </div>
         <div className="content-card-actions">
           <Button variant="quiet" onClick={openDetail}>
-            查看详情
+            {video.detailCharged
+              ? "查看详情"
+              : detailPrice
+                ? `查看详情 · ${detailPrice} 积分`
+                : "查看详情"}
           </Button>
           <Button
             variant="outline"
@@ -965,26 +957,34 @@ export function ViralPage() {
   );
   paginationContextKeyRef.current = paginationContextKey;
 
-  const shown = useMemo(
-    () =>
-      data.videos
-        .filter(
-          (item) =>
-            item.platform === platform &&
-            (scope === "all" || favoriteKeys.has(viralIdentity(item))) &&
-            (category === "全部" || item.category === category),
-        )
-        .sort((left, right) => {
-          if (sort === "热门优先") {
-            return (
-              right.likes - left.likes ||
-              left.id.localeCompare(right.id, undefined, { numeric: true })
-            );
-          }
-          return (right.publishedAt ?? 0) - (left.publishedAt ?? 0);
-        }),
-    [category, data.videos, favoriteKeys, platform, scope, sort],
+  // 爆款网格 == 管理端策展的「首页展示」条目。`data.videos` 是共享存储，链接导入
+  // 与搜索结果也会往里塞条目（详情页要靠它按 id 找视频），那些条目没有首页展示
+  // 标记，必须挡在网格之外——否则会以「缓存失败」的形态出现在爆款列表里。
+  // 平台计数与分类筛选同用这份策展集合，否则会出现「有分类没有卡片」的空点击。
+  // 「我的收藏」不受此限：收藏是服务端状态，允许包含已下首页的视频。
+  const curated = useMemo(
+    () => data.videos.filter((item) => item.homepageFeatured === true),
+    [data.videos],
   );
+  const shown = useMemo(() => {
+    const source = scope === "favorites" ? data.videos : curated;
+    return source
+      .filter(
+        (item) =>
+          item.platform === platform &&
+          (scope !== "favorites" || favoriteKeys.has(viralIdentity(item))) &&
+          (category === "全部" || item.category === category),
+      )
+      .sort((left, right) => {
+        if (sort === "热门优先") {
+          return (
+            right.likes - left.likes ||
+            left.id.localeCompare(right.id, undefined, { numeric: true })
+          );
+        }
+        return (right.publishedAt ?? 0) - (left.publishedAt ?? 0);
+      });
+  }, [category, curated, data.videos, favoriteKeys, platform, scope, sort]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: 平台/分类/排序变化时重置滚动加载计数。
   useEffect(() => {
@@ -993,10 +993,13 @@ export function ViralPage() {
 
   const current = review ? shown.slice(0, visibleCount) : shown;
   const statisticsError = useViralStatistics(current, !review);
+  // 卡片报价：审核演示不报价，与其余计费入口同一口径。
+  const detailPrice = useViralDetailPrice(!review);
 
   // 浏览列表直接展示 current；缓存 hook 喂实际展示的列表（§6.2 翻页即缓存）。
   const gridVideos = current;
-  useViralAutoCache(gridVideos);
+  // 归档未就绪的条目由这里补一条合成状态，否则覆盖不到（Rust 侧压根没入队）。
+  const cacheFallback = useViralAutoCache(gridVideos);
   // 卡片角标/进度条的数据源；只喂完整的平台+ID 对，避免半条记录产生 ":xxx" 这类废键。
   const cacheProgress = useViralCacheProgress(
     gridVideos.flatMap((video) =>
@@ -1005,10 +1008,33 @@ export function ViralPage() {
         : [],
     ),
   );
-  const cacheProgressFor = (video: StudioVideo) =>
-    video.platformKey && video.nativeId
-      ? cacheProgress.get(viralCacheKey(video.platformKey, video.nativeId))
-      : undefined;
+  const cacheProgressFor = (video: StudioVideo) => {
+    if (!video.platformKey || !video.nativeId) return undefined;
+    const key = viralCacheKey(video.platformKey, video.nativeId);
+    // 真实进度优先：同一条视频重试成功后，合成状态自动让位。
+    return cacheProgress.get(key) ?? cacheFallback.get(key);
+  };
+
+  // 本地缓存回收（D5）的保留集：非首页条目（素材、搜索结果、详情注入）不进爆款
+  // 网格，但同样在用本地缓存，回收时必须排除。首页条目以每次下发的结果为准，因此
+  // 这里不看它们——被删除的条目下次刷新就不再下发，正好落进回收范围。
+  const knownCacheKeys = useMemo(() => {
+    const byPlatform = new Map<
+      string,
+      { platform: string; videoId: string }[]
+    >();
+    for (const video of data.videos) {
+      if (!video.platformKey || !video.nativeId) continue;
+      if (video.homepageFeatured === true) continue;
+      const keys = byPlatform.get(video.platformKey) ?? [];
+      keys.push({ platform: video.platformKey, videoId: video.nativeId });
+      byPlatform.set(video.platformKey, keys);
+    }
+    return byPlatform;
+  }, [data.videos]);
+  // 列表刷新的回调里要用最新一份，但不能因此把 data 放进 effect 依赖（会连环重拉）。
+  const knownCacheKeysRef = useRef(knownCacheKeys);
+  knownCacheKeysRef.current = knownCacheKeys;
 
   // 每完成一次缓存就把缓存压回上限内（§13-1）。以「本页已缓存条数」为触发条件，
   // 避免每条进度事件都去扫一遍缓存目录。
@@ -1112,6 +1138,20 @@ export function ViralPage() {
             ...incoming,
           ],
         }));
+        // 删除与下架只有服务端看得见（条目只是不再出现在下发结果里），所以每次
+        // 列表刷新后把本地多余的缓存交给服务端判定再回收（D5）。保留集 = 本次仍
+        // 可用的条目 + 收藏 + 已知的非首页条目；下架的条目已经播不了，不保留。
+        void reclaimViralCache(platformKey, [
+          ...result.items
+            .filter(
+              (item) => item.availability === "available" || item.isFavorite,
+            )
+            .map((item) => ({
+              platform: item.platform,
+              videoId: item.videoId,
+            })),
+          ...(knownCacheKeysRef.current.get(platformKey) ?? []),
+        ]);
       })
       .catch(() => {
         if (
@@ -1203,6 +1243,20 @@ export function ViralPage() {
             ...incoming,
           ],
         }));
+        // 删除与下架只有服务端看得见（条目只是不再出现在下发结果里），所以每次
+        // 列表刷新后把本地多余的缓存交给服务端判定再回收（D5）。保留集 = 本次仍
+        // 可用的条目 + 收藏 + 已知的非首页条目；下架的条目已经播不了，不保留。
+        void reclaimViralCache(platformKey, [
+          ...result.items
+            .filter(
+              (item) => item.availability === "available" || item.isFavorite,
+            )
+            .map((item) => ({
+              platform: item.platform,
+              videoId: item.videoId,
+            })),
+          ...(knownCacheKeysRef.current.get(platformKey) ?? []),
+        ]);
       })
       .catch(() => {
         if (
@@ -1370,7 +1424,7 @@ export function ViralPage() {
         ? item === "抖音"
           ? 20
           : 30
-        : data.videos.filter((video) => video.platform === item).length
+        : curated.filter((video) => video.platform === item).length
     }`,
   }));
   const categories = review
@@ -1378,7 +1432,7 @@ export function ViralPage() {
     : [
         "全部",
         ...new Set(
-          data.videos
+          curated
             .filter((video) => video.platform === platform && video.category)
             .map((video) => video.category),
         ),
@@ -1469,7 +1523,6 @@ export function ViralPage() {
           </Button>
         ))}
       </nav>
-      {!review && <RefreshStatisticsButton videos={gridVideos} />}
       {!review && <ViralCacheUsage revision={cachedOnPage} />}
       {(listError || statisticsError) && (
         <p className="viral-media-status is-error" role="status">
@@ -1508,6 +1561,7 @@ export function ViralPage() {
               }
               availability={availabilityByKey.get(viralIdentity(video))}
               cacheProgress={cacheProgressFor(video)}
+              detailPrice={detailPrice}
             />
           ))}
         </section>
@@ -1681,6 +1735,10 @@ export function ViralDetailPage() {
   const [detailAvailability, setDetailAvailability] =
     useState<ViralVideoItem["availability"]>("available");
   const [detailFavorite, setDetailFavorite] = useState<boolean>();
+  // 「查看详情」计费回执：进入详情即调一次（服务端按付费账号去重，重复查看免费），
+  // 详情与互动统计字段在同一响应里返回，因此只算一次费用。
+  const [detailBilling, setDetailBilling] = useState<ViralDetailBilling>();
+  const [detailBillingError, setDetailBillingError] = useState<string>();
   const detailAccountRef = useRef(accountId);
   const detailRequestRef = useRef(0);
   detailAccountRef.current = accountId;
@@ -1694,6 +1752,8 @@ export function ViralDetailPage() {
     setDetailFavorite(undefined);
     setDetailAvailability("available");
     setDetailStatus("idle");
+    setDetailBilling(undefined);
+    setDetailBillingError(undefined);
   }, [accountId]);
 
   useEffect(() => {
@@ -1712,17 +1772,16 @@ export function ViralDetailPage() {
       detailAccountRef.current === requestAccountId &&
       detailRequestRef.current === requestId;
     setDetailStatus("loading");
-    void fetchViralVideo(detailParams.platform, detailParams.videoId)
-      .then((response) => {
+    void openViralVideoDetail(detailParams.platform, detailParams.videoId)
+      .then(({ item, billing }) => {
         if (!isCurrent()) return;
-        const item = "item" in response ? response.item : response;
         const restored = studioVideoFromViral(item);
-        if (!isCurrent()) return;
         setDetailAvailability(item.availability ?? "available");
         setDetailFavorite(Boolean(item.isFavorite));
+        setDetailBilling(billing);
+        setDetailBillingError(undefined);
         setRemoteVideo(restored);
         setDetailStatus("idle");
-        if (!isCurrent()) return;
         updateData((current) => ({
           ...current,
           videos: [
@@ -1733,21 +1792,40 @@ export function ViralDetailPage() {
           ],
         }));
       })
-      .catch(() => {
-        if (isCurrent()) setDetailStatus("error");
+      .catch((cause) => {
+        if (!isCurrent()) return;
+        setDetailStatus("error");
+        // 计费未完成的详情不算「已查看」：把原因显式告诉用户，本地已有条目
+        // 仍可阅读（这些字段浏览列表本就免费可见），不做任何收费态展示。
+        const message =
+          cause instanceof Error ? cause.message : "查看详情失败，请重试。";
+        setDetailBillingError(message);
+        if (isInsufficientCredits(cause)) {
+          setRefreshNotice("积分不足，查看详情未完成。");
+          openLive("wallet");
+        }
       });
     return () => {
       if (detailRequestRef.current === requestId) {
         detailRequestRef.current += 1;
       }
     };
-  }, [detailParams, remoteVideo, review, selectedVideo, updateData, accountId]);
+  }, [
+    detailParams,
+    remoteVideo,
+    review,
+    selectedVideo,
+    updateData,
+    accountId,
+    openLive,
+  ]);
 
   useEffect(() => {
     if (video) persistViralDetailUrl(video);
   }, [video]);
 
-  const statisticsError = useViralStatistics(video ? [video] : [], !review);
+  // 互动统计随「查看详情」同一响应下发（一次计费覆盖详情与统计），
+  // 详情页不再单独发起统计请求。
   const { playback, play, retry, markFailed } = useViralPlayback(video);
   // hooks 必须在提前 return 之前声明完毕（刷新按钮渲染在下方详情分支里）。
   const [refreshBusy, setRefreshBusy] = useState(false);
@@ -1800,7 +1878,19 @@ export function ViralDetailPage() {
       sourceId: task.sourceAssetId,
       sourceAssetId: task.sourceAssetId,
     });
-    extractScriptFromUpload(task.projectId, task.sourceAssetId);
+    // Web 降级链路（本地无缓存，素材由服务端导入）：同样带上视频身份，转写完成后
+    // 走一次「获取文案」——文案交付到谁手里就在谁账上扣费，这条链路也不例外。
+    // 没有平台标识就没法关联文案，只能按普通转写处理（这类条目本就进不了爆款列表）。
+    const copyClaim =
+      video.platformKey && video.nativeId
+        ? { platformKey: video.platformKey, nativeId: video.nativeId }
+        : undefined;
+    extractScriptFromUpload(
+      task.projectId,
+      task.sourceAssetId,
+      undefined,
+      copyClaim,
+    );
     navigate("copy", {
       selectedVideoId: video.id,
       returnTo: "viral-detail",
@@ -1935,10 +2025,18 @@ export function ViralDetailPage() {
             <span className="viral-detail-published">发布 {published}</span>
             <span>时长 {video.duration}</span>
           </div>
-          {!review && video && <RefreshStatisticsButton videos={[video]} />}
-          {statisticsError && (
+          {detailBilling && (
+            <p className="viral-media-status is-ready" role="status">
+              {detailBilling.billable === false
+                ? "该视频当前不可用，本次查看详情未计费。"
+                : detailBilling.deduped
+                  ? "该视频此前已购买过详情，本次查看不再扣积分。"
+                  : `本次查看详情扣除 ${detailBilling.charged} 积分（含互动统计，再次查看不再扣费）。`}
+            </p>
+          )}
+          {detailBillingError && (
             <p className="viral-media-status is-error" role="status">
-              {statisticsError}
+              {detailBillingError}
             </p>
           )}
           {refreshNotice && (

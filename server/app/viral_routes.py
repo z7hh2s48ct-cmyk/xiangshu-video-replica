@@ -25,12 +25,13 @@ from app.auth import AuthenticatedUser, Database
 from app.billing_catalog import SERVICES
 from app.billing_meter import billing_context
 from app.customer_fence import BusinessDbDep
+from app.db_portable import BusinessConnection
 from app.media_routes import api_base_url, get_media_storage
 from app.permissions import require_not_auditor
 from app.script_from_audio import cached_transcript, cached_transcripts
 from app.settings import settings_encryption_key
 from app.storage import StorageBackendUnavailable, local_download_signature
-from app.usage_billing import accept_operation, finish_source
+from app.usage_billing import accept_operation, finish_source, resolve_wallet_owner
 from app.viral_keywords import configured_viral_categories
 from app.viral_media import (
     VIRAL_MEDIA_URL_TTL,
@@ -50,6 +51,7 @@ from app.viral_store import (
     is_viral_favorite,
     list_favorite_viral_video_page,
     list_viral_video_page,
+    reclaimable_viral_video_ids,
     remove_viral_favorite,
     validate_viral_cursor,
     viral_fetched_at,
@@ -113,6 +115,9 @@ class ViralVideoItem(BaseModel):
     isFavorite: bool = False
     hasCopy: bool = False
     availability: Literal["available", "hidden", "unavailable"] = "available"
+    # 本账号是否已为「查看详情」付过费（列表 / 收藏 / 详情统一回填，卡片据此
+    # 显示「已查看」，也避免把重复查看当成新的收费动作）。
+    detailCharged: bool = False
 
 
 class ViralListResponse(BaseModel):
@@ -149,8 +154,66 @@ class ViralMediaRequest(BaseModel):
     kind: Literal["audio", "video"] | None = None
 
 
+class ViralDetailRequest(BaseModel):
+    platform: str = Field(min_length=1)
+    videoId: str = Field(min_length=1, max_length=512)
+
+
+class ViralDetailBilling(BaseModel):
+    """查看详情的计费回执（服务端权威值，客户端只展示）."""
+
+    charged: int
+    unit: str
+    # 同一条视频对同一个付费账号只扣一次：true 表示复用既有购买，本次未再扣费。
+    deduped: bool = False
+    # 已下架 / 不可用的内容不计费，供客户端区分「已购买」与「本次不计费」。
+    billable: bool = True
+
+
+class ViralDetailViewResponse(BaseModel):
+    item: ViralVideoItem
+    billing: ViralDetailBilling
+
+
+class ViralCopyClaimRequest(BaseModel):
+    platform: str = Field(min_length=1)
+    videoId: str = Field(min_length=1, max_length=512)
+
+
+class ViralCopyBilling(BaseModel):
+    """获取文案的计费回执（服务端权威值，客户端只展示）."""
+
+    charged: int
+    unit: str
+    # 同一条视频对同一个付费账号只扣一次：true 表示复用既有购买，本次未再扣费。
+    deduped: bool = False
+    # 已下架 / 不可用的内容不计费，供客户端区分「已购买」与「本次不计费」。
+    billable: bool = True
+
+
+class ViralCopyClaimResponse(BaseModel):
+    # 未命中共享缓存时双 null：这次没有交付，因此也不扣费，客户端按需再走转写。
+    text: str | None
+    updatedAt: str | None
+    billing: ViralCopyBilling
+
+
 class ViralStatisticsRequest(BaseModel):
     videoIds: list[str] = Field(min_length=1, max_length=12)
+
+
+class ViralCacheReclaimRequest(BaseModel):
+    platform: str = Field(min_length=1)
+    # 本地缓存清单由客户端上报：服务端不知道用户机器上有什么，只能回答「该不该留」。
+    # 上限 200 条（单行 IN 查询的合理批量），客户端超出时自行分批。
+    videoIds: list[Annotated[str, Field(min_length=1, max_length=512)]] = Field(
+        min_length=1, max_length=200
+    )
+
+
+class ViralCacheReclaimResponse(BaseModel):
+    platform: str
+    reclaim: list[str]
 
 
 class ViralStatisticsResponse(BaseModel):
@@ -208,12 +271,14 @@ def _item(
     is_favorite: bool = False,
     availability: ViralAvailability = "available",
     has_copy: bool = False,
+    detail_charged: bool = False,
 ) -> ViralVideoItem:
     item = ViralVideoItem(
         **video.to_client_dict(),
         isFavorite=is_favorite,
         availability=availability,
         hasCopy=has_copy,
+        detailCharged=detail_charged,
     )
     if not video.cover_key:
         item.coverUrl = None
@@ -281,6 +346,12 @@ def list_viral_videos(
     # 浏览列表同样回填共享文案命中：与搜索接口口径一致，卡片不用先搜一次
     # 才知道这篇文案已经提取过。
     copy_hits = cached_transcripts(conn, [(video.platform, video.video_id) for video in page.items])
+    detail_charged_ids = viral_detail_charged_ids(
+        conn,
+        user_id=actor.id,
+        platform=platform,
+        video_ids=[video.video_id for video in page.items],
+    )
     return ViralListResponse(
         platform=platform,
         sort=sort,
@@ -291,6 +362,7 @@ def list_viral_videos(
                 is_favorite=video.video_id in favorite_ids,
                 availability=availability_by_id.get(video.video_id, "available"),
                 has_copy=(video.platform, video.video_id) in copy_hits,
+                detail_charged=video.video_id in detail_charged_ids,
             )
             for video in page.items
         ],
@@ -339,6 +411,14 @@ def list_viral_favorites(
             video_ids=[video.video_id for video in page.items if video.platform == video_platform],
         )
     copy_hits = cached_transcripts(conn, [(video.platform, video.video_id) for video in page.items])
+    detail_charged_by_platform: dict[str, set[str]] = {}
+    for video_platform in {video.platform for video in page.items}:
+        detail_charged_by_platform[video_platform] = viral_detail_charged_ids(
+            conn,
+            user_id=actor.id,
+            platform=video_platform,
+            video_ids=[video.video_id for video in page.items if video.platform == video_platform],
+        )
     return ViralFavoritesResponse(
         items=[
             _item(
@@ -348,6 +428,7 @@ def list_viral_favorites(
                     video.video_id, "available"
                 ),
                 has_copy=(video.platform, video.video_id) in copy_hits,
+                detail_charged=video.video_id in detail_charged_by_platform[video.platform],
             )
             for video in page.items
         ],
@@ -463,6 +544,33 @@ def fetch_viral_video_media(payload: ViralMediaRequest, db: BusinessDbDep) -> Vi
         url=_browser_playable_url(result.url, actor.id),
         contentType=result.content_type,
         cacheHit=result.cache_hit,
+    )
+
+
+@router.post("/videos/cache-reclaim", response_model=ViralCacheReclaimResponse)
+def audit_local_viral_cache(
+    payload: ViralCacheReclaimRequest,
+    conn: Database,
+    actor: AuthenticatedUser,
+) -> ViralCacheReclaimResponse:
+    """回答「这些本地缓存条目还有没有服务端来源」，供桌面端回收。
+
+    只读、不计费：回收动作发生在用户机器上，但判据必须由服务端给出——删除与下架
+    都不会在客户端的旧分页数据里留下痕迹。
+    """
+    if payload.platform not in _STORED_PLATFORMS:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "VIRAL_PLATFORM_INVALID", "message": "不支持的视频平台"},
+        )
+    return ViralCacheReclaimResponse(
+        platform=payload.platform,
+        reclaim=reclaimable_viral_video_ids(
+            conn,
+            user_id=actor.id,
+            platform=payload.platform,
+            video_ids=list(dict.fromkeys(payload.videoIds)),
+        ),
     )
 
 
@@ -815,6 +923,135 @@ def _requested_byte_range(value: str | None, size: int) -> tuple[int, int, bool]
     return start, end, True
 
 
+VIRAL_DETAIL_SERVICE = "viral_detail"
+VIRAL_COPY_SERVICE = "viral_copy"
+
+
+def _detail_source_id(owner_id: str, platform: str, video_id: str) -> str:
+    """「查看详情」的台账行键：付费账号 + 平台 + 视频.
+
+    来源标识本身就是去重键——同一条视频对同一个付费账号最多留下一行 ``SUCCEEDED``，
+    因此再次查看不会重新扣费。用**付费账号**（钱包主体）而不是操作者：子账号共享
+    母账号钱包，也就共享这份已购内容，否则同一个客户会为同一条视频被扣多次。
+    """
+    return f"viral-detail:{owner_id}:{platform}:{video_id}"
+
+
+def _detail_purchased(conn: BusinessConnection, source_id: str) -> bool:
+    """该账号是否已买过这条视频的详情（只有终态 ``SUCCEEDED`` 算已购买）."""
+    row = conn.execute(
+        "SELECT 1 FROM billing_operations WHERE service=%s AND source_id=%s "
+        "AND state='SUCCEEDED' LIMIT 1",
+        (VIRAL_DETAIL_SERVICE, source_id),
+    ).fetchone()
+    return row is not None
+
+
+def viral_detail_charged_ids(
+    conn: BusinessConnection, *, user_id: str, platform: str, video_ids: list[str]
+) -> set[str]:
+    """批量收口「本账号已购买详情」的视频 id，供列表 / 收藏回填卡片状态."""
+    if not video_ids:
+        return set()
+    owner_id = resolve_wallet_owner(conn, user_id)
+    by_source_id = {
+        _detail_source_id(owner_id, platform, video_id): video_id for video_id in video_ids
+    }
+    rows = conn.execute(
+        "SELECT source_id FROM billing_operations WHERE service=%s AND state='SUCCEEDED' "
+        "AND source_id = ANY(%s)",
+        (VIRAL_DETAIL_SERVICE, list(by_source_id)),
+    ).fetchall()
+    return {by_source_id[str(row[0])] for row in rows if str(row[0]) in by_source_id}
+
+
+def _detail_charged(
+    conn: BusinessConnection, *, user_id: str, platform: str, video_id: str
+) -> bool:
+    return video_id in viral_detail_charged_ids(
+        conn, user_id=user_id, platform=platform, video_ids=[video_id]
+    )
+
+
+def _copy_source_id(owner_id: str, platform: str, video_id: str) -> str:
+    """「获取文案」的台账行键：付费账号 + 平台 + 视频.
+
+    与「查看详情」同一套去重口径——同一条视频对同一个付费账号最多留下一行
+    ``SUCCEEDED``。用**付费账号**（钱包主体）而不是操作者：子账号共享母账号钱包，
+    也就共享这份已购文案，否则同一个客户会为同一条视频的文案被反复扣费。
+    """
+    return f"viral-copy:{owner_id}:{platform}:{video_id}"
+
+
+def _copy_purchased(conn: BusinessConnection, source_id: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM billing_operations WHERE service=%s AND source_id=%s "
+        "AND state='SUCCEEDED' LIMIT 1",
+        (VIRAL_COPY_SERVICE, source_id),
+    ).fetchone()
+    return row is not None
+
+
+def charge_viral_copy(
+    conn: BusinessConnection,
+    *,
+    actor: AuthenticatedUser,
+    platform: str,
+    video_id: str,
+    billable: bool = True,
+) -> tuple[int, bool]:
+    """交付共享文案前扣一次「获取文案」费，返回 (本次扣费积分, 是否复用已购).
+
+    零售口径（已拍板）：文案一旦被别人转写进共享缓存，后续账号拿到它照样付费——
+    秒回省下的是平台的转写成本，不是用户手里的内容价值；同一条视频对同一个付费
+    账号只扣一次。资费 fail-closed（未配置 / 已停用 / 单价为 0 一律拒绝），且与
+    ``accept_operation`` 共用同一把用户锁：并发的首次获取在这里排队，后到者看到
+    已购买行即走免费分支，不会各扣一次。失败（未命中 / 拒绝 / 事务回滚）都不扣费。
+    """
+    if not billable:
+        return 0, False
+    from app.viral_search_routes import require_priced_viral_service
+
+    source_id = _copy_source_id(resolve_wallet_owner(conn, actor.id), platform, video_id)
+    if _copy_purchased(conn, source_id):
+        return 0, True
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="viral.copy_claim",
+        entity_type="viral_video",
+        entity_id=video_id,
+    )
+    require_priced_viral_service(conn, VIRAL_COPY_SERVICE, error_code="VIRAL_COPY_UNPRICED")
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtext(%s))",
+        ("billing:user:" + actor.id,),
+    )
+    if _copy_purchased(conn, source_id):
+        return 0, True
+    accept_operation(
+        conn,
+        user_id=actor.id,
+        service=VIRAL_COPY_SERVICE,
+        source_id=source_id,
+        units=1,
+        request_fingerprint=f"{platform}:{video_id}",
+    )
+    charged = int(
+        finish_source(conn, source_id, units=1, succeeded=True, service=VIRAL_COPY_SERVICE) or 0
+    )
+    return charged, False
+
+
+def viral_copy_purchased(
+    conn: BusinessConnection, *, user_id: str, platform: str, video_id: str
+) -> bool:
+    """该付费账号是否已买过这条视频的文案（只读状态查询回填 ``purchased``）."""
+    return _copy_purchased(
+        conn, _copy_source_id(resolve_wallet_owner(conn, user_id), platform, video_id)
+    )
+
+
 @router.get("/videos/{platform}/{video_id:path}", response_model=ViralVideoItem)
 def get_viral_video_detail(
     conn: Database,
@@ -822,6 +1059,12 @@ def get_viral_video_detail(
     platform: str,
     video_id: str,
 ) -> ViralVideoItem:
+    """免费读取单条爆款视频：工作区搜索与旧客户端的只读路径.
+
+    「查看详情」的计费产品走 ``POST /videos/detail``。本端点不扣费，且它下发的
+    字段与免费列表完全同源（列表本就免费返回同样的字段），所以它不是绕过计费的
+    入口，只是同一条内容在库里的读取口径。
+    """
     video = _require_stored_video(conn, platform=platform, video_id=video_id)
     availability = viral_video_availability(conn, platform=platform, video_id=video_id)
     return _item(
@@ -834,4 +1077,157 @@ def get_viral_video_detail(
         ),
         availability=availability,
         has_copy=cached_transcript(conn, platform=platform, video_id=video_id) is not None,
+        detail_charged=_detail_charged(
+            conn, user_id=actor.id, platform=platform, video_id=video_id
+        ),
+    )
+
+
+@router.post("/videos/detail", response_model=ViralDetailViewResponse)
+def open_viral_video_detail(
+    payload: ViralDetailRequest, db: BusinessDbDep
+) -> ViralDetailViewResponse:
+    """打开爆款视频详情：读内容池 + 按次计费（同一付费账号同一条视频只扣一次）.
+
+    计费口径（已拍板）：详情与统计字段在同一个响应里返回，因此只算一次「查看详情」；
+    浏览、缓存、播放都不在本端点计费。预留在 ``accept_operation``、结算在
+    ``finish_source``，两者与内容读取同处一个事务——内容读不到（404/409）或事务
+    回滚时预留一并消失，**失败不扣费**。
+
+    免费分支有三类，客户端据 ``billing`` 区分：已购买（``deduped``）、已下架 /
+    不可用（``billable=false``）、以及审核账号读取**已购买**内容（不产生新扣费）。
+    审核账号不得产生新的客户扣费，所以首次购买前先过 ``require_not_auditor``；
+    这与 ``/videos/source`` 等计费端点同一口径。
+    """
+    if payload.platform not in _STORED_PLATFORMS:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "VIRAL_PLATFORM_INVALID", "message": "不支持的视频平台"},
+        )
+    # 循环导入：viral_search_routes 反向依赖本模块的 ViralVideoItem，只能延迟导入。
+    from app.viral_search_routes import require_priced_viral_service
+
+    with db.write() as (conn, actor):
+        with conn:
+            video = _require_stored_video(conn, platform=payload.platform, video_id=payload.videoId)
+            availability = viral_video_availability(
+                conn, platform=payload.platform, video_id=payload.videoId
+            )
+            source_id = _detail_source_id(
+                resolve_wallet_owner(conn, actor.id), payload.platform, payload.videoId
+            )
+            billable = availability == "available"
+            charged = 0
+            deduped = billable and _detail_purchased(conn, source_id)
+            if billable and not deduped:
+                require_not_auditor(
+                    conn,
+                    actor=actor,
+                    action="viral.detail",
+                    entity_type="viral_video",
+                    entity_id=payload.videoId,
+                )
+                require_priced_viral_service(
+                    conn, VIRAL_DETAIL_SERVICE, error_code="VIRAL_DETAIL_UNPRICED"
+                )
+                # 与 accept_operation 同一把用户锁：并发的首次查看在这里排队，
+                # 后到者看到已购买行即走免费分支，不会各扣一次。
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                    ("billing:user:" + actor.id,),
+                )
+                if _detail_purchased(conn, source_id):
+                    deduped = True
+                else:
+                    accept_operation(
+                        conn,
+                        user_id=actor.id,
+                        service=VIRAL_DETAIL_SERVICE,
+                        source_id=source_id,
+                        units=1,
+                        request_fingerprint=f"{payload.platform}:{payload.videoId}",
+                    )
+                    charged = int(
+                        finish_source(
+                            conn,
+                            source_id,
+                            units=1,
+                            succeeded=True,
+                            service=VIRAL_DETAIL_SERVICE,
+                        )
+                        or 0
+                    )
+            item = _item(
+                video,
+                is_favorite=is_viral_favorite(
+                    conn,
+                    user_id=actor.id,
+                    platform=payload.platform,
+                    video_id=payload.videoId,
+                ),
+                availability=availability,
+                has_copy=cached_transcript(
+                    conn, platform=payload.platform, video_id=payload.videoId
+                )
+                is not None,
+                detail_charged=deduped or charged > 0,
+            )
+    return ViralDetailViewResponse(
+        item=item,
+        billing=ViralDetailBilling(
+            charged=charged,
+            unit=SERVICES[VIRAL_DETAIL_SERVICE].unit,
+            deduped=deduped,
+            billable=billable,
+        ),
+    )
+
+
+@router.post("/videos/copy/claim", response_model=ViralCopyClaimResponse)
+def claim_viral_video_copy(
+    payload: ViralCopyClaimRequest, db: BusinessDbDep
+) -> ViralCopyClaimResponse:
+    """获取共享文案：命中缓存即扣一次「获取文案」费并下发正文，未命中不扣费.
+
+    共享缓存的写入方是转写链路（``POST /videos/copy`` 与工作台文案工坊），它们各自
+    付转写费；本端点是**交付侧**的计费点：谁拿到文案谁付费，秒回别人的转写结果不
+    例外。未命中时如实回 null 且分文不扣——没有交付就没有收费。
+    """
+    if payload.platform not in _STORED_PLATFORMS:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "VIRAL_PLATFORM_INVALID", "message": "不支持的视频平台"},
+        )
+    with db.write() as (conn, actor):
+        with conn:
+            _require_stored_video(conn, platform=payload.platform, video_id=payload.videoId)
+            hit = cached_transcript(conn, platform=payload.platform, video_id=payload.videoId)
+            if hit is None:
+                return ViralCopyClaimResponse(
+                    text=None,
+                    updatedAt=None,
+                    billing=ViralCopyBilling(charged=0, unit=SERVICES[VIRAL_COPY_SERVICE].unit),
+                )
+            # 已下架 / 不可用的内容不计费（与「查看详情」同口径），但仍把已有文案
+            # 交给用户：内容早已产出，此时再收费等于对一条看不成的视频收钱。
+            billable = (
+                viral_video_availability(conn, platform=payload.platform, video_id=payload.videoId)
+                == "available"
+            )
+            charged, deduped = charge_viral_copy(
+                conn,
+                actor=actor,
+                platform=payload.platform,
+                video_id=payload.videoId,
+                billable=billable,
+            )
+    return ViralCopyClaimResponse(
+        text=hit.result.text,
+        updatedAt=hit.updated_at,
+        billing=ViralCopyBilling(
+            charged=charged,
+            unit=SERVICES[VIRAL_COPY_SERVICE].unit,
+            deduped=deduped,
+            billable=billable,
+        ),
     )

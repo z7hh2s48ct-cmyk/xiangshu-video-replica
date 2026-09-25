@@ -23,6 +23,7 @@ import {
   cancelOralTask,
   cancelSourceFrameTask,
   chooseProjectMainCharacterVersion,
+  claimViralCopy,
   clearMaterialCache,
   compileGenerationPrompt,
   completeMaterialUpload,
@@ -4404,12 +4405,13 @@ describe("deduplicated oral materials", () => {
 });
 
 describe("爆款文案提取（本地抽音轨上传）", () => {
-  it("先读共享文案缓存，命中与否都由同一端点回答", async () => {
+  it("只读状态问「有没有 + 买没买过」，不下发正文", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
-        text: "共享缓存里的文案",
+        available: true,
         updatedAt: "2026-09-23T00:00:00",
+        purchased: false,
       }),
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -4417,13 +4419,39 @@ describe("爆款文案提取（本地抽音轨上传）", () => {
     await expect(
       fetchViralCopy("wechat_channels", "wx/id?x=1"),
     ).resolves.toEqual({
-      text: "共享缓存里的文案",
+      available: true,
       updatedAt: "2026-09-23T00:00:00",
+      purchased: false,
     });
     // 视频号 id 是可含斜杠的 opaque ID，必须整体编码进查询串。
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:8000/api/viral/search/copy?platform=wechat_channels&videoId=wx%2Fid%3Fx%3D1",
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it("获取共享文案走计费端点并回传扣费回执", async () => {
+    const claimed = {
+      text: "共享缓存里的文案",
+      updatedAt: "2026-09-23T00:00:00",
+      billing: { charged: 20, unit: "call", deduped: false, billable: true },
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => claimed,
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(claimViralCopy("douyin", "native-1")).resolves.toEqual(
+      claimed,
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/viral/videos/copy/claim",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ platform: "douyin", videoId: "native-1" }),
+        signal: expect.any(AbortSignal),
+      }),
     );
   });
 

@@ -370,6 +370,73 @@ def test_douyidou_top_level_duration_takes_priority_over_nested() -> None:
     assert resolved.duration_ms == 5000
 
 
+# ── 互动字段：解析上游给了就带上，没给必须留空（不伪造）────────────────────
+
+
+def test_resolved_metadata_takes_optional_interaction_fields() -> None:
+    """上游顺带返回的头像 / 互动 / 发布时间 / 标签必须落进解析结果。"""
+
+    class RichGatewayTransport(DouyidouHttpTransport):
+        def request(self, url: str, *, headers: Mapping[str, str]) -> bytes:
+            return json.dumps(
+                {
+                    "code": 0,
+                    "data": {
+                        "aweme_id": _DOUYIN_ID,
+                        "title": "庭院施工案例",
+                        "video": [f"https://media.example/{_DOUYIN_ID}.mp4"],
+                        "author": {
+                            "nickname": "作者甲",
+                            "avatar_thumb": {"url_list": ["https://img.example/avatar.jpeg"]},
+                            "is_verified": True,
+                        },
+                        "statistics": {
+                            "digg_count": 1200,
+                            "comment_count": "34",
+                            "share_count": 5,
+                            "collect_count": "1.2万",
+                        },
+                        "create_time": 1788700000,
+                        "text_extra": [
+                            {"hashtag_name": "庭院"},
+                            {"hashtag_name": "自建房"},
+                        ],
+                    },
+                }
+            ).encode()
+
+    client = DouyidouLinkClient(app_id="test", app_secret="test", transport=RichGatewayTransport())
+    resolved = client.resolve(f"https://www.douyin.com/video/{_DOUYIN_ID}", purpose="copy")
+    metadata = resolved.metadata
+    assert metadata.author_avatar == "https://img.example/avatar.jpeg"
+    assert metadata.verified is True
+    assert (metadata.likes, metadata.comments, metadata.shares, metadata.collects) == (
+        1200,
+        34,
+        5,
+        12000,
+    )
+    assert metadata.published_at == 1788700000
+    assert metadata.tags == ("庭院", "自建房")
+
+
+def test_resolved_metadata_stays_empty_when_provider_omits_fields() -> None:
+    """解析上游没有互动字段时不得填默认值——管理端据此显示「字段待补全」。"""
+
+    client = DouyidouLinkClient(
+        app_id="test", app_secret="test", transport=RecordingGatewayTransport()
+    )
+    metadata = client.resolve(f"https://www.douyin.com/video/{_DOUYIN_ID}", purpose="copy").metadata
+    assert metadata.author_avatar is None
+    assert metadata.verified is False
+    assert metadata.likes is None
+    assert metadata.comments is None
+    assert metadata.shares is None
+    assert metadata.collects is None
+    assert metadata.published_at is None
+    assert metadata.tags == ()
+
+
 def test_unused_import_guard() -> None:
     # 占位防止未来误删 Any 导入；保持与既有测试文件风格一致。
     payload: dict[str, Any] = {}

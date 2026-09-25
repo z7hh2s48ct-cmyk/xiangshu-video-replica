@@ -7,12 +7,12 @@ server/tests/test_analysis_diagnostics_pg.py
 server/tests/test_analysis_model_configuration.py
 server/tests/test_apilio_image_provider.py
 server/tests/test_batch_titles.py
-server/tests/test_bootstrap_all_env_pg_gate.py
 server/tests/test_character_image_authorization.py
 server/tests/test_customer_center.py
+server/tests/test_customer_ha_smoke.py
+server/tests/test_customer_pitr.py
 server/tests/test_customer_sub_account_self_service.py
 server/tests/test_cw028_shared_settings_contract.py
-server/tests/test_cw033_pitr_drill_validation.py
 server/tests/test_cw040_internal_release_exit.py
 server/tests/test_cw054_pg_portable_contract.py
 server/tests/test_cw059_billing_pg_matrix.py
@@ -24,7 +24,6 @@ server/tests/test_independent_request_model.py
 server/tests/test_material_groups_bulk.py
 server/tests/test_material_thumbs.py
 server/tests/test_media_url_contract.py
-server/tests/test_migration_dialect_contract.py
 server/tests/test_ops_metrics.py
 server/tests/test_pg_test_kit.py
 server/tests/test_publish_accounts.py
@@ -33,8 +32,7 @@ server/tests/test_queue_load_10k.py
 server/tests/test_sql_pagination.py
 server/tests/test_storage.py
 server/tests/test_sub_account_schema.py
-server/tests/test_viral_decrypt.py
-server/tests/test_viral_link_canonical.py
+server/tests/test_viral_keywords.py
 server/tests/test_viral_media.py
-server/tests/test_wallet_pricing_breakdown_pg.py
-server/tests/test_wechat_native_provider.py
+server/tests/test_wallet_pricing_breakdown.py
+server/tests/test_wechat_native_client.py

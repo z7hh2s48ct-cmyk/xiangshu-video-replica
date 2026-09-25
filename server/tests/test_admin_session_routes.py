@@ -253,6 +253,7 @@ def route_state(sessions_dsn: str) -> Iterator[str]:
             "viral_video_favorites, "
             "viral_video_visibility, "
             "viral_videos, "
+            "viral_fetch_state, "
             "viral_search_discoveries, "
             "security_rate_limit_counters, security_auth_failures CASCADE"
         )
@@ -946,6 +947,458 @@ def test_admin_collected_video_requires_manual_homepage_selection_and_delete_is_
             == 3
         )
         assert conn.execute("SELECT count(*) FROM viral_media_preparations").fetchone()[0] == 1
+
+
+@pytest.mark.pg
+def test_link_imported_material_cannot_be_featured(
+    client: TestClient,
+    route_state: str,
+) -> None:
+    """链接导入素材不进首页：单条与批量都要拒，否则它会绕过采集侧质量门槛。"""
+    headers = _admin_session(client)
+    with psycopg.connect(route_state) as conn:
+        conn.execute(
+            "UPDATE viral_videos SET category='链接导入',"
+            " cover_url='https://cdn.example.com/imported.jpg',"
+            " cover_key='viral/cover/douyin/imported'"
+            " WHERE video_id='admin-video/opaque=id'"
+        )
+        # 归档已完成：拒的理由必须是「链接导入」，而不是「尚未归档」。
+        conn.execute(
+            "INSERT INTO viral_media_preparations"
+            "(id,platform,video_id,media_kind,status,storage_uri) VALUES"
+            "('import-media','douyin','admin-video/opaque=id','video',"
+            "'SUCCEEDED','fake://test/video.mp4')"
+        )
+    path = "/api/control/viral/videos/douyin/admin-video%2Fopaque%3Did/curation"
+    refused = client.patch(
+        path,
+        headers={**headers, "Idempotency-Key": "feature-link-import"},
+        json={"action": "feature", "reason": "导入素材尝试上首页", "confirm": True},
+    )
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["code"] == "VIRAL_LINK_IMPORT_NOT_CURATABLE"
+    batch = client.post(
+        "/api/control/viral/videos/curation:batch",
+        headers={**headers, "Idempotency-Key": "batch-feature-link-import"},
+        json={
+            "action": "feature",
+            "items": [{"platform": "douyin", "video_id": "admin-video/opaque=id"}],
+            "reason": "批量导入素材上首页",
+            "confirm": True,
+        },
+    )
+    assert batch.status_code == 409, batch.text
+    assert batch.json()["detail"]["code"] == "VIRAL_LINK_IMPORT_NOT_CURATABLE"
+    with psycopg.connect(route_state) as conn:
+        assert conn.execute(
+            "SELECT homepage_featured FROM viral_videos WHERE video_id='admin-video/opaque=id'"
+        ).fetchone()[0] in (0, False)
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM audit_logs WHERE action='viral_video.curation'"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+@pytest.mark.pg
+def test_collected_video_list_projects_card_fields_and_status_segments(
+    client: TestClient, route_state: str
+) -> None:
+    headers = _admin_session(client)
+    with psycopg.connect(route_state) as conn:
+        conn.execute(
+            "UPDATE viral_videos SET author='庭院设计阿伟',"
+            " author_avatar='https://cdn.example.com/avatar.jpg', verified=1,"
+            " published_display='09-20', like_display='12.5w',"
+            " comments=12, shares=34, collects=56,"
+            " cover_url='https://cdn.example.com/cover.jpg',"
+            ' tags_json=\'["农村自建房","庭院施工"]\''
+            " WHERE video_id='admin-video/opaque=id'"
+        )
+        conn.execute(
+            "INSERT INTO viral_videos"
+            "(platform,video_id,title,author,cover_url,cover_key,tags_json) "
+            "VALUES('douyin','ready-video','已归档视频','阿伟',"
+            "'https://cdn.example.com/ready.jpg','viral/cover/douyin/ready-video','[\"乡村别墅\"]')"
+        )
+        conn.execute(
+            "INSERT INTO viral_media_preparations"
+            "(id,platform,video_id,media_kind,status,storage_uri) VALUES"
+            "('ready-media','douyin','ready-video','video','SUCCEEDED','fake://test/ready.mp4')"
+        )
+        # 链接导入 / 其它平台的行不属于采集库视图，任何分段都不应出现。
+        conn.execute(
+            "INSERT INTO viral_videos(platform,video_id,title) "
+            "VALUES('xiaohongshu','parsed-link','用户解析小红书')"
+        )
+        conn.execute(
+            "INSERT INTO viral_media_preparations"
+            "(id,platform,video_id,media_kind,status,storage_uri) VALUES"
+            "('parsed-media','xiaohongshu','parsed-link','video','SUCCEEDED','fake://test/p.mp4')"
+        )
+    page = client.get("/api/control/viral/videos", headers=headers)
+    assert page.status_code == 200, page.text
+    items = {item["video_id"]: item for item in page.json()["items"]}
+    assert set(items) == {"admin-video/opaque=id", "ready-video"}
+    pending = items["admin-video/opaque=id"]
+    assert pending["author"] == "庭院设计阿伟"
+    assert pending["author_avatar"] == "https://cdn.example.com/avatar.jpg"
+    assert pending["verified"] is True
+    assert pending["published_display"] == "09-20"
+    assert pending["like_display"] == "12.5w"
+    assert pending["tags"] == ["农村自建房", "庭院施工"]
+    assert (pending["comments"], pending["shares"], pending["collects"]) == (12, 34, 56)
+    # 未落地长期封面副本时不下发源站外链（外链会过期，且代理路由取不到对象）。
+    assert pending["cover_url"] is None
+    assert "tags_json" not in pending
+    # 已归档封面 → 只下发站内代理地址（免登录，`<img>` 可直接加载）。
+    assert items["ready-video"]["cover_url"] == "/api/viral/covers/douyin/ready-video"
+    assert items["ready-video"]["tags"] == ["乡村别墅"]
+
+    def segment(status: str) -> set[str]:
+        response = client.get(
+            f"/api/control/viral/videos?platform=douyin&status={status}", headers=headers
+        )
+        assert response.status_code == 200, response.text
+        return {item["video_id"] for item in response.json()["items"]}
+
+    assert segment("ready") == {"ready-video"}
+    assert segment("pending") == {"admin-video/opaque=id"}
+    assert segment("failed") == set()
+    assert segment("featured") == set()
+    with psycopg.connect(route_state) as conn:
+        conn.execute(
+            "INSERT INTO viral_videos(platform,video_id,title,homepage_featured) "
+            "VALUES('douyin','failed-video','归档失败视频',1)"
+        )
+        conn.execute(
+            "INSERT INTO viral_media_preparations"
+            "(id,platform,video_id,media_kind,status) VALUES"
+            "('failed-media','douyin','failed-video','video','FAILED')"
+        )
+    assert segment("failed") == {"failed-video"}
+    assert segment("featured") == {"failed-video"}
+    assert segment("pending") == {"admin-video/opaque=id"}
+    assert (
+        client.get("/api/control/viral/videos?status=unknown", headers=headers).status_code == 422
+    )
+
+
+@pytest.mark.pg
+def test_viral_overview_counts_share_the_list_segments(
+    client: TestClient, route_state: str
+) -> None:
+    import json
+    from datetime import datetime
+
+    assert client.get("/api/control/viral/overview").status_code == 401
+    headers = _admin_session(client)
+    keywords = [
+        {"platform": "douyin", "category": "建房预算", "keyword": "自建房预算"},
+        {"platform": "wechat_channels", "category": "建房预算", "keyword": "建房预算"},
+        {"platform": "wechat_channels", "category": "庭院案例", "keyword": "农村庭院设计"},
+    ]
+    with psycopg.connect(route_state) as conn:
+        conn.execute(
+            "UPDATE viral_runtime_controls SET keywords_json=%s,"
+            " collection_interval_days=3,"
+            " next_collection_at='2099-01-01T00:00:00+00:00'",
+            (json.dumps(keywords, ensure_ascii=False),),
+        )
+        conn.execute(
+            "INSERT INTO viral_videos(platform,video_id,title,homepage_featured) VALUES"
+            "('douyin','ready-video','已归档视频',1),"
+            "('douyin','failed-video','归档失败视频',0)"
+        )
+        conn.execute(
+            "INSERT INTO viral_media_preparations"
+            "(id,platform,video_id,media_kind,status,storage_uri) VALUES"
+            "('ready-media','douyin','ready-video','video','SUCCEEDED','fake://test/ready.mp4'),"
+            "('failed-media','douyin','failed-video','video','FAILED',NULL)"
+        )
+        conn.execute(
+            "INSERT INTO viral_fetch_state(platform,sort,fetched_at) "
+            "VALUES('douyin','hot','2026-09-24T08:00:00+00:00')"
+        )
+    overview = client.get("/api/control/viral/overview", headers=headers)
+    assert overview.status_code == 200, overview.text
+    data = overview.json()
+    assert data["content_total"] == 3
+    assert data["archive_ready"] == 1
+    assert data["homepage_featured"] == 1
+    assert data["archive_failed"] == 1
+    assert data["pending_archive"] == 1
+    assert data["added_today"] == 3
+    assert data["last_created_at"]
+    assert data["collection_enabled"] is True
+    assert data["keyword_count"] == {"douyin": 1, "wechat_channels": 2}
+    assert datetime.fromisoformat(str(data["next_collection_at"])).year == 2099
+    assert data["collection_interval_days"] == 3
+    assert data["last_fetched_at"] == "2026-09-24T08:00:00+00:00"
+    # 概览数字必须与列表分段同口径，否则运营看到的数与翻得到的行会对不上。
+    for status, expected in (
+        ("ready", data["archive_ready"]),
+        ("pending", data["pending_archive"]),
+        ("failed", data["archive_failed"]),
+        ("featured", data["homepage_featured"]),
+    ):
+        response = client.get(
+            f"/api/control/viral/videos?status={status}&limit=50", headers=headers
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["total"] == expected, status
+
+
+@pytest.mark.pg
+def test_viral_batch_curation_features_and_deletes_with_one_audit_per_item(
+    client: TestClient, route_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dataclasses import replace
+
+    from app.storage import FakeStorageAdapter
+    from app.viral_media import CoverEnricher
+
+    headers = _admin_session(client)
+    batch_path = "/api/control/viral/videos/curation:batch"
+    with psycopg.connect(route_state) as conn:
+        conn.execute(
+            "UPDATE viral_videos SET collection_published=0,"
+            " cover_url='https://cdn.example.com/cover.jpg'"
+            " WHERE video_id='admin-video/opaque=id'"
+        )
+        conn.execute(
+            "INSERT INTO viral_videos(platform,video_id,title) "
+            "VALUES('douyin','second-video','第二条待上首页')"
+        )
+        conn.execute(
+            "INSERT INTO viral_media_preparations"
+            "(id,platform,video_id,media_kind,status,storage_uri) VALUES"
+            "('media-a','douyin','admin-video/opaque=id','video','SUCCEEDED','fake://test/a.mp4'),"
+            "('media-b','douyin','second-video','video','SUCCEEDED','fake://test/b.mp4')"
+        )
+    monkeypatch.setattr(
+        "app.media_routes.get_media_storage",
+        lambda conn: FakeStorageAdapter(provider="cos", bucket="test"),
+    )
+    monkeypatch.setattr(
+        CoverEnricher,
+        "enrich",
+        lambda self, video: replace(video, cover_key=f"viral/cover/douyin/{video.video_id}"),
+    )
+    payload = {
+        "action": "feature",
+        "items": [
+            {"platform": "douyin", "video_id": "admin-video/opaque=id"},
+            {"platform": "douyin", "video_id": "second-video"},
+        ],
+        "reason": "批量确认上首页",
+        "confirm": True,
+    }
+    featured = client.post(
+        batch_path, headers={**headers, "Idempotency-Key": "batch-feature"}, json=payload
+    )
+    assert featured.status_code == 200, featured.text
+    assert featured.json()["action"] == "feature"
+    assert featured.json()["count"] == 2
+    replay = client.post(
+        batch_path, headers={**headers, "Idempotency-Key": "batch-feature"}, json=payload
+    )
+    assert replay.status_code == 200
+    assert replay.headers["X-Idempotent-Replay"] == "true"
+    assert replay.json() == featured.json()
+    with psycopg.connect(route_state) as conn:
+        assert (
+            conn.execute("SELECT count(*) FROM viral_videos WHERE homepage_featured=1").fetchone()[
+                0
+            ]
+            == 2
+        )
+        assert (
+            conn.execute(
+                "SELECT cover_key FROM viral_videos WHERE video_id='admin-video/opaque=id'"
+            ).fetchone()[0]
+            == "viral/cover/douyin/admin-video/opaque=id"
+        )
+        batch_audit = conn.execute(
+            "SELECT count(*) FROM audit_logs WHERE action='viral_video.curation'"
+            " AND metadata_json::jsonb->>'batch'='true'"
+        ).fetchone()[0]
+        assert batch_audit == 2
+    deletion = {**payload, "action": "delete", "reason": "批量下架不再展示"}
+    deleted = client.post(
+        batch_path, headers={**headers, "Idempotency-Key": "batch-delete"}, json=deletion
+    )
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["count"] == 2
+    page = client.get("/api/control/viral/videos", headers=headers)
+    assert page.json()["total"] == 0
+    assert all(item["deleted"] is True for item in deleted.json()["items"])
+
+
+@pytest.mark.pg
+def test_viral_batch_curation_is_all_or_nothing(
+    client: TestClient, route_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dataclasses import replace
+
+    from app.storage import FakeStorageAdapter
+    from app.viral_media import CoverEnricher
+
+    headers = _admin_session(client)
+    batch_path = "/api/control/viral/videos/curation:batch"
+    with psycopg.connect(route_state) as conn:
+        conn.execute(
+            "UPDATE viral_videos SET cover_url='https://cdn.example.com/cover.jpg'"
+            " WHERE video_id='admin-video/opaque=id'"
+        )
+        conn.execute(
+            "INSERT INTO viral_videos(platform,video_id,title,cover_url) VALUES"
+            "('douyin','loose-video','封面取不到的视频','https://cdn.example.com/loose.jpg'),"
+            "('douyin','no-media-video','尚未归档的视频',NULL)"
+        )
+        conn.execute(
+            "INSERT INTO viral_media_preparations"
+            "(id,platform,video_id,media_kind,status,storage_uri) VALUES"
+            "('admin-media','douyin','admin-video/opaque=id','video','SUCCEEDED','fake://test/a.mp4'),"
+            "('loose-media','douyin','loose-video','video','SUCCEEDED','fake://test/l.mp4')"
+        )
+    monkeypatch.setattr(
+        "app.media_routes.get_media_storage",
+        lambda conn: FakeStorageAdapter(provider="cos", bucket="test"),
+    )
+    # 只有第一条视频能取到封面副本，第二条 enrich 后仍无 cover_key。
+    monkeypatch.setattr(
+        CoverEnricher,
+        "enrich",
+        lambda self, video: (
+            replace(video, cover_key="viral/cover/douyin/admin-video/opaque=id")
+            if video.video_id == "admin-video/opaque=id"
+            else video
+        ),
+    )
+    # 只要有一条封面取不到，整批都不动：宁可不做，也不留下半批已上首页。
+    refused = client.post(
+        batch_path,
+        headers={**headers, "Idempotency-Key": "batch-cover-miss"},
+        json={
+            "action": "feature",
+            "items": [
+                {"platform": "douyin", "video_id": "admin-video/opaque=id"},
+                {"platform": "douyin", "video_id": "loose-video"},
+            ],
+            "reason": "批量上首页失败验收",
+            "confirm": True,
+        },
+    )
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["code"] == "VIRAL_COVER_NOT_READY"
+    not_ready = client.post(
+        batch_path,
+        headers={**headers, "Idempotency-Key": "batch-not-ready"},
+        json={
+            "action": "feature",
+            "items": [{"platform": "douyin", "video_id": "no-media-video"}],
+            "reason": "未归档不能上首页",
+            "confirm": True,
+        },
+    )
+    assert not_ready.status_code == 409, not_ready.text
+    assert not_ready.json()["detail"]["code"] == "VIRAL_MEDIA_NOT_READY"
+    missing = client.post(
+        batch_path,
+        headers={**headers, "Idempotency-Key": "batch-missing"},
+        json={
+            "action": "delete",
+            "items": [
+                {"platform": "douyin", "video_id": "admin-video/opaque=id"},
+                {"platform": "douyin", "video_id": "ghost-video"},
+            ],
+            "reason": "含已删除视频的批量",
+            "confirm": True,
+        },
+    )
+    assert missing.status_code == 404, missing.text
+    assert missing.json()["detail"]["code"] == "VIRAL_VIDEO_NOT_FOUND"
+    with psycopg.connect(route_state) as conn:
+        assert (
+            conn.execute("SELECT count(*) FROM viral_videos WHERE homepage_featured=1").fetchone()[
+                0
+            ]
+            == 0
+        )
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM viral_videos WHERE deleted_at IS NOT NULL"
+            ).fetchone()[0]
+            == 0
+        )
+        # 封面补写在整批回滚里一并撤销，不留「封面已补但没上首页」的中间态。
+        assert (
+            conn.execute(
+                "SELECT cover_key FROM viral_videos WHERE video_id='admin-video/opaque=id'"
+            ).fetchone()[0]
+            is None
+        )
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM audit_logs WHERE action='viral_video.curation'"
+            ).fetchone()[0]
+            == 0
+        )
+
+
+@pytest.mark.pg
+def test_viral_batch_curation_validates_contract_and_bounds(client: TestClient) -> None:
+    batch_path = "/api/control/viral/videos/curation:batch"
+    item = {"platform": "douyin", "video_id": "admin-video/opaque=id"}
+    payload = {"action": "unfeature", "items": [item], "reason": "批量校验", "confirm": True}
+    auditor = _admin_session(client, "auditor_u")
+    assert (
+        client.post(
+            batch_path, headers={**auditor, "Idempotency-Key": "batch-auditor"}, json=payload
+        ).status_code
+        == 403
+    )
+    headers = _admin_session(client)
+    assert (
+        client.post(batch_path, headers={"Idempotency-Key": "batch-csrf"}, json=payload).status_code
+        == 403
+    )
+    assert client.post(batch_path, headers=headers, json=payload).status_code == 400
+    assert (
+        client.post(
+            batch_path,
+            headers={**headers, "Idempotency-Key": "batch-blank-reason"},
+            json={**payload, "reason": " "},
+        ).status_code
+        == 400
+    )
+    assert (
+        client.post(
+            batch_path,
+            headers={**headers, "Idempotency-Key": "batch-empty"},
+            json={**payload, "items": []},
+        ).status_code
+        == 422
+    )
+    assert (
+        client.post(
+            batch_path,
+            headers={**headers, "Idempotency-Key": "batch-duplicate"},
+            json={**payload, "items": [item, item]},
+        ).status_code
+        == 422
+    )
+    assert (
+        client.post(
+            batch_path,
+            headers={**headers, "Idempotency-Key": "batch-overflow"},
+            json={**payload, "items": [dict(item, video_id=f"v{i}") for i in range(21)]},
+        ).status_code
+        == 422
+    )
 
 
 def test_admin_preview_converts_local_storage_to_signed_http(

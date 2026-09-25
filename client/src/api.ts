@@ -7590,6 +7590,8 @@ export type ViralVideoItem = {
   hasPlayableAudio: boolean;
   /** 共享文案缓存命中：该视频的文案已被提取过（信息性标记，不计费）。 */
   hasCopy?: boolean;
+  /** 「查看详情」已购买：同一付费账号同一条视频只扣一次，卡片据此免报价。 */
+  detailCharged?: boolean;
   /** 源平台播放地址；真实列表播放统一由服务端媒体管线转存后使用。 */
   playUrl: string | null;
   isFavorite?: boolean;
@@ -7637,6 +7639,38 @@ export type ViralFavoriteResponse = {
 };
 
 export type ViralDetailResponse = { item: ViralVideoItem } | ViralVideoItem;
+
+/** 「查看详情」的计费回执（服务端权威值，客户端只展示）。 */
+export type ViralDetailBilling = {
+  charged: number;
+  unit: string;
+  /** 同一条视频对同一个付费账号只扣一次：true 表示复用既有购买、本次未扣费。 */
+  deduped: boolean;
+  /** 已下架 / 不可用的内容不计费，供界面区分「已购买」与「本次不计费」。 */
+  billable: boolean;
+};
+
+export type ViralDetailViewResponse = {
+  item: ViralVideoItem;
+  billing: ViralDetailBilling;
+};
+
+/** 「获取文案」的计费回执（服务端权威值，客户端只展示）。 */
+export type ViralCopyBilling = {
+  charged: number;
+  unit: string;
+  /** 同一条视频对同一个付费账号只扣一次：true 表示复用既有购买、本次未扣费。 */
+  deduped: boolean;
+  /** 已下架 / 不可用的内容不计费，供界面区分「已购买」与「本次不计费」。 */
+  billable: boolean;
+};
+
+export type ViralCopyClaimResponse = {
+  /** 未命中共享缓存时为 null：这次没有交付，也没有扣费。 */
+  text: string | null;
+  updatedAt: string | null;
+  billing: ViralCopyBilling;
+};
 
 export type ViralListOptions = {
   featuredOnly?: boolean;
@@ -7756,6 +7790,28 @@ export function fetchViralVideo(
   return requestApiJson<ViralDetailResponse>(
     `/api/viral/videos/${encodeURIComponent(platform)}/${encodeURIComponent(videoId)}`,
     "视频详情暂不可用",
+  );
+}
+
+/**
+ * 打开爆款视频详情（按次计费）。
+ *
+ * 详情与互动统计字段在同一个响应里返回，所以只算一次「查看详情」；同一条视频对
+ * 同一个付费账号只扣一次，已购买过的条目重放会命中服务端去重台账（``billing``
+ * 里 ``deduped=true``、``charged=0``）。失败（未配置资费 / 积分不足 / 视频不可用）
+ * 不扣费，调用方据 ``billing.billable`` 与 ``deduped`` 区分展示口径。
+ */
+export function openViralVideoDetail(
+  platform: ViralPlatform,
+  videoId: string,
+): Promise<ViralDetailViewResponse> {
+  return requestApiJson<ViralDetailViewResponse>(
+    "/api/viral/videos/detail",
+    "视频详情暂不可用",
+    {
+      method: "POST",
+      body: JSON.stringify({ platform, videoId }),
+    },
   );
 }
 
@@ -7945,6 +8001,27 @@ export function fetchViralVideoMedia(
   );
 }
 
+/**
+ * 本地缓存回收判据：把客户端已缓存的条目交给服务端，回答哪些已不再下发。
+ *
+ * 删除与下架不会在客户端的分页数据里留下痕迹（条目只是不再出现），因此判据必须
+ * 由服务端给出；客户端按返回的 `reclaim` 清理本地缓存文件。只读、不计费。
+ */
+export function fetchViralCacheReclaim(
+  platform: ViralPlatform,
+  videoIds: string[],
+): Promise<{ platform: ViralPlatform; reclaim: string[] }> {
+  return requestApiJson<{ platform: ViralPlatform; reclaim: string[] }>(
+    "/api/viral/videos/cache-reclaim",
+    "本地缓存回收检查失败",
+    {
+      method: "POST",
+      body: JSON.stringify({ platform, videoIds }),
+    },
+    VIRAL_LIST_TIMEOUT_MS,
+  );
+}
+
 /** 源站直链下发结果（`decodeKey` 视频号专用，必须与 `fullUrl` 同批使用）。 */
 export type ViralVideoSource = {
   platform: ViralPlatform;
@@ -7980,28 +8057,53 @@ export function fetchViralVideoSource(
   );
 }
 
-/** 共享文案缓存的只读命中结果（`GET /api/viral/search/copy`）。 */
-export type ViralCopyCacheHit = {
-  text: string | null;
+/** 共享文案的只读状态（`GET /api/viral/search/copy`）：不含正文。 */
+export type ViralCopyStatus = {
+  /** 共享缓存里有没有这条视频的文案：true = 现在获取即可秒回。 */
+  available: boolean;
   updatedAt: string | null;
+  /** 本付费账号是否已付过「获取文案」费：true 时再取不重复扣费。 */
+  purchased: boolean;
 };
 
 /**
- * 读共享文案缓存：命中即回填，未命中双 null。
+ * 只读文案状态：有没有、什么时候写的、本账号是不是已经买过。
  *
- * 纯读路径——不下载、不上传、不抽音轨、不计费（`viral_script_cache` 跨用户共享），
- * 所以点「提取文案」时先调它是安全的：命中就不必让用户白等一次本地抽音轨与上传
- * （决策 #18）。调用方需自行容忍失败——读缓存不顺不该拦住真正的提取。
+ * 不下发正文——正文要走 `claimViralCopy`（扣费与交付在同一处发生）。本端点不计费，
+ * 用于点「提取文案」前的口径提示（已购 / 将扣多少），失败也不该拦住后续操作。
  */
 export function fetchViralCopy(
   platform: ViralPlatform,
   videoId: string,
-): Promise<ViralCopyCacheHit> {
+): Promise<ViralCopyStatus> {
   const query = new URLSearchParams({ platform, videoId });
-  return requestApiJson<ViralCopyCacheHit>(
+  return requestApiJson<ViralCopyStatus>(
     `/api/viral/search/copy?${query.toString()}`,
-    "读取文案缓存失败",
+    "读取文案状态失败",
     {},
+    VIRAL_LIST_TIMEOUT_MS,
+  );
+}
+
+/**
+ * 获取共享文案（按次计费）：命中缓存即扣一次「获取文案」费并返回正文。
+ *
+ * 口径（已拍板）：文案一旦被别人转写进共享缓存，后续账号拿到它照样付费——秒回省下
+ * 的是平台的转写成本，不是用户手里的内容价值；同一条视频对同一个付费账号只扣一次
+ * （`billing.deduped=true` 时本次未扣费）。未命中返回 `text=null` 且分文不扣，调用方
+ * 再走本地抽音轨转写。
+ */
+export function claimViralCopy(
+  platform: ViralPlatform,
+  videoId: string,
+): Promise<ViralCopyClaimResponse> {
+  return requestApiJson<ViralCopyClaimResponse>(
+    "/api/viral/videos/copy/claim",
+    "获取文案失败",
+    {
+      method: "POST",
+      body: JSON.stringify({ platform, videoId }),
+    },
     VIRAL_LIST_TIMEOUT_MS,
   );
 }
@@ -8010,6 +8112,8 @@ export function fetchViralCopy(
 export type ViralCopyExtraction = {
   text: string | null;
   updatedAt: string | null;
+  /** 命中缓存时的计费回执：这条秒回同样扣过费（未命中时为 null）。 */
+  billing: ViralCopyBilling | null;
   projectId: string | null;
   sourceAssetId: string | null;
   taskId: string | null;

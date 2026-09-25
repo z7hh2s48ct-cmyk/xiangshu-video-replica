@@ -3605,7 +3605,7 @@ def _copy_video(
 
 
 def _seed_copy_fixture(dsn: str) -> None:
-    """基础座子 + 内容池里的一条视频 + asr 资费（预留按秒计价）."""
+    """基础座子 + 内容池里的一条视频 + asr / viral_copy 资费（前者按秒预留，后者按次交付）."""
     from app.viral_store import upsert_viral_videos
 
     _seed_base(dsn)
@@ -3617,6 +3617,13 @@ def _seed_copy_fixture(dsn: str) -> None:
         dsn,
         "INSERT INTO billing_tariffs(service,enabled,unit_credits,unit_cost_fen) "
         "VALUES ('asr',true,2,1)",
+    )
+    # 命中共享缓存时处理器也要收一次「获取文案」：资费缺失会 fail-closed，所以座子里
+    # 必须备好（provider 记 platform，没有按次供应商成本，只配客户单价）。
+    _exec(dsn, "DELETE FROM billing_tariffs WHERE service='viral_copy'")
+    _exec(
+        dsn,
+        "INSERT INTO billing_tariffs(service,enabled,unit_credits) VALUES ('viral_copy',true,5)",
     )
     # 运行开关的种子行由迁移写入，但它带 users 外键而 _truncate 用 CASCADE，
     # 会被基础座子连带清掉；本段依赖它，所以自己重建一行。
@@ -3878,10 +3885,14 @@ def test_viral_copy_upload_serves_shared_cache_without_submission(
     assert _one(pg_state, "SELECT count(*) FROM billing_attempts") == 0
 
 
-async def test_viral_copy_handler_serves_shared_cache_before_any_billing(
+async def test_viral_copy_handler_serves_shared_cache_and_bills_the_delivery(
     pg_state: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """处理器在计费之前查共享缓存：命中即秒回，不建任务、不预留、不落素材."""
+    """命中共享缓存：不建任务、不落素材，但这次交付照样扣一次「获取文案」.
+
+    秒回省下的是平台的转写成本，不是用户手里的内容价值——谁拿到文案谁付这笔交付费，
+    同一条视频对同一个付费账号只扣一次（台账去重）。
+    """
     _seed_copy_fixture(pg_state)
     _exec(
         pg_state,
@@ -3894,9 +3905,14 @@ async def test_viral_copy_handler_serves_shared_cache_before_any_billing(
     assert response.status_code == 200
     assert payload.text == "服务器共享的原视频文案"
     assert payload.task_id is None
+    assert payload.billing is not None
+    assert payload.billing.charged == 5
+    assert payload.billing.deduped is False
     assert _one(pg_state, "SELECT count(*) FROM script_from_audio_tasks") == 0
-    assert _one(pg_state, "SELECT count(*) FROM billing_operations") == 0
     assert _one(pg_state, "SELECT count(*) FROM viral_import_tasks") == 0
+    assert _rows(pg_state, "SELECT service, state, charged_credits FROM billing_operations") == [
+        {"service": "viral_copy", "state": "SUCCEEDED", "charged_credits": 5}
+    ]
 
 
 async def test_viral_copy_handler_respects_the_shared_import_pause(pg_state: str) -> None:

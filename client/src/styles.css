@@ -5301,36 +5301,11 @@ button.activation-generator__submit {
 .admin-shell--control .admin-services__header {
   justify-content: flex-start;
 }
-.admin-viral-library .admin-viral-heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 16px;
-  margin-bottom: 12px;
-}
-.admin-viral-heading h2 {
-  margin: 0 0 6px;
-}
-.admin-viral-heading h2 span {
-  color: var(--admin-gold, #c6a45f);
-  margin-left: 8px;
-}
-.admin-viral-heading p {
-  margin: 0;
-}
-.admin-viral-summary {
-  display: flex;
-  gap: 18px;
-  flex-wrap: wrap;
-  padding: 10px 0;
-  color: #aaa49a;
-  font-size: var(--font-caption);
-}
-.admin-viral-summary strong {
-  color: #ede5d8;
-  margin-left: 6px;
-}
+/* ──────────────────────────────────────────────────────────────────────
+   爆款视频库 / 用户搜索发现（管理端）
+   「用户搜索发现」复用下面这组基础排版，改动共用规则时两页都要看；
+   页面专属版式一律收在 .admin-viral-library 下，避免两页互相串样式。
+   ────────────────────────────────────────────────────────────────────── */
 .admin-shell--control .admin-viral-toolbar {
   display: flex;
   align-items: flex-end;
@@ -5359,18 +5334,6 @@ button.activation-generator__submit {
   table-layout: fixed;
   min-width: 760px;
   width: 100%;
-}
-.admin-viral-col-video {
-  width: auto;
-}
-.admin-viral-col-metrics {
-  width: 162px;
-}
-.admin-viral-col-status {
-  width: 126px;
-}
-.admin-viral-col-actions {
-  width: 154px;
 }
 .admin-shell--control .admin-workspace .admin-viral-table :is(th, td) {
   padding: 12px 16px;
@@ -5454,8 +5417,7 @@ button.activation-generator__submit {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 10px;
-  font-size: var(--font-caption);
+  gap: 9px;
 }
 .admin-viral-featured {
   color: #e2c17b;
@@ -5481,72 +5443,749 @@ button.activation-generator__submit {
   border-color: #36332e;
   background: transparent;
 }
-.admin-viral-detail {
-  padding: 4px 2px;
+
+/* ── 爆款视频库：页面专属版式 ───────────────────────────────────────── */
+/* 面板是 gap 16px 的网格，直接子元素不再自留外边距，避免行距叠成两倍。 */
+.admin-shell--control .admin-viral-library > * {
+  margin-block: 0;
 }
-.admin-viral-full-title {
+.admin-viral-library .admin-viral-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.admin-viral-heading h2 {
+  margin: 0 0 6px;
+}
+.admin-viral-heading p {
+  margin: 0;
+}
+/* 基础规则的 :is() 里含 .pagination / .admin-hint 这类类选择器，实际权重是
+   (0,3,0)，库内的小字覆盖要再叠 .admin-workspace 与 .admin-viral-library 才
+   压得住：列表与抽屉的小字比正文更密，按正文渲染会把行高撑得很高。 */
+.admin-shell--control
+  .admin-workspace
+  .admin-viral-library
+  :is(span, dt, dd, label, small) {
+  font-size: var(--font-caption);
+}
+.admin-shell--control span.admin-viral-eyebrow {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--admin-gold);
+  letter-spacing: 0.18em;
+}
+.admin-viral-headacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* ── 概览数字 ───────────────────────────────────────────────────────── */
+/* 固定列数而非 auto-fit：5 张数字卡按 2/3/5 列始终铺满整行，auto-fit 在宽屏
+   上会多分出空轨道，把数字卡挤在左半行。 */
+.admin-viral-tiles {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+@media (min-width: 720px) {
+  .admin-viral-tiles {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (min-width: 1080px) {
+  .admin-viral-tiles {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+}
+.admin-viral-tile {
+  min-width: 0;
+  border: 1px solid var(--admin-line);
+  border-radius: 8px;
+  padding: 11px 13px;
+  background: var(--admin-panel-raised);
+}
+.admin-shell--control
+  .admin-workspace
+  .admin-viral-library
+  .admin-viral-tile
+  dd {
+  margin: 5px 0 0;
+  color: var(--admin-text);
+  font-size: var(--font-subtitle);
+  font-weight: 600;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+}
+.admin-shell--control .admin-viral-tile dd small {
+  margin-left: 4px;
+  color: var(--admin-muted);
+  font-weight: 400;
+}
+/* 采集计划是宽条：无论窄屏分成几列，都自己占满一行，不与数字格拼半行。 */
+.admin-viral-tile--plan {
+  grid-column: 1 / -1;
+  border-color: var(--admin-line-strong, #3a3a44);
+  background:
+    linear-gradient(110deg, var(--admin-gold-wash), transparent 62%),
+    var(--admin-panel-raised);
+}
+.admin-shell--control
+  .admin-workspace
+  .admin-viral-library
+  .admin-viral-tile--plan
+  dd {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px 22px;
+  font-size: var(--font-label);
+  font-weight: 400;
+}
+.admin-shell--control .admin-viral-tile--plan dd > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ── 采集关键词条 ───────────────────────────────────────────────────── */
+.admin-viral-keywords {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  border: 1px dashed var(--admin-line);
+  border-radius: 8px;
+  padding: 11px 13px;
+}
+.admin-shell--control span.admin-viral-keywords__label {
+  color: var(--admin-gold);
+  letter-spacing: 0.08em;
+}
+.admin-shell--control span.admin-viral-kw {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 100%;
+  border: 1px solid var(--admin-line);
+  border-radius: 999px;
+  padding: 2px 10px;
+  color: #ded8ce;
+  background: var(--admin-panel-raised);
+  overflow-wrap: anywhere;
+}
+.admin-viral-kw i {
+  color: var(--admin-muted);
+  font-style: normal;
+}
+.admin-shell--control span.admin-viral-keywords__hint {
+  margin-left: auto;
+  color: var(--admin-muted);
+  line-height: 1.6;
+}
+
+/* ── 实时搜索入库 ───────────────────────────────────────────────────── */
+.admin-viral-upstream {
+  border: 1px solid var(--admin-line-strong, #3a3a44);
+  border-radius: 10px;
+  padding: 15px 16px 16px;
+  background: var(--admin-panel-raised);
+}
+.admin-viral-upstream h3 {
+  margin: 0 0 6px;
+  color: var(--admin-text);
+}
+.admin-viral-upstream > .admin-hint {
+  margin: 0;
+}
+/* 面板自己已经有边框和底色，内嵌工具栏只留排版，不再画第二层壳。 */
+.admin-viral-upstream > form.admin-toolbar {
+  margin: 13px 0 4px;
+  border: 0;
+  padding: 0;
+  background: none;
+}
+.admin-viral-upstream > p[role="status"] {
+  margin: 10px 0 0;
+}
+
+/* ── 筛选、分段切换与搜索 ───────────────────────────────────────────── */
+.admin-viral-filters {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  border: 1px solid var(--admin-line-soft);
+  border-radius: 8px;
+  padding: 11px 12px;
+  background: #161615;
+}
+.admin-viral-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  border: 1px solid var(--admin-line);
+  border-radius: 8px;
+  padding: 3px;
+  background: #111110;
+}
+.admin-shell--control .admin-viral-library .admin-viral-seg button {
+  min-height: 28px;
+  border: 0;
+  border-radius: 5px;
+  padding: 4px 11px;
+  color: #bdb7ad;
+  background: transparent;
+  font-size: var(--font-caption);
+  font-weight: 600;
+}
+.admin-shell--control
+  .admin-viral-library
+  .admin-viral-seg
+  button:not(:disabled):hover {
+  color: var(--admin-gold-bright);
+  background: var(--admin-gold-wash);
+}
+.admin-shell--control .admin-viral-library .admin-viral-seg button.is-active {
+  color: #18140c;
+  background: var(--admin-gold);
+}
+.admin-shell--control .admin-viral-library .admin-viral-seg button:disabled {
+  color: #6f6b66;
+}
+.admin-viral-seg em {
+  margin-left: 6px;
+  font-style: normal;
+  opacity: 0.72;
+  font-variant-numeric: tabular-nums;
+}
+.admin-viral-searchbar {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: auto;
+}
+.admin-shell--control .admin-viral-searchbar > label {
+  flex: 1 1 210px;
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: var(--admin-muted);
+}
+.admin-viral-searchbar input {
+  width: 100%;
+  height: 36px;
+  border: 1px solid var(--admin-line);
+  border-radius: 5px;
+  padding: 0 12px;
+  color: #d8d2c8;
+  outline: none;
+  background: #111110;
+}
+.admin-shell--control .admin-viral-searchbar button[type="submit"] {
+  border-color: transparent;
+  color: #18140c;
+  background: var(--admin-gold);
+  font-weight: 700;
+}
+.admin-shell--control
+  .admin-viral-searchbar
+  button[type="submit"]:not(:disabled):hover {
+  background: var(--admin-gold-bright);
+}
+
+/* ── 批量操作条 ─────────────────────────────────────────────────────── */
+.admin-viral-batch {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--admin-gold) 42%, transparent);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--admin-gold-wash);
+}
+.admin-shell--control
+  .admin-workspace
+  .admin-viral-library
+  .admin-viral-batch
+  > span:first-child {
+  color: var(--admin-text);
+  font-size: var(--font-label);
+}
+.admin-viral-batch .admin-hint {
+  flex: 1 1 260px;
+  margin: 0;
+}
+
+/* ── 明细表 ─────────────────────────────────────────────────────────── */
+.admin-shell--control .admin-viral-library .admin-viral-table {
+  table-layout: fixed;
+  min-width: 1080px;
+  width: 100%;
+}
+.admin-viral-library .admin-viral-col-select {
+  width: 46px;
+}
+.admin-viral-library .admin-viral-col-video {
+  width: auto;
+}
+.admin-viral-library .admin-viral-col-metrics {
+  width: 200px;
+}
+.admin-viral-library .admin-viral-col-time {
+  width: 184px;
+}
+.admin-viral-library .admin-viral-col-status {
+  width: 130px;
+}
+.admin-viral-library .admin-viral-col-actions {
+  width: 188px;
+}
+.admin-shell--control
+  .admin-workspace
+  .admin-viral-library
+  .admin-viral-table
+  :is(th, td) {
+  padding: 14px 16px;
+}
+.admin-shell--control .admin-viral-library .admin-viral-col-select {
+  text-align: center;
+}
+.admin-viral-library .admin-viral-col-select input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--admin-gold);
+}
+.admin-viral-videocell {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
+}
+.admin-viral-videocell__text {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+.admin-viral-thumb {
+  position: relative;
+  flex: 0 0 104px;
+  width: 104px;
+  height: 58px;
+  overflow: hidden;
+  border: 1px solid var(--admin-line);
+  border-radius: 6px;
+  background: #111110;
+}
+.admin-viral-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.admin-shell--control span.admin-viral-thumb__empty {
+  display: grid;
+  height: 100%;
+  place-items: center;
+  padding: 0 4px;
+  color: var(--admin-muted);
+  line-height: 1.25;
+  text-align: center;
+}
+.admin-shell--control span.admin-viral-thumb__duration {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: #f2ece2;
+  background: rgba(0, 0, 0, 0.68);
+  font-variant-numeric: tabular-nums;
+}
+.admin-viral-chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.admin-shell--control span.admin-viral-chip {
+  max-width: 190px;
+  overflow: hidden;
+  border: 1px solid var(--admin-line-soft);
+  border-radius: 4px;
+  padding: 1px 7px;
+  color: #b3ada3;
+  background: #1b1a18;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.admin-shell--control .admin-workspace button.admin-viral-titlelink {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  color: #eae4da;
+  background: transparent;
+  font-size: var(--font-label);
+  font-weight: 600;
+  line-height: 1.55;
+  text-align: left;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.admin-shell--control
+  .admin-workspace
+  button.admin-viral-titlelink:not(:disabled):hover {
+  color: var(--admin-gold-bright);
+  background: transparent;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.admin-viral-author {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  color: var(--admin-muted);
+}
+.admin-viral-author img,
+.admin-viral-author i {
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+}
+.admin-viral-author img {
+  object-fit: cover;
+}
+.admin-viral-author i {
+  display: grid;
+  place-items: center;
+  color: var(--admin-gold);
+  background: var(--admin-gold-wash);
+  border: 1px solid var(--admin-line);
+  font-style: normal;
+}
+.admin-viral-author b {
+  overflow: hidden;
+  color: #ded8ce;
+  font-size: var(--font-label);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.admin-viral-verified {
+  color: var(--admin-gold-bright);
+}
+.admin-viral-times {
+  display: grid;
+  gap: 6px;
+  color: #c9c2b8;
+  font-variant-numeric: tabular-nums;
+}
+.admin-viral-times span {
+  display: grid;
+  gap: 1px;
+}
+.admin-viral-times em {
+  color: var(--admin-muted);
+  font-style: normal;
+}
+.admin-shell--control
+  .admin-workspace
+  .admin-viral-library
+  .admin-viral-metrics
+  dd {
+  font-size: var(--font-label);
+}
+/* 行内操作收在右侧，按状态一级级退让，避免一列等宽按钮把行撑散。 */
+.admin-shell--control .admin-viral-library .admin-viral-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.admin-shell--control
+  .admin-viral-library
+  :is(
+    .admin-viral-headacts,
+    .admin-viral-actions,
+    .admin-viral-batch,
+    .admin-viral-searchbar,
+    .admin-viral-seg,
+    .admin-viral-drawer__head,
+    .admin-viral-drawer__foot
+  )
+  button {
+  min-height: 32px;
+  border: 1px solid var(--admin-line);
+  border-radius: 6px;
+  padding: 6px 12px;
+  color: #ded8ce;
+  background: transparent;
+  font-size: var(--font-caption);
+  font-weight: 600;
+}
+.admin-shell--control
+  .admin-viral-library
+  :is(
+    .admin-viral-headacts,
+    .admin-viral-actions,
+    .admin-viral-batch,
+    .admin-viral-searchbar,
+    .admin-viral-drawer__head,
+    .admin-viral-drawer__foot
+  )
+  button:not(:disabled):hover {
+  border-color: var(--admin-gold);
+  color: var(--admin-gold-bright);
+  background: var(--admin-gold-wash);
+}
+.admin-shell--control
+  .admin-viral-library
+  :is(
+    .admin-viral-headacts,
+    .admin-viral-actions,
+    .admin-viral-batch,
+    .admin-viral-searchbar,
+    .admin-viral-drawer__head,
+    .admin-viral-drawer__foot
+  )
+  button:disabled {
+  border-color: var(--admin-line-soft);
+  color: #77736e;
+  background: transparent;
+}
+.admin-shell--control .admin-viral-library button.admin-viral-action-primary {
+  border-color: transparent;
+  color: #18140c;
+  background: var(--admin-gold);
+  font-weight: 700;
+}
+.admin-shell--control
+  .admin-viral-library
+  button.admin-viral-action-primary:not(:disabled):hover {
+  color: #18140c;
+  background: var(--admin-gold-bright);
+}
+.admin-shell--control
+  .admin-viral-library
+  button.admin-viral-action-primary:disabled {
+  border-color: var(--admin-line-soft);
+  color: #77736e;
+  background: transparent;
+}
+.admin-shell--control .admin-viral-library button.admin-viral-action-danger {
+  border-color: color-mix(in srgb, #df9c96 45%, transparent);
+  color: #df9c96;
+  background: transparent;
+}
+.admin-shell--control
+  .admin-viral-library
+  button.admin-viral-action-danger:not(:disabled):hover {
+  border-color: #b9706a;
+  color: #f0b3ac;
+  background: rgba(223, 156, 150, 0.1);
+}
+
+/* ── 详情抽屉 ───────────────────────────────────────────────────────── */
+/* 层级压在确认框（90）之下：删除等动作要在抽屉之上弹确认。 */
+.admin-viral-drawer-layer {
+  position: fixed;
+  z-index: 80;
+  display: flex;
+  justify-content: flex-end;
+  inset: 0;
+}
+.admin-viral-drawer__scrim {
+  position: absolute;
+  inset: 0;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  background: rgba(9, 9, 8, 0.58);
+  cursor: pointer;
+}
+.admin-viral-drawer {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  width: min(496px, 100%);
+  min-width: 0;
+  height: 100dvh;
+  overflow: hidden;
+  border-left: 1px solid var(--admin-line);
+  background: var(--admin-panel);
+  box-shadow: -18px 0 48px rgba(0, 0, 0, 0.45);
+  outline: none;
+}
+.admin-viral-drawer__head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  border-bottom: 1px solid var(--admin-line-soft);
+  padding: 13px 16px;
+  background: var(--admin-panel-raised);
+}
+.admin-viral-drawer__head b {
+  color: var(--admin-text);
+  font-size: var(--font-subtitle);
+  font-weight: 600;
+}
+.admin-viral-drawer__head button {
+  margin-left: auto;
+}
+.admin-viral-drawer__body {
+  flex: 1 1 auto;
+  display: grid;
+  align-content: start;
+  gap: 13px;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+}
+.admin-viral-drawer__foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  border-top: 1px solid var(--admin-line-soft);
+  padding: 12px 16px;
+  background: var(--admin-panel-raised);
+}
+.admin-viral-player {
+  display: grid;
+  gap: 10px;
+}
+.admin-viral-player img,
+.admin-viral-player video {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--admin-line);
+  border-radius: 8px;
+  background: #000;
+}
+.admin-viral-player img {
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+}
+.admin-viral-player video {
+  max-height: 320px;
+  object-fit: contain;
+}
+.admin-viral-player__tags {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.admin-viral-drawer__title {
+  margin: 0;
   color: #e9e2d5;
   line-height: 1.7;
   overflow-wrap: anywhere;
-  margin: 0 0 16px;
 }
-.admin-viral-detail > dl {
+.admin-viral-drawer__section {
+  margin: 4px 0 -4px;
+  color: var(--admin-gold);
+  letter-spacing: 0.08em;
+}
+.admin-viral-drawer__meta,
+.admin-viral-drawer__stats {
   display: grid;
+  gap: 12px 20px;
+  margin: 0;
+}
+.admin-viral-drawer__stats {
   grid-template-columns: 1fr 1fr;
-  gap: 16px 24px;
-  margin: 0;
 }
-.admin-viral-detail dt {
-  color: #aaa49a;
-  font-size: var(--font-caption);
-  margin-bottom: 5px;
+.admin-viral-drawer__meta {
+  grid-template-columns: 1fr 1fr;
 }
-.admin-viral-detail dd {
+.admin-shell--control .admin-viral-drawer__stats dt,
+.admin-shell--control .admin-viral-drawer__meta dt {
+  margin-bottom: 3px;
+  color: var(--admin-muted);
+}
+.admin-shell--control
+  .admin-workspace
+  .admin-viral-library
+  .admin-viral-drawer__stats
+  dd {
   margin: 0;
-  overflow-wrap: anywhere;
+  color: var(--admin-text);
+  font-size: var(--font-subtitle);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.admin-shell--control
+  .admin-workspace
+  .admin-viral-library
+  .admin-viral-drawer__meta
+  dd {
+  margin: 0;
+  color: #ded8ce;
+  font-size: var(--font-label);
   line-height: 1.6;
+  overflow-wrap: anywhere;
 }
-.admin-viral-storage {
+.admin-viral-drawer__storage {
   grid-column: 1 / -1;
 }
-.admin-viral-storage dd {
+.admin-viral-drawer__storage dd {
   font-family: var(--mono);
   font-size: var(--font-caption);
+  color: #b3ada3;
 }
-.admin-viral-danger-zone {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  border-top: 1px solid #35322d;
-  padding-top: 14px;
-  margin-top: 18px;
-  font-size: var(--font-caption);
-  color: #aaa49a;
+
+@media (max-width: 1023px) {
+  /* 窄屏只留抽屉没有意义，让它占满屏宽，详情与操作才够点。 */
+  .admin-viral-drawer {
+    width: 100%;
+    border-left: 0;
+  }
 }
-.admin-shell--control .admin-viral-danger-zone button {
-  background: transparent;
-  color: #df9c96;
-  border-color: #754b47;
-}
-.admin-viral-preview {
-  margin-bottom: 18px;
-  padding: 18px;
-  border: 1px solid #4d4230;
-  border-radius: 8px;
-  background: #111;
-}
-.admin-viral-preview h3 {
-  overflow-wrap: anywhere;
-}
-.admin-viral-preview video {
-  display: block;
-  margin: 16px auto;
+@media (max-width: 760px) {
+  /* 与基础规则同为 4 类权重，靠位置覆盖窄屏压下来的 820px 表宽。 */
+  .admin-shell--control
+    .admin-workspace
+    .admin-viral-library
+    .admin-viral-table {
+    min-width: 1080px;
+  }
 }
 @media (max-width: 600px) {
-  .admin-viral-summary {
-    gap: 12px;
+  .admin-viral-headacts {
+    width: 100%;
   }
+  .admin-viral-headacts button {
+    flex: 1 1 auto;
+  }
+  .admin-viral-keywords {
+    align-items: flex-start;
+  }
+  .admin-shell--control span.admin-viral-keywords__hint {
+    margin-left: 0;
+  }
+  .admin-viral-filters {
+    padding: 10px;
+  }
+  .admin-viral-searchbar {
+    margin-left: 0;
+  }
+  .admin-viral-searchbar > label,
   .admin-viral-toolbar > label,
   .admin-viral-toolbar > .admin-viral-search {
     flex-basis: 100%;

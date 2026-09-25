@@ -1302,7 +1302,7 @@ def _patch_refresh_infra(monkeypatch) -> None:
 
 
 def test_copy_returns_cached_transcript_and_null_on_miss(search_client, route_state) -> None:
-    """GET /search/copy：命中返回 text+updatedAt（只读、免费），未命中双 null."""
+    """GET /search/copy：只回「有没有 / 买没买过」（只读、免费），绝不下发正文."""
     headers, _ = account(search_client, "copy_read")
     payload = json.dumps({"text": "已缓存文案", "duration_sec": 12.0}, ensure_ascii=False)
     with psycopg.connect(route_state) as raw:
@@ -1318,15 +1318,18 @@ def test_copy_returns_cached_transcript_and_null_on_miss(search_client, route_st
         params={"platform": "douyin", "videoId": "v-copy-1"},
     )
     assert hit.status_code == 200, hit.text
-    assert hit.json()["text"] == "已缓存文案"
+    assert hit.json()["available"] is True
     assert hit.json()["updatedAt"]
+    assert hit.json()["purchased"] is False
+    # 正文是零售内容，只能从计费端点 POST /videos/copy/claim 取。
+    assert "text" not in hit.json()
     miss = search_client.get(
         "/api/viral/search/copy",
         headers=headers,
         params={"platform": "douyin", "videoId": "v-copy-absent"},
     )
     assert miss.status_code == 200
-    assert miss.json() == {"text": None, "updatedAt": None}
+    assert miss.json() == {"available": False, "updatedAt": None, "purchased": False}
 
 
 def test_discoveries_list_today_and_validate_date(search_client, route_state) -> None:

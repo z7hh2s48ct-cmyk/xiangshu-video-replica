@@ -3,6 +3,7 @@ import {
   type CurrentUser,
   cancelGenerationBatch,
   cancelOralTask,
+  claimViralCopy,
   completeVideoUpload,
   createGenerationBatch,
   createGenerationResultPreviewUrl,
@@ -21,7 +22,6 @@ import {
   deletePublishAccount,
   deleteStudioDraft,
   downloadMaterialAsset,
-  fetchViralCopy,
   type GenerationBatch,
   type GenerationBatchInput,
   type GenerationBatchListItem,
@@ -66,6 +66,7 @@ import {
   saveStudioDraft,
   saveStudioSavedScript,
   uploadReferenceVideo,
+  type ViralCopyBilling,
   type ViralPlatform,
   type ViralVideoItem,
   verifyPublishAccount,
@@ -1159,6 +1160,7 @@ export function studioVideoFromViral(item: ViralVideoItem): StudioVideo {
     homepageFeatured: Boolean(item.homepageFeatured),
     hasPlayableAudio: item.hasPlayableAudio,
     hasCopy: item.hasCopy === true,
+    detailCharged: item.detailCharged === true,
     playUrl: item.playUrl,
   };
 }
@@ -1705,12 +1707,16 @@ export async function awaitScriptFromAudioTask(
 
 /** 文案提取的受理结果：命中共享缓存时直接带文案，否则带待轮询的任务与草稿归属。 */
 export type ViralCopyReceipt =
-  | { kind: "cache"; text: string }
+  | { kind: "cache"; text: string; billing: ViralCopyBilling }
   | { kind: "task"; projectId: string; sourceAssetId: string; taskId: string };
 
 /**
- * 桌面端爆款文案提取：先查共享缓存（命中即回填，不下载不上传不计费），未命中才
+ * 桌面端爆款文案提取：先取共享文案（命中即扣一次「获取文案」费并秒回），未命中才
  * 本地抽音轨上传。
+ *
+ * 「秒回」不等于免费：文案是零售内容，谁拿到手里谁付这次交付的钱，同一条视频对同一
+ * 个付费账号只扣一次（服务端台账去重）。未命中时本次分文不扣——没有交付就没有收费
+ * ——再按归档数据源补齐本地缓存、抽音轨上传，转写费由 ASR 科目另计。
  *
  * 与工作台上传链路的区别只有「素材从哪来」：这里上传的是客户端自己从**本地缓存的
  * 原视频**里抽出的单声道音轨，平台因此不必再为文案留存原片（设计 §5.3 / §8）。
@@ -1721,15 +1727,14 @@ export type ViralCopyReceipt =
 export async function startViralCopyExtraction(video: {
   platformKey: string;
   nativeId: string;
-  playUrl?: string | null;
 }): Promise<ViralCopyReceipt> {
   const { platformKey, nativeId } = video;
-  // 读缓存失败不该拦住提取（未命中或读不到都只是少一次秒回），所以这里吞掉异常。
-  const cached = await fetchViralCopy(
-    platformKey as ViralPlatform,
-    nativeId,
-  ).catch(() => null);
-  if (cached?.text) return { kind: "cache", text: cached.text };
+  // 计费点前移到这里：取文案就是付费动作，读不到计费口径就不该往下走（继续下去
+  // 会白花一次转写费）。失败照实抛出，由调用方提示用户。
+  const claimed = await claimViralCopy(platformKey as ViralPlatform, nativeId);
+  if (claimed.text) {
+    return { kind: "cache", text: claimed.text, billing: claimed.billing };
+  }
   await ensureViralCacheForVideo(video);
   await awaitViralCacheReady(platformKey, nativeId);
   const audio = await extractViralAudio(platformKey, nativeId);
@@ -1738,8 +1743,19 @@ export async function startViralCopyExtraction(video: {
     nativeId,
     audio,
   );
-  // 与缓存检查之间的竞态：别的用户刚好写入了结果，服务端直接带文案回来。
-  if (accepted.text) return { kind: "cache", text: accepted.text };
+  // 与获取之间的竞态：别的用户刚好写入了结果，服务端扣费后直接带文案回来。
+  if (accepted.text) {
+    return {
+      kind: "cache",
+      text: accepted.text,
+      billing: accepted.billing ?? {
+        charged: 0,
+        unit: "call",
+        deduped: false,
+        billable: true,
+      },
+    };
+  }
   if (!accepted.projectId || !accepted.sourceAssetId || !accepted.taskId) {
     throw new Error("文案提取任务缺少项目或素材结果");
   }
@@ -1749,6 +1765,21 @@ export async function startViralCopyExtraction(video: {
     sourceAssetId: accepted.sourceAssetId,
     taskId: accepted.taskId,
   };
+}
+
+/**
+ * 转写完成后取回文案：这里才是首提取者的交付与计费点.
+ *
+ * 他已为这次转写付过 ASR 按秒费用，但拿到手的文案本身同样要付一次「获取文案」费
+ * （已拍板口径：谁拿到文案谁付费，没有双重标准）。未命中缓存（例如服务端还没写完）
+ * 返回 null，调用方以任务结果兜底。
+ */
+export async function claimExtractedViralCopy(
+  platformKey: string,
+  nativeId: string,
+): Promise<string | null> {
+  const claimed = await claimViralCopy(platformKey as ViralPlatform, nativeId);
+  return claimed.text;
 }
 
 export async function loadLatestScriptFromUpload(projectId: string) {

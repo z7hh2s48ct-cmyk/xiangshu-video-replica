@@ -27,7 +27,7 @@ from app.media_routes import api_base_url, get_media_storage
 from app.permissions import require_not_auditor
 from app.script_from_audio import cached_transcript, cached_transcripts
 from app.usage_billing import finish_source
-from app.viral_routes import ViralVideoItem
+from app.viral_routes import ViralVideoItem, viral_copy_purchased
 from app.viral_search import (
     SEARCH_SERVICE,
     archive_search_covers_bounded,
@@ -301,9 +301,12 @@ def search_viral_videos(
     )
 
 
-class ViralCopyResponse(BaseModel):
-    text: str | None
+class ViralCopyStatusResponse(BaseModel):
+    # 共享缓存里有没有这条视频的文案：true = 现在获取即可秒回，false = 要先转写。
+    available: bool
     updatedAt: str | None
+    # 本付费账号是否已为这条视频付过「获取文案」费：true 时再取不重复扣费。
+    purchased: bool
 
 
 class ViralDiscoveryItem(BaseModel):
@@ -320,21 +323,25 @@ class ViralDiscoveriesResponse(BaseModel):
     items: list[ViralDiscoveryItem]
 
 
-@router.get("/search/copy", response_model=ViralCopyResponse)
+@router.get("/search/copy", response_model=ViralCopyStatusResponse)
 def get_viral_search_copy(
     conn: Database,
-    _actor: AuthenticatedUser,
+    actor: AuthenticatedUser,
     videoId: Annotated[str, Query(min_length=1, max_length=512)],
     platform: Literal["douyin", "wechat_channels"] = "douyin",
-) -> ViralCopyResponse:
-    """读共享文案缓存：命即刻回填，未命中双 null（客户端再决定是否提取）.
+) -> ViralCopyStatusResponse:
+    """只读文案状态：有没有、什么时候写的、本账号是不是已经买过.
 
-    纯读路径：不触发下载/上传/ASR，不计费（`viral_script_cache` 跨用户共享）。
+    **不下发正文**：文案是零售内容，正文只能从 ``POST /videos/copy/claim`` 取，扣费
+    与交付在同一处发生。本端点不触发下载/上传/ASR，也不计费；旧客户端拿到的
+    ``text`` 变成 null 会按「未命中」重走一次提取，由上传链路计费，不会白拿。
     """
     hit = cached_transcript(conn, platform=platform, video_id=videoId)
-    if hit is None:
-        return ViralCopyResponse(text=None, updatedAt=None)
-    return ViralCopyResponse(text=hit.result.text, updatedAt=hit.updated_at)
+    return ViralCopyStatusResponse(
+        available=hit is not None,
+        updatedAt=hit.updated_at if hit is not None else None,
+        purchased=viral_copy_purchased(conn, user_id=actor.id, platform=platform, video_id=videoId),
+    )
 
 
 @router.get("/search/discoveries", response_model=ViralDiscoveriesResponse)

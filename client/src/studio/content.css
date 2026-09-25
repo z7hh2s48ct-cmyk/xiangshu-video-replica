@@ -1374,6 +1374,11 @@
   color: #e07b6a;
 }
 
+/* 归档未就绪是过渡态而非失败：用提示色，避免用户以为素材坏了。 */
+.viral-card-cache.is-unready {
+  color: #d8b976;
+}
+
 .viral-card-cache-track {
   position: absolute;
   left: 0;
@@ -1571,11 +1576,28 @@
   line-height: 1.45;
   margin: 0;
   color: #ecece8;
+  min-height: 2.9em;
+}
+
+/* 标题即详情入口：按钮只为承载点击语义，外观保持标题样式，悬停才提示可点。 */
+.viral-card-title {
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  min-height: 2.9em;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.viral-card-title:hover:not(:disabled) {
+  color: var(--accent-strong);
+  text-decoration: underline;
 }
 
 .viral-card-author {

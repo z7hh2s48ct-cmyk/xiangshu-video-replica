@@ -25,6 +25,9 @@ from app.db_portable import BusinessConnection
 from app.viral_tikhub import MAX_TAGS, ViralVideo, WechatVideoDetail, is_irrelevant_viral_video
 
 VIRAL_FETCH_TTL = timedelta(hours=1)
+# 链接导入素材的分类标记：既是管理端可读的来源标识，也是「不进首页」的判据。
+# 链接导入只保证拿到媒体本身，互动字段由管理端按「字段待补全」提示。
+LINK_IMPORT_CATEGORY = "链接导入"
 STATISTICS_CHECKED_AT_KEY = "_statistics_checked_at"
 STATISTICS_RETRY_AT_KEY = "_statistics_retry_at"
 STATISTICS_OBJECT_ID_KEY = "_statistics_object_id"
@@ -253,6 +256,54 @@ def list_viral_videos(conn: BusinessConnection, *, platform: str, sort: str) -> 
         (platform, now - int(timedelta(days=7).total_seconds()), now),
     ).fetchall()
     return [_row_to_video(row) for row in rows if not is_irrelevant_viral_video(str(row["title"]))]
+
+
+def reclaimable_viral_video_ids(
+    conn: BusinessConnection, *, user_id: str, platform: str, video_ids: list[str]
+) -> list[str]:
+    """挑出「本地已缓存、服务端却已不再下发」的条目，桌面端据此回收本地缓存。
+
+    判据必须由服务端回答：客户端手里只有翻过的页，拿它当「还在下发」的依据会把
+    仍然有效的缓存误删。这里与首页列表口径完全一致（窗口内 + 已发布 + 归档就绪 +
+    标题可用），再看是否已下架，最后排除收藏——收藏是用户主动保留的内容，不受首页
+    窗口与下架影响，误删等于丢数据。
+    """
+    if not video_ids:
+        return []
+    window_end = _collection_window_end(conn, platform)
+    placeholders = ", ".join("%s" for _ in video_ids)
+    rows = conn.execute(
+        f"""
+        SELECT video_id, title FROM viral_videos
+        WHERE platform = %s AND video_id IN ({placeholders})
+            AND collection_published = 1
+            AND published_at BETWEEN %s AND %s
+            {_PUBLISHED_SQL}
+        """,
+        (
+            platform,
+            *video_ids,
+            window_end - int(timedelta(days=7).total_seconds()),
+            window_end,
+        ),
+    ).fetchall()
+    still_served = {
+        str(row["video_id"]) for row in rows if not is_irrelevant_viral_video(str(row["title"]))
+    }
+    availability = viral_video_availabilities(
+        conn, platform=platform, video_ids=sorted(still_served)
+    )
+    favorites = favorite_viral_video_ids(
+        conn, user_id=user_id, platform=platform, video_ids=video_ids
+    )
+    reclaim: list[str] = []
+    for video_id in video_ids:
+        if video_id in favorites:
+            continue
+        if video_id in still_served and availability.get(video_id, "available") == "available":
+            continue
+        reclaim.append(video_id)
+    return reclaim
 
 
 def _cursor_values(video: ViralVideo, sort: str) -> tuple[int, int, str]:

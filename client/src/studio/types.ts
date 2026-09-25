@@ -150,6 +150,8 @@ export type StudioVideo = {
   hasPlayableAudio?: boolean;
   /** 共享文案缓存命中：卡片可展示「已有文案」角标。 */
   hasCopy?: boolean;
+  /** 「查看详情」已购买：同账号同视频只扣一次，卡片据此免报价。 */
+  detailCharged?: boolean;
   playUrl?: string | null;
 };
 export type StudioTask = {
@@ -395,8 +397,15 @@ export type StudioContextValue = {
   discardSavedDraft: () => void;
   /** 确认终稿：云端保存成功后置 confirmed；项目已有分镜时再同步项目脚本。 */
   confirmFinalDraft: () => void;
-  /** 上传来源视频 → 提取文案（script-from-audio）→ 回填草稿并跳文案工坊。 */
-  extractScriptFromUpload: (projectId?: string, assetId?: string) => void;
+  /** 上传来源视频 → 提取文案（script-from-audio）→ 回填草稿并跳文案工坊。
+   * 爆款来源额外带 `copyClaim`（视频的平台与原生 ID）：转写完成后要凭它回获取接口
+   * 取正文并付「获取文案」费——转写费落在 ASR 科目，这笔交付费另计。 */
+  extractScriptFromUpload: (
+    projectId?: string,
+    assetId?: string,
+    preparedTaskId?: string,
+    copyClaim?: { platformKey: string; nativeId: string },
+  ) => void;
   /**
    * 爆款文案提取（桌面端）：本地抽音轨 → 上传 → 转写 → 回填；共享缓存命中则直接填入。
    * Web 端没有本地缓存，调用方应退回 `extractScriptFromUpload` 那条服务端拉取链路。

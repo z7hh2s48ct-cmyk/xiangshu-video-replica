@@ -59,6 +59,7 @@ import { LiveWorkspacePanel } from "./LiveWorkspacePanel";
 import {
   awaitScriptFromAudioTask,
   type CloudDraftRestore,
+  claimExtractedViralCopy,
   discardCloudDraft,
   extractScriptFromUpload as extractScriptFromUploadLive,
   loadCloudDraft,
@@ -1834,6 +1835,9 @@ export function StudioWorkspace({
     importedProjectId?: string,
     importedAssetId?: string,
     preparedTaskId?: string,
+    // 爆款链路的文案归属：转写只是把结果写进共享缓存，正文还要凭它回获取接口取一次
+    // （那里才是交付与计费点，见 live.claimExtractedViralCopy）。
+    copyClaim?: { platformKey: string; nativeId: string },
   ) => {
     if (review) {
       notify("审核示例不调用真实接口。");
@@ -1885,7 +1889,27 @@ export function StudioWorkspace({
         ? awaitScriptFromAudioTask(preparedTaskId)
         : extractScriptFromUploadLive(projectId, assetId)
     )
-      .then(({ text }) => {
+      .then(async ({ text: taskText }) => {
+        // 爆款链路：转写完成只代表结果进了共享缓存，交付与计费要走「获取文案」那一步
+        // （首提取者同样付费，已拍板口径）。取不到就退回任务结果——文案已经产出，不能让
+        // 用户白花一次转写费；欠下的这笔获取费由下次显式提取补齐，且不会重扣 ASR。
+        let text = taskText;
+        let copyBillingMissing = false;
+        if (copyClaim) {
+          try {
+            const claimed = await claimExtractedViralCopy(
+              copyClaim.platformKey,
+              copyClaim.nativeId,
+            );
+            if (claimed) {
+              text = claimed;
+            } else {
+              copyBillingMissing = true;
+            }
+          } catch {
+            copyBillingMissing = true;
+          }
+        }
         extractingRef.current = false;
         endCopyExtractionProgress();
         if (
@@ -1930,7 +1954,11 @@ export function StudioWorkspace({
         });
         navigate("copy", { returnTo: "workbench" });
         setWalletRevision((value) => value + 1);
-        notify("文案已提取，请核对原文并选择二创方式。");
+        notify(
+          copyBillingMissing
+            ? "文案已提取，请核对原文并选择二创方式（本次获取未完成计费，重新提取可补齐）。"
+            : "文案已提取，请核对原文并选择二创方式。",
+        );
       })
       .catch((cause: unknown) => {
         extractingRef.current = false;
@@ -1974,6 +2002,9 @@ export function StudioWorkspace({
       notify("该视频缺少可导入的平台标识");
       return;
     }
+    // 收窄后的常量：回调里再读 video 的属性，TS 不再保证非空。
+    const platformKey = video.platformKey;
+    const nativeId = video.nativeId;
     const permissionGeneration = permissionGenerationRef.current;
     const extractionAccount = currentUser.id;
     // 结果回来时草稿可能已经换过来源：命中缓存的回填没有 projectId/assetId 可核对，
@@ -1990,18 +2021,19 @@ export function StudioWorkspace({
     beginCopyExtractionProgress("正在准备本地音轨…");
     navigate("copy", { returnTo: "workbench" });
     void startViralCopyExtraction({
-      platformKey: video.platformKey,
-      nativeId: video.nativeId,
-      playUrl: video.playUrl,
+      platformKey,
+      nativeId,
     })
       .then((receipt) => {
         if (receipt.kind === "task") {
           // 未命中共享缓存：服务端已建好任务，交给与上传链路完全相同的轮询与回填通道。
+          // 带上这条视频的身份，转写完成后回来取文案（首提取者的交付与计费点）。
           extractingRef.current = false;
           extractScriptFromUpload(
             receipt.projectId,
             receipt.sourceAssetId,
             receipt.taskId,
+            { platformKey, nativeId },
           );
           return;
         }
@@ -2033,7 +2065,19 @@ export function StudioWorkspace({
           },
         });
         navigate("copy", { returnTo: "workbench" });
-        notify("已命中共享文案缓存，文案已填入，请核对后选择二创方式。");
+        // 命中共享缓存同样计费（已购则复用）：扣了分就刷新钱包徽标，别让余额看起来没动。
+        if (receipt.billing.charged > 0) {
+          setWalletRevision((value) => value + 1);
+        }
+        const billed =
+          receipt.billing.charged > 0
+            ? `本次获取扣除 ${receipt.billing.charged} 积分`
+            : receipt.billing.deduped
+              ? "此前已购买过这条文案，本次未扣费"
+              : "本次未计费";
+        notify(
+          `已命中共享文案缓存，${billed}，文案已填入，请核对后选择二创方式。`,
+        );
       })
       .catch((cause: unknown) => {
         extractingRef.current = false;
