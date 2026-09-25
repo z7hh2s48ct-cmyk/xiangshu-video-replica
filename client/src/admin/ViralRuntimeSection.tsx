@@ -47,6 +47,8 @@ export function ViralRuntimeSection({
     "AVAILABLE" | "HIDDEN" | "UNAVAILABLE"
   >("HIDDEN");
 
+  // 全量加载：把服务端值写进表单草稿，只在挂载时使用。轮询与操作后的刷新走
+  // loadStatus，避免采集进行中每 3 秒用服务端值回滚管理员未保存的编辑。
   const load = useCallback(async () => {
     setError("");
     try {
@@ -60,6 +62,15 @@ export function ViralRuntimeSection({
       );
       setPerKeywordLimit(value.per_keyword_limit ?? 10);
       setIntervalDays(value.collection_interval_days ?? 7);
+    } catch (cause) {
+      setError(adminActivationErrorMessage(cause, "读取爆款视频运行状态失败"));
+    }
+  }, []);
+
+  // 仅刷新运行状态（开关、队列、采集进度），不触碰表单草稿与既有错误提示。
+  const loadStatus = useCallback(async () => {
+    try {
+      setControls(await fetchViralRuntimeControls());
     } catch (cause) {
       setError(adminActivationErrorMessage(cause, "读取爆款视频运行状态失败"));
     }
@@ -80,10 +91,10 @@ export function ViralRuntimeSection({
   useEffect(() => {
     if (!collectionActive) return;
     const timer = window.setInterval(() => {
-      void load();
+      void loadStatus();
     }, 3000);
     return () => window.clearInterval(timer);
-  }, [collectionActive, load]);
+  }, [collectionActive, loadStatus]);
 
   async function confirm() {
     if (!controls || !pending) return;
@@ -112,7 +123,7 @@ export function ViralRuntimeSection({
         setNotice("视频可用状态已更新。");
       } else if (pending === "collect") {
         await collectViralNow(reason);
-        await load();
+        await loadStatus();
         setNotice("已触发立即采集，下方状态会实时更新采集进度。");
       } else {
         const next = await updateViralRuntimeControls(
