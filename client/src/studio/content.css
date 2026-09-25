@@ -1407,6 +1407,85 @@
   color: #999b95;
 }
 
+/* 统计自愈入口：只在当前页存在「缺互动统计」的视频号时出现。
+   补全会真实外呼并按条结算，文案因此必须同时说明「只补缺的、24 小时内不重复外呼」。 */
+.viral-statistics-heal {
+  align-items: flex-start;
+  display: flex;
+  gap: 11px;
+  margin: 10px 0 0;
+  border: 1px solid rgba(224, 168, 63, 0.36);
+  border-radius: 11px;
+  background: rgba(224, 168, 63, 0.09);
+  padding: 11px 13px;
+}
+
+/* 进行中不再是「需要你做什么」，退成中性底色，只留进度与取消。 */
+.viral-statistics-heal.is-healing {
+  align-items: center;
+  border-color: var(--line);
+  background: var(--panel);
+}
+
+.viral-statistics-heal__icon {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(224, 168, 63, 0.4);
+  border-radius: 8px;
+  background: rgba(224, 168, 63, 0.16);
+  color: var(--accent-strong);
+  font-size: var(--font-label);
+}
+
+.viral-statistics-heal__body {
+  min-width: 0;
+}
+
+.viral-statistics-heal__body b {
+  display: block;
+  font-size: var(--font-label);
+}
+
+.viral-statistics-heal__body small {
+  display: block;
+  margin-top: 4px;
+  color: #a9a29a;
+  font-size: var(--font-caption);
+  line-height: 1.55;
+}
+
+.viral-statistics-heal__actions {
+  margin-left: auto;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.viral-statistics-heal__progress {
+  color: #cbc6bd;
+  font-size: var(--font-caption);
+}
+
+.viral-statistics-heal__bar {
+  flex: 1;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #202027;
+}
+
+.viral-statistics-heal__bar i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-strong));
+  transition: width 0.2s ease;
+}
+
 .viral-card-scrim {
   position: absolute;
   inset: 0;

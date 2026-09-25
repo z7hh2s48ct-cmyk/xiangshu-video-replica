@@ -45,6 +45,7 @@ import {
   openViralVideoDetail,
   putMaterial,
   refreshViralVideoResource,
+  refreshViralVideoStatistics,
   removeViralFavorite,
   resolveMaterials,
   saveStudioDraft,
@@ -341,10 +342,49 @@ function useViralDetailPrice(enabled: boolean) {
   return credits;
 }
 
-function useViralStatistics(videos: StudioVideo[], enabled: boolean) {
-  const { updateData } = useStudio();
+/** 缺互动统计的视频号条目：评论 / 转发 / 收藏三项补采字段全空（与服务端的完整性判据同口径）。 */
+function viralStatisticsMissing(video: StudioVideo) {
+  return (
+    video.platformKey === "wechat_channels" &&
+    Boolean(video.nativeId) &&
+    video.comments == null &&
+    video.shares == null &&
+    video.collections == null
+  );
+}
+
+type ViralStatisticsHealing = {
+  /** 本轮要补全的条数（点「补全统计」那一刻的缺口）。 */
+  total: number;
+  /** 已处理（回填成功或失败）的条数。 */
+  done: number;
+};
+
+type ViralStatisticsState = {
+  error?: string;
+  /** 当前这一页里缺互动统计的视频号条数；为 0 时自愈入口不出现。 */
+  missingCount: number;
+  /** 补全进行中的进度；未在补全时为 undefined。 */
+  healing?: ViralStatisticsHealing;
+  /** 用户已忽略当前这批缺口（缺口集合一变就重新出现）。 */
+  dismissed: boolean;
+  heal: () => void;
+  cancel: () => void;
+  dismiss: () => void;
+};
+
+function useViralStatistics(
+  videos: StudioVideo[],
+  enabled: boolean,
+): ViralStatisticsState {
+  const { updateData, openLive } = useStudio();
   const attemptedIds = useRef(new Set<string>());
   const [error, setError] = useState<string>();
+  const [healing, setHealing] = useState<ViralStatisticsHealing>();
+  // 忽略按「缺哪几条」记账：翻页 / 新条目让缺口集合一变，自愈入口就该重新出现。
+  const [dismissedKey, setDismissedKey] = useState("");
+  // 补全轮次序号：取消、卸载、重新发起都靠它让上一轮在下一个检查点自行退出。
+  const healRunRef = useRef(0);
   const pendingIds = videos
     .filter(
       (video) =>
@@ -368,7 +408,73 @@ function useViralStatistics(videos: StudioVideo[], enabled: boolean) {
       .catch(() => setError("部分视频统计暂时无法更新"));
   }, [enabled, pendingKey, updateData]);
 
-  return error;
+  const missingIds = videos
+    .filter(viralStatisticsMissing)
+    .map((video) => video.nativeId as string);
+  const missingKey = missingIds.join(",");
+  const missingIdsRef = useRef(missingIds);
+  missingIdsRef.current = missingIds;
+
+  useEffect(() => {
+    return () => {
+      // 卸载后旧轮次可能还在飞：序号作废，它回来时不再写状态。
+      healRunRef.current += 1;
+    };
+  }, []);
+
+  const cancelHeal = () => {
+    healRunRef.current += 1;
+    setHealing(undefined);
+  };
+
+  const heal = () => {
+    const ids = missingIdsRef.current;
+    if (!ids.length) return;
+    const run = ++healRunRef.current;
+    setError(undefined);
+    setDismissedKey("");
+    setHealing({ total: ids.length, done: 0 });
+    void (async () => {
+      let done = 0;
+      for (const id of ids) {
+        if (healRunRef.current !== run) return;
+        try {
+          // 逐条补采：服务端按「实际外呼条数」结算，逐条请求让进度与回填都是增量的
+          // （哪条先返回就先填哪条），「取消」也停在真实的计费边界上——已发出的
+          // 那一条照常结算，后面没发出去的一条不花钱。
+          const result = await refreshViralVideoStatistics(
+            [id],
+            newViralSearchKey(),
+          );
+          if (healRunRef.current !== run) return;
+          updateViralStatistics(updateData, result.items);
+          attemptedIds.current.add(id);
+        } catch (cause) {
+          if (healRunRef.current !== run) return;
+          if (isInsufficientCredits(cause)) {
+            setError("余额不足，无法补全互动统计");
+            openLive("wallet");
+          } else {
+            setError("互动统计补全中断，请稍后重试");
+          }
+          break;
+        }
+        done += 1;
+        setHealing({ total: ids.length, done });
+      }
+      if (healRunRef.current === run) setHealing(undefined);
+    })();
+  };
+
+  return {
+    error,
+    missingCount: missingIds.length,
+    healing,
+    dismissed: dismissedKey !== "" && dismissedKey === missingKey,
+    heal,
+    cancel: cancelHeal,
+    dismiss: () => setDismissedKey(missingKey),
+  };
 }
 
 /** 点击播放：真实平台视频先走媒体管线，测试夹具可直接使用 playUrl。 */
@@ -553,11 +659,14 @@ function ViralCover({
 
 /** 统计行（参考统计行四字段常显）：点赞 / 评论 / 转发 / 收藏。 */
 function ViralStatsRow({ video }: { video: StudioVideo }) {
+  // 视频号的互动统计要单独补采，还没补全时四个字段一律显示「—」：点赞在搜索结果里
+  // 可能是 0 或一个饱和的展示值，与其余三项不同源，单独显示会被读成「统计已到手」。
+  const missing = viralStatisticsMissing(video);
   const stats: Array<[string, string, string]> = [
-    ["heart", "点赞", viralLikesLabel(video)],
-    ["comment", "评论", formatCount(video.comments ?? null)],
-    ["share", "转发", formatCount(video.shares)],
-    ["star", "收藏", formatCount(video.collections)],
+    ["heart", "点赞", missing ? "—" : viralLikesLabel(video)],
+    ["comment", "评论", missing ? "—" : formatCount(video.comments ?? null)],
+    ["share", "转发", missing ? "—" : formatCount(video.shares)],
+    ["star", "收藏", missing ? "—" : formatCount(video.collections)],
   ];
   return (
     <div className="viral-card-stats">
@@ -992,7 +1101,7 @@ export function ViralPage() {
   }, [platform, category, scope, sort]);
 
   const current = review ? shown.slice(0, visibleCount) : shown;
-  const statisticsError = useViralStatistics(current, !review);
+  const statistics = useViralStatistics(current, !review);
   // 卡片报价：审核演示不报价，与其余计费入口同一口径。
   const detailPrice = useViralDetailPrice(!review);
 
@@ -1524,11 +1633,58 @@ export function ViralPage() {
         ))}
       </nav>
       {!review && <ViralCacheUsage revision={cachedOnPage} />}
-      {(listError || statisticsError) && (
+      {(listError || statistics.error) && (
         <p className="viral-media-status is-error" role="status">
-          {listError ?? statisticsError}
+          {listError ?? statistics.error}
         </p>
       )}
+      {!review &&
+      !statistics.healing &&
+      statistics.missingCount > 0 &&
+      !statistics.dismissed ? (
+        <div className="viral-statistics-heal">
+          <span className="viral-statistics-heal__icon" aria-hidden="true">
+            ↻
+          </span>
+          <div className="viral-statistics-heal__body" role="status">
+            <b>{statistics.missingCount} 条视频号的互动统计还没补全</b>
+            <small>
+              {
+                "视频号的点赞 / 评论 / 转发 / 收藏需要单独补采。补全只对缺失的条目外呼，已取到的数据 24 小时内不再重复外呼，因此不会重复计费。"
+              }
+            </small>
+          </div>
+          <div className="viral-statistics-heal__actions">
+            <Button variant="quiet" onClick={statistics.dismiss}>
+              忽略
+            </Button>
+            <Button onClick={statistics.heal}>补全统计</Button>
+          </div>
+        </div>
+      ) : null}
+      {!review && statistics.healing ? (
+        <div className="viral-statistics-heal is-healing">
+          <span className="viral-statistics-heal__icon" aria-hidden="true">
+            ↻
+          </span>
+          <span className="viral-statistics-heal__progress" role="status">
+            正在补全 {statistics.healing.total} 条视频号的互动统计…（
+            {statistics.healing.done} / {statistics.healing.total}）
+          </span>
+          <span className="viral-statistics-heal__bar" aria-hidden="true">
+            <i
+              style={{
+                width: `${Math.round(
+                  (statistics.healing.done / statistics.healing.total) * 100,
+                )}%`,
+              }}
+            />
+          </span>
+          <Button variant="quiet" onClick={statistics.cancel}>
+            取消
+          </Button>
+        </div>
+      ) : null}
       {refreshStatus && (
         <p className="viral-media-status" role="status">
           {refreshStatus}

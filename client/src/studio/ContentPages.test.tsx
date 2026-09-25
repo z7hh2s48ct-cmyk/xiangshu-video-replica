@@ -17,6 +17,7 @@ import type {
   StudioData,
   StudioPublishDraft,
   StudioState,
+  StudioVideo,
 } from "./types";
 
 const {
@@ -32,6 +33,7 @@ const {
   listViralVideos,
   newViralSearchKey,
   refreshViralVideoResource,
+  refreshViralVideoStatistics,
   downloadVideoToFile,
   fetchViralVideoSource,
   saveViralFavorite,
@@ -84,6 +86,7 @@ const {
   listViralVideos: vi.fn(),
   newViralSearchKey: vi.fn(() => "viral-search-key"),
   refreshViralVideoResource: vi.fn(),
+  refreshViralVideoStatistics: vi.fn(),
   downloadVideoToFile: vi.fn(),
   fetchViralVideoSource: vi.fn(),
   saveViralFavorite: vi.fn(),
@@ -158,6 +161,7 @@ vi.mock("../api", () => ({
   listViralVideos,
   newViralSearchKey,
   refreshViralVideoResource,
+  refreshViralVideoStatistics,
   downloadVideoToFile,
   fetchViralVideoSource,
   saveViralFavorite,
@@ -525,6 +529,48 @@ function viralItem(index: number, overrides: Partial<ViralVideoItem> = {}) {
   };
 }
 
+/** 视频号缺互动统计的卡片：三个补采字段全空，点赞也退成未知（不显示 0）。 */
+function missingWechatVideo(): StudioVideo {
+  const base = studio();
+  return {
+    ...base.data.videos[1],
+    likes: 0,
+    likeDisplay: null,
+    comments: null,
+    shares: null,
+    collections: null,
+  };
+}
+
+/** 补采接口返回的完整统计（按 nativeId 认领回原卡片）。 */
+function wechatStatisticsPayload() {
+  return {
+    items: [
+      {
+        platform: "wechat_channels" as const,
+        videoId: "native-wx-1",
+        category: "庭院案例",
+        title: "新中式庭院的三个细节",
+        author: "庭院设计老周",
+        authorAvatar: null,
+        verified: false,
+        coverUrl: "/studio/demo-2.jpg",
+        durationMs: 72_000,
+        likes: 9_800,
+        comments: 44,
+        shares: 55,
+        collects: 66,
+        publishedAt: null,
+        publishedDisplay: "3天前",
+        likeDisplay: "1.2万",
+        tags: [],
+        hasPlayableAudio: false,
+        playUrl: null,
+      },
+    ],
+  };
+}
+
 describe("V1.4 内容与运营页面", () => {
   beforeEach(() => {
     window.sessionStorage.clear();
@@ -547,6 +593,7 @@ describe("V1.4 内容与运营页面", () => {
     fetchViralVideoSource.mockReset();
     downloadVideoToFile.mockReset();
     refreshViralVideoResource.mockReset();
+    refreshViralVideoStatistics.mockReset();
     fetchViralVideoStatistics.mockReset();
     fetchViralVideo.mockReset();
     openViralVideoDetail.mockReset();
@@ -2049,6 +2096,163 @@ describe("V1.4 内容与运营页面", () => {
       shares: 55,
       collections: 66,
     });
+  });
+
+  it("视频号缺互动统计时给出自愈入口，补全后逐条回填并自动收起", async () => {
+    listViralVideos.mockReturnValue(new Promise(() => {}));
+    fetchViralVideoStatistics.mockResolvedValue({ items: [] });
+    let release: ((payload: { items: ViralVideoItem[] }) => void) | undefined;
+    refreshViralVideoStatistics.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const base = studio();
+    const value = studio({
+      review: false,
+      data: { ...base.data, videos: [missingWechatVideo()] },
+    });
+    render(<StatefulViralPage value={value} />);
+    fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
+
+    // 缺统计的卡片四项都是「—」：点赞也不显示 0（0 会被读成已到手的真实数据）。
+    expect(screen.getByTitle("点赞")).toHaveTextContent("—");
+    expect(
+      await screen.findByText("1 条视频号的互动统计还没补全"),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/补全只对缺失的条目外呼/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "补全统计" }));
+    // 逐条补采：入口换成进度，报价口径由服务端按实际外呼条数结算。
+    expect(
+      await screen.findByText(/正在补全 1 条视频号的互动统计…（0 \/ 1）/),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(refreshViralVideoStatistics).toHaveBeenCalledWith(
+        ["native-wx-1"],
+        "viral-search-key",
+      ),
+    );
+
+    await act(async () => {
+      release?.(wechatStatisticsPayload());
+    });
+    await waitFor(() =>
+      expect(screen.getByTitle("评论")).toHaveTextContent("44"),
+    );
+    expect(screen.getByTitle("点赞")).toHaveTextContent("1.2万");
+    // 补齐后自愈入口自动消失。
+    expect(screen.queryByText(/还没补全/)).toBeNull();
+    expect(screen.queryByText(/正在补全/)).toBeNull();
+  });
+
+  it("取消补全后丢弃迟到的回填，缺口重新出现在入口上", async () => {
+    listViralVideos.mockReturnValue(new Promise(() => {}));
+    fetchViralVideoStatistics.mockResolvedValue({ items: [] });
+    let release: ((payload: { items: ViralVideoItem[] }) => void) | undefined;
+    refreshViralVideoStatistics.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const base = studio();
+    const value = studio({
+      review: false,
+      data: { ...base.data, videos: [missingWechatVideo()] },
+    });
+    render(<StatefulViralPage value={value} />);
+    fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
+
+    fireEvent.click(await screen.findByRole("button", { name: "补全统计" }));
+    expect(await screen.findByText(/正在补全/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(screen.queryByText(/正在补全/)).toBeNull();
+    expect(
+      screen.getByText("1 条视频号的互动统计还没补全"),
+    ).toBeInTheDocument();
+
+    // 取消后那一条仍会返回：迟到的结果不得再写进列表（否则会白扣一次还改了界面）。
+    await act(async () => {
+      release?.(wechatStatisticsPayload());
+    });
+    expect(screen.getByTitle("评论")).toHaveTextContent("—");
+    expect(
+      screen.getByText("1 条视频号的互动统计还没补全"),
+    ).toBeInTheDocument();
+  });
+
+  it("忽略后收起自愈入口", async () => {
+    listViralVideos.mockReturnValue(new Promise(() => {}));
+    fetchViralVideoStatistics.mockResolvedValue({ items: [] });
+    const base = studio();
+    const value = studio({
+      review: false,
+      data: { ...base.data, videos: [missingWechatVideo()] },
+    });
+    render(<StatefulViralPage value={value} />);
+    fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
+
+    fireEvent.click(await screen.findByRole("button", { name: "忽略" }));
+    expect(screen.queryByText(/还没补全/)).toBeNull();
+  });
+
+  it("补全失败时保留入口并给出重试提示", async () => {
+    listViralVideos.mockReturnValue(new Promise(() => {}));
+    fetchViralVideoStatistics.mockResolvedValue({ items: [] });
+    refreshViralVideoStatistics.mockRejectedValue(new Error("upstream down"));
+    const base = studio();
+    const value = studio({
+      review: false,
+      data: { ...base.data, videos: [missingWechatVideo()] },
+    });
+    render(<StatefulViralPage value={value} />);
+    fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
+
+    fireEvent.click(await screen.findByRole("button", { name: "补全统计" }));
+    expect(
+      await screen.findByText("互动统计补全中断，请稍后重试"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("1 条视频号的互动统计还没补全"),
+    ).toBeInTheDocument();
+  });
+
+  it("补全遇到余额不足时引导充值并保留入口", async () => {
+    listViralVideos.mockReturnValue(new Promise(() => {}));
+    fetchViralVideoStatistics.mockResolvedValue({ items: [] });
+    refreshViralVideoStatistics.mockRejectedValue(
+      Object.assign(new Error("积分不足"), { code: "INSUFFICIENT_CREDITS" }),
+    );
+    const base = studio();
+    const value = studio({
+      review: false,
+      data: { ...base.data, videos: [missingWechatVideo()] },
+    });
+    render(<StatefulViralPage value={value} />);
+    fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
+
+    fireEvent.click(await screen.findByRole("button", { name: "补全统计" }));
+    expect(
+      await screen.findByText("余额不足，无法补全互动统计"),
+    ).toBeInTheDocument();
+    expect(value.openLive).toHaveBeenCalledWith("wallet");
+  });
+
+  it("审核演示不出现自愈入口，也不发起补采", async () => {
+    listViralVideos.mockReturnValue(new Promise(() => {}));
+    const base = studio();
+    useStudio.mockReturnValue(
+      studio({ data: { ...base.data, videos: [missingWechatVideo()] } }),
+    );
+    render(<ViralPage />);
+    fireEvent.click(screen.getByRole("tab", { name: /视频号/ }));
+
+    expect(screen.getByTitle("点赞")).toHaveTextContent("—");
+    expect(screen.queryByText(/还没补全/)).toBeNull();
+    expect(fetchViralVideoStatistics).not.toHaveBeenCalled();
+    expect(refreshViralVideoStatistics).not.toHaveBeenCalled();
   });
 
   it("视频号详情不再单独请求统计（统计随「查看详情」同批返回）", async () => {
