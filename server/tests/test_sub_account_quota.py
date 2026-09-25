@@ -68,7 +68,7 @@ QUOTA_DB = "t_sub_account_quota"
 # main 链尾（20260922T2200_material_preference_tags）之上；其后依次叠加
 # 20260923T1800 部署垫片、20260924T0000 交易号唯一索引与
 # 20260924T0100 口播提交时刻列与 20260924T0200 口播隐藏偏好表，故链尾为该值。
-_HEAD_REVISION = "20260924T0200_customer_oral_task_visibility"
+_HEAD_REVISION = "20260926T0000_viral_homepage_rank"
 # _PRIOR_REVISION 是本迁移自身的 down_revision，用于降级断言。
 # 合并 main 后 1200 重挂到 20260922T1200_recharge_packages（手册 §3）；Phase 3b
 # permissions 与其后的 analysis 三迁移（failure_diagnostic / request_id /
