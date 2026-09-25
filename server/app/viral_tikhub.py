@@ -186,6 +186,8 @@ class ViralVideo:
     # 封面落主存储后的对象 key；存在时客户端下发自有稳定地址。
     cover_key: str | None = None
     homepage_featured: bool = False
+    # 策展置顶序（T4）：NULL 表示未置顶，featured 列表按 ASC NULLS LAST 排序。
+    homepage_rank: int | None = None
 
     def to_client_dict(self) -> dict[str, Any]:
         return {

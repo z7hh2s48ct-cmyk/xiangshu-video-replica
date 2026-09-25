@@ -49,7 +49,7 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 # 20260924T0100_oral_task_submitted_at 为口播轮询看播增加 submitted_at 计时锚点，
 # 20260924T0200_customer_oral_task_visibility 为口播任务补账号级隐藏偏好表。
 # 迁移后 alembic 版本头即该值，9 处 assert version == HEAD_REVISION 依赖此值。
-HEAD_REVISION = "20260924T0200_customer_oral_task_visibility"
+HEAD_REVISION = "20260926T0000_viral_homepage_rank"
 
 
 def test_viral_script_cache_migration_preserves_results_without_task_foreign_keys(
