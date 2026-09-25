@@ -1325,6 +1325,48 @@
   font-size: var(--font-label);
   font-weight: 700;
 }
+/* 备用通道分组：与主入口字段同排，但自带分组标题与状态说明，
+   让「填了才启用 / 怎么才算启用」一眼可见。 */
+.provider-backup {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.provider-backup[data-invalid="true"] {
+  border-color: #6b2f2f;
+}
+.provider-backup__heading {
+  margin: 0;
+  color: #b9b3a8;
+  font-size: var(--font-label);
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+.provider-backup__notice {
+  margin: 0;
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: #cfe9d9;
+  background: rgba(126, 203, 156, 0.12);
+  border: 1px solid rgba(126, 203, 156, 0.32);
+  font-size: var(--font-caption);
+  line-height: 1.6;
+}
+.provider-backup__error {
+  margin: 0;
+  color: #ff9aa8;
+  font-size: var(--font-caption);
+  line-height: 1.6;
+}
+.provider-backup__hint {
+  margin: 0;
+  color: #8f8c86;
+  font-size: var(--font-caption);
+  line-height: 1.6;
+}
 .secret-toggle {
   position: absolute;
   top: 50%;

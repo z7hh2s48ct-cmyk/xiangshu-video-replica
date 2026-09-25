@@ -2,6 +2,7 @@ import {
   type FormEvent,
   type ReactNode,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -95,6 +96,19 @@ type ProviderFormSpec = {
   title: string;
   note?: string;
   fields: ProviderField[];
+  /**
+   * 备用通道分组（目前只有爆款数据源用）。
+   *
+   * 备用入口填了才启用：服务端在主入口失效（超时 / 限流 / 上游异常）时自动切过去
+   * 重取。它对客户是不可见的计费细节——切换只发生在平台侧，客户侧价格与扣费口径
+   * 不变，所以这里必须把「已启用 / 怎么启用」写清楚，而不是留两个裸输入框。
+   */
+  backupChannel?: {
+    heading: string;
+    fields: ProviderField[];
+    enabledNotice: string;
+    hint: string;
+  };
 };
 
 // COS 区域固定为上海，界面不再显示 Region 输入框。
@@ -143,8 +157,22 @@ const PROVIDER_FORMS: Record<ProviderName, ProviderFormSpec> = {
   },
   tikhub: {
     title: "爆款视频数据源",
-    note: "抖音 / 视频号最近 7 天爆款参考库 · 只需 API Key",
-    fields: [{ name: "api_key", label: "API Key", secret: true }],
+    note: "抖音 / 视频号最近 7 天爆款参考库。主入口失效（超时、限流、上游异常）时自动切到备用入口重取，同一份数据不会重复计成本。",
+    fields: [{ name: "api_key", label: "主入口密钥", secret: true }],
+    backupChannel: {
+      heading: "备用通道（可选）",
+      enabledNotice:
+        "备用通道已启用：关键词采集、视频号分页、视频号详情 / 统计补采三个计费节点共用这条通道；切换只发生在平台侧，客户端不重复扣费——一次请求只在成功的那条通道上记一次平台成本。",
+      hint: "备用密钥必须与备用入口一起配置：只填密钥不填入口，保存会被拒绝。留空「备用密钥」表示与主入口共用同一把密钥。",
+      fields: [
+        {
+          name: "backup_base_url",
+          label: "备用入口",
+          placeholder: "https://…（留空则不启用备用通道）",
+        },
+        { name: "backup_api_key", label: "备用密钥", secret: true },
+      ],
+    },
   },
   dashscope: {
     title: "语音转写",
@@ -403,8 +431,16 @@ function ProviderForm({
   ) => Promise<ProviderTestResult>;
 }) {
   const form = PROVIDER_FORMS[provider];
+  const backupChannel = form.backupChannel;
+  const backupChannelFields = backupChannel?.fields ?? [];
+  // 主字段与备用通道字段共用一份表单状态：初始化要看得到备用入口的已存值，
+  // 提交后也要清掉备用密钥，否则保存完输入框里还留着上一次的密钥。
+  const formFields = useMemo(
+    () => [...form.fields, ...(form.backupChannel?.fields ?? [])],
+    [form],
+  );
   const [values, setValues] = useState<Record<string, string>>(() =>
-    initialValues(form.fields, settings.config),
+    initialValues(formFields, settings.config),
   );
   const [visibleFields, setVisibleFields] = useState<Record<string, boolean>>(
     {},
@@ -417,6 +453,7 @@ function ProviderForm({
   >({});
   const [status, setStatus] = useState("");
   const [statusTone, setStatusTone] = useState<"ok" | "error">("ok");
+  const [backupError, setBackupError] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
   const [paidProbeOpen, setPaidProbeOpen] = useState(false);
@@ -429,8 +466,8 @@ function ProviderForm({
       return;
     }
     previousConfigRef.current = settings.config;
-    setValues(initialValues(form.fields, settings.config));
-  }, [form.fields, settings.config]);
+    setValues(initialValues(formFields, settings.config));
+  }, [formFields, settings.config]);
 
   async function toggleSecretVisibility(name: string) {
     if (visibleFields[name]) {
@@ -473,15 +510,22 @@ function ProviderForm({
     }
     setIsSaving(true);
     setStatus("");
+    setBackupError("");
     try {
       await onSave(provider, values);
-      setValues((current) => clearSecretFields(current, form.fields));
+      setValues((current) => clearSecretFields(current, formFields));
       setVisibleFields({});
       setRevealedFields({});
       setStatus("已保存");
       setStatusTone("ok");
-    } catch {
-      setStatus("保存失败，请检查必填项与管理员权限。");
+    } catch (cause) {
+      const message = saveErrorMessage(cause);
+      // 备用通道的错配只有服务端判得准（入口格式、密钥与入口是否配对），
+      // 这类消息同时落在分组里，操作者不必回头去顶部状态行找原因。
+      if (message.includes("备用")) {
+        setBackupError(message);
+      }
+      setStatus(message);
       setStatusTone("error");
     } finally {
       setIsSaving(false);
@@ -541,6 +585,71 @@ function ProviderForm({
     }
   }
 
+  function renderField(field: ProviderField) {
+    const isVisible = Boolean(visibleFields[field.name]);
+    const isRevealing = Boolean(revealingFields[field.name]);
+    return (
+      <label key={field.name}>
+        {field.label}
+        <span className={field.secret ? "secret-field" : undefined}>
+          <input
+            disabled={readOnly || isRevealing || isSaving}
+            autoComplete={field.secret ? "new-password" : "off"}
+            type={field.secret && !isVisible ? "password" : "text"}
+            value={values[field.name] ?? ""}
+            placeholder={
+              field.secret && settings.configured
+                ? "已保存，留空不修改"
+                : field.placeholder
+            }
+            onChange={(event) => {
+              setValues((current) => ({
+                ...current,
+                [field.name]: event.target.value,
+              }));
+              setRevealedFields((current) => ({
+                ...current,
+                [field.name]: false,
+              }));
+            }}
+          />
+          {field.secret ? (
+            <button
+              disabled={readOnly || isRevealing}
+              type="button"
+              className="secret-toggle"
+              aria-label={
+                isRevealing
+                  ? `正在读取${field.label}`
+                  : isVisible
+                    ? `隐藏${field.label}`
+                    : `显示${field.label}`
+              }
+              aria-pressed={isVisible}
+              onClick={() => void toggleSecretVisibility(field.name)}
+            >
+              <svg
+                aria-hidden="true"
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.7"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" />
+                <circle cx="12" cy="12" r="3" />
+                {isVisible ? <path d="m3 3 18 18" /> : null}
+              </svg>
+            </button>
+          ) : null}
+        </span>
+      </label>
+    );
+  }
+
   return (
     <form
       className="provider-card"
@@ -562,70 +671,31 @@ function ProviderForm({
         {settings.configured ? "已配置" : "未配置"}
       </span>
       <div className="field-stack">
-        {form.fields.map((field) => {
-          const isVisible = Boolean(visibleFields[field.name]);
-          const isRevealing = Boolean(revealingFields[field.name]);
-          return (
-            <label key={field.name}>
-              {field.label}
-              <span className={field.secret ? "secret-field" : undefined}>
-                <input
-                  disabled={readOnly || isRevealing || isSaving}
-                  autoComplete={field.secret ? "new-password" : "off"}
-                  type={field.secret && !isVisible ? "password" : "text"}
-                  value={values[field.name] ?? ""}
-                  placeholder={
-                    field.secret && settings.configured
-                      ? "已保存，留空不修改"
-                      : field.placeholder
-                  }
-                  onChange={(event) => {
-                    setValues((current) => ({
-                      ...current,
-                      [field.name]: event.target.value,
-                    }));
-                    setRevealedFields((current) => ({
-                      ...current,
-                      [field.name]: false,
-                    }));
-                  }}
-                />
-                {field.secret ? (
-                  <button
-                    disabled={readOnly || isRevealing}
-                    type="button"
-                    className="secret-toggle"
-                    aria-label={
-                      isRevealing
-                        ? `正在读取${field.label}`
-                        : isVisible
-                          ? `隐藏${field.label}`
-                          : `显示${field.label}`
-                    }
-                    aria-pressed={isVisible}
-                    onClick={() => void toggleSecretVisibility(field.name)}
-                  >
-                    <svg
-                      aria-hidden="true"
-                      width="18"
-                      height="18"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.7"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    >
-                      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" />
-                      <circle cx="12" cy="12" r="3" />
-                      {isVisible ? <path d="m3 3 18 18" /> : null}
-                    </svg>
-                  </button>
-                ) : null}
-              </span>
-            </label>
-          );
-        })}
+        {form.fields.map(renderField)}
+        {backupChannel ? (
+          <div
+            className="provider-backup"
+            data-invalid={backupError ? "true" : undefined}
+          >
+            <p className="provider-backup__heading">{backupChannel.heading}</p>
+            {backupChannelFields.some(
+              (field) => (settings.config[field.name] ?? "").trim() !== "",
+            ) ? (
+              <p className="provider-backup__notice">
+                {/* 图标单独成节：读屏不必念出装饰符号，正文也保持可独立匹配。 */}
+                <span aria-hidden="true">✓</span> {backupChannel.enabledNotice}
+              </p>
+            ) : null}
+            {backupError ? (
+              // 不重复声明 role="alert"：顶部状态行已经播报过一次，读屏不该听两遍。
+              <p className="provider-backup__error">
+                <span aria-hidden="true">✕</span> {backupError}
+              </p>
+            ) : null}
+            {backupChannelFields.map(renderField)}
+            <p className="provider-backup__hint">{backupChannel.hint}</p>
+          </div>
+        ) : null}
       </div>
       <div className="form-actions">
         <button type="submit" disabled={readOnly || isSaving || isTesting}>
@@ -827,6 +897,28 @@ function RuntimeForm({
       </div>
     </form>
   );
+}
+
+/**
+ * 保存失败的文案。
+ *
+ * 服务端的校验消息（例如备用通道「密钥没有入口」「入口不是 http(s)」）是操作者唯一
+ * 能据以自救的线索，不能吞掉换成「保存失败」；但也只在这类明确的校验失败上原样回显——
+ * 网络中断、网关错误页会带英文原文，套到界面上反而更难懂。
+ */
+function saveErrorMessage(error: unknown): string {
+  const code =
+    typeof error === "object" && error !== null && "code" in error
+      ? (error as { code?: unknown }).code
+      : undefined;
+  if (
+    (code === "INVALID_SETTINGS" || code === "INVALID_SERVICE_SETTINGS") &&
+    error instanceof Error &&
+    error.message.trim()
+  ) {
+    return error.message;
+  }
+  return "保存失败，请检查必填项与管理员权限。";
 }
 
 function testResultLabel(result: ProviderTestResult) {

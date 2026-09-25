@@ -68,8 +68,9 @@ PERMISSIONS_DB = "t_sub_account_permission"
 # 链尾：本分支的 20260923T1200_admin_refund_adjustment 按手册 §3 重挂于
 # main 链尾（20260922T2200_material_preference_tags）之上；其后依次叠加
 # 20260923T1800 部署垫片、20260924T0000 交易号唯一索引与
-# 20260924T0100 口播提交时刻列与 20260924T0200 口播隐藏偏好表，故链尾为该值。
-_HEAD_REVISION = "20260924T0200_customer_oral_task_visibility"
+# 20260924T0100 口播提交时刻列、20260924T0200 口播隐藏偏好表、
+# 20260925T1400 计费触发器追加修复，故链尾为该值。
+_HEAD_REVISION = "20260925T1400_api_metadata_pending_write"
 _PRIOR_REVISION = "20260921T1200_sub_account_quotas"
 
 

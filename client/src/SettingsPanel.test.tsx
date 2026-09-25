@@ -679,4 +679,161 @@ describe("SettingsPanel", () => {
     expect(hifly.getByRole("button", { name: "保存" })).toBeDisabled();
     expect(hifly.getByRole("button", { name: "只读检查" })).toBeDisabled();
   });
+
+  // 爆款数据源备用通道：主入口失效时服务端自动切到备用入口重取，
+  // 界面要负责的三件事——怎么启用、提交什么、校验失败时把原因落在哪里。
+  function tikhubBackend(config: Record<string, string> = {}) {
+    const saveProvider = vi.fn().mockResolvedValue({
+      provider: "tikhub",
+      configured: true,
+      config,
+    });
+    const backend: SettingsBackend = {
+      load: vi.fn().mockResolvedValue({
+        ...settingsSnapshot,
+        providers: {
+          ...settingsSnapshot.providers,
+          tikhub: { provider: "tikhub", configured: true, config },
+        },
+      }),
+      saveProvider,
+      saveRuntime: vi.fn(),
+      saveBilling: vi.fn(),
+      testProvider: vi.fn(),
+    };
+    return { backend, saveProvider };
+  }
+
+  it("爆款数据源把备用通道单独成组，填了备用入口才给出启用说明", async () => {
+    const { backend } = tikhubBackend({
+      backup_base_url: "https://api-backup.example.com",
+    });
+    const { container } = render(
+      <SettingsPanel
+        source="control"
+        controlBackend={backend}
+        section="providers"
+      />,
+    );
+
+    await screen.findByText("爆款视频数据源");
+    const tikhub = providerCard(container, "tikhub");
+    expect(tikhub.getByText("备用通道（可选）")).toBeInTheDocument();
+    expect(tikhub.getByLabelText("备用入口")).toHaveValue(
+      "https://api-backup.example.com",
+    );
+    // 备用密钥同样是密钥字段：只回显掩码，留空不改动。
+    expect(tikhub.getByLabelText("备用密钥")).toHaveAttribute(
+      "type",
+      "password",
+    );
+    expect(tikhub.getByText(/备用通道已启用/)).toBeInTheDocument();
+    expect(tikhub.getByText(/三个计费节点共用这条通道/)).toBeInTheDocument();
+    expect(tikhub.getByText(/客户端不重复扣费/)).toBeInTheDocument();
+  });
+
+  it("未填备用入口时不出现启用说明，只留配对规则", async () => {
+    const { backend } = tikhubBackend();
+    const { container } = render(
+      <SettingsPanel
+        source="control"
+        controlBackend={backend}
+        section="providers"
+      />,
+    );
+
+    await screen.findByText("爆款视频数据源");
+    const tikhub = providerCard(container, "tikhub");
+    expect(tikhub.queryByText(/备用通道已启用/)).toBeNull();
+    expect(
+      tikhub.getByText(/备用密钥必须与备用入口一起配置/),
+    ).toBeInTheDocument();
+  });
+
+  it("保存爆款数据源时把备用入口与备用密钥一并提交", async () => {
+    const { backend, saveProvider } = tikhubBackend();
+    const { container } = render(
+      <SettingsPanel
+        source="control"
+        controlBackend={backend}
+        section="providers"
+      />,
+    );
+
+    await screen.findByText("爆款视频数据源");
+    const tikhub = providerCard(container, "tikhub");
+    fireEvent.change(tikhub.getByLabelText("备用入口"), {
+      target: { value: "https://api-backup.example.com" },
+    });
+    fireEvent.change(tikhub.getByLabelText("备用密钥"), {
+      target: { value: DUMMY_KEY },
+    });
+    fireEvent.click(tikhub.getByRole("button", { name: "保存" }));
+
+    await waitFor(() =>
+      expect(saveProvider).toHaveBeenCalledWith("tikhub", {
+        api_key: "",
+        backup_base_url: "https://api-backup.example.com",
+        backup_api_key: DUMMY_KEY,
+      }),
+    );
+    // 保存后密钥字段清空：已存的密钥不会留在表单里。
+    expect(tikhub.getByLabelText("备用密钥")).toHaveValue("");
+  });
+
+  it("备用通道校验失败时就近报错，并保留服务端的原始原因", async () => {
+    const { backend } = tikhubBackend();
+    const saveProvider = backend.saveProvider as ReturnType<typeof vi.fn>;
+    saveProvider.mockRejectedValue(
+      Object.assign(new Error("备用密钥需要与备用入口一起配置"), {
+        code: "INVALID_SERVICE_SETTINGS",
+      }),
+    );
+    const { container } = render(
+      <SettingsPanel
+        source="control"
+        controlBackend={backend}
+        section="providers"
+      />,
+    );
+
+    await screen.findByText("爆款视频数据源");
+    const tikhub = providerCard(container, "tikhub");
+    fireEvent.change(tikhub.getByLabelText("备用密钥"), {
+      target: { value: DUMMY_KEY },
+    });
+    fireEvent.click(tikhub.getByRole("button", { name: "保存" }));
+
+    const alert = await tikhub.findByRole("alert");
+    expect(alert).toHaveTextContent("备用密钥需要与备用入口一起配置");
+    // 同一句话落在备用通道分组里（顶栏播报一次，读屏不重复）。
+    expect(tikhub.getAllByText("备用密钥需要与备用入口一起配置")).toHaveLength(
+      2,
+    );
+    expect(
+      container.querySelector('form[data-provider="tikhub"] .provider-backup'),
+    ).toHaveAttribute("data-invalid", "true");
+  });
+
+  it("非校验类保存失败不把英文原文抛给用户", async () => {
+    const { backend } = tikhubBackend();
+    const saveProvider = backend.saveProvider as ReturnType<typeof vi.fn>;
+    saveProvider.mockRejectedValue(
+      Object.assign(new Error("Failed to fetch"), { code: "NETWORK" }),
+    );
+    const { container } = render(
+      <SettingsPanel
+        source="control"
+        controlBackend={backend}
+        section="providers"
+      />,
+    );
+
+    await screen.findByText("爆款视频数据源");
+    const tikhub = providerCard(container, "tikhub");
+    fireEvent.click(tikhub.getByRole("button", { name: "保存" }));
+
+    const alert = await tikhub.findByRole("alert");
+    expect(alert).toHaveTextContent("保存失败，请检查必填项与管理员权限。");
+  });
 });

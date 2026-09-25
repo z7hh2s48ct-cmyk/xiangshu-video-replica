@@ -84,7 +84,7 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 # 用的是这个常量——此前那两处把 head 字面量写在断言里，追加迁移时漏掉一处就会红
 # 而没有任何自动化提示。B1 追加 20260923T1200 时正是被这两个断言抓到的，
 # 因此顺手收敛成一个常量。
-_HEAD_REVISION = "20260924T0200_customer_oral_task_visibility"
+_HEAD_REVISION = "20260925T1400_api_metadata_pending_write"
 
 T16_DB_NAME = "t16_customer_devices_test"
 

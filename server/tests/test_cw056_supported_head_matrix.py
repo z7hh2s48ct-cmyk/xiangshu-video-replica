@@ -82,8 +82,10 @@ REPO_ROOT = SERVER_DIR.parent
 # 合并 main 后：本分支的 20260923T1800_re_add_h3_extended_modes_rollout_compat 追加于
 # main 链尾（20260923T1200_admin_refund_adjustment）之上；上线评审 P1-1 的
 # 20260924T0000_wechat_transaction_unique、P1-2 的 20260924T0100_oral_task_submitted_at
-# 与 20260924T0200_customer_oral_task_visibility 再依次叠加其上，故链尾为该值。
-HEAD_REVISION = "20260924T0200_customer_oral_task_visibility"
+# 与 20260924T0200_customer_oral_task_visibility 再依次叠加其上；
+# 20260925T1400_api_metadata_pending_write（api_metadata 允许在 PENDING 期写入的
+# 追加修复）再叠加于链尾，故链尾为该值。
+HEAD_REVISION = "20260925T1400_api_metadata_pending_write"
 
 # 最后一个已发布（受支持）起点。其后的 056…090 与本迁移尚未随任何受支持版本发布，
 # 故冻结范围止于此——把未发布 revision 也纳入哈希会让每次新增迁移都必须改常量，
@@ -146,6 +148,10 @@ HEAD_SCHEMA_COUNTS = {
     # 两列复合主键 + 两条 CASCADE 外键，hidden_at 走 Text）：tables 103 → 104、
     # columns 1222 → 1225、primary_keys 103 → 104、foreign_keys 193 → 195；
     # digest 重算（见下）。
+    # 20260925T1400 只 CREATE OR REPLACE 触发器函数 billing_refuse_fact_rewrite()
+    # （把 api_metadata 加进 billing_operations 的 PENDING 期可写列白名单）：
+    # 不加表 / 列 / 索引 / 触发器，故本字典与表名全集不变；digest 进
+    # pg_get_functiondef 文本，必然重算（见下）。
     "check_constraints": 323,
     "columns": 1225,
     "foreign_keys": 195,
@@ -348,6 +354,8 @@ HEAD_TABLE_NAMES = (
 # - 20260924T0100_oral_task_submitted_at（上线评审 P1-2）：oral_tasks 增加
 #   submitted_at（可空 Text，无默认）作轮询看播计时锚点——columns +1=1222；
 #   不加表不加索引，digest 随之重算。
+# - 20260925T1400_api_metadata_pending_write（计费触发器与 api_metadata 相撞的追加修复）：
+#   仅替换 billing_refuse_fact_rewrite() 函数体，结构与计数全不变，digest 随函数文本重算。
 # digest/counts 以 scripts/ci/migration_manifest.py --print-schema 于 postgres:16 重算
 # （合并后的新 head：sub_account_permissions + 三个 analysis 迁移 + viral 搜索发现表
 #  + main 的 MATERIAL-UX tags_json 列 + REFUND 调账迁移 + 1800 垫片 + 交易号唯一
@@ -355,7 +363,7 @@ HEAD_TABLE_NAMES = (
 #  两侧原来的 digest 都不能用——本分支那条是接在 viral 之后的旧链、main 那条只到
 #  MATERIAL-UX，合并后 head 变成接在 MATERIAL-UX 之后的本分支迁移，约束文本随之变化，
 #  digest 必然要重算。由 scripts/ci/migration_manifest.py --print-schema 在 PG 上重算后粘贴。
-HEAD_SCHEMA_DIGEST = "11c132eaf1b496d42cf4495be265335f19649f86644165a6c17b9c2c5c9bd470"
+HEAD_SCHEMA_DIGEST = "513c610f3aa60fdb6af0ce4f2306a589a8a3d885e13744b7ed846e9e17ab888d"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

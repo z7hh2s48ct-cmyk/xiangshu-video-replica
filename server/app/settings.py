@@ -468,6 +468,21 @@ def validate_provider_config(provider: ProviderName, config: dict[str, str]) -> 
     missing = [field for field in REQUIRED_PROVIDER_FIELDS[provider] if not config.get(field)]
     if missing:
         raise ValueError(f"missing required setting: {', '.join(missing)}")
+    if provider == "tikhub":
+        _validate_tikhub_backup_channel(config)
+
+
+def _validate_tikhub_backup_channel(config: dict[str, str]) -> None:
+    """爆款数据源备用通道（可选项）：入口必须是 URL，密钥不能单独出现.
+
+    字段名与 ``app.viral_tikhub`` 的备用通道配置一致；在此拒绝错配，避免保存
+    后才在采集日志里暴露问题。
+    """
+    backup_base_url = (config.get("backup_base_url") or "").strip()
+    if backup_base_url and not backup_base_url.startswith(("http://", "https://")):
+        raise ValueError("备用入口需要以 http:// 或 https:// 开头")
+    if (config.get("backup_api_key") or "").strip() and not backup_base_url:
+        raise ValueError("备用密钥需要与备用入口一起配置")
 
 
 def validate_zpay_config(config: dict[str, str]) -> None:
