@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import UTC, datetime
+import threading
+from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 from uuid import uuid4
 
@@ -31,10 +32,27 @@ MAX_SAVED_SCRIPT_TEXT_CHARS = 100_000
 MAX_SAVED_SCRIPTS_PER_USER = 50
 
 
+_UTC_NOW_LOCK = threading.Lock()
+_UTC_NOW_LAST = ""
+
+
 def _utc_now_text() -> str:
     """Microsecond-precision timestamp; CURRENT_TIMESTAMP alone is
-    second-granular and cannot break ties for uuid-keyed rows."""
-    return datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S.%f")
+    second-granular and cannot break ties for uuid-keyed rows.
+
+    同一进程内保证严格递增：Windows 系统时钟粒度约 15.6ms，同一 tick 内的写入会
+    拿到完全相同的 updated_at，而并列组内的兜底排序键是随机 UUID，「最新写入排
+    最前」就变成掷硬币（CW-058 flaky 的根因）。同 tick 内按微秒顺延消除并列；
+    跨进程仍依赖系统时钟（Linux 微秒级，实际不会并列）。
+    """
+    global _UTC_NOW_LAST
+    with _UTC_NOW_LOCK:
+        value = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S.%f")
+        if value <= _UTC_NOW_LAST:
+            previous = datetime.strptime(_UTC_NOW_LAST, "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=UTC)
+            value = (previous + timedelta(microseconds=1)).strftime("%Y-%m-%d %H:%M:%S.%f")
+        _UTC_NOW_LAST = value
+        return value
 
 
 class StudioDraftUpsertRequest(BaseModel):
