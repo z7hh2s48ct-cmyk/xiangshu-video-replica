@@ -317,9 +317,7 @@ describe("ViralVideosPage", () => {
         ok: true,
         status: 200,
         json: async () => ({
-          items: [
-            { ...video, availability: hidden ? "HIDDEN" : "AVAILABLE" },
-          ],
+          items: [{ ...video, availability: hidden ? "HIDDEN" : "AVAILABLE" }],
           total: 1,
         }),
       };
@@ -373,7 +371,9 @@ describe("ViralVideosPage", () => {
     setAdminCsrfToken("csrf-curation-test");
     render(<ViralVideosPage />);
     await screen.findByText("庭院施工案例");
-    expect(screen.getByRole("button", { name: "恢复显示" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "恢复显示" }),
+    ).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "隐藏" }),
     ).not.toBeInTheDocument();

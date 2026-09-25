@@ -186,7 +186,7 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
                   ? "已置顶，客户端首页将优先展示该视频。"
                   : pending.action === "unpin"
                     ? "已取消置顶，该视频恢复默认首页顺序。"
-                    : "首页展示设置已更新.",
+                    : "首页展示设置已更新。",
       );
       // 搜索结果与视频库共用一套操作，成功后同步两侧的行状态。
       if (pending.action === "archive")
@@ -937,7 +937,9 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
                                 )
                               }
                             >
-                              {video.homepage_rank == null ? "置顶" : "取消置顶"}
+                              {video.homepage_rank == null
+                                ? "置顶"
+                                : "取消置顶"}
                             </button>
                           )}
                         </div>
@@ -1058,8 +1060,8 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
                     : pending?.action === "unpin"
                       ? "取消后该视频回到首页默认顺序，仍保持展示。请填写操作原因。"
                       : pending?.action === "unfeature"
-                    ? "取消后首页不再展示，视频仍保留在爆款列表。请填写操作原因。"
-                    : "已归档视频会自动补齐封面后展示到首页。请填写操作原因。"
+                        ? "取消后首页不再展示，视频仍保留在爆款列表。请填写操作原因。"
+                        : "已归档视频会自动补齐封面后展示到首页。请填写操作原因。"
         }
         confirmLabel="确认操作"
         onClose={() => setPending(null)}
