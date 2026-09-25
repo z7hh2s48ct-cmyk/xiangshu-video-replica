@@ -1856,6 +1856,8 @@ export type CollectedViralVideo = {
   collection_published: boolean;
   media_status: string;
   storage_uri: string | null;
+  /** 平台可见状态；列表接口未返回时按 AVAILABLE 处理。 */
+  availability?: "AVAILABLE" | "HIDDEN" | "UNAVAILABLE";
 };
 
 export async function listCollectedViralVideos(options: {

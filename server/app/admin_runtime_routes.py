@@ -436,12 +436,15 @@ _COLLECTED_VIRAL_ROW_SELECT = """
         v.native_json::jsonb->>'_statistics_retry_at' AS statistics_retry_at,
         (COALESCE(v.cover_url,'') != '') AS cover_required,
         COALESCE(m.status,'NOT_STARTED') AS media_status,m.storage_uri,
-        r.status AS archive_status,r.error_message_redacted AS archive_error
+        r.status AS archive_status,r.error_message_redacted AS archive_error,
+        COALESCE(vis.status,'AVAILABLE') AS availability
     FROM viral_videos v LEFT JOIN viral_media_preparations m
         ON m.platform=v.platform AND m.video_id=v.video_id AND m.media_kind='video'
     LEFT JOIN viral_refresh_tasks r ON r.platform=v.platform AND r.sort='latest'
         AND r.collection_config_json::jsonb->>'kind'='single_archive'
         AND r.collection_config_json::jsonb->>'video_id'=v.video_id
+    LEFT JOIN viral_video_visibility vis
+        ON vis.platform=v.platform AND vis.video_id=v.video_id
 """
 
 
@@ -485,6 +488,7 @@ _COLLECTED_VIDEO_COLUMNS = (
     "storage_uri",
     "archive_status",
     "archive_error",
+    "availability",
 )
 
 
