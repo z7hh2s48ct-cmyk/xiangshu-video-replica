@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import email.message
 import gzip
 import io
 import json
@@ -23,6 +24,7 @@ from app.viral_tikhub import (
     UrllibViralHttpTransport,
     ViralSourceClient,
     ViralSourceError,
+    ViralSourceHttpStatusError,
     ViralSourceUnavailable,
     _pick_image_url,
     _reset_wechat_detail_cache,
@@ -790,3 +792,150 @@ def test_play_url_prefers_h264_over_smaller_bytevc2():
         ],
     }
     assert pick_douyin_play_url(block) == "https://cdn.test/h264.mp4"
+
+
+# ---------------------------------------------------------------------------
+# 429/5xx 重试与退避：仅重试"请求未被受理"的状态；网络错误不重试
+# ---------------------------------------------------------------------------
+
+
+class FlakyStatusTransport:
+    """前 N 次抛出带状态码的传输层错误，之后恢复返回空搜索页."""
+
+    def __init__(self, fail_times: int, status: int, retry_after: float | None = None) -> None:
+        self.fail_times = fail_times
+        self.status = status
+        self.retry_after = retry_after
+        self.calls = 0
+
+    def request(self, method: str, url: str, *, headers, body=None) -> bytes:
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise ViralSourceHttpStatusError(self.status, self.retry_after)
+        return json.dumps({"code": 200, "data": {"business_data": []}}).encode("utf-8")
+
+
+class NetworkErrorTransport:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def request(self, method: str, url: str, *, headers, body=None) -> bytes:
+        self.calls += 1
+        raise ViralSourceError("爆款数据源网络异常，请稍后重试")
+
+
+def _retry_client(transport: Any) -> ViralSourceClient:
+    return ViralSourceClient(
+        api_key="test-key",
+        transport=transport,
+        detail_transport=FakeTransport([]),
+    )
+
+
+def test_retry_on_429_honours_retry_after_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("app.viral_tikhub.time.sleep", lambda seconds: sleeps.append(seconds))
+    transport = FlakyStatusTransport(fail_times=1, status=429, retry_after=2.0)
+
+    videos = _retry_client(transport).douyin_search(keyword="别墅")
+
+    assert videos == []
+    assert transport.calls == 2
+    assert sleeps == [2.0]
+
+
+def test_retry_on_429_uses_backoff_and_stops_after_max_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("app.viral_tikhub.time.sleep", lambda seconds: sleeps.append(seconds))
+    transport = FlakyStatusTransport(fail_times=5, status=429)
+
+    with pytest.raises(ViralSourceError):
+        _retry_client(transport).douyin_search(keyword="别墅")
+
+    assert transport.calls == 3
+    assert sleeps == [0.5, 1.0]
+
+
+def test_retry_on_5xx_recovers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.viral_tikhub.time.sleep", lambda seconds: None)
+    transport = FlakyStatusTransport(fail_times=1, status=502)
+
+    assert _retry_client(transport).douyin_search(keyword="别墅") == []
+    assert transport.calls == 2
+
+
+def test_no_retry_on_other_4xx(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("app.viral_tikhub.time.sleep", lambda seconds: sleeps.append(seconds))
+    transport = FlakyStatusTransport(fail_times=3, status=404)
+
+    with pytest.raises(ViralSourceError):
+        _retry_client(transport).douyin_search(keyword="别墅")
+
+    assert transport.calls == 1
+    assert sleeps == []
+
+
+def test_no_retry_on_network_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("app.viral_tikhub.time.sleep", lambda seconds: sleeps.append(seconds))
+    transport = NetworkErrorTransport()
+
+    with pytest.raises(ViralSourceError):
+        _retry_client(transport).douyin_search(keyword="别墅")
+
+    assert transport.calls == 1
+    assert sleeps == []
+
+
+def test_transport_exposes_status_and_retry_after_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = email.message.Message()
+    message["Retry-After"] = "3"
+
+    def fail_request(*args: object, **kwargs: object) -> bytes:
+        raise HTTPError(
+            "https://source.test/search",
+            429,
+            "too many requests",
+            hdrs=message,
+            fp=io.BytesIO(b"{}"),
+        )
+
+    monkeypatch.setattr("app.viral_tikhub.urlopen", fail_request)
+
+    with pytest.raises(ViralSourceHttpStatusError) as excinfo:
+        UrllibViralHttpTransport().request(
+            "POST", "https://source.test/search", headers={}, body=b"{}"
+        )
+
+    assert excinfo.value.status == 429
+    assert excinfo.value.retry_after == 3.0
+
+
+def test_transport_without_retry_after_header_yields_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_request(*args: object, **kwargs: object) -> bytes:
+        raise HTTPError(
+            "https://source.test/search",
+            502,
+            "bad gateway",
+            hdrs=None,
+            fp=io.BytesIO(b"{}"),
+        )
+
+    monkeypatch.setattr("app.viral_tikhub.urlopen", fail_request)
+
+    with pytest.raises(ViralSourceHttpStatusError) as excinfo:
+        UrllibViralHttpTransport().request(
+            "POST", "https://source.test/search", headers={}, body=b"{}"
+        )
+
+    assert excinfo.value.status == 502
+    assert excinfo.value.retry_after is None
