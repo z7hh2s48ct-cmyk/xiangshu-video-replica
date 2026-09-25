@@ -57,6 +57,24 @@ _BROWSER_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 )
 
+# 数据源重试（T6）：仅对 429/5xx 这类「请求未被上游受理」的状态重试，
+# 退避尊重 Retry-After（封顶防阻塞 worker），否则 0.5s/1.0s 指数退避。
+_VIRAL_SOURCE_MAX_ATTEMPTS = 3
+_VIRAL_SOURCE_BACKOFF_SECONDS: tuple[float, ...] = (0.5, 1.0)
+_VIRAL_SOURCE_MAX_BACKOFF_SECONDS = 5.0
+
+
+def _is_retryable_status(status: int) -> bool:
+    return status == 429 or 500 <= status <= 599
+
+
+def _retry_backoff_delay(attempt: int, retry_after: float | None) -> float:
+    if retry_after is not None:
+        return min(retry_after, _VIRAL_SOURCE_MAX_BACKOFF_SECONDS)
+    index = min(attempt - 1, len(_VIRAL_SOURCE_BACKOFF_SECONDS) - 1)
+    return _VIRAL_SOURCE_BACKOFF_SECONDS[index]
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,6 +84,26 @@ class ViralSourceError(RuntimeError):
 
 class ViralSourceUnavailable(ViralSourceError):
     """爆款数据源未配置或不可读。"""
+
+
+class ViralSourceHttpStatusError(ViralSourceError):
+    """数据源返回了可分类的 HTTP 状态（429/5xx 驱动重试决策）."""
+
+    def __init__(self, status: int, retry_after: float | None = None) -> None:
+        super().__init__("爆款数据源暂时不可用，请稍后重试")
+        self.status = status
+        self.retry_after = retry_after
+
+
+def _retry_after_seconds(headers: Any) -> float | None:
+    """从响应头读 Retry-After（秒）；缺失或非法时返回 None."""
+    value = headers.get("Retry-After") if headers is not None else None
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return None
 
 
 class ViralHttpTransport:
@@ -110,7 +148,7 @@ class UrllibViralHttpTransport(ViralHttpTransport):
                 exc.code,
                 type(exc).__name__,
             )
-            raise ViralSourceError("爆款数据源暂时不可用，请稍后重试") from exc
+            raise ViralSourceHttpStatusError(exc.code, _retry_after_seconds(exc.headers)) from exc
         except (TimeoutError, URLError, OSError) as exc:
             logger.warning("Viral source request failed: %s", type(exc).__name__)
             raise ViralSourceError("爆款数据源网络异常，请稍后重试") from exc
@@ -619,9 +657,31 @@ class ViralSourceClient:
         }
         api_type = api_type_mapping.get(path)
 
+        # 重试只针对 429/5xx 这类「请求未被上游受理」的状态：搜索是只读查询，
+        # 重试不会产生重复副作用。超时/网络错误的结果不可知且重试会放大计费
+        # 成本，不做重试。每次物理外呼都独立过 meter_call，重试成本据实计量。
         with set_api_type(api_type) if api_type else nullcontext():
-            with meter_call("viral_data", units=billing_units):
-                content = transport.request("POST", url, headers=headers, body=body)
+            content: bytes | None = None
+            for attempt in range(1, _VIRAL_SOURCE_MAX_ATTEMPTS + 1):
+                try:
+                    with meter_call("viral_data", units=billing_units):
+                        content = transport.request("POST", url, headers=headers, body=body)
+                    break
+                except ViralSourceHttpStatusError as exc:
+                    if attempt >= _VIRAL_SOURCE_MAX_ATTEMPTS or not _is_retryable_status(
+                        exc.status
+                    ):
+                        raise
+                    delay = _retry_backoff_delay(attempt, exc.retry_after)
+                    logger.warning(
+                        "Viral source request got HTTP %s, retrying in %.1fs (attempt %s/%s)",
+                        exc.status,
+                        delay,
+                        attempt,
+                        _VIRAL_SOURCE_MAX_ATTEMPTS - 1,
+                    )
+                    time.sleep(delay)
+        assert content is not None
         try:
             envelope = json.loads(_maybe_gunzip(content))
         except json.JSONDecodeError as exc:
