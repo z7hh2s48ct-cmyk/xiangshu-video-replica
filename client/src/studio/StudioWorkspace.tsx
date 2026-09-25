@@ -26,7 +26,10 @@ import {
 } from "../api";
 import { BrandIdentity } from "../BrandIdentity";
 import { CustomerCenterPage } from "../customer/CustomerCenterPage";
-import { isInsufficientCredits } from "../insufficientCredits";
+import {
+  isInsufficientCredits,
+  openWalletIfInsufficientCredits,
+} from "../insufficientCredits";
 import {
   discountSourceLabel,
   formatDiscountZhe,
@@ -2041,6 +2044,13 @@ export function StudioWorkspace({
         if (
           currentUserRoleRef.current === "auditor" ||
           permissionGenerationRef.current !== permissionGeneration
+        )
+          return;
+        if (
+          openWalletIfInsufficientCredits(cause, {
+            notify,
+            openWallet: () => openLive("wallet"),
+          })
         )
           return;
         notify(

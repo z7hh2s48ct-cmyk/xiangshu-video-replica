@@ -50,7 +50,10 @@ import {
   saveViralFavorite,
   updateMaterial,
 } from "../api";
-import { isInsufficientCredits } from "../insufficientCredits";
+import {
+  isInsufficientCredits,
+  openWalletIfInsufficientCredits,
+} from "../insufficientCredits";
 import { VideoPreview } from "../VideoPreview";
 import { CharacterMaterialViews } from "./CharacterMaterialViews";
 import { useStudio } from "./context";
@@ -769,7 +772,7 @@ function ViralCard({
   availability?: ViralVideoItem["availability"];
   cacheProgress?: ViralCacheProgress;
 }) {
-  const { review, navigate, notify } = useStudio();
+  const { review, navigate, notify, openLive } = useStudio();
   const playerRef = useRef<HTMLVideoElement | null>(null);
   const [downloadBusy, setDownloadBusy] = useState(false);
   const { playback, play, retry, markFailed, activate } = useViralPlayback(
@@ -847,7 +850,14 @@ function ViralCard({
         else if (result.status === "started")
           notify("已开始下载，请在新窗口完成保存");
       } catch (cause) {
-        notify(cause instanceof Error ? cause.message : "下载失败，请重试。");
+        if (
+          !openWalletIfInsufficientCredits(cause, {
+            notify,
+            openWallet: () => openLive("wallet"),
+          })
+        ) {
+          notify(cause instanceof Error ? cause.message : "下载失败，请重试。");
+        }
       } finally {
         setDownloadBusy(false);
       }
