@@ -39,11 +39,11 @@ APILIO_GEMINI_MODEL = "gemini-3.1-pro-preview"
 # preview 模型疑似已下线，改用正式版。上游再次调整时，设置页的「视频分析
 # 模型」可直接覆盖这里，不必等下一次发版。
 APILIO_ANALYSIS_MODEL = "gemini-3.8-flash"
-# 主模型限流/下线时的默认替补。选 gemini-3.1-pro-preview 是因为它与主模型
-# 共用同一 Apilio 凭据且截至 2026-09-20 仍在服务（图像语义检查在用），配额
-# 桶独立于 flash，恰好接得住 flash 的 429。可用设置项 analysis_model_fallbacks
+# 主模型限流/下线时的默认替补。选 gemini-3.7-flash：与主模型同为 flash 系
+# 正式版（避开 2026-09-20 出过事的 preview 名），只落后主模型一个 minor 版本，
+# 配额桶独立，恰好接得住主模型的 429。可用设置项 analysis_model_fallbacks
 # 覆盖；换过默认主模型后请同步核对这份名单。
-APILIO_ANALYSIS_FALLBACK_MODELS: tuple[str, ...] = ("gemini-3.1-pro-preview",)
+APILIO_ANALYSIS_FALLBACK_MODELS: tuple[str, ...] = ("gemini-3.7-flash",)
 # 限流切换前的间隔：不同模型配额桶独立，无需长退避；租约 10 分钟、单次调用
 # 上限 240s，这里只留礼貌性停顿。
 FAILOVER_RETRY_WAIT_SECONDS = 2.0

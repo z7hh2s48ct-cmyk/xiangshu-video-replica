@@ -26,7 +26,7 @@ from app.analysis import (
 )
 
 PRIMARY = "gemini-3.8-flash"
-BACKUP = "gemini-3.1-pro-preview"
+BACKUP = "gemini-3.7-flash"
 
 
 def _rate_limited() -> AnalysisProviderFailed:

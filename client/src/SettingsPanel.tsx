@@ -123,7 +123,7 @@ const PROVIDER_FORMS: Record<ProviderName, ProviderFormSpec> = {
       {
         name: "analysis_model_fallbacks",
         label: "备选视频分析模型（可选，逗号分隔）",
-        placeholder: "gemini-3.1-pro-preview",
+        placeholder: "gemini-3.7-flash",
       },
     ],
   },
