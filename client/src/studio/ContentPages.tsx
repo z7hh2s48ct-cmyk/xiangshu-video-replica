@@ -1829,6 +1829,34 @@ export function ViralDetailPage() {
     }
     void start(video, "copy", goExtract);
   };
+  // 复刻方向只适用于 ≤15s 的爆款：服务端对参考视频有 4–15s 硬校验，超限必然
+  // 422。时长未知时保守隐藏入口；超长视频仍可走「提取文案→口播数字人」方向。
+  const canReplicate =
+    typeof video.durationMs === "number" &&
+    video.durationMs > 0 &&
+    video.durationMs <= 15_000;
+  const goReplica = (task: ViralImportTask) => {
+    if (!task.canAnalyze || !task.projectId || !task.sourceAssetId) {
+      notify("该来源暂不支持视频复刻");
+      return;
+    }
+    patchDraft({
+      projectId: task.projectId,
+      sourceId: task.sourceAssetId,
+      sourceAssetId: task.sourceAssetId,
+    });
+    navigate("replica", {
+      selectedVideoId: video.id,
+      returnTo: "viral-detail",
+    });
+  };
+  const beginReplicate = () => {
+    if (review) {
+      notify("审核模式仅演示，不执行导入");
+      return;
+    }
+    void start(video, "replica", goReplica);
+  };
   // 刷新资源（仅抖音，按次计费）：封面失效/直链过期时的自救入口。
   const beginRefresh = () => {
     if (review || refreshBusy) return;
@@ -1985,6 +2013,20 @@ export function ViralDetailPage() {
                 提取文案
               </Button>
             </div>
+            {canReplicate && (
+              <div className="content-detail-action">
+                <Button
+                  disabled={
+                    importState.status === "loading" ||
+                    detailAvailability !== "available"
+                  }
+                  variant="outline"
+                  onClick={beginReplicate}
+                >
+                  {importState.status === "loading" ? "导入中…" : "去复刻"}
+                </Button>
+              </div>
+            )}
             {!review && video.platformKey === "douyin" && (
               <div className="content-detail-action">
                 <Button

@@ -1143,6 +1143,7 @@ export function studioVideoFromViral(item: ViralVideoItem): StudioVideo {
     // 转存后的封面是站内相对路径，桌面端页面 origin 不是 API origin。
     poster: item.coverUrl ? resolveManagedMediaUrl(item.coverUrl) : "",
     duration: formatViralDuration(item.durationMs),
+    durationMs: item.durationMs,
     likes: item.likes,
     collections: item.collects,
     shares: item.shares,
