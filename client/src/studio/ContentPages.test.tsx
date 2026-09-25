@@ -4161,7 +4161,7 @@ describe("V1.4 内容与运营页面", () => {
     );
   });
 
-  it("MATERIAL-UX-03：按人物二级筛选来源于人物列表并下发 person_id", async () => {
+  it("MATERIAL-UX-03：对象筛选下拉按人物分组并下发 person_id，清空后不再携带", async () => {
     listMaterials.mockResolvedValue({
       items: [material("gate")],
       page: 1,
@@ -4178,20 +4178,63 @@ describe("V1.4 内容与运营页面", () => {
     useStudio.mockReturnValue(value);
     render(<MaterialsPage />);
     await screen.findByRole("button", { name: "选择素材 gate.png" });
-    // 未选“按人物”时不出现人物二级下拉
-    expect(screen.queryByLabelText("按人物筛选")).toBeNull();
-    fireEvent.change(screen.getByLabelText("对象筛选方式"), {
-      target: { value: "person" },
-    });
-    const personSelect = await screen.findByLabelText("按人物筛选");
-    // 二级下拉数据源复用已加载的人物列表
+    // 人物/项目以 optgroup 分组，选项数据源复用已加载的人物列表
+    const objectSelect = screen.getByLabelText("对象筛选");
     expect(
-      personSelect.querySelector('option[value="person-1"]'),
+      objectSelect.querySelector(
+        'optgroup[label="按人物"] option[value="person:person-1"]',
+      ),
     ).not.toBeNull();
-    fireEvent.change(personSelect, { target: { value: "person-1" } });
+    fireEvent.change(objectSelect, { target: { value: "person:person-1" } });
     await waitFor(() =>
       expect(listMaterials).toHaveBeenLastCalledWith(
         expect.objectContaining({ personId: "person-1", page: 1 }),
+      ),
+    );
+    // 切回“全部对象”后请求不再携带对象条件
+    fireEvent.change(objectSelect, { target: { value: "" } });
+    await waitFor(() =>
+      expect(listMaterials).toHaveBeenLastCalledWith(
+        expect.objectContaining({ personId: undefined, page: 1 }),
+      ),
+    );
+  });
+
+  it("MATERIAL-UX-03：对象筛选直切项目时互斥清空人物条件", async () => {
+    listMaterials.mockResolvedValue({
+      items: [material("gate")],
+      page: 1,
+      page_size: 24,
+      total: 1,
+    });
+    const value = studio({ review: false });
+    value.data = {
+      ...value.data,
+      people: [
+        { id: "person-1", name: "张工" } as StudioData["people"][number],
+      ],
+      projects: [
+        { id: "project-1", name: "庭院样板" } as StudioData["projects"][number],
+      ],
+    };
+    useStudio.mockReturnValue(value);
+    render(<MaterialsPage />);
+    await screen.findByRole("button", { name: "选择素材 gate.png" });
+    const objectSelect = screen.getByLabelText("对象筛选");
+    fireEvent.change(objectSelect, { target: { value: "person:person-1" } });
+    await waitFor(() =>
+      expect(listMaterials).toHaveBeenLastCalledWith(
+        expect.objectContaining({ personId: "person-1" }),
+      ),
+    );
+    // 人物未清空直切项目：两组条件互斥，项目下发时人物条件必须已清空
+    fireEvent.change(objectSelect, { target: { value: "project:project-1" } });
+    await waitFor(() =>
+      expect(listMaterials).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          projectId: "project-1",
+          personId: undefined,
+        }),
       ),
     );
   });
@@ -4763,7 +4806,10 @@ describe("V1.4 内容与运营页面", () => {
     expect(
       screen.getByRole("button", { name: "选择素材 mix-video.mp4" }),
     ).toHaveClass("content-asset");
-    expect(screen.queryByText("网格视图")).toBeInTheDocument();
+    // 视图切换收纳进工具栏后为图标按钮，靠 aria-label 寻址
+    expect(
+      screen.queryByRole("button", { name: "网格视图" }),
+    ).toBeInTheDocument();
   });
 
   it("MATERIAL-UX-07：音频标签页列表化区分用途并可去往音频口播", async () => {

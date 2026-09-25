@@ -11,10 +11,6 @@
   align-items: flex-start;
   margin-bottom: 14px;
 }
-.content-title-action {
-  align-self: flex-start;
-  margin-top: 64px;
-}
 .content-title h1 {
   font-size: var(--font-title);
   line-height: 1.2;
@@ -400,12 +396,9 @@
   min-height: 34px;
 }
 .content-material-upload-group {
-  align-items: flex-start;
-  align-self: flex-start;
+  align-items: center;
   display: flex;
   gap: 8px;
-  margin-left: auto;
-  margin-top: 64px;
 }
 .content-material-cache {
   display: flex;
@@ -419,6 +412,11 @@
 .content-material-cache p {
   flex-basis: 100%;
   margin: 0;
+}
+/* 长说明收进悬停提示，缓存条默认只占一行。 */
+.content-material-cache__hint {
+  cursor: help;
+  text-decoration: underline dotted;
 }
 /* MATERIAL-UX-04：多文件上传队列条与整页拖拽高亮。 */
 .content-materials--drag {
@@ -525,11 +523,14 @@
 .content-asset--landscape .studio-media {
   height: 120px;
 }
-/* MATERIAL-UX-07：列表视图 / 音频紧凑行。 */
+/* MATERIAL-UX-07：列表视图 / 音频紧凑行。视图切换收纳在工具栏内。 */
 .content-view-switch {
   display: flex;
-  gap: 6px;
-  margin-bottom: 10px;
+  gap: 4px;
+}
+.content-view-switch .studio-button {
+  min-width: 38px;
+  padding: 0 10px;
 }
 .content-material-rows {
   display: grid;
@@ -585,17 +586,23 @@
   font-size: var(--font-caption, 12px);
   padding: 4px 8px;
 }
+/* 筛选行 flex 回流：搜索框伸缩，排序靠右；窄屏自然换行而非逐控件占一行。 */
 .content-material-filters {
   align-items: center;
-  display: grid;
+  display: flex;
+  flex-wrap: wrap;
   gap: 10px;
-  grid-template-columns: minmax(180px, 1fr) 160px auto;
-  margin: 14px 0 16px;
+  margin: 12px 0 14px;
 }
-.content-material-filters input,
+.content-material-filters input {
+  flex: 1 1 220px;
+  min-height: 38px;
+}
 .content-material-filters select {
   min-height: 38px;
-  width: 100%;
+}
+.content-material-filters__sort {
+  margin-left: auto;
 }
 .content-asset-grid {
   display: grid;
@@ -1213,7 +1220,6 @@
   }
   .content-detail-grid,
   .content-material-layout,
-  .content-material-filters,
   .content-publish-layout,
   .content-publish-media-grid,
   .content-chart-grid {
@@ -2079,4 +2085,32 @@ span.viral-card-cover-empty.content-player-viral-poster {
   gap: 10px;
   justify-content: space-between;
   font-size: var(--font-caption, 12px);
+}
+
+/* 素材库页头：标题、类型 Tabs 与上传操作合并成一行，压缩首屏头部高度。
+   置于文件末尾以保持选择器优先级单调递增（noDescendingSpecificity）。 */
+.content-material-title {
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  justify-content: flex-start;
+}
+.content-material-title h1 {
+  font-size: var(--font-section);
+  margin: 0;
+  white-space: nowrap;
+}
+.content-material-title .studio-tabs {
+  border-bottom: 0;
+  margin: 0;
+}
+.content-material-title .studio-tabs > button {
+  min-height: 38px;
+  padding: 7px 16px;
+}
+.content-material-title__actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
 }
