@@ -842,6 +842,104 @@ def test_manual_feature_publishes_ready_video_to_catalog_and_unfeature_keeps_it(
 
 
 @pytest.mark.pg
+def test_homepage_pin_orders_featured_list_and_unpin_restores(
+    client: TestClient, route_state: str
+) -> None:
+    from datetime import UTC, datetime
+
+    from app.db_portable import BusinessConnection
+    from app.viral_store import list_viral_video_page
+
+    headers = _admin_session(client)
+    with psycopg.connect(route_state) as conn:
+        conn.execute(
+            "UPDATE viral_videos SET published_at=%s,collection_published=0",
+            (int(datetime.now(UTC).timestamp()),),
+        )
+        conn.execute(
+            "INSERT INTO viral_media_preparations"
+            "(id,platform,video_id,media_kind,status,storage_uri) VALUES"
+            "('catalog-media','douyin','admin-video/opaque=id','video',"
+            "'SUCCEEDED','fake://test/video.mp4'),"
+            "('catalog-media-2','douyin','admin-video/second=id','video',"
+            "'SUCCEEDED','fake://test/second.mp4')"
+        )
+        conn.execute(
+            "INSERT INTO viral_videos(platform,video_id,title,category) VALUES"
+            "('douyin','admin-video/second=id','第二条待选视频','施工')"
+        )
+        conn.execute(
+            "UPDATE viral_videos SET published_at=%s,collection_published=0 "
+            "WHERE video_id='admin-video/second=id'",
+            (int(datetime.now(UTC).timestamp()),),
+        )
+
+    def curate(video_id: str, action: str, key: str):
+        path = f"/api/control/viral/videos/douyin/{video_id}/curation"
+        return client.patch(
+            path,
+            headers={**headers, "Idempotency-Key": key},
+            json={"action": action, "reason": "策展排序验收", "confirm": True},
+        )
+
+    # 未展示的视频不能置顶
+    not_featured = curate("admin-video%2Fopaque%3Did", "pin", "pin-unfeatured")
+    assert not_featured.status_code == 409, not_featured.text
+
+    # 依次展示两条（rank 追加为 1、2），再置顶第二条（rank 变为 0）
+    assert curate("admin-video%2Fopaque%3Did", "feature", "rank-feature-1").status_code == 200
+    assert curate("admin-video%2Fsecond%3Did", "feature", "rank-feature-2").status_code == 200
+    pinned = curate("admin-video%2Fsecond%3Did", "pin", "rank-pin-second")
+    assert pinned.status_code == 200, pinned.text
+    assert pinned.json()["homepage_rank"] == 0
+
+    def featured_ids(limit: int, cursor: str | None = None) -> tuple[list[str], str | None]:
+        with psycopg.connect(route_state) as conn:
+            bus = BusinessConnection.postgres(conn)
+            page = list_viral_video_page(
+                bus,
+                platform="douyin",
+                sort="hot",
+                limit=limit,
+                featured_only=True,
+                cursor=cursor,
+            )
+        return [item.video_id for item in page.items], page.next_cursor
+
+    first_page, cursor = featured_ids(1)
+    assert first_page == ["admin-video/second=id"]
+    # 置顶序进入 keyset 游标：第二页是未置顶的那条，且不重复
+    assert cursor is not None
+    second_page, _ = featured_ids(1, cursor)
+    assert second_page == ["admin-video/opaque=id"]
+
+    # 取消置顶后 rank 归还 NULL，两条回到默认顺序（feature 先后）
+    unpinned = curate("admin-video%2Fsecond%3Did", "unpin", "rank-unpin-second")
+    assert unpinned.status_code == 200
+    assert unpinned.json()["homepage_rank"] is None
+    with psycopg.connect(route_state) as conn:
+        bus = BusinessConnection.postgres(conn)
+        page = list_viral_video_page(
+            bus, platform="douyin", sort="hot", limit=12, featured_only=True
+        )
+        assert [item.video_id for item in page.items] == [
+            "admin-video/opaque=id",
+            "admin-video/second=id",
+        ]
+        assert all(item.homepage_rank is None for item in page.items)
+
+    # 取消首页展示归还置顶序
+    assert curate("admin-video%2Fopaque%3Did", "unfeature", "rank-unfeature").status_code == 200
+    with psycopg.connect(route_state) as conn:
+        assert (
+            conn.execute(
+                "SELECT homepage_rank FROM viral_videos WHERE video_id='admin-video/opaque=id'"
+            ).fetchone()[0]
+            is None
+        )
+
+
+@pytest.mark.pg
 def test_admin_collected_video_requires_manual_homepage_selection_and_delete_is_durable(
     client: TestClient,
     route_state: str,

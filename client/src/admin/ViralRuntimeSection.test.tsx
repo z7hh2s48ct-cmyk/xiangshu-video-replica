@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { setAdminCsrfToken } from "../api";
@@ -101,6 +101,36 @@ describe("ViralRuntimeSection", () => {
     expect(screen.getByText(/最后采集 暂无/)).toHaveTextContent(
       "视频号：已缓存 18条",
     );
+  });
+
+  it("采集进行中轮询只刷新运行状态，不覆盖未保存的关键词草稿", async () => {
+    const serverControls = {
+      ...controls,
+      keywords: [
+        { platform: "douyin", category: "庭院案例", keyword: "服务端旧词" },
+      ],
+      per_keyword_limit: 10,
+      collection_interval_days: 7,
+    };
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      response(serverControls),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ViralRuntimeSection />);
+
+    fireEvent.change(await screen.findByLabelText("关键词 1"), {
+      target: { value: "我的未保存草稿" },
+    });
+    fireEvent.change(await screen.findByLabelText("每个关键词最多采集"), {
+      target: { value: "21" },
+    });
+
+    // 等到采集进行中的 3 秒轮询发生（第 2 次读取）；期间草稿不能被回滚。
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2), {
+      timeout: 4500,
+    });
+    expect(screen.getByLabelText("关键词 1")).toHaveValue("我的未保存草稿");
+    expect(screen.getByLabelText("每个关键词最多采集")).toHaveValue(21);
   });
 
   it("直接确认暂停采集并自动记录操作说明", async () => {

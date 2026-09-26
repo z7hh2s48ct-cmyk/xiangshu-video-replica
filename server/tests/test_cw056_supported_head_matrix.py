@@ -83,7 +83,7 @@ REPO_ROOT = SERVER_DIR.parent
 # main 链尾（20260923T1200_admin_refund_adjustment）之上；上线评审 P1-1 的
 # 20260924T0000_wechat_transaction_unique、P1-2 的 20260924T0100_oral_task_submitted_at
 # 与 20260924T0200_customer_oral_task_visibility 再依次叠加其上，故链尾为该值。
-HEAD_REVISION = "20260924T0200_customer_oral_task_visibility"
+HEAD_REVISION = "20260926T0000_viral_homepage_rank"
 
 # 最后一个已发布（受支持）起点。其后的 056…090 与本迁移尚未随任何受支持版本发布，
 # 故冻结范围止于此——把未发布 revision 也纳入哈希会让每次新增迁移都必须改常量，
@@ -147,7 +147,7 @@ HEAD_SCHEMA_COUNTS = {
     # columns 1222 → 1225、primary_keys 103 → 104、foreign_keys 193 → 195；
     # digest 重算（见下）。
     "check_constraints": 323,
-    "columns": 1225,
+    "columns": 1226,
     "foreign_keys": 195,
     "identity_columns": 0,
     "jsonb_columns": 6,
@@ -169,6 +169,7 @@ HEAD_SCHEMA_COUNTS = {
 # partial_indexes 不变；时间戳走 sa.Text()，timestamptz_columns 不变。
 # CW-075 090 的增量：本表名集追加 customer_discounts（main 链尾迁移 090 新建的表，
 # 已 re-linearize 到 main 现头 089 之上：089→090）。HEAD_SCHEMA_COUNTS 与
+# T4 置顶序追加 viral_videos.homepage_rank：columns +1，digest 经 --print-schema 重算。
 # HEAD_SCHEMA_DIGEST 已随之重算为 090 的真实值——它们是全局 post-linearization 不变量：
 # CW-078 折叠 089 时在本地 PG 探针重算过一次（digest 8fe43e16），CW-075 折叠 090 后沿
 # 同一先例（postgres:16-alpine，与 CI pg-fixture 同主版本）再重算一次。故 B 组真实 PG
@@ -355,7 +356,7 @@ HEAD_TABLE_NAMES = (
 #  两侧原来的 digest 都不能用——本分支那条是接在 viral 之后的旧链、main 那条只到
 #  MATERIAL-UX，合并后 head 变成接在 MATERIAL-UX 之后的本分支迁移，约束文本随之变化，
 #  digest 必然要重算。由 scripts/ci/migration_manifest.py --print-schema 在 PG 上重算后粘贴。
-HEAD_SCHEMA_DIGEST = "11c132eaf1b496d42cf4495be265335f19649f86644165a6c17b9c2c5c9bd470"
+HEAD_SCHEMA_DIGEST = "5ce51ceb67e391bee9e1535aef4c2a810e9fe7107a3fb15185f0b8b83ceb4dc3"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

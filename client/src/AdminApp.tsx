@@ -13,7 +13,6 @@ import { GenerationRecordsPage } from "./admin/GenerationRecordsPage";
 import { OverviewPage } from "./admin/OverviewPage";
 import { SessionsPage } from "./admin/SessionsPage";
 import { SystemSettingsPage } from "./admin/SystemSettingsPage";
-import { AdminErrorBoundary } from "./admin/ui/AdminErrorBoundary";
 import { shanghaiDate } from "./admin/ui/vocabulary";
 import { ViralDiscoveriesPage } from "./admin/ViralDiscoveriesPage";
 import { ViralVideosPage } from "./admin/ViralVideosPage";

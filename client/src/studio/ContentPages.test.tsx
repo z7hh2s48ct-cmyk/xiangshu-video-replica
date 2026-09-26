@@ -969,7 +969,7 @@ describe("V1.4 内容与运营页面", () => {
     );
   });
 
-  it("爆款详情移除复刻且仅音频来源可交给文案提取", async () => {
+  it("时长未知的爆款详情不提供去复刻，仅音频来源可交给文案提取", async () => {
     createViralImportTask.mockResolvedValue({
       taskId: "audio-import",
       status: "SUCCEEDED",
@@ -1007,6 +1007,81 @@ describe("V1.4 内容与运营页面", () => {
     );
     expect(value.navigate).toHaveBeenCalledWith(
       "copy",
+      expect.objectContaining({ returnTo: "viral-detail" }),
+    );
+  });
+
+  it("超过15秒的爆款详情不提供去复刻入口", async () => {
+    const base = studio();
+    const value = studio({
+      data: {
+        ...base.data,
+        videos: [
+          { ...base.data.videos[0], durationMs: 88_000 },
+          ...base.data.videos.slice(1),
+        ],
+      },
+      state: {
+        ...base.state,
+        page: "viral-detail",
+        selectedVideoId: "dy-1",
+      },
+    });
+    useStudio.mockReturnValue(value);
+    render(<ViralDetailPage />);
+
+    expect(
+      screen.queryByRole("button", { name: /复刻/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("时长不超过15秒的爆款详情提供去复刻并带入参考素材", async () => {
+    createViralImportTask.mockResolvedValue({
+      taskId: "replica-import",
+      status: "SUCCEEDED",
+      projectId: "replica-project",
+      sourceAssetId: "replica-asset",
+      mediaKind: "video",
+      canTranscribe: true,
+      canAnalyze: true,
+    });
+    const base = studio();
+    const value = studio({
+      review: false,
+      data: {
+        ...base.data,
+        videos: [
+          { ...base.data.videos[0], durationMs: 12_000 },
+          ...base.data.videos.slice(1),
+        ],
+      },
+      state: {
+        ...base.state,
+        page: "viral-detail",
+        selectedVideoId: "dy-1",
+      },
+    });
+    useStudio.mockReturnValue(value);
+    render(<ViralDetailPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "去复刻" }));
+    await waitFor(() =>
+      expect(createViralImportTask).toHaveBeenCalledWith(
+        "douyin",
+        "native-dy-1",
+        "replica",
+        expect.any(String),
+      ),
+    );
+    await waitFor(() =>
+      expect(value.patchDraft).toHaveBeenCalledWith({
+        projectId: "replica-project",
+        sourceId: "replica-asset",
+        sourceAssetId: "replica-asset",
+      }),
+    );
+    expect(value.navigate).toHaveBeenCalledWith(
+      "replica",
       expect.objectContaining({ returnTo: "viral-detail" }),
     );
   });
@@ -1081,6 +1156,27 @@ describe("V1.4 内容与运营页面", () => {
     // 下载不产生服务端导入任务，也不进入文案工坊。
     expect(createViralImportTask).not.toHaveBeenCalled();
     expect(value.navigate).not.toHaveBeenCalled();
+  });
+
+  it("下载遇余额不足时打开钱包侧栏并透传服务端文案", async () => {
+    viralCacheBridge.cacheAvailable.mockReturnValue(true);
+    viralCacheBridge.ensureViralCacheForVideo.mockRejectedValueOnce(
+      Object.assign(new Error("积分不足，本次需要 6 积分。"), {
+        code: "INSUFFICIENT_CREDITS",
+      }),
+    );
+    const value = studio({ review: false });
+    useStudio.mockReturnValue(value);
+    render(<ViralPage />);
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "下载视频 农村建房预算，别只盯着主体",
+      }),
+    );
+
+    await waitFor(() => expect(value.openLive).toHaveBeenCalledWith("wallet"));
+    expect(value.notify).toHaveBeenCalledWith("积分不足，本次需要 6 积分。");
   });
 
   it("桌面端爆款详情提取文案改走本地抽音轨上传，不再导入参考素材", () => {

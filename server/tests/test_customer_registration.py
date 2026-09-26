@@ -60,7 +60,7 @@ REGISTER_PATH = "/api/customer/register"
 # Phase 3b sub_account_permissions，再叠加 BILLING-OBS-20260922 三个 analysis 迁移
 # 及其后的 REFUND 调账、1800 部署垫片、20260924T0000 交易号唯一索引、
 # 20260924T0100 口播提交时刻列与 20260924T0200 口播隐藏偏好表。
-HEAD_REVISION = "20260924T0200_customer_oral_task_visibility"
+HEAD_REVISION = "20260926T0000_viral_homepage_rank"
 PRIOR_REVISION = "20260912T1353_customer_discounts"
 
 # A policy-valid password (>= MIN_PASSWORD_LENGTH, not blank). Never a secret.
