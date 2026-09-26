@@ -42,11 +42,12 @@ APILIO_GEMINI_MODEL = "gemini-3.8-flash"
 APILIO_ANALYSIS_MODEL = "gemini-3.8-flash"
 # 主模型限流/下线时的默认替补。选 gemini-3.7-flash：与主模型同为 flash 系
 # 正式版（避开 2026-09-20 出过事的 preview 名），只落后主模型一个 minor 版本，
-# 配额桶独立，恰好接得住主模型的 429。可用设置项 analysis_model_fallbacks
-# 覆盖；换过默认主模型后请同步核对这份名单。
+# 作为主模型 429 时的第二条路径；实际可用性与配额隔离仍须线上探测。
+# 可用设置项 analysis_model_fallbacks 覆盖；换过默认主模型后请核对名单。
 APILIO_ANALYSIS_FALLBACK_MODELS: tuple[str, ...] = ("gemini-3.7-flash",)
-# 限流切换前的间隔：不同模型配额桶独立，无需长退避；租约 10 分钟、单次调用
-# 上限 240s，这里只留礼貌性停顿。
+MAX_ANALYSIS_FALLBACK_MODELS = 1
+# 限流切换前只留礼貌性停顿；是否有独立配额仍需真实账户验证。
+# 租约 10 分钟、单次调用上限 240s，因此最多只尝试一个备选。
 FAILOVER_RETRY_WAIT_SECONDS = 2.0
 
 # 结构化运动枚举：拆解结果必须对“人物是否在动、机位是否在动”显式表态，
@@ -422,6 +423,8 @@ class ApilioGemini:
             name = str(candidate).strip()
             if name and name != model and name not in deduped:
                 deduped.append(name)
+        if len(deduped) > MAX_ANALYSIS_FALLBACK_MODELS:
+            raise ValueError("只能配置一个备选视频分析模型")
         self.fallback_models = tuple(deduped)
         self.transport = transport or UrllibApilioChatTransport()
         self.failover_pause = failover_pause or time.sleep
@@ -516,9 +519,8 @@ class ApilioGemini:
     def _complete(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         """按「主模型 → 备选模型」顺序尝试，把限流/下线从任务失败降级为换道。
 
-        只对「换个模型有意义」的失败切换：429/5xx/网络超时（retryable）与
-        400/404（上游下线该模型的典型表现，见 2026-09-20 事故）。401/403 是
-        密钥问题、请求阶段失败对任何模型都一样，均不烧备选请求。
+        只对 429 和上游明确报告模型不可用的 400/404 切换。网络超时可能
+        已被上游受理，盲目换模型会重复一次结果不确定的付费调用。
         """
         models = (self.model, *self.fallback_models)
         last_failure: AnalysisProviderFailed | None = None
@@ -532,7 +534,7 @@ class ApilioGemini:
                 return self._complete_once(payload)
             except AnalysisProviderFailed as exc:
                 last_failure = exc
-                if index < len(models) - 1 and _should_try_fallback(exc):
+                if index < len(models) - 1 and _should_try_fallback(exc, model=model):
                     logger.warning(
                         "%s 视频拆解模型 %s 请求失败（phase=%s status=%s），切换备选模型 %s",
                         analysis_log_ref(),
@@ -595,13 +597,22 @@ class ApilioGemini:
         }
 
 
-def _should_try_fallback(failure: AnalysisProviderFailed) -> bool:
-    if failure.failure_phase == REQUEST_FAILURE_PHASE:
+def _should_try_fallback(failure: AnalysisProviderFailed, *, model: str) -> bool:
+    if failure.failure_phase != HTTP_FAILURE_PHASE:
         return False
-    if failure.retryable:
+    if failure.http_status == 429:
         return True
-    # 上游下线某个模型时拒绝是即时的且不计费，换模型重试没有额外代价。
-    return failure.http_status in (400, 404)
+    if failure.http_status not in (400, 404):
+        return False
+    diagnostic = failure.upstream_diagnostic or {}
+    reason = diagnostic.get("reason")
+    if not isinstance(reason, str):
+        return False
+    model_unavailable = (
+        rf"(?:\bmodel\s+|\bmodels/){re.escape(model)}\s+(?:is\s+)?"
+        r"(?:not available|unavailable|not found|does not exist|deprecated|retired)\b"
+    )
+    return bool(re.search(model_unavailable, reason, re.IGNORECASE))
 
 
 def _with_failover_note(
@@ -624,15 +635,23 @@ _FALLBACK_MODEL_SEPARATOR_PATTERN = re.compile(r"[,;，；\s]+")
 def parse_analysis_fallback_models(raw: str | None) -> tuple[str, ...]:
     """解析设置项 analysis_model_fallbacks；未配置时返回出厂替补名单。
 
-    允许逗号（中英文）、分号与空白混排；空片段与重复项丢弃，顺序保留。
+    允许逗号（中英文）、分号与空白混排；空片段与重复项丢弃。
     与主模型重复的项由 ``ApilioGemini`` 构造时统一去重。
     """
     if raw is None or not raw.strip():
         return APILIO_ANALYSIS_FALLBACK_MODELS
+    parts = [part for part in _FALLBACK_MODEL_SEPARATOR_PATTERN.split(raw.strip()) if part]
+    disabled_parts = [part for part in parts if part.lower() == "disabled"]
+    if disabled_parts:
+        if len(disabled_parts) == len(parts):
+            return ()
+        raise ValueError("disabled 不能与模型名混用")
     models: list[str] = []
-    for part in _FALLBACK_MODEL_SEPARATOR_PATTERN.split(raw.strip()):
-        if part and part not in models:
+    for part in parts:
+        if part not in models:
             models.append(part)
+    if len(models) > MAX_ANALYSIS_FALLBACK_MODELS:
+        raise ValueError("只能配置一个备选视频分析模型")
     return tuple(models)
 
 

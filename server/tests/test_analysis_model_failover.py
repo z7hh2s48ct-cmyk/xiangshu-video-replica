@@ -24,6 +24,7 @@ from app.analysis import (
     ApilioGemini,
     parse_analysis_fallback_models,
 )
+from app.settings import validate_provider_config
 
 PRIMARY = "gemini-3.8-flash"
 BACKUP = "gemini-3.7-flash"
@@ -43,6 +44,7 @@ def _model_unavailable(model: str) -> AnalysisProviderFailed:
         f"视频拆解服务拒绝了请求（HTTP 400）：model {model} is not available",
         http_status=400,
         failure_phase=HTTP_FAILURE_PHASE,
+        upstream_diagnostic={"reason": f"model {model} is not available"},
     )
 
 
@@ -124,6 +126,20 @@ def test_retired_model_http_400_falls_over() -> None:
     assert transport.requested_models == [PRIMARY, BACKUP]
 
 
+def test_retired_model_http_404_falls_over() -> None:
+    failure = AnalysisProviderFailed(
+        "model not found",
+        http_status=404,
+        failure_phase=HTTP_FAILURE_PHASE,
+        upstream_diagnostic={"reason": f"models/{PRIMARY} is not found"},
+    )
+    provider, transport = _provider([failure, _success_body()])
+
+    provider.analyze(video_uri="https://example.com/reference.mp4", duration_seconds=15.0)
+
+    assert transport.requested_models == [PRIMARY, BACKUP]
+
+
 def test_all_models_failing_raises_the_last_failure_with_a_failover_note() -> None:
     """全部模型都失败时抛最后一次的原始失败，消息注明已尝试过哪些模型。"""
     provider, transport = _provider([_rate_limited(), _rate_limited()])
@@ -154,6 +170,44 @@ def test_auth_failure_does_not_waste_backup_attempts() -> None:
     assert BACKUP not in str(caught.value)
 
 
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        (400, "invalid video URL"),
+        (404, "route not found"),
+        (500, "server error"),
+        (400, f"model {PRIMARY} response_format unsupported"),
+        (400, "model input is unavailable because the signed video URL expired"),
+    ],
+)
+def test_non_model_http_failure_does_not_try_backup(status: int, reason: str) -> None:
+    failure = AnalysisProviderFailed(
+        reason,
+        http_status=status,
+        failure_phase=HTTP_FAILURE_PHASE,
+        retryable=status >= 500,
+        upstream_diagnostic={"reason": reason},
+    )
+    provider, transport = _provider([failure, _success_body()])
+
+    with pytest.raises(AnalysisProviderFailed) as caught:
+        provider.analyze(video_uri="https://example.com/reference.mp4", duration_seconds=15.0)
+
+    assert caught.value is failure
+    assert transport.requested_models == [PRIMARY]
+
+
+def test_network_timeout_does_not_repeat_ambiguous_paid_call() -> None:
+    failure = AnalysisProviderFailed("upstream timeout", failure_phase="network", retryable=True)
+    provider, transport = _provider([failure, _success_body()])
+
+    with pytest.raises(AnalysisProviderFailed) as caught:
+        provider.analyze(video_uri="https://example.com/reference.mp4", duration_seconds=15.0)
+
+    assert caught.value is failure
+    assert transport.requested_models == [PRIMARY]
+
+
 def test_request_phase_failure_does_not_try_backups() -> None:
     """非 HTTPS 地址等请求阶段失败对任何模型都一样，不做无意义的备选调用。"""
     refused = AnalysisProviderFailed(
@@ -172,15 +226,20 @@ def test_pause_runs_before_each_backup_attempt() -> None:
     """切换备选前留出间隔，给限流窗口一点恢复时间；间隔可注入便于测试。"""
     waits: list[float] = []
     provider, _ = _provider(
-        [_rate_limited(), _rate_limited(), _rate_limited()],
-        fallback_models=(BACKUP, "gemini-3.5-flash"),
+        [_rate_limited(), _rate_limited()],
+        fallback_models=(BACKUP,),
         pause=waits.append,
     )
 
     with pytest.raises(AnalysisProviderFailed):
         provider.analyze(video_uri="https://example.com/reference.mp4", duration_seconds=15.0)
 
-    assert waits == [FAILOVER_RETRY_WAIT_SECONDS, FAILOVER_RETRY_WAIT_SECONDS]
+    assert waits == [FAILOVER_RETRY_WAIT_SECONDS]
+
+
+def test_multiple_fallbacks_are_rejected_before_paid_call() -> None:
+    with pytest.raises(ValueError, match="只能配置一个备选视频分析模型"):
+        _provider([_success_body()], fallback_models=(BACKUP, "gemini-3.5-flash"))
 
 
 def test_duplicate_and_blank_models_are_dropped_from_the_chain() -> None:
@@ -235,12 +294,21 @@ def test_configured_fallback_list_overrides_the_default(monkeypatch: pytest.Monk
         {
             "analysis_api_key": "k",
             "analysis_model": "m-primary",
-            "analysis_model_fallbacks": "m-a, m-b；m-a m-c",
+            "analysis_model_fallbacks": "m-a, m-a",
         },
     )
 
     assert provider.model == "m-primary"
-    assert provider.fallback_models == ("m-a", "m-b", "m-c")
+    assert provider.fallback_models == ("m-a",)
+
+
+def test_disabled_fallback_setting_reaches_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider_for(
+        monkeypatch,
+        {"analysis_api_key": "k", "analysis_model_fallbacks": "disabled"},
+    )
+
+    assert provider.fallback_models == ()
 
 
 def test_parse_fallback_models_blank_uses_shipped_default() -> None:
@@ -248,5 +316,23 @@ def test_parse_fallback_models_blank_uses_shipped_default() -> None:
     assert parse_analysis_fallback_models("   ") == APILIO_ANALYSIS_FALLBACK_MODELS
 
 
+def test_explicit_disabled_value_turns_off_failover() -> None:
+    assert parse_analysis_fallback_models("disabled") == ()
+    assert parse_analysis_fallback_models("disabled,disabled") == ()
+    validate_provider_config("apilio", {"analysis_model_fallbacks": "disabled"})
+
+
+def test_disabled_cannot_be_mixed_with_a_model() -> None:
+    with pytest.raises(ValueError, match="disabled 不能与模型名混用"):
+        parse_analysis_fallback_models("disabled, m-a")
+
+
 def test_parse_fallback_models_supports_mixed_separators() -> None:
-    assert parse_analysis_fallback_models("a, b；c，d e") == ("a", "b", "c", "d", "e")
+    assert parse_analysis_fallback_models("a, a；a，a a") == ("a",)
+
+
+def test_multiple_configured_fallbacks_are_rejected() -> None:
+    with pytest.raises(ValueError, match="只能配置一个备选视频分析模型"):
+        parse_analysis_fallback_models("a, b")
+    with pytest.raises(ValueError, match="只能配置一个备选视频分析模型"):
+        validate_provider_config("apilio", {"analysis_model_fallbacks": "a, b"})

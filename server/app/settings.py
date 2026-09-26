@@ -468,6 +468,10 @@ def validate_provider_config(provider: ProviderName, config: dict[str, str]) -> 
     missing = [field for field in REQUIRED_PROVIDER_FIELDS[provider] if not config.get(field)]
     if missing:
         raise ValueError(f"missing required setting: {', '.join(missing)}")
+    if provider == "apilio":
+        from app.analysis import parse_analysis_fallback_models
+
+        parse_analysis_fallback_models(config.get("analysis_model_fallbacks"))
 
 
 def validate_zpay_config(config: dict[str, str]) -> None:
