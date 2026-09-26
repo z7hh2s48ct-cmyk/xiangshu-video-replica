@@ -414,6 +414,7 @@ export function CustomersPage({
               <thead>
                 <tr>
                   <th>用户名</th>
+                  <th>公司名称</th>
                   <th>客户 ID</th>
                   <th>注册时间</th>
                   <th>状态</th>
@@ -432,6 +433,14 @@ export function CustomersPage({
                         title={customer.username}
                       >
                         {customer.username}
+                      </span>
+                    </td>
+                    <td data-label="公司名称">
+                      <span
+                        className="customer-cell-ellipsis"
+                        title={customer.display_name}
+                      >
+                        {customer.display_name}
                       </span>
                     </td>
                     <td data-label="客户 ID">
@@ -659,6 +668,10 @@ function CustomerDetailView({
             </div>
             <p>
               客户 ID <CopyCustomerId value={customer.user_id} />
+            </p>
+            <p>
+              公司名称{" "}
+              <strong>{customer.display_name ?? customer.username}</strong>
             </p>
             <p>注册时间 {formatDateTime(customer.created_at)}</p>
           </div>

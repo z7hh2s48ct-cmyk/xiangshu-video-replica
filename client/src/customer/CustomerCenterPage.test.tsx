@@ -449,6 +449,16 @@ test("显示名称给字数提示（P2#19）", async () => {
   expect(screen.getByText("9/50")).toBeVisible();
 });
 
+test("显示名称引导客户填写公司名称，管理后台按公司名识别", async () => {
+  render(<CustomerCenterPage account={setup()} />);
+  await screen.findByText("125");
+  fireEvent.click(screen.getByRole("tab", { name: "账号设置" }));
+
+  expect(await screen.findByLabelText("显示名称")).toBeVisible();
+  expect(screen.getByText(/建议填写公司名称/)).toBeVisible();
+  expect(screen.getByText(/管理后台.*公司名称/)).toBeVisible();
+});
+
 test("术语去技术化：Token 表说「第 N 次更新」、来源下拉说「早期版本消费」", async () => {
   render(<CustomerCenterPage account={setup()} />);
   await screen.findByText("125");

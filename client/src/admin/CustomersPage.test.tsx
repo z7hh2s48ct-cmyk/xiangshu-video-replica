@@ -110,6 +110,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       {
         user_id: "user-1",
         username: "customer-1",
+        display_name: "乡墅装饰有限公司",
         created_at: "2026-08-24T10:00:00Z",
         activation_code: "ABC-123",
         status: "active",
@@ -123,6 +124,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       {
         user_id: "user-2",
         username: "customer-2",
+        display_name: "合家美宅建材商行",
         created_at: "2026-08-24T11:00:00Z",
         activation_code: "DEF-456",
         status: "active",
@@ -150,6 +152,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       .map((cell) => cell.textContent);
     expect(headers).toEqual([
       "用户名",
+      "公司名称",
       "客户 ID",
       "注册时间",
       "状态",
@@ -171,6 +174,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
         .map((cell) => cell.textContent?.replace(/\s+/g, " ").trim()),
     ).toEqual([
       "customer-1",
+      "乡墅装饰有限公司",
       "user-1",
       // 与 formatDateTime 的展示契约一致：固定 Asia/Shanghai，
       // 否则期望值随 runner 时区漂移（CI 为 UTC，本地为 +8）。
@@ -377,6 +381,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
         {
           user_id: "user-1",
           username: "customer-1",
+          display_name: "乡墅装饰有限公司",
           created_at: "2026-08-24T10:00:00Z",
           activation_code: "ABC-123",
           status: "active",
@@ -414,6 +419,9 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       .getByRole("heading", { name: "customer-1" })
       .closest("div");
     expect(detailPanel).not.toBeNull();
+    // 详情页带出公司名（display_name），让管理员确认账号与公司的一一对应
+    expect(screen.getByText(/公司名称/)).toBeInTheDocument();
+    expect(screen.getByText("乡墅装饰有限公司")).toBeInTheDocument();
     expect(
       screen.getByRole("region", { name: "客户核心指标" }),
     ).toBeInTheDocument();
