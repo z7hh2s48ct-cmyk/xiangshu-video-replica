@@ -26,6 +26,8 @@ from collections import OrderedDict
 from collections.abc import Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -96,14 +98,20 @@ class ViralSourceHttpStatusError(ViralSourceError):
 
 
 def _retry_after_seconds(headers: Any) -> float | None:
-    """从响应头读 Retry-After（秒）；缺失或非法时返回 None."""
+    """从响应头读 Retry-After（秒或 HTTP 日期）；缺失或非法时返回 None."""
     value = headers.get("Retry-After") if headers is not None else None
     if not value:
         return None
     try:
         return max(0.0, float(value))
     except (TypeError, ValueError):
-        return None
+        try:
+            retry_at = parsedate_to_datetime(str(value))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=UTC)
+        return max(0.0, (retry_at - datetime.now(UTC)).total_seconds())
 
 
 class ViralHttpTransport:
@@ -194,6 +202,7 @@ class ViralVideo:
             "platform": self.platform,
             "videoId": self.video_id,
             "homepageFeatured": self.homepage_featured,
+            "homepageRank": self.homepage_rank,
             "category": self.category,
             "title": self.title,
             "sourceDescription": str(self.native.get("source_description") or "") or None,
@@ -659,16 +668,32 @@ class ViralSourceClient:
         }
         api_type = api_type_mapping.get(path)
 
-        # 重试只针对 429/5xx 这类「请求未被上游受理」的状态：搜索是只读查询，
-        # 重试不会产生重复副作用。超时/网络错误的结果不可知且重试会放大计费
-        # 成本，不做重试。每次物理外呼都独立过 meter_call，重试成本据实计量。
+        # 搜索是只读查询，HTTP 状态或业务包中的 429/5xx 可安全重试。超时/网络
+        # 错误的结果不可知且重试会放大计费成本，不做重试。每次物理外呼都独立
+        # 计量；供应商已返回响应时先确认供应商用量，业务成功后才确认客户侧结果。
         with set_api_type(api_type) if api_type else nullcontext():
-            content: bytes | None = None
             for attempt in range(1, _VIRAL_SOURCE_MAX_ATTEMPTS + 1):
                 try:
-                    with meter_call("viral_data", units=billing_units):
+                    with meter_call("viral_data", units=billing_units) as metered_call:
                         content = transport.request("POST", url, headers=headers, body=body)
-                    break
+                        metered_call.record_usage()
+                        try:
+                            envelope = json.loads(_maybe_gunzip(content))
+                        except json.JSONDecodeError as exc:
+                            raise ViralSourceError("爆款数据源返回了无法解析的响应") from exc
+                        if not isinstance(envelope, dict):
+                            raise ViralSourceError("爆款数据源响应结构异常")
+                        code = envelope.get("code")
+                        if isinstance(code, int) and not isinstance(code, bool) and code != 200:
+                            if _is_retryable_status(code):
+                                raise ViralSourceHttpStatusError(code)
+                            raise ViralSourceError("爆款数据源暂时不可用，请稍后重试")
+                        data = envelope.get("data")
+                        if not isinstance(data, dict):
+                            raise ViralSourceError("爆款数据源响应缺少数据")
+                        if data.get("ret") not in (None, 0) or data.get("error"):
+                            raise ViralSourceError("爆款内容暂时无法获取，请稍后重试")
+                    return data
                 except ViralSourceHttpStatusError as exc:
                     if attempt >= _VIRAL_SOURCE_MAX_ATTEMPTS or not _is_retryable_status(
                         exc.status
@@ -683,22 +708,7 @@ class ViralSourceClient:
                         _VIRAL_SOURCE_MAX_ATTEMPTS - 1,
                     )
                     time.sleep(delay)
-        assert content is not None
-        try:
-            envelope = json.loads(_maybe_gunzip(content))
-        except json.JSONDecodeError as exc:
-            raise ViralSourceError("爆款数据源返回了无法解析的响应") from exc
-        if not isinstance(envelope, dict):
-            raise ViralSourceError("爆款数据源响应结构异常")
-        code = envelope.get("code")
-        if isinstance(code, int) and code != 200:
-            raise ViralSourceError("爆款数据源暂时不可用，请稍后重试")
-        data = envelope.get("data")
-        if not isinstance(data, dict):
-            raise ViralSourceError("爆款数据源响应缺少数据")
-        if data.get("ret") not in (None, 0) or data.get("error"):
-            raise ViralSourceError("爆款内容暂时无法获取，请稍后重试")
-        return data
+        raise AssertionError("数据源重试循环必须返回或抛出异常")
 
     # -- 抖音 ----------------------------------------------------------------
 

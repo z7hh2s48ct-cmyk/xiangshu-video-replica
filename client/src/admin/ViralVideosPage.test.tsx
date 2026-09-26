@@ -202,6 +202,7 @@ describe("ViralVideosPage", () => {
     expect(
       await screen.findByText(/登记 4 次；已确认 3 次/),
     ).toBeInTheDocument();
+    expect(screen.getByText(/未成功 1 次；处理中 0 次/)).toBeInTheDocument();
     expect(screen.getByText(/失败 1 笔；待扣 0 笔/)).toBeInTheDocument();
     expect(screen.getByText(/已知成本 ¥0.00000125/)).toBeInTheDocument();
     expect(fetchMock.mock.calls[0][0]).not.toContain("user_id=other");

@@ -99,7 +99,7 @@ export function ViralCollectionBilling({ query }: { query: string }) {
         按上方日期查看所有客户的采集批次，不受用户、模块、供应商筛选影响。每次已确认的接口请求按批次快照单价向客户逐项扣分；供应商成本只记录一次。数据库读取和云存储不收费。
       </p>
       <p>
-        搜索分页和视频号详情均计入接口次数。结果不明的请求暂不向客户扣分，供应商成本保留待核对。客户收入明细不分摊公共采集成本，请以批次总账核对利润。
+        搜索分页和视频号详情均计入接口次数。未成功的请求暂不向客户扣分；无法确认的供应商成本保留待核对。客户收入明细不分摊公共采集成本，请以批次总账核对利润。
       </p>
       <button
         type="button"
@@ -144,7 +144,7 @@ export function ViralCollectionBilling({ query }: { query: string }) {
                     <td>
                       登记 {batch.request_count} 次；已确认{" "}
                       {batch.confirmed_count} 次<br />
-                      结果不明 {batch.uncertain_count} 次；处理中{" "}
+                      未成功 {batch.uncertain_count} 次；处理中{" "}
                       {batch.pending_requests} 次
                     </td>
                     <td>

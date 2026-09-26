@@ -12,6 +12,8 @@ import json
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from typing import Any
 from urllib.error import HTTPError
 
@@ -210,6 +212,7 @@ def test_normalize_douyin_aweme_caps_tags_and_maps_stats() -> None:
     assert video.tags == ["锦鲤体型", "鱼池养锦鲤", "第三个", "第四个", "第五个", "第六个"]
     client_dict = video.to_client_dict()
     assert client_dict["hasPlayableAudio"] is True
+    assert client_dict["homepageRank"] is None
     assert client_dict["native"] == {"aweme_id": "7680753914849346171"}
 
 
@@ -724,9 +727,28 @@ def test_wechat_video_detail_rejects_actual_error_envelope_with_neutral_message(
 
 
 def test_non_200_envelope_raises() -> None:
-    client, _ = _client([{"code": 429, "message": "rate limited"}])
+    failure = {"code": 429, "message": "rate limited"}
+    client, _ = _client([failure, failure, failure])
     with pytest.raises(ViralSourceError):
         client.douyin_search(keyword="乡墅")
+
+
+@pytest.mark.parametrize("status", [429, 502])
+def test_retry_on_retryable_envelope_then_succeeds(
+    status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("app.viral_tikhub.time.sleep", lambda seconds: sleeps.append(seconds))
+    client, transports = _client(
+        [
+            {"code": status, "message": "temporary failure"},
+            {"code": 200, "data": {"business_data": []}},
+        ]
+    )
+
+    assert client.douyin_search(keyword="乡墅") == []
+    assert len(transports[0].requests) == 2
+    assert sleeps == [0.5]
 
 
 def test_http_error_log_does_not_echo_upstream_response(
@@ -939,3 +961,15 @@ def test_transport_without_retry_after_header_yields_none(
 
     assert excinfo.value.status == 502
     assert excinfo.value.retry_after is None
+
+
+def test_retry_after_accepts_http_date() -> None:
+    from app.viral_tikhub import _retry_after_seconds
+
+    message = email.message.Message()
+    message["Retry-After"] = format_datetime(datetime.now(UTC) + timedelta(seconds=3))
+
+    retry_after = _retry_after_seconds(message)
+
+    assert retry_after is not None
+    assert 0.0 <= retry_after <= 3.0
