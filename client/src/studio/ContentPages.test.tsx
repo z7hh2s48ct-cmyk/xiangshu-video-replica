@@ -4296,6 +4296,45 @@ describe("V1.4 内容与运营页面", () => {
     );
   });
 
+  it("MATERIAL-UX-03：对象筛选直切项目时互斥清空人物条件", async () => {
+    listMaterials.mockResolvedValue({
+      items: [material("gate")],
+      page: 1,
+      page_size: 24,
+      total: 1,
+    });
+    const value = studio({ review: false });
+    value.data = {
+      ...value.data,
+      people: [
+        { id: "person-1", name: "张工" } as StudioData["people"][number],
+      ],
+      projects: [
+        { id: "project-1", name: "庭院样板" } as StudioData["projects"][number],
+      ],
+    };
+    useStudio.mockReturnValue(value);
+    render(<MaterialsPage />);
+    await screen.findByRole("button", { name: "选择素材 gate.png" });
+    const objectSelect = screen.getByLabelText("对象筛选");
+    fireEvent.change(objectSelect, { target: { value: "person:person-1" } });
+    await waitFor(() =>
+      expect(listMaterials).toHaveBeenLastCalledWith(
+        expect.objectContaining({ personId: "person-1" }),
+      ),
+    );
+    // 人物未清空直切项目：两组条件互斥，项目下发时人物条件必须已清空
+    fireEvent.change(objectSelect, { target: { value: "project:project-1" } });
+    await waitFor(() =>
+      expect(listMaterials).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          projectId: "project-1",
+          personId: undefined,
+        }),
+      ),
+    );
+  });
+
   it("MATERIAL-UX-03：详情面板显示时间/大小/时长且归属可跳转", async () => {
     const item = material("gate", {
       person_id: "person-1",
