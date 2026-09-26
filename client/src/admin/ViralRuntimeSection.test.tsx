@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { setAdminCsrfToken } from "../api";
@@ -131,6 +137,40 @@ describe("ViralRuntimeSection", () => {
     });
     expect(screen.getByLabelText("关键词 1")).toHaveValue("我的未保存草稿");
     expect(screen.getByLabelText("每个关键词最多采集")).toHaveValue(21);
+  });
+
+  it("旧轮询结果不能回滚刚保存的采集开关", async () => {
+    setAdminCsrfToken("csrf-viral");
+    let resolvePolling:
+      | ((value: Awaited<ReturnType<typeof response>>) => void)
+      | undefined;
+    let reads = 0;
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+      if (init?.method === "PATCH")
+        return response({ ...controls, collection_enabled: false });
+      reads += 1;
+      if (reads === 2)
+        return new Promise<Awaited<ReturnType<typeof response>>>((resolve) => {
+          resolvePolling = resolve;
+        });
+      return response(controls);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ViralRuntimeSection />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "暂停采集" }));
+    await waitFor(() => expect(reads).toBe(2), { timeout: 4500 });
+    fireEvent.click(screen.getByRole("button", { name: "确认更新" }));
+    expect(
+      await screen.findByRole("button", { name: "恢复采集" }),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      resolvePolling?.(await response(controls));
+    });
+    expect(
+      screen.getByRole("button", { name: "恢复采集" }),
+    ).toBeInTheDocument();
   });
 
   it("直接确认暂停采集并自动记录操作说明", async () => {

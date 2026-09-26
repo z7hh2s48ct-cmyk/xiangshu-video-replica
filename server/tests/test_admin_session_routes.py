@@ -891,6 +891,7 @@ def test_homepage_pin_orders_featured_list_and_unpin_restores(
     assert curate("admin-video%2Fsecond%3Did", "feature", "rank-feature-2").status_code == 200
     pinned = curate("admin-video%2Fsecond%3Did", "pin", "rank-pin-second")
     assert pinned.status_code == 200, pinned.text
+    assert pinned.json()["homepage_featured"] is True
     assert pinned.json()["homepage_rank"] == 0
 
     def featured_ids(limit: int, cursor: str | None = None) -> tuple[list[str], str | None]:
@@ -916,6 +917,7 @@ def test_homepage_pin_orders_featured_list_and_unpin_restores(
     # 取消置顶后 rank 归还 NULL，两条回到默认顺序（feature 先后）
     unpinned = curate("admin-video%2Fsecond%3Did", "unpin", "rank-unpin-second")
     assert unpinned.status_code == 200
+    assert unpinned.json()["homepage_featured"] is True
     assert unpinned.json()["homepage_rank"] is None
     with psycopg.connect(route_state) as conn:
         bus = BusinessConnection.postgres(conn)

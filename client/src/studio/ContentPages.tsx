@@ -1829,11 +1829,11 @@ export function ViralDetailPage() {
     }
     void start(video, "copy", goExtract);
   };
-  // 复刻方向只适用于 ≤15s 的爆款：服务端对参考视频有 4–15s 硬校验，超限必然
-  // 422。时长未知时保守隐藏入口；超长视频仍可走「提取文案→口播数字人」方向。
+  // 复刻方向只适用于 4–15s 的爆款；与服务端参考视频校验保持一致。
+  // 时长未知或超限时隐藏入口，视频仍可走「提取文案→口播数字人」方向。
   const canReplicate =
     typeof video.durationMs === "number" &&
-    video.durationMs > 0 &&
+    video.durationMs >= 4_000 &&
     video.durationMs <= 15_000;
   const goReplica = (task: ViralImportTask) => {
     if (!task.canAnalyze || !task.projectId || !task.sourceAssetId) {

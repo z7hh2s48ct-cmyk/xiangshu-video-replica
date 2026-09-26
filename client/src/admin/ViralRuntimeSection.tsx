@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   adminActivationErrorMessage,
@@ -46,6 +46,7 @@ export function ViralRuntimeSection({
   const [availability, setAvailability] = useState<
     "AVAILABLE" | "HIDDEN" | "UNAVAILABLE"
   >("HIDDEN");
+  const statusRequest = useRef(0);
 
   // 全量加载：把服务端值写进表单草稿，只在挂载时使用。轮询与操作后的刷新走
   // loadStatus，避免采集进行中每 3 秒用服务端值回滚管理员未保存的编辑。
@@ -69,10 +70,15 @@ export function ViralRuntimeSection({
 
   // 仅刷新运行状态（开关、队列、采集进度），不触碰表单草稿与既有错误提示。
   const loadStatus = useCallback(async () => {
+    const request = ++statusRequest.current;
     try {
-      setControls(await fetchViralRuntimeControls());
+      const value = await fetchViralRuntimeControls();
+      if (request === statusRequest.current) setControls(value);
     } catch (cause) {
-      setError(adminActivationErrorMessage(cause, "读取爆款视频运行状态失败"));
+      if (request === statusRequest.current)
+        setError(
+          adminActivationErrorMessage(cause, "读取爆款视频运行状态失败"),
+        );
     }
   }, []);
 
@@ -89,12 +95,12 @@ export function ViralRuntimeSection({
       controls.platforms.some((item) => item.refresh_status === "refreshing"));
 
   useEffect(() => {
-    if (!collectionActive) return;
+    if (!collectionActive || saving) return;
     const timer = window.setInterval(() => {
       void loadStatus();
     }, 3000);
     return () => window.clearInterval(timer);
-  }, [collectionActive, loadStatus]);
+  }, [collectionActive, loadStatus, saving]);
 
   async function confirm() {
     if (!controls || !pending) return;
@@ -108,6 +114,7 @@ export function ViralRuntimeSection({
             : pending === "keywords"
               ? "更新爆款视频采集设置"
               : "更新爆款视频导入开关";
+    statusRequest.current += 1;
     setSaving(true);
     setError("");
     setNotice("");
@@ -150,6 +157,7 @@ export function ViralRuntimeSection({
           },
           reason,
         );
+        statusRequest.current += 1;
         setControls(next);
         setNotice(
           pending === "keywords"

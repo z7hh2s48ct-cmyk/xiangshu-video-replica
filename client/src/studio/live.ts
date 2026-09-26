@@ -1158,6 +1158,7 @@ export function studioVideoFromViral(item: ViralVideoItem): StudioVideo {
     likeDisplay: item.likeDisplay,
     tags: item.tags,
     homepageFeatured: Boolean(item.homepageFeatured),
+    homepageRank: item.homepageRank ?? null,
     hasPlayableAudio: item.hasPlayableAudio,
     hasCopy: item.hasCopy === true,
     playUrl: item.playUrl,

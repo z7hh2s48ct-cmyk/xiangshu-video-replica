@@ -10,6 +10,7 @@ import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from uuid import uuid4
 
 from app.db_pg import pg_transaction
@@ -25,6 +26,18 @@ from app.usage_billing import (
 _source: ContextVar[str | None] = ContextVar("billing_source", default=None)
 _collection: ContextVar[str | None] = ContextVar("billing_collection", default=None)
 _api_type: ContextVar[str | None] = ContextVar("billing_api_type", default=None)
+
+
+@dataclass
+class MeteredCall:
+    """分开记录供应商用量与调用方可见结果。"""
+
+    units: float | int
+    usage: float | int | None = None
+
+    def record_usage(self) -> None:
+        """供应商已返回响应，因此该次用量可确定。"""
+        self.usage = self.units
 
 
 @contextmanager
@@ -63,7 +76,7 @@ def billing_context(source_id: str) -> Iterator[None]:
 
 
 @contextmanager
-def meter_call(service: str, *, units: float | int = 1) -> Iterator[None]:
+def meter_call(service: str, *, units: float | int = 1) -> Iterator[MeteredCall]:
     source = None if service == "viral_data" and _collection.get() else _source.get()
     attempt = None
     platform_operation = None
@@ -89,10 +102,13 @@ def meter_call(service: str, *, units: float | int = 1) -> Iterator[None]:
                 api_metadata=api_metadata if api_metadata else None,
             )
             attempt = begin_attempt(conn, operation_id=platform_operation, attempt_key="request")
-    usage = None
+    call = MeteredCall(units=units)
+    succeeded = False
     try:
-        yield
-        usage = units
+        yield call
+        succeeded = True
+        if call.usage is None:
+            call.record_usage()
     finally:
         if attempt:
             with pg_transaction() as raw:
@@ -104,11 +120,11 @@ def meter_call(service: str, *, units: float | int = 1) -> Iterator[None]:
                     ).fetchone()
                     if operation[0] != "PENDING":
                         raise RuntimeError("采集接口计量已超时，迟到结果保留待核对")
-                complete_attempt(conn, attempt_id=attempt, usage=usage)
+                complete_attempt(conn, attempt_id=attempt, usage=call.usage)
                 if platform_operation:
                     finish_operation(
                         conn,
                         operation_id=platform_operation,
-                        units=units if usage is not None else 0,
-                        succeeded=usage is not None,
+                        units=units if succeeded else 0,
+                        succeeded=succeeded,
                     )

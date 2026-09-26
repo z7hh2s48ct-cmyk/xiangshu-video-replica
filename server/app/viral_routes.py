@@ -89,6 +89,7 @@ logger = logging.getLogger(__name__)
 
 class ViralVideoItem(BaseModel):
     homepageFeatured: bool = False
+    homepageRank: int | None = None
     platform: str
     videoId: str
     category: str
