@@ -413,9 +413,16 @@
   flex-basis: 100%;
   margin: 0;
 }
-/* 长说明收进悬停提示，缓存条默认只占一行。 */
+/* 默认保持单行；展开后在缓存条内显示完整规则。 */
 .content-material-cache__hint {
-  cursor: help;
+  max-width: 100%;
+  min-width: 0;
+}
+.content-material-cache__hint[open] {
+  flex-basis: 100%;
+}
+.content-material-cache__hint summary {
+  cursor: pointer;
   text-decoration: underline dotted;
 }
 /* MATERIAL-UX-04：多文件上传队列条与整页拖拽高亮。 */
@@ -599,7 +606,12 @@
   min-height: 38px;
 }
 .content-material-filters select {
+  max-width: 100%;
+  min-width: 0;
   min-height: 38px;
+}
+.content-material-filters select.content-material-filters__object {
+  width: min(180px, 100%);
 }
 .content-material-filters__sort {
   margin-left: auto;

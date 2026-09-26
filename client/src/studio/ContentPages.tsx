@@ -3639,12 +3639,13 @@ function MaterialsPageContent() {
           >
             {clearingCache ? "正在清理…" : "清理本机缓存"}
           </Button>
-          <span
-            className="content-material-cache__hint"
-            title="首屏优先在线预览并复用已有本机缓存；视频和音频首次播放时后台缓存。单个文件不超过 50 MB，超限继续在线预览。"
-          >
-            缓存说明
-          </span>
+          <details className="content-material-cache__hint">
+            <summary>缓存说明</summary>
+            <p>
+              首屏优先在线预览并复用已有本机缓存；视频和音频首次播放时后台缓存。
+              单个文件不超过 50 MB，超限继续在线预览。
+            </p>
+          </details>
           {cacheMessage ? <p role="status">{cacheMessage}</p> : null}
         </section>
       ) : null}
@@ -3682,6 +3683,7 @@ function MaterialsPageContent() {
           </select>
           <select
             aria-label="对象筛选"
+            className="content-material-filters__object"
             value={
               personFilter
                 ? `person:${personFilter}`
@@ -3765,6 +3767,9 @@ function MaterialsPageContent() {
             <option value="title_asc">名称 A→Z</option>
             <option value="size_desc">文件大小</option>
           </select>
+          <Button type="submit" variant="outline">
+            搜索
+          </Button>
         </form>
       ) : null}
       <section className="content-material-layout">

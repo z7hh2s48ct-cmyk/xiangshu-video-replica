@@ -3572,7 +3572,7 @@ describe("V1.4 内容与运营页面", () => {
     fireEvent.change(screen.getByLabelText("素材来源"), {
       target: { value: "upload" },
     });
-    fireEvent.submit(screen.getByRole("form", { name: "素材筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
 
     await waitFor(() =>
       expect(listMaterials).toHaveBeenLastCalledWith({
@@ -3587,6 +3587,19 @@ describe("V1.4 内容与运营页面", () => {
         pageSize: 24,
       }),
     );
+  });
+
+  it("缓存说明可通过点击展开完整规则", async () => {
+    listMaterials.mockResolvedValue({ items: [], page: 1, total: 0 });
+    useStudio.mockReturnValue(studio({ review: false }));
+    render(<MaterialsPage />);
+
+    const disclosure = screen.getByText("缓存说明").closest("details");
+    expect(disclosure).not.toBeNull();
+    expect(disclosure).not.toHaveAttribute("open");
+    fireEvent.click(screen.getByText("缓存说明"));
+    expect(disclosure).toHaveAttribute("open");
+    expect(screen.getByText(/单个文件不超过 50 MB/)).toBeInTheDocument();
   });
 
   it("素材页一次批量签名当前页并在翻页后加载下一页", async () => {
