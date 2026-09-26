@@ -1105,6 +1105,8 @@ def curate_collected_viral_video(
         # 未置顶的展示视频按既有 hot/latest 默认序排在置顶视频之后。
         next_rank: int | None = None
         if payload.action == "pin":
+            # 不同视频的行锁互不冲突；固定事务锁让并发置顶按提交顺序分配唯一序号。
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (202609260001,))
             min_rank = conn.execute(
                 "SELECT COALESCE(MIN(homepage_rank),1)-1 FROM viral_videos "
                 "WHERE deleted_at IS NULL AND homepage_featured=1"
@@ -1154,7 +1156,7 @@ def curate_collected_viral_video(
         return {
             "platform": platform,
             "video_id": video_id,
-            "homepage_featured": payload.action == "feature",
+            "homepage_featured": bool(featured_value),
             "homepage_rank": next_rank,
             "deleted": payload.action == "delete",
         }

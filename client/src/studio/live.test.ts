@@ -2185,6 +2185,40 @@ describe("爆款视频封面地址", () => {
       "",
     );
   });
+
+  it("保留首页精选置顶顺序", () => {
+    expect(
+      live.studioVideoFromViral({ ...item, homepageRank: 3 }),
+    ).toMatchObject({ homepageRank: 3 });
+    expect(
+      live.studioVideoFromViral({ ...item, homepageRank: null }),
+    ).toMatchObject({ homepageRank: null });
+  });
+
+  it("合并抖音与视频号精选时保留各自置顶顺序", async () => {
+    api.listViralVideos.mockImplementation(async (platform: string) => ({
+      platform,
+      sort: "hot",
+      categories: [],
+      fetchedAt: null,
+      items: [
+        {
+          ...item,
+          platform,
+          videoId: `${platform}-1`,
+          homepageRank: platform === "douyin" ? 2 : 1,
+        },
+      ],
+    }));
+
+    await expect(live.loadViralVideos()).resolves.toMatchObject({
+      videos: [
+        { platformKey: "douyin", homepageRank: 2 },
+        { platformKey: "wechat_channels", homepageRank: 1 },
+      ],
+      errors: [],
+    });
+  });
 });
 
 describe("uploadWorkbenchSourceVideo 失败清理", () => {

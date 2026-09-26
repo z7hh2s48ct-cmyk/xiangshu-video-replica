@@ -416,6 +416,8 @@ def list_viral_video_page(
         if featured_only and len(boundary) != 4:
             # 升级前的 v2 旧游标不含置顶序：静默回到第一页，避免分页死循环。
             boundary = None
+        elif not featured_only and len(boundary) != 3:
+            raise InvalidViralCursorError("viral video cursor belongs to another list")
     collected: list[ViralVideo] = []
     exhausted = False
     chunk_size = max(32, min(100, limit * 2))

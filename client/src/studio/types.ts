@@ -125,6 +125,8 @@ export type StudioPerson = {
 };
 export type StudioVideo = {
   homepageFeatured?: boolean;
+  /** 首页精选置顶顺序；数值越小越靠前，空值表示未置顶。 */
+  homepageRank?: number | null;
   id: string;
   title: string;
   author: string;

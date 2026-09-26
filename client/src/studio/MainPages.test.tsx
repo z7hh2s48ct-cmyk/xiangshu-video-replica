@@ -995,6 +995,44 @@ describe("V1.4 工作台新版首页布局", () => {
     expect(screen.queryByText("灵感视频 6")).not.toBeInTheDocument();
   });
 
+  it("首页精选先按跨平台置顶顺序展示，未置顶再按热度排序", () => {
+    const rankedVideos: StudioVideo[] = [
+      { ...videos[0], id: "douyin-hot", title: "抖音高热", likes: 999_999 },
+      {
+        ...videos[1],
+        id: "wechat-pinned-second",
+        title: "视频号置顶第二",
+        likes: 1,
+        homepageRank: 2,
+      },
+      {
+        ...videos[2],
+        id: "douyin-pinned-first",
+        title: "抖音置顶第一",
+        likes: 0,
+        homepageRank: 1,
+      },
+      ...videos.slice(3),
+    ];
+    const value = studio(undefined, {
+      state: createState("workbench"),
+      data: data([], rankedVideos),
+    });
+    useStudio.mockReturnValue(value);
+
+    const { container } = render(<WorkbenchPage />);
+    const titles = Array.from(
+      container.querySelectorAll(".studio-home-viral-card h3"),
+      (heading) => heading.textContent,
+    );
+
+    expect(titles.slice(0, 3)).toEqual([
+      "抖音置顶第一",
+      "视频号置顶第二",
+      "抖音高热",
+    ]);
+  });
+
   it("真实爆款从首页提取文案时先导入项目素材", async () => {
     createViralImportTask.mockResolvedValue({
       taskId: "import-home",
