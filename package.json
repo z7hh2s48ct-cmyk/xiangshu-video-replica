@@ -22,6 +22,7 @@
     "dev:viral-collection": "bash scripts/dev-with-pg.sh uv --cache-dir .uv-cache run --project server --locked python -m app.bootstrap && bash scripts/dev-with-pg.sh uv --cache-dir .uv-cache run --project server --locked python -m app.generation_worker --viral-collection --idle-seconds 30",
     "format": "npm run format --workspace client && uv --cache-dir .uv-cache run --project server --locked ruff format server",
     "generate:api": "npm run generate:api --workspace client",
+    "preflight": "bash scripts/ci/preflight-push.sh",
     "release:customer": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/build-customer-signed-release.ps1",
     "require:customer-api-base": "node scripts/require_customer_api_base.mjs",
     "tauri": "npm run tauri --workspace client --",
