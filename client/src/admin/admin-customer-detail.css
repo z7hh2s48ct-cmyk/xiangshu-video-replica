@@ -358,33 +358,43 @@
 @media (min-width: 761px) {
   .customers-table {
     table-layout: fixed;
-    min-width: 940px;
+    min-width: 1040px;
   }
   .customers-table :is(th, td) {
     padding: 14px 10px;
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
   }
+  /* 列序（9 列，宽度合计 100%）：用户名 / 公司名称 / 客户 ID / 注册时间 /
+     状态 / 可用额度 / 累计消耗 / 生成情况 / 操作。
+     table-layout: fixed 下宽度按位置生效 —— 增删列必须同步这里的 nth-child
+     编号，否则从插入点起宽度整体错位、末列拿不到宽度（「公司名称」插入第 2 位
+     时正是如此）。 */
   .customers-table th:nth-child(1) {
-    width: 13%;
-  }
-  .customers-table th:nth-child(2) {
-    width: 18%;
-  }
-  .customers-table th:nth-child(3) {
-    width: 13%;
-  }
-  .customers-table th:nth-child(4) {
-    width: 8%;
-  }
-  .customers-table th:nth-child(5),
-  .customers-table th:nth-child(6) {
     width: 11%;
   }
+  .customers-table th:nth-child(2) {
+    width: 15%;
+  }
+  .customers-table th:nth-child(3) {
+    width: 11%;
+  }
+  .customers-table th:nth-child(4) {
+    width: 12%;
+  }
+  .customers-table th:nth-child(5) {
+    width: 8%;
+  }
+  .customers-table th:nth-child(6) {
+    width: 10%;
+  }
   .customers-table th:nth-child(7) {
-    width: 16%;
+    width: 10%;
   }
   .customers-table th:nth-child(8) {
+    width: 13%;
+  }
+  .customers-table th:nth-child(9) {
     width: 10%;
   }
 }

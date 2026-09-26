@@ -37,6 +37,18 @@ import {
 } from "./ui/vocabulary";
 import "./admin-customer-detail.css";
 
+/** 公司名称未填写时的显式占位。
+ *
+ * 不静默回退成用户名：那样既与相邻的「用户名」列重复，又掩盖了"这个账号还没填
+ * 公司名"这一运营信号——而该信号的用处正是提醒运营去催客户补填。列表与详情共用
+ * 此函数，避免同一字段在两处显示不同值。
+ */
+const COMPANY_NAME_FALLBACK = "未填写";
+
+function companyNameOf(customer: CustomerListItem): string {
+  return customer.display_name || COMPANY_NAME_FALLBACK;
+}
+
 interface CustomersPageProps {
   embedded?: boolean;
   operatorId?: string;
@@ -314,9 +326,12 @@ export function CustomersPage({
         onSubmit={handleFilterSubmit}
       >
         <label className="admin-toolbar__field">
-          <span>用户名筛选</span>
+          {/* 关键字同时匹配用户名与公司名称（服务端 u.username OR
+              u.display_name）：运营的识别路径是「这家公司是哪个账号」，
+              只按用户名筛选会让公司名搜不到。 */}
+          <span>用户名 / 公司名称</span>
           <input
-            placeholder="按用户名筛选"
+            placeholder="按用户名或公司名称筛选"
             ref={usernameFilterRef}
             type="text"
             value={usernameDraft}
@@ -438,9 +453,9 @@ export function CustomersPage({
                     <td data-label="公司名称">
                       <span
                         className="customer-cell-ellipsis"
-                        title={customer.display_name}
+                        title={companyNameOf(customer)}
                       >
-                        {customer.display_name}
+                        {companyNameOf(customer)}
                       </span>
                     </td>
                     <td data-label="客户 ID">
@@ -670,8 +685,7 @@ function CustomerDetailView({
               客户 ID <CopyCustomerId value={customer.user_id} />
             </p>
             <p>
-              公司名称{" "}
-              <strong>{customer.display_name ?? customer.username}</strong>
+              公司名称 <strong>{companyNameOf(customer)}</strong>
             </p>
             <p>注册时间 {formatDateTime(customer.created_at)}</p>
           </div>

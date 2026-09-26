@@ -1017,6 +1017,7 @@ export interface CustomerListResponse {
 export interface CustomerListOptions {
   limit?: number;
   offset?: number;
+  /** 关键字而非严格用户名：服务端同时匹配 username 与 display_name（公司名称）。 */
   username_filter?: string;
   status?: string;
   createdFrom?: string;
@@ -1029,6 +1030,9 @@ export interface CustomerListOptions {
  * Fetch the customer list with the management-wide limit/offset contract (A5).
  *
  * GET /api/control/customers?limit=&offset=&username=
+ *
+ * ``username`` 的实际语义是关键字：服务端写成 ``u.username ILIKE %s OR
+ * u.display_name ILIKE %s``，所以「按公司名识别账号」也走同一个参数。
  */
 export async function listCustomers(
   options: CustomerListOptions = {},

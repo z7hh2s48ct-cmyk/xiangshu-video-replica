@@ -1510,6 +1510,27 @@ def test_list_customers_supports_pagination_and_username_filter(
     assert response.json()["items"] == []
 
 
+def test_list_customers_keyword_matches_company_name(client: TestClient) -> None:
+    """运营按公司名识别账号：关键字筛选同时匹配用户名与 display_name。
+
+    夹具里 username 是 ``customer_u``、display_name 是 ``Customer User``。两条
+    断言互为对照，各自只有一支能命中，所以不会互相掩盖：
+    - ``User`` 不是 ``customer_u`` 的子串 → 命中只能来自 display_name 分支；
+    - ``customer_u`` 不是 ``Customer User`` 的子串 → 命中只能来自 username 分支。
+    """
+    admin = _admin_session(client)
+    company = client.get("/api/control/customers", params={"username": "User"}, headers=admin)
+    assert company.status_code == 200, company.text
+    assert company.json()["total"] == 1
+    assert company.json()["items"][0]["display_name"] == "Customer User"
+
+    username = client.get(
+        "/api/control/customers", params={"username": "customer_u"}, headers=admin
+    )
+    assert username.status_code == 200, username.text
+    assert username.json()["total"] == 1
+
+
 def test_list_customers_is_auditor_readable(client: TestClient) -> None:
     auditor = _admin_session(client, actor="auditor_u")
     response = client.get("/api/control/customers", headers=auditor)
@@ -1765,6 +1786,29 @@ def test_customers_csv_export_uses_the_same_date_and_balance_filters(
     )
     assert response.status_code == 200, response.text
     assert "customer_u" not in response.text
+
+
+def test_customers_csv_export_carries_and_filters_on_company_name(
+    client: TestClient,
+) -> None:
+    """导出与列表同口径：带出公司名，且关键字筛选覆盖它。
+
+    断言表头而非仅断言内容：公司名列若只是"值恰好出现"，无法区分它是独立列
+    还是被并进了别的列。
+    """
+    admin = _admin_session(client)
+    response = client.get("/api/control/customers.csv", params={"username": "User"}, headers=admin)
+    assert response.status_code == 200, response.text
+    header, *body = response.text.splitlines()
+    assert header.rstrip("\r").split(",") == [
+        "username",
+        "display_name",
+        "masked_code",
+        "activated_at",
+        "status",
+    ]
+    assert body, "按公司名筛选应命中夹具客户，而不是只有表头"
+    assert "Customer User" in response.text
 
 
 def test_customer_code_materials_never_reach_control_csv_exports(
