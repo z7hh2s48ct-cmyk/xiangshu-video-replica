@@ -126,10 +126,9 @@ describe("ViralRuntimeSection", () => {
     });
 
     // 等到采集进行中的 3 秒轮询发生（第 2 次读取）；期间草稿不能被回滚。
-    await waitFor(
-      () => expect(fetchMock).toHaveBeenCalledTimes(2),
-      { timeout: 4500 },
-    );
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2), {
+      timeout: 4500,
+    });
     expect(screen.getByLabelText("关键词 1")).toHaveValue("我的未保存草稿");
     expect(screen.getByLabelText("每个关键词最多采集")).toHaveValue(21);
   });
