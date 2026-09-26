@@ -1035,7 +1035,31 @@ describe("V1.4 内容与运营页面", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("时长不超过15秒的爆款详情提供去复刻并带入参考素材", async () => {
+  it("低于4秒的爆款详情不提供去复刻入口", () => {
+    const base = studio();
+    const value = studio({
+      data: {
+        ...base.data,
+        videos: [
+          { ...base.data.videos[0], durationMs: 3_000 },
+          ...base.data.videos.slice(1),
+        ],
+      },
+      state: {
+        ...base.state,
+        page: "viral-detail",
+        selectedVideoId: "dy-1",
+      },
+    });
+    useStudio.mockReturnValue(value);
+    render(<ViralDetailPage />);
+
+    expect(
+      screen.queryByRole("button", { name: /复刻/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("4–15秒的爆款详情提供去复刻并带入参考素材", async () => {
     createViralImportTask.mockResolvedValue({
       taskId: "replica-import",
       status: "SUCCEEDED",
@@ -1051,7 +1075,7 @@ describe("V1.4 内容与运营页面", () => {
       data: {
         ...base.data,
         videos: [
-          { ...base.data.videos[0], durationMs: 12_000 },
+          { ...base.data.videos[0], durationMs: 4_000 },
           ...base.data.videos.slice(1),
         ],
       },
