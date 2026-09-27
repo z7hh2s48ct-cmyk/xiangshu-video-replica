@@ -23,6 +23,7 @@ import {
 } from "../api.admin";
 import { yuanInputToFen } from "../rechargePackageDisplay";
 import { AccountCreditPanel } from "./AccountCreditPanel";
+import { CustomerBenefitsSection } from "./CustomerBenefitsSection";
 import { CustomerDeviceSection } from "./CustomerDeviceSection";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { CopyCustomerId } from "./ui/CopyCustomerId";
@@ -748,6 +749,12 @@ function CustomerDetailView({
           userId={customer.user_id}
         />
       </div>
+      <CustomerBenefitsSection
+        key={`benefits:${customer.user_id}`}
+        onChanged={onChanged}
+        readOnly={readOnly}
+        userId={customer.user_id}
+      />
     </div>
   );
 }

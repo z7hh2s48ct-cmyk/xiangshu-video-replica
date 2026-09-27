@@ -32,6 +32,7 @@ const SOURCE_DOCUMENT_OPTIONS = [
   "COMPENSATION_APPROVAL",
   "REFUND_APPROVAL",
   "LEDGER_CORRECTION",
+  "OFFLINE_PAYMENT",
 ] as const;
 
 // 平台名一律走共享词典（ui/vocabulary.ts 的 PLATFORM_LABELS）。这里曾私刻一份

@@ -217,6 +217,37 @@ def _infer_pricing_scope(conn: psycopg.Connection, user_id: str) -> str:
     return "CUSTOMER_STANDARD" if registered else "INTERNAL"
 
 
+def _current_billing_snapshot(
+    conn: psycopg.Connection, *, user_id: str, pricing_scope: str
+) -> dict[str, int]:
+    """The billing snapshot frozen onto an admin-written order (base/charged/min/step)."""
+    snapshot = conn.execute(
+        "SELECT internal_base_unit_price_fen, min_recharge_fen, recharge_step_fen "
+        "FROM runtime_settings WHERE id = 1"
+    ).fetchone()
+    if not snapshot:
+        raise _http(503, "BILLING_SNAPSHOT_UNAVAILABLE", "Billing snapshot not configured.")
+
+    base_unit_price_fen = int(snapshot[0])
+    billing = {
+        "internal_base_unit_price_fen": base_unit_price_fen,
+        "charged_unit_price_fen": base_unit_price_fen,
+        "min_recharge_fen": int(snapshot[1]),
+        "recharge_step_fen": int(snapshot[2]),
+    }
+    if pricing_scope == "CUSTOMER_STANDARD":
+        custom_price = conn.execute(
+            "SELECT unit_price_fen FROM customer_unit_prices WHERE user_id = %s",
+            (user_id,),
+        ).fetchone()
+        if custom_price is not None:
+            billing = apply_customer_unit_price(
+                billing,
+                unit_price_fen=int(custom_price[0]),
+            )
+    return billing
+
+
 def _deny_admin_self_service(
     conn: psycopg.Connection,
     *,
@@ -527,31 +558,8 @@ def create_admin_adjustment(
         # Infer pricing scope from target user's activation status
         pricing_scope = _infer_pricing_scope(conn, user_id)
 
-        # Get current billing snapshot
-        snapshot = conn.execute(
-            "SELECT internal_base_unit_price_fen, min_recharge_fen, recharge_step_fen "
-            "FROM runtime_settings WHERE id = 1"
-        ).fetchone()
-        if not snapshot:
-            raise _http(503, "BILLING_SNAPSHOT_UNAVAILABLE", "Billing snapshot not configured.")
-
-        base_unit_price_fen = int(snapshot[0])
-        billing = {
-            "internal_base_unit_price_fen": base_unit_price_fen,
-            "charged_unit_price_fen": base_unit_price_fen,
-            "min_recharge_fen": int(snapshot[1]),
-            "recharge_step_fen": int(snapshot[2]),
-        }
-        if pricing_scope == "CUSTOMER_STANDARD":
-            custom_price = conn.execute(
-                "SELECT unit_price_fen FROM customer_unit_prices WHERE user_id = %s",
-                (user_id,),
-            ).fetchone()
-            if custom_price is not None:
-                billing = apply_customer_unit_price(
-                    billing,
-                    unit_price_fen=int(custom_price[0]),
-                )
+        billing = _current_billing_snapshot(conn, user_id=user_id, pricing_scope=pricing_scope)
+        base_unit_price_fen = billing["internal_base_unit_price_fen"]
         unit_price_fen = billing["charged_unit_price_fen"]
         min_recharge_fen = billing["min_recharge_fen"]
         recharge_step_fen = billing["recharge_step_fen"]

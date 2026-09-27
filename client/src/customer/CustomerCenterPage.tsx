@@ -130,6 +130,7 @@ const PAIR_STATE_LABEL: Record<LedgerPairState, string> = {
 const CREDIT_SOURCE_LABEL: Record<string, string> = {
   FREE_GRANT: "积分赠送",
   CREDIT_COMPENSATION: "积分补偿",
+  OFFLINE_PAYMENT: "套餐充值",
   zpay: "在线充值",
   wechat_native: "微信充值",
   activation_code: "账号激活",

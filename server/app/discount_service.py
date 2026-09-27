@@ -8,7 +8,8 @@
 - **R-A 成本泄露面**：折扣是售价侧概念（``user_price_fen × discount_rate``），本模块
   绝不触碰 ``cost_price_fen``；折后价计算只作用于售价分位。
 - **R-C 管理写契约**：折扣配置的写入是管理端操作（confirm + reason + Idempotency-Key +
-  audit_logs），本模块只提供**只读**查询；写路径归后续管理端任务。
+  audit_logs），本模块只提供**只读**查询；写路径在 ``recharge_packages``（套餐权益）与
+  ``customer_benefits``（手工折扣）。
 - **R-D 历史账目冻结**：客户泳道只读已冻结的 ``discount_rate_snapshot``（CW-076 在
   reserve 时落），改配置不重算历史。
 - **多折扣源互斥取优先级最高**（§2.3）：``priority`` 数值越大越优先，``get_best_discount``
@@ -17,9 +18,8 @@
 PostgreSQL 是客户泳道唯一真源，且运行时**无 ORM**（db_pg.py：psycopg3 + psycopg_pool
 only），故每个 PG 入口都期望一条活的 ``psycopg.Connection``（沿 api_key_service 先例）。
 
-状态（BILLING-OBS P1-3，2026-09）：本模块仍无生产调用点——消耗侧客户折扣**未接入**
-reserve/finalize（CW-076）。当前唯一生效的折扣是 ``customer_credit_pricing.config_json``
-的全局 ``discount_basis_points``（管理端「客户报价配置」页可编辑，受理时冻结进快照）。"""
+生产调用点：``billing_catalog.retail_snapshot`` 计价时取 ``get_best_discount``，与
+``customer_credit_pricing`` 的全局 ``discount_basis_points`` 合并取更优后冻结进快照。"""
 
 from __future__ import annotations
 
