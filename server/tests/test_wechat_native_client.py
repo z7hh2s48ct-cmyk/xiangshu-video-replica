@@ -949,5 +949,321 @@ def test_concurrent_cold_cache_reads_download_the_certificates_once(
     assert {certificate.serial_no for certificate in results} == {platform_serial}
 
 
+# --- 查单必须带 mchid ---------------------------------------------------------
+
+
+def test_query_order_sends_the_mandatory_mchid_and_signs_the_full_url(
+    platform_key: rsa.RSAPrivateKey,
+    platform_cert_pem: bytes,
+    platform_serial: str,
+    merchant_private_key: rsa.RSAPrivateKey,
+    merchant_config: WeChatMerchantConfig,
+) -> None:
+    """微信要求 ?mchid= 必填；签名串里的 URL 也必须含这段 query，否则 SIGN_ERROR。"""
+    body = json.dumps({"trade_state": "NOTPAY", "out_trade_no": "OUT_Q_MCHID"}).encode()
+    signed = _signed_response(platform_key, body, platform_serial)
+    opener = _RouteOpener(_query_routes(signed, platform_cert_pem, platform_serial))
+    client = WeChatNativeClient(opener=opener)
+
+    client.query_order(merchant=merchant_config, out_trade_no="OUT_Q_MCHID")
+
+    query = next(c for c in opener.calls if "/out-trade-no/" in c.full_url)
+    expected_path = f"/v3/pay/transactions/out-trade-no/OUT_Q_MCHID?mchid={merchant_config.mchid}"
+    assert query.full_url == WECHAT_API_BASE + expected_path
+    authorization = query.get_header("Authorization")
+    assert authorization is not None
+    signature = re.search(r'signature="([^"]+)"', authorization)
+    timestamp = re.search(r'timestamp="([^"]+)"', authorization)
+    nonce = re.search(r'nonce_str="([^"]+)"', authorization)
+    assert signature is not None and timestamp is not None and nonce is not None
+    message = build_request_signature_message(
+        method="GET",
+        url_path=expected_path,
+        timestamp=timestamp.group(1),
+        nonce=nonce.group(1),
+        body="",
+    )
+    assert verify_sha256_rsa(
+        public_key=merchant_private_key.public_key(),
+        signature_b64=signature.group(1),
+        message=message,
+    )
+
+
+# --- 微信支付公钥模式 ---------------------------------------------------------
+
+PUBLIC_KEY_ID = "PUB_KEY_ID_0114232134912410000000000000"
+
+
+@pytest.fixture(scope="module")
+def wechatpay_public_key_pem(platform_key: rsa.RSAPrivateKey) -> str:
+    """测试里复用平台私钥充当微信支付公钥对应的私钥。"""
+    return (
+        platform_key.public_key()
+        .public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+        .decode("ascii")
+    )
+
+
+@pytest.fixture(scope="module")
+def public_key_merchant(
+    merchant_config: WeChatMerchantConfig, wechatpay_public_key_pem: str
+) -> WeChatMerchantConfig:
+    return WeChatMerchantConfig(
+        appid=merchant_config.appid,
+        mchid=merchant_config.mchid,
+        serial_no=merchant_config.serial_no,
+        api_v3_key=merchant_config.api_v3_key,
+        private_key_pem=merchant_config.private_key_pem,
+        public_key_id=PUBLIC_KEY_ID,
+        public_key_pem=wechatpay_public_key_pem,
+    )
+
+
+def _settings_for(merchant: WeChatMerchantConfig, **overrides: str) -> dict[str, str]:
+    return {
+        "appid": merchant.appid,
+        "mchid": merchant.mchid,
+        "serial_no": merchant.serial_no,
+        "api_v3_key": merchant.api_v3_key,
+        "private_key": merchant.private_key_pem,
+        **overrides,
+    }
+
+
+def test_merchant_config_parses_the_public_key_pair(
+    merchant_config: WeChatMerchantConfig, wechatpay_public_key_pem: str
+) -> None:
+    parsed = merchant_config_from_settings(
+        _settings_for(
+            merchant_config, public_key_id=PUBLIC_KEY_ID, public_key=wechatpay_public_key_pem
+        )
+    )
+
+    assert parsed.public_key_id == PUBLIC_KEY_ID
+    assert parsed.public_key_pem == wechatpay_public_key_pem.strip()
+
+
+def test_merchant_config_without_public_key_stays_in_certificate_mode(
+    merchant_config: WeChatMerchantConfig,
+) -> None:
+    parsed = merchant_config_from_settings(
+        _settings_for(merchant_config, public_key_id="", public_key="")
+    )
+
+    assert parsed.public_key_id == "" and parsed.public_key_pem == ""
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"public_key_id": PUBLIC_KEY_ID}, id="id-without-key"),
+        pytest.param({"public_key": "__PEM__"}, id="key-without-id"),
+        pytest.param(
+            {"public_key_id": "0114232134912410", "public_key": "__PEM__"}, id="no-prefix"
+        ),
+        pytest.param(
+            {"public_key_id": PUBLIC_KEY_ID, "public_key": "-----BEGIN PUBLIC KEY-----\nxx"},
+            id="not-a-pem",
+        ),
+    ],
+)
+def test_merchant_config_rejects_a_half_or_broken_public_key(
+    merchant_config: WeChatMerchantConfig,
+    wechatpay_public_key_pem: str,
+    overrides: dict[str, str],
+) -> None:
+    """只填一半会让公钥签名的回调全部验签失败，必须在保存时就拒绝。"""
+    resolved = {
+        key: (wechatpay_public_key_pem if value == "__PEM__" else value)
+        for key, value in overrides.items()
+    }
+    with pytest.raises(ValueError):
+        merchant_config_from_settings(_settings_for(merchant_config, **resolved))
+
+
+def test_public_key_merchant_verifies_responses_without_platform_certificates(
+    platform_key: rsa.RSAPrivateKey,
+    public_key_merchant: WeChatMerchantConfig,
+    deployment: WeChatDeploymentConfig,
+) -> None:
+    """新商户没有平台证书：下单应答按 PUB_KEY_ID 用公钥验签，全程不碰 /v3/certificates。"""
+    body = json.dumps({"code_url": "weixin://wxpay/bizpayurl?pr=PUBKEY"}).encode()
+    signed = _signed_response(platform_key, body, PUBLIC_KEY_ID)
+    unavailable = HTTPError(WECHAT_API_BASE + CERTIFICATES_PATH, 404, "Not Found", {}, None)
+    opener = _RouteOpener({NATIVE_ORDER_PATH: signed, CERTIFICATES_PATH: unavailable})
+    client = WeChatNativeClient(opener=opener)
+
+    result = client.create_native_order(
+        merchant=public_key_merchant,
+        deployment=deployment,
+        out_trade_no="OUT_PUBKEY_001",
+        description="d",
+        amount_fen=100,
+    )
+
+    assert result.code_url == "weixin://wxpay/bizpayurl?pr=PUBKEY"
+    assert [c.full_url for c in opener.calls] == [WECHAT_API_BASE + NATIVE_ORDER_PATH]
+    # 切换期内微信按这个请求头决定用公钥体系签应答。
+    assert opener.calls[0].get_header("Wechatpay-serial") == PUBLIC_KEY_ID
+
+
+def test_certificate_merchant_does_not_send_the_public_key_header(
+    platform_key: rsa.RSAPrivateKey,
+    platform_cert_pem: bytes,
+    platform_serial: str,
+    merchant_config: WeChatMerchantConfig,
+    deployment: WeChatDeploymentConfig,
+) -> None:
+    body = json.dumps({"code_url": "weixin://x"}).encode()
+    signed = _signed_response(platform_key, body, platform_serial)
+    opener = _RouteOpener(_native_routes(signed, platform_cert_pem, platform_serial))
+    WeChatNativeClient(opener=opener).create_native_order(
+        merchant=merchant_config,
+        deployment=deployment,
+        out_trade_no="OUT_CERT_HDR",
+        description="d",
+        amount_fen=100,
+    )
+
+    order_request = next(c for c in opener.calls if NATIVE_ORDER_PATH in c.full_url)
+    assert order_request.get_header("Wechatpay-serial") is None
+
+
+def test_merchant_in_transition_still_verifies_certificate_signed_responses(
+    platform_key: rsa.RSAPrivateKey,
+    platform_cert_pem: bytes,
+    platform_serial: str,
+    public_key_merchant: WeChatMerchantConfig,
+    deployment: WeChatDeploymentConfig,
+) -> None:
+    """灰度期间两种签名混用：配了公钥后，平台证书签的应答照样能验。"""
+    body = json.dumps({"code_url": "weixin://mixed"}).encode()
+    signed = _signed_response(platform_key, body, platform_serial)
+    opener = _RouteOpener(_native_routes(signed, platform_cert_pem, platform_serial))
+
+    result = WeChatNativeClient(opener=opener).create_native_order(
+        merchant=public_key_merchant,
+        deployment=deployment,
+        out_trade_no="OUT_MIXED",
+        description="d",
+        amount_fen=100,
+    )
+
+    assert result.code_url == "weixin://mixed"
+
+
+@pytest.mark.parametrize("configured", [True, False], ids=["other-id", "no-public-key"])
+def test_unknown_public_key_id_is_refused_without_any_download(
+    platform_key: rsa.RSAPrivateKey,
+    public_key_merchant: WeChatMerchantConfig,
+    merchant_config: WeChatMerchantConfig,
+    configured: bool,
+) -> None:
+    merchant = public_key_merchant if configured else merchant_config
+    body = json.dumps({"trade_state": "NOTPAY", "out_trade_no": "OUT_PK_X"}).encode()
+    signed = _signed_response(platform_key, body, "PUB_KEY_ID_SOMEONE_ELSE")
+    opener = _RouteOpener({"/out-trade-no/": signed})
+
+    with pytest.raises(WeChatNativeError):
+        WeChatNativeClient(opener=opener).query_order(merchant=merchant, out_trade_no="OUT_PK_X")
+
+    assert all(CERTIFICATES_PATH not in c.full_url for c in opener.calls)
+
+
+def test_public_key_self_check_accepts_order_not_exist(
+    public_key_merchant: WeChatMerchantConfig,
+) -> None:
+    """ORDER_NOT_EXIST 只会在微信接受签名之后才返回，足以证明凭据有效。"""
+    body = json.dumps({"code": "ORDER_NOT_EXIST", "message": "订单不存在"}).encode()
+
+    def not_found(request: Request) -> HTTPError:
+        return HTTPError(request.full_url, 404, "Not Found", {}, io.BytesIO(body))
+
+    opener = _RouteOpener({"/out-trade-no/SELFCHECK": not_found})
+
+    WeChatNativeClient(opener=opener).check_public_key_credentials(public_key_merchant)
+
+    assert len(opener.calls) == 1
+    assert f"?mchid={public_key_merchant.mchid}" in opener.calls[0].full_url
+
+
+def test_public_key_self_check_surfaces_a_credential_error(
+    public_key_merchant: WeChatMerchantConfig,
+) -> None:
+    body = json.dumps({"code": "SIGN_ERROR", "message": "签名错误"}).encode()
+
+    def rejected(request: Request) -> HTTPError:
+        return HTTPError(request.full_url, 401, "Unauthorized", {}, io.BytesIO(body))
+
+    opener = _RouteOpener({"/out-trade-no/": rejected})
+
+    with pytest.raises(WeChatNativeError, match="SIGN_ERROR") as caught:
+        WeChatNativeClient(opener=opener).check_public_key_credentials(public_key_merchant)
+    assert caught.value.wechat_code == "SIGN_ERROR"
+
+
+# --- 证书下载限频 -------------------------------------------------------------
+
+
+def test_forged_serials_cannot_force_repeated_certificate_downloads(
+    platform_cert_pem: bytes, platform_serial: str, merchant_config: WeChatMerchantConfig
+) -> None:
+    """伪造回调可以随意编造 Wechatpay-Serial；限频期内未知序列号直接失败，不再下载。"""
+    opener = _RouteOpener(
+        {CERTIFICATES_PATH: _certificates_response(API_V3_KEY, platform_cert_pem, platform_serial)}
+    )
+    clock = _FakeClock()
+    manager = PlatformCertificateManager(
+        opener=opener, min_refresh_interval_seconds=60.0, clock=clock
+    )
+    manager.get_certificate(merchant_config, platform_serial)
+
+    for index in range(20):
+        with pytest.raises(WeChatNativeError):
+            manager.get_certificate(merchant_config, f"FORGED-{index}")
+    assert len(opener.calls) == 1
+    # 已知序列号不受影响。
+    assert manager.get_certificate(merchant_config, platform_serial).serial_no == platform_serial
+
+    clock.advance(61.0)
+    with pytest.raises(WeChatNativeError):
+        manager.get_certificate(merchant_config, "FORGED-after-interval")
+    assert len(opener.calls) == 2
+
+
+def test_failed_downloads_are_rate_limited_too(merchant_config: WeChatMerchantConfig) -> None:
+    """微信不可用时不能每个回调都再撞一次 10 秒超时。"""
+    opener = _RouteOpener({CERTIFICATES_PATH: TimeoutError("timed out")})
+    clock = _FakeClock()
+    manager = PlatformCertificateManager(opener=opener, clock=clock)
+
+    for _ in range(5):
+        with pytest.raises(WeChatNativeError):
+            manager.get_certificate(merchant_config, "ANY-SERIAL")
+
+    assert len(opener.calls) == 1
+
+
+def test_stale_certificate_is_served_when_the_refresh_fails(
+    platform_cert_pem: bytes, platform_serial: str, merchant_config: WeChatMerchantConfig
+) -> None:
+    """TTL 到期后下载失败：已验真过的旧证书继续可用，回调不因一次网络抖动全部 503。"""
+    outcomes: list[object] = [
+        _certificates_response(API_V3_KEY, platform_cert_pem, platform_serial),
+        TimeoutError("timed out"),
+    ]
+    opener = _RouteOpener({CERTIFICATES_PATH: lambda _request: outcomes.pop(0)})
+    clock = _FakeClock()
+    manager = PlatformCertificateManager(opener=opener, cache_ttl_seconds=100.0, clock=clock)
+    manager.get_certificate(merchant_config, platform_serial)
+
+    clock.advance(200.0)
+    certificate = manager.get_certificate(merchant_config, platform_serial)
+
+    assert certificate.serial_no == platform_serial
+    assert len(opener.calls) == 2
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

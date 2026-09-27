@@ -149,6 +149,8 @@ describe("PaymentSettingsSection (A-01/A-03)", () => {
             serial_no: "",
             api_v3_key: "",
             private_key: "",
+            public_key_id: "",
+            public_key: "",
           },
         },
         "保存默认通道",
@@ -198,6 +200,8 @@ describe("PaymentSettingsSection (A-01/A-03)", () => {
             serial_no: "",
             api_v3_key: "",
             private_key: "",
+            public_key_id: "",
+            public_key: "",
           },
         },
         "保存微信官方设置",
@@ -324,6 +328,68 @@ describe("PaymentSettingsSection 凭据自检", () => {
       await screen.findByText("凭据自检通过（平台证书 2 张）。"),
     ).toBeInTheDocument();
     expect(selfCheckWechatNative).toHaveBeenCalledTimes(1);
+  });
+
+  it("公钥模式自检通过时不展示平台证书数量", async () => {
+    vi.mocked(selfCheckWechatNative).mockResolvedValue({
+      ok: true,
+      code: null,
+      message: "商户凭据有效：签名被微信接受（微信支付公钥模式）。",
+      verification_mode: "public_key",
+    });
+    render(<PaymentSettingsSection />);
+    fireEvent.click(await screen.findByRole("button", { name: "凭据自检" }));
+    expect(
+      await screen.findByText("凭据自检通过（微信支付公钥模式）。"),
+    ).toBeInTheDocument();
+  });
+
+  it("已保存的微信支付公钥回填，并随商户配置一起提交", async () => {
+    vi.mocked(getCustomerPaymentSettings).mockResolvedValue({
+      ...controlSettings,
+      active_provider: "wechat_native",
+      wechat_native: {
+        provider: "wechat_native",
+        configured: true,
+        config: {
+          appid: "app-live",
+          mchid: "mch-live",
+          serial_no: "SERIAL01",
+          api_v3_key: "********",
+          private_key: "********",
+          public_key_id: "PUB_KEY_ID_0001",
+          public_key: "-----BEGIN PUBLIC KEY-----",
+        },
+      },
+    } as ControlSettings);
+    vi.mocked(adminWrite).mockResolvedValue({
+      provider: "wechat_native",
+      configured: true,
+      config: {},
+    });
+    render(<PaymentSettingsSection />);
+    expect(await screen.findByLabelText("微信支付公钥 ID（可选）")).toHaveValue(
+      "PUB_KEY_ID_0001",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存微信官方设置" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "确认保存微信官方设置" }),
+    );
+    await waitFor(() =>
+      expect(adminWrite).toHaveBeenCalledWith(
+        "/api/control/settings/customer-payments/wechat-native",
+        {
+          config: expect.objectContaining({
+            public_key_id: "PUB_KEY_ID_0001",
+            public_key: "-----BEGIN PUBLIC KEY-----",
+          }),
+        },
+        "保存微信官方设置",
+        "保存微信官方设置失败。",
+        expect.any(String),
+        "PATCH",
+      ),
+    );
   });
 
   it("自检失败时透出微信侧错误信息", async () => {

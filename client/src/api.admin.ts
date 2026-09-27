@@ -130,6 +130,7 @@ export type WechatSelfCheckResult = {
   ok: boolean;
   code: string | null;
   message: string;
+  verification_mode?: "public_key" | "platform_certificate";
   platform_certificates?: number;
 };
 /**

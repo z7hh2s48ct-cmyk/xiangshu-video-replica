@@ -341,6 +341,7 @@ def self_check_wechat_settings(
     response.headers["Cache-Control"] = "no-store"
     from app.wechat_native_client import (
         PlatformCertificateManager,
+        WeChatNativeClient,
         WeChatNativeError,
         merchant_config_from_settings,
     )
@@ -351,6 +352,19 @@ def self_check_wechat_settings(
         merchant = merchant_config_from_settings(settings)
     except ValueError as exc:
         return {"ok": False, "code": "WECHAT_CONFIG_INVALID", "message": str(exc)}
+    if merchant.public_key_id:
+        # 公钥模式的商户没有平台证书可下载（微信回“无可用的平台证书”），改用
+        # 一次必然查无此单的查询来证明签名三件套被微信接受。
+        try:
+            WeChatNativeClient().check_public_key_credentials(merchant)
+        except WeChatNativeError as exc:
+            return {"ok": False, "code": "WECHAT_SELF_CHECK_FAILED", "message": str(exc)}
+        return {
+            "ok": True,
+            "code": None,
+            "message": "商户凭据有效：签名被微信接受（微信支付公钥模式）。",
+            "verification_mode": "public_key",
+        }
     try:
         certificates = PlatformCertificateManager().check_credentials(merchant)
     except WeChatNativeError as exc:
@@ -359,6 +373,7 @@ def self_check_wechat_settings(
         "ok": True,
         "code": None,
         "message": "商户凭据有效：签名被微信接受，平台证书解密成功。",
+        "verification_mode": "platform_certificate",
         "platform_certificates": certificates,
     }
 
@@ -381,6 +396,7 @@ def save_wechat_settings(
                 422,
                 detail=(
                     "微信商户配置无效：请检查必填项、32 字节 API v3 密钥及 RSA 私钥；"
+                    "微信支付公钥 ID（PUB_KEY_ID_ 开头）与公钥须成对填写；"
                     "有待支付订单时不能更换商户号或 AppID。"
                 ),
             ) from exc
@@ -431,6 +447,7 @@ def save_payment_provider(
                     422,
                     detail=(
                         "微信商户配置无效，请检查商户信息、API v3 密钥和私钥；"
+                        "微信支付公钥 ID 与公钥须成对填写；"
                         "待支付订单未结束时不能更换商户身份。"
                     ),
                 ) from exc

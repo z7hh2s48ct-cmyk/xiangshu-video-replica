@@ -36,6 +36,8 @@ const emptyWechat = {
   serial_no: "",
   api_v3_key: "",
   private_key: "",
+  public_key_id: "",
+  public_key: "",
 };
 
 /** Merchant secrets are never prefilled; blank secret fields retain their saved values. */
@@ -78,6 +80,8 @@ export function PaymentSettingsSection({
           appid: next.wechat_native?.config.appid ?? "",
           mchid: next.wechat_native?.config.mchid ?? "",
           serial_no: next.wechat_native?.config.serial_no ?? "",
+          public_key_id: next.wechat_native?.config.public_key_id ?? "",
+          public_key: next.wechat_native?.config.public_key ?? "",
         });
       })
       .catch((cause) => {
@@ -115,7 +119,9 @@ export function PaymentSettingsSection({
       const result = await selfCheckWechatNative();
       if (result.ok)
         setNotice(
-          `凭据自检通过（平台证书 ${result.platform_certificates ?? 0} 张）。`,
+          result.verification_mode === "public_key"
+            ? "凭据自检通过（微信支付公钥模式）。"
+            : `凭据自检通过（平台证书 ${result.platform_certificates ?? 0} 张）。`,
         );
       else setError(`凭据自检未通过：${result.message}`);
     } catch (cause) {
@@ -380,6 +386,34 @@ export function PaymentSettingsSection({
               }
             />
           </label>
+          <label>
+            微信支付公钥 ID（可选）
+            <input
+              disabled={disabled}
+              placeholder="PUB_KEY_ID_ 开头；未使用微信支付公钥则留空"
+              value={wechat.public_key_id}
+              onChange={(event) =>
+                setWechat({ ...wechat, public_key_id: event.target.value })
+              }
+            />
+          </label>
+          <label>
+            微信支付公钥（PEM，可选）
+            <textarea
+              autoComplete="off"
+              disabled={disabled}
+              rows={4}
+              placeholder="粘贴商户平台「API 安全」下载的微信支付公钥"
+              value={wechat.public_key}
+              onChange={(event) =>
+                setWechat({ ...wechat, public_key: event.target.value })
+              }
+            />
+          </label>
+          <p className="admin-hint">
+            新开通的商户号只能使用微信支付公钥，请与公钥 ID
+            成对填写；两项都留空则使用平台证书。
+          </p>
           <p className="admin-hint">
             保存默认通道时会一起保存当前商户配置。回调地址使用服务端
             PUBLIC_BASE_URL，需配置可访问的 HTTPS 域名。
