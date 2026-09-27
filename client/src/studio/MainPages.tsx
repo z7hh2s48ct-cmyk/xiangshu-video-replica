@@ -314,11 +314,23 @@ export function WorkbenchPage() {
   );
   const featuredVideos = [...(data.homepageVideos ?? [])]
     .filter((video) => video.homepageFeatured === true)
-    .sort(
-      (left, right) =>
+    .sort((left, right) => {
+      if (left.homepageRank !== null && left.homepageRank !== undefined) {
+        if (right.homepageRank === null || right.homepageRank === undefined)
+          return -1;
+        if (left.homepageRank !== right.homepageRank)
+          return left.homepageRank - right.homepageRank;
+      } else if (
+        right.homepageRank !== null &&
+        right.homepageRank !== undefined
+      ) {
+        return 1;
+      }
+      return (
         right.likes - left.likes ||
-        left.id.localeCompare(right.id, undefined, { numeric: true }),
-    )
+        left.id.localeCompare(right.id, undefined, { numeric: true })
+      );
+    })
     .slice(0, 5);
   const beginViralCreation = async (
     video: StudioVideo,

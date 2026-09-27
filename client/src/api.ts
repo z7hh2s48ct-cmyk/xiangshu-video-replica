@@ -7569,6 +7569,7 @@ export type ViralSearchTimeRange = "all" | "day" | "week" | "half_year";
 
 export type ViralVideoItem = {
   homepageFeatured?: boolean;
+  homepageRank?: number | null;
   platform: ViralPlatform;
   videoId: string;
   category: string;

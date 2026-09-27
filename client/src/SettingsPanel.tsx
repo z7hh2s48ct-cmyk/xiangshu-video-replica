@@ -121,7 +121,7 @@ const PROVIDER_FORMS: Record<ProviderName, ProviderFormSpec> = {
   },
   apilio: {
     title: "模型服务",
-    note: "视频分析模型留空则用服务端默认值；上游下线某个模型时可在此直接改名，不必等发版",
+    note: "视频分析模型留空则用服务端默认值；主模型限流或明确下线时自动切换一次。备选留空用内置模型，最多配置一个；填写 disabled 可关闭切换",
     fields: [
       { name: "api_key", label: "图像模型 API Key", secret: true },
       {
@@ -133,6 +133,11 @@ const PROVIDER_FORMS: Record<ProviderName, ProviderFormSpec> = {
         name: "analysis_model",
         label: "视频分析模型（可选）",
         placeholder: "gemini-3.8-flash",
+      },
+      {
+        name: "analysis_model_fallbacks",
+        label: "备选视频分析模型（可选，最多一个）",
+        placeholder: "gemini-3.7-flash",
       },
     ],
   },

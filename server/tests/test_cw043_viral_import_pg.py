@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator
+from types import SimpleNamespace
 from typing import Any, cast
 
 # 审计写入器在导入期即要求 HMAC key（enqueue 走 insert_audit）；先于 app 导入设置。
@@ -61,6 +62,35 @@ from app.viral_import import (
 )
 
 CW043_VIRAL_IMPORT_TEST_DB = "cw043_viral_import_test"
+
+
+@pytest.mark.parametrize("duration_ms", [0, 3_000, 16_000])
+def test_replica_import_rejects_out_of_range_duration(monkeypatch, duration_ms):
+    from app import viral_import
+    from app.auth import CurrentUser
+
+    monkeypatch.setattr(viral_import, "require_viral_import_enabled", lambda _conn: None)
+    monkeypatch.setattr(viral_import, "require_not_auditor", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        viral_import,
+        "get_viral_video",
+        lambda *_args, **_kwargs: SimpleNamespace(duration_ms=duration_ms),
+    )
+    monkeypatch.setattr(
+        viral_import, "viral_video_availability", lambda *_args, **_kwargs: "available"
+    )
+    actor = CurrentUser(id="u1", username="u1", display_name="用户", role="customer")
+    request = viral_import.ViralImportRequest(
+        platform="douyin", videoId="short-video", purpose="replica"
+    )
+
+    with pytest.raises(ViralImportError) as error:
+        viral_import.enqueue_viral_import_task(
+            object(), actor=actor, request=request, idempotency_key="short-video"
+        )
+
+    assert error.value.status_code == 422
+    assert error.value.detail["code"] == "VIRAL_IMPORT_DURATION_OUT_OF_RANGE"
 
 
 @pytest.mark.parametrize(

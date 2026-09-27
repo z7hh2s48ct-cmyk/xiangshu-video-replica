@@ -426,7 +426,7 @@ def collect_viral_now(
 
 class ViralCurationRequest(AdminWriteContract):
     model_config = ConfigDict(extra="forbid")
-    action: Literal["feature", "unfeature", "delete"]
+    action: Literal["feature", "unfeature", "delete", "pin", "unpin"]
 
 
 # 视频库与管理端搜索共用的行投影：viral_videos 左联云端媒体准备与单条转存
@@ -437,17 +437,20 @@ _COLLECTED_VIRAL_ROW_SELECT = """
         v.verified,v.duration_ms,
         v.likes,v.comments,v.shares,v.collects,v.published_at,v.created_at,
         v.published_display,v.like_display,v.tags_json,
-        v.homepage_featured,v.collection_published,v.cover_key,
+        v.homepage_featured,v.collection_published,v.homepage_rank,v.cover_key,
         v.native_json::jsonb->>'_statistics_checked_at' AS statistics_checked_at,
         v.native_json::jsonb->>'_statistics_retry_at' AS statistics_retry_at,
         (COALESCE(v.cover_url,'') != '') AS cover_required,
         COALESCE(m.status,'NOT_STARTED') AS media_status,m.storage_uri,
-        r.status AS archive_status,r.error_message_redacted AS archive_error
+        r.status AS archive_status,r.error_message_redacted AS archive_error,
+        COALESCE(vis.status,'AVAILABLE') AS availability
     FROM viral_videos v LEFT JOIN viral_media_preparations m
         ON m.platform=v.platform AND m.video_id=v.video_id AND m.media_kind='video'
     LEFT JOIN viral_refresh_tasks r ON r.platform=v.platform AND r.sort='latest'
         AND r.collection_config_json::jsonb->>'kind'='single_archive'
         AND r.collection_config_json::jsonb->>'video_id'=v.video_id
+    LEFT JOIN viral_video_visibility vis
+        ON vis.platform=v.platform AND vis.video_id=v.video_id
 """
 
 # 列表状态分段的服务端口径：与前端 archiveLabel 同一套判定，避免两处漂移。
@@ -541,6 +544,7 @@ _COLLECTED_VIDEO_COLUMNS = (
     "tags_json",
     "homepage_featured",
     "collection_published",
+    "homepage_rank",
     "cover_key",
     "statistics_checked_at",
     "statistics_retry_at",
@@ -549,6 +553,7 @@ _COLLECTED_VIDEO_COLUMNS = (
     "storage_uri",
     "archive_status",
     "archive_error",
+    "availability",
 )
 
 
@@ -1131,14 +1136,17 @@ def curate_collected_viral_video(
 
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         row = conn.execute(
-            "SELECT cover_url,cover_key,category FROM viral_videos "
+            "SELECT cover_url,cover_key,homepage_featured,category FROM viral_videos "
             "WHERE platform=%s AND video_id=%s AND deleted_at IS NULL FOR UPDATE",
             (platform, video_id),
         ).fetchone()
         if row is None:
             raise http_error(404, "VIRAL_VIDEO_NOT_FOUND", "视频不存在或已删除。")
+        cover_url, cover_key, homepage_featured, category = row
+        if payload.action in ("pin", "unpin") and not homepage_featured:
+            raise http_error(409, "VIRAL_VIDEO_NOT_FEATURED", "只有已展示到首页的视频才能置顶。")
         if payload.action == "feature":
-            if str(row[2] or "") == LINK_IMPORT_CATEGORY:
+            if str(category or "") == LINK_IMPORT_CATEGORY:
                 # 链接导入是用户自己的项目素材，不进首页内容池；否则它会绕过采集
                 # 侧的质量门槛直接出现在所有客户的爆款网格里。
                 raise http_error(
@@ -1155,8 +1163,8 @@ def curate_collected_viral_video(
                 raise http_error(
                     409, "VIRAL_MEDIA_NOT_READY", "视频和封面归档完成后才能展示到首页。"
                 )
-            if row[0] and not row[1]:
-                if prepared_cover is None or prepared_cover[0] != row[0]:
+            if cover_url and not cover_key:
+                if prepared_cover is None or prepared_cover[0] != cover_url:
                     raise http_error(
                         409, "VIRAL_COVER_NOT_READY", "视频已归档，但封面暂时无法获取，请稍后重试。"
                     )
@@ -1173,15 +1181,38 @@ def curate_collected_viral_video(
                 raise http_error(
                     409, "VIRAL_VIDEO_UNAVAILABLE", "该视频已下架或隐藏，请先恢复可用状态。"
                 )
+        # 置顶序（T4）：只有 pin 写入（取当前最小序-1，可叠加置顶），
+        # unpin/unfeature/delete 归还 NULL=回到默认顺序。展示到首页不写序，
+        # 未置顶的展示视频按既有 hot/latest 默认序排在置顶视频之后。
+        next_rank: int | None = None
+        if payload.action == "pin":
+            # 不同视频的行锁互不冲突；固定事务锁让并发置顶按提交顺序分配唯一序号。
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (202609260001,))
+            min_rank = conn.execute(
+                "SELECT COALESCE(MIN(homepage_rank),1)-1 FROM viral_videos "
+                "WHERE deleted_at IS NULL AND homepage_featured=1"
+            ).fetchone()
+            assert min_rank is not None  # 聚合查询恒有一行
+            next_rank = int(min_rank[0])
+        # pin/unpin 不改变展示状态（前置守卫已确保处于展示中）。
+        featured_value = (
+            1
+            if payload.action == "feature"
+            else int(homepage_featured)
+            if payload.action in ("pin", "unpin")
+            else 0
+        )
         conn.execute(
             """UPDATE viral_videos SET homepage_featured=%s,
                 collection_published=CASE WHEN %s THEN 1 ELSE collection_published END,
-                deleted_at=CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE deleted_at END
+                deleted_at=CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE deleted_at END,
+                homepage_rank=%s
             WHERE platform=%s AND video_id=%s""",
             (
-                int(payload.action == "feature"),
+                featured_value,
                 payload.action == "feature",
                 payload.action == "delete",
+                next_rank,
                 platform,
                 video_id,
             ),
@@ -1206,7 +1237,8 @@ def curate_collected_viral_video(
         return {
             "platform": platform,
             "video_id": video_id,
-            "homepage_featured": payload.action == "feature",
+            "homepage_featured": bool(featured_value),
+            "homepage_rank": next_rank,
             "deleted": payload.action == "delete",
         }
 

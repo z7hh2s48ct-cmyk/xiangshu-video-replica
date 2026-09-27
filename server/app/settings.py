@@ -470,6 +470,10 @@ def validate_provider_config(provider: ProviderName, config: dict[str, str]) -> 
         raise ValueError(f"missing required setting: {', '.join(missing)}")
     if provider == "tikhub":
         _validate_tikhub_backup_channel(config)
+    if provider == "apilio":
+        from app.analysis import parse_analysis_fallback_models
+
+        parse_analysis_fallback_models(config.get("analysis_model_fallbacks"))
 
 
 def _validate_tikhub_backup_channel(config: dict[str, str]) -> None:

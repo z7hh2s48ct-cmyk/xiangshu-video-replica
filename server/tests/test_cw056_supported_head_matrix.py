@@ -83,8 +83,9 @@ REPO_ROOT = SERVER_DIR.parent
 # main 链尾（20260923T1200_admin_refund_adjustment）之上；上线评审 P1-1 的
 # 20260924T0000_wechat_transaction_unique、P1-2 的 20260924T0100_oral_task_submitted_at
 # 与 20260924T0200_customer_oral_task_visibility 再依次叠加其上；
+# 20260926T0000_viral_homepage_rank（爆款首页策展排行）与
 # 20260925T1400_api_metadata_pending_write（api_metadata 允许在 PENDING 期写入的
-# 追加修复）再叠加于链尾，故链尾为该值。
+# 追加修复）再依次叠加于链尾，故链尾为该值。
 HEAD_REVISION = "20260925T1400_api_metadata_pending_write"
 
 # 最后一个已发布（受支持）起点。其后的 056…090 与本迁移尚未随任何受支持版本发布，
@@ -153,7 +154,7 @@ HEAD_SCHEMA_COUNTS = {
     # 不加表 / 列 / 索引 / 触发器，故本字典与表名全集不变；digest 进
     # pg_get_functiondef 文本，必然重算（见下）。
     "check_constraints": 323,
-    "columns": 1225,
+    "columns": 1226,
     "foreign_keys": 195,
     "identity_columns": 0,
     "jsonb_columns": 6,
@@ -175,6 +176,7 @@ HEAD_SCHEMA_COUNTS = {
 # partial_indexes 不变；时间戳走 sa.Text()，timestamptz_columns 不变。
 # CW-075 090 的增量：本表名集追加 customer_discounts（main 链尾迁移 090 新建的表，
 # 已 re-linearize 到 main 现头 089 之上：089→090）。HEAD_SCHEMA_COUNTS 与
+# T4 置顶序追加 viral_videos.homepage_rank：columns +1，digest 经 --print-schema 重算。
 # HEAD_SCHEMA_DIGEST 已随之重算为 090 的真实值——它们是全局 post-linearization 不变量：
 # CW-078 折叠 089 时在本地 PG 探针重算过一次（digest 8fe43e16），CW-075 折叠 090 后沿
 # 同一先例（postgres:16-alpine，与 CI pg-fixture 同主版本）再重算一次。故 B 组真实 PG
@@ -356,6 +358,11 @@ HEAD_TABLE_NAMES = (
 #   不加表不加索引，digest 随之重算。
 # - 20260925T1400_api_metadata_pending_write（计费触发器与 api_metadata 相撞的追加修复）：
 #   仅替换 billing_refuse_fact_rewrite() 函数体，结构与计数全不变，digest 随函数文本重算。
+# - 20260926T0000_viral_homepage_rank（爆款首页策展排序，来自 main）：viral_videos 增加
+#   homepage_rank（可空 Integer，无回填，downgrade 直接删列）——columns +1；不加表、
+#   不加索引、不加约束，digest 随之重算。本分支的 20260925T1400 重挂于其后（见该迁移
+#   docstring），链尾仍是 20260925T1400，但链上新增了这一层，故下面三个字面量按
+#   「合并后新链」重算。
 # digest/counts 以 scripts/ci/migration_manifest.py --print-schema 于 postgres:16 重算
 # （合并后的新 head：sub_account_permissions + 三个 analysis 迁移 + viral 搜索发现表
 #  + main 的 MATERIAL-UX tags_json 列 + REFUND 调账迁移 + 1800 垫片 + 交易号唯一
@@ -363,7 +370,7 @@ HEAD_TABLE_NAMES = (
 #  两侧原来的 digest 都不能用——本分支那条是接在 viral 之后的旧链、main 那条只到
 #  MATERIAL-UX，合并后 head 变成接在 MATERIAL-UX 之后的本分支迁移，约束文本随之变化，
 #  digest 必然要重算。由 scripts/ci/migration_manifest.py --print-schema 在 PG 上重算后粘贴。
-HEAD_SCHEMA_DIGEST = "513c610f3aa60fdb6af0ce4f2306a589a8a3d885e13744b7ed846e9e17ab888d"
+HEAD_SCHEMA_DIGEST = "4664d29b30f58a9607ce0f6e2b7f11d74f1c6d9b50f3d56c70380b831d202dde"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

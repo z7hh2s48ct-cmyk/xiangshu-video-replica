@@ -253,6 +253,56 @@ def test_collection_meter_counts_actual_calls_and_preserves_batch(client, route_
         assert sum(row[1] is None for row in rows) == 1
 
 
+def test_collection_meter_records_supplier_usage_without_customer_success(
+    client, route_state, monkeypatch
+):
+    from app.billing_meter import collection_billing_context
+    from app.viral_collection_billing import create_collection_batch, settle_collection_charges
+    from app.viral_tikhub import ViralSourceClient, ViralSourceError
+
+    user = account(client, "failed_collection_response")[1]
+    with psycopg.connect(route_state) as raw:
+        raw.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_credits,unit_cost_fen) "
+            "VALUES ('viral_data',true,3,2)"
+        )
+        credit_lot(raw, user, key="failed-collection-funds", credits=100, amount_fen=100)
+        batch = create_collection_batch(
+            BusinessConnection.postgres(raw), platform="douyin", config={}, user_ids=[user]
+        )
+
+    class FailedBusinessResponseTransport:
+        def request(self, method, url, *, headers, body=None):
+            return json.dumps({"code": 429, "message": "rate limited"}).encode()
+
+    monkeypatch.setattr("app.viral_tikhub.time.sleep", lambda _seconds: None)
+    source = ViralSourceClient(api_key="test-key", transport=FailedBusinessResponseTransport())
+    with collection_billing_context(batch), pytest.raises(ViralSourceError):
+        source.douyin_search(keyword="别墅")
+
+    assert settle_collection_charges() == 0
+    with psycopg.connect(route_state) as raw:
+        operations = raw.execute(
+            "SELECT state,actual_units FROM billing_operations WHERE collection_batch_id=%s",
+            (batch,),
+        ).fetchall()
+        attempts = raw.execute(
+            "SELECT a.state,a.usage,a.cost_fen FROM billing_attempts a "
+            "JOIN billing_operations o ON o.id=a.operation_id WHERE o.collection_batch_id=%s",
+            (batch,),
+        ).fetchall()
+        assert operations == [("FAILED", 0)] * 3
+        assert attempts == [("ACTUAL", 1, 2)] * 3
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM viral_collection_charges WHERE request_id IN "
+                "(SELECT id FROM billing_operations WHERE collection_batch_id=%s)",
+                (batch,),
+            ).fetchone()[0]
+            == 0
+        )
+
+
 def test_expired_collection_call_becomes_unknown_and_late_response_cannot_charge(
     client, route_state, monkeypatch
 ):
@@ -1457,14 +1507,21 @@ def test_douyin_refresh_records_metered_provider_call(client, route_state):
     ]
 
 
-def test_failover_records_platform_cost_only_for_the_successful_channel(client, route_state):
-    """主通道失败自动切备用：批次成本只记成功那一次，失败尝试为 0 用量."""
+def test_failover_charges_customer_only_for_the_successful_channel(client, route_state):
+    """主通道失败自动切备用：客户侧只认成功那一次，失败尝试不产生客户用量.
+
+    供应商侧另算：物理外呼拿到了响应（哪怕是失败信封）就据实确认供应商成本，
+    与 429/5xx 原地重试的口径一致（每次物理外呼独立过一次计量）。
+    """
     from test_viral_tikhub import FakeTransport, _douyin_search_payload
 
     from app.billing_meter import collection_billing_context
     from app.viral_collection_billing import create_collection_batch
-    from app.viral_tikhub import ViralSourceClient
+    from app.viral_tikhub import ViralSourceClient, _reset_channel_cooldowns
 
+    # 冷却表按"入口+凭据"指纹跨用例共享：同进程里前面的失败用例会把主通道
+    # 打进 120s 冷却，本轮就会只剩备用通道可试（失效的不是本用例要测的择优）。
+    _reset_channel_cooldowns()
     _, uid = account(client)
     with psycopg.connect(route_state) as raw:
         conn = BusinessConnection.postgres(raw)
@@ -1490,7 +1547,10 @@ def test_failover_records_platform_cost_only_for_the_successful_channel(client, 
     attempts = {str(row[0]): row for row in rows}
     assert set(attempts) == {"FAILED", "SUCCEEDED"}
     failed = attempts["FAILED"]
-    assert (failed[2], failed[3], failed[1]) == (None, None, Decimal(0))
+    # 客户侧：失败尝试 0 单位（预留全额释放）。
+    assert failed[1] == Decimal(0)
+    # 供应商侧：主通道确实回了一个失败信封，按物理外呼据实计入平台成本。
+    assert (failed[2], failed[3]) == (Decimal(1), Decimal("0.5"))
     succeeded = attempts["SUCCEEDED"]
     assert (succeeded[2], succeeded[3], succeeded[1]) == (
         Decimal(1),

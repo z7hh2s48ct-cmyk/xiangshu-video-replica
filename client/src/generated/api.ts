@@ -11918,7 +11918,7 @@ export interface components {
        * Action
        * @enum {string}
        */
-      action: "feature" | "unfeature" | "delete";
+      action: "feature" | "unfeature" | "delete" | "pin" | "unpin";
     };
     /**
      * ViralDetailBilling
@@ -12319,6 +12319,8 @@ export interface components {
        * @default false
        */
       homepageFeatured: boolean;
+      /** Homepagerank */
+      homepageRank?: number | null;
       /** Platform */
       platform: string;
       /** Videoid */

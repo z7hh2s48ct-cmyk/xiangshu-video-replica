@@ -1109,7 +1109,7 @@ describe("V1.4 内容与运营页面", () => {
     );
   });
 
-  it("爆款详情移除复刻且仅音频来源可交给文案提取", async () => {
+  it("时长未知的爆款详情不提供去复刻，仅音频来源可交给文案提取", async () => {
     createViralImportTask.mockResolvedValue({
       taskId: "audio-import",
       status: "SUCCEEDED",
@@ -1149,6 +1149,105 @@ describe("V1.4 内容与运营页面", () => {
     );
     expect(value.navigate).toHaveBeenCalledWith(
       "copy",
+      expect.objectContaining({ returnTo: "viral-detail" }),
+    );
+  });
+
+  it("超过15秒的爆款详情不提供去复刻入口", async () => {
+    const base = studio();
+    const value = studio({
+      data: {
+        ...base.data,
+        videos: [
+          { ...base.data.videos[0], durationMs: 88_000 },
+          ...base.data.videos.slice(1),
+        ],
+      },
+      state: {
+        ...base.state,
+        page: "viral-detail",
+        selectedVideoId: "dy-1",
+      },
+    });
+    useStudio.mockReturnValue(value);
+    render(<ViralDetailPage />);
+
+    expect(
+      screen.queryByRole("button", { name: /复刻/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("低于4秒的爆款详情不提供去复刻入口", () => {
+    const base = studio();
+    const value = studio({
+      data: {
+        ...base.data,
+        videos: [
+          { ...base.data.videos[0], durationMs: 3_000 },
+          ...base.data.videos.slice(1),
+        ],
+      },
+      state: {
+        ...base.state,
+        page: "viral-detail",
+        selectedVideoId: "dy-1",
+      },
+    });
+    useStudio.mockReturnValue(value);
+    render(<ViralDetailPage />);
+
+    expect(
+      screen.queryByRole("button", { name: /复刻/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("4–15秒的爆款详情提供去复刻并带入参考素材", async () => {
+    createViralImportTask.mockResolvedValue({
+      taskId: "replica-import",
+      status: "SUCCEEDED",
+      projectId: "replica-project",
+      sourceAssetId: "replica-asset",
+      mediaKind: "video",
+      canTranscribe: true,
+      canAnalyze: true,
+    });
+    const base = studio();
+    const value = studio({
+      review: false,
+      data: {
+        ...base.data,
+        videos: [
+          { ...base.data.videos[0], durationMs: 4_000 },
+          ...base.data.videos.slice(1),
+        ],
+      },
+      state: {
+        ...base.state,
+        page: "viral-detail",
+        selectedVideoId: "dy-1",
+      },
+    });
+    useStudio.mockReturnValue(value);
+    render(<ViralDetailPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "去复刻" }));
+    await waitFor(() =>
+      expect(createViralImportTask).toHaveBeenCalledWith(
+        "douyin",
+        "native-dy-1",
+        "replica",
+        expect.any(String),
+      ),
+    );
+    await waitFor(() =>
+      expect(value.patchDraft).toHaveBeenCalledWith({
+        projectId: "replica-project",
+        sourceId: "replica-asset",
+        sourceAssetId: "replica-asset",
+      }),
+    );
+    expect(value.navigate).toHaveBeenCalledWith(
+      "replica",
       expect.objectContaining({ returnTo: "viral-detail" }),
     );
   });
@@ -1223,6 +1322,27 @@ describe("V1.4 内容与运营页面", () => {
     // 下载不产生服务端导入任务，也不进入文案工坊。
     expect(createViralImportTask).not.toHaveBeenCalled();
     expect(value.navigate).not.toHaveBeenCalled();
+  });
+
+  it("下载遇余额不足时打开钱包侧栏并透传服务端文案", async () => {
+    viralCacheBridge.cacheAvailable.mockReturnValue(true);
+    viralCacheBridge.ensureViralCacheForVideo.mockRejectedValueOnce(
+      Object.assign(new Error("积分不足，本次需要 6 积分。"), {
+        code: "INSUFFICIENT_CREDITS",
+      }),
+    );
+    const value = studio({ review: false });
+    useStudio.mockReturnValue(value);
+    render(<ViralPage />);
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "下载视频 农村建房预算，别只盯着主体",
+      }),
+    );
+
+    await waitFor(() => expect(value.openLive).toHaveBeenCalledWith("wallet"));
+    expect(value.notify).toHaveBeenCalledWith("积分不足，本次需要 6 积分。");
   });
 
   it("桌面端爆款详情提取文案改走本地抽音轨上传，不再导入参考素材", () => {
@@ -4203,7 +4323,7 @@ describe("V1.4 内容与运营页面", () => {
     fireEvent.change(screen.getByLabelText("素材来源"), {
       target: { value: "upload" },
     });
-    fireEvent.submit(screen.getByRole("form", { name: "素材筛选" }));
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
 
     await waitFor(() =>
       expect(listMaterials).toHaveBeenLastCalledWith({
@@ -4218,6 +4338,19 @@ describe("V1.4 内容与运营页面", () => {
         pageSize: 24,
       }),
     );
+  });
+
+  it("缓存说明可通过点击展开完整规则", async () => {
+    listMaterials.mockResolvedValue({ items: [], page: 1, total: 0 });
+    useStudio.mockReturnValue(studio({ review: false }));
+    render(<MaterialsPage />);
+
+    const disclosure = screen.getByText("缓存说明").closest("details");
+    expect(disclosure).not.toBeNull();
+    expect(disclosure).not.toHaveAttribute("open");
+    fireEvent.click(screen.getByText("缓存说明"));
+    expect(disclosure).toHaveAttribute("open");
+    expect(screen.getByText(/单个文件不超过 50 MB/)).toBeInTheDocument();
   });
 
   it("素材页一次批量签名当前页并在翻页后加载下一页", async () => {
@@ -4888,7 +5021,7 @@ describe("V1.4 内容与运营页面", () => {
     );
   });
 
-  it("MATERIAL-UX-03：按人物二级筛选来源于人物列表并下发 person_id", async () => {
+  it("MATERIAL-UX-03：对象筛选下拉按人物分组并下发 person_id，清空后不再携带", async () => {
     listMaterials.mockResolvedValue({
       items: [material("gate")],
       page: 1,
@@ -4905,20 +5038,63 @@ describe("V1.4 内容与运营页面", () => {
     useStudio.mockReturnValue(value);
     render(<MaterialsPage />);
     await screen.findByRole("button", { name: "选择素材 gate.png" });
-    // 未选“按人物”时不出现人物二级下拉
-    expect(screen.queryByLabelText("按人物筛选")).toBeNull();
-    fireEvent.change(screen.getByLabelText("对象筛选方式"), {
-      target: { value: "person" },
-    });
-    const personSelect = await screen.findByLabelText("按人物筛选");
-    // 二级下拉数据源复用已加载的人物列表
+    // 人物/项目以 optgroup 分组，选项数据源复用已加载的人物列表
+    const objectSelect = screen.getByLabelText("对象筛选");
     expect(
-      personSelect.querySelector('option[value="person-1"]'),
+      objectSelect.querySelector(
+        'optgroup[label="按人物"] option[value="person:person-1"]',
+      ),
     ).not.toBeNull();
-    fireEvent.change(personSelect, { target: { value: "person-1" } });
+    fireEvent.change(objectSelect, { target: { value: "person:person-1" } });
     await waitFor(() =>
       expect(listMaterials).toHaveBeenLastCalledWith(
         expect.objectContaining({ personId: "person-1", page: 1 }),
+      ),
+    );
+    // 切回“全部对象”后请求不再携带对象条件
+    fireEvent.change(objectSelect, { target: { value: "" } });
+    await waitFor(() =>
+      expect(listMaterials).toHaveBeenLastCalledWith(
+        expect.objectContaining({ personId: undefined, page: 1 }),
+      ),
+    );
+  });
+
+  it("MATERIAL-UX-03：对象筛选直切项目时互斥清空人物条件", async () => {
+    listMaterials.mockResolvedValue({
+      items: [material("gate")],
+      page: 1,
+      page_size: 24,
+      total: 1,
+    });
+    const value = studio({ review: false });
+    value.data = {
+      ...value.data,
+      people: [
+        { id: "person-1", name: "张工" } as StudioData["people"][number],
+      ],
+      projects: [
+        { id: "project-1", name: "庭院样板" } as StudioData["projects"][number],
+      ],
+    };
+    useStudio.mockReturnValue(value);
+    render(<MaterialsPage />);
+    await screen.findByRole("button", { name: "选择素材 gate.png" });
+    const objectSelect = screen.getByLabelText("对象筛选");
+    fireEvent.change(objectSelect, { target: { value: "person:person-1" } });
+    await waitFor(() =>
+      expect(listMaterials).toHaveBeenLastCalledWith(
+        expect.objectContaining({ personId: "person-1" }),
+      ),
+    );
+    // 人物未清空直切项目：两组条件互斥，项目下发时人物条件必须已清空
+    fireEvent.change(objectSelect, { target: { value: "project:project-1" } });
+    await waitFor(() =>
+      expect(listMaterials).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          projectId: "project-1",
+          personId: undefined,
+        }),
       ),
     );
   });
@@ -5490,7 +5666,10 @@ describe("V1.4 内容与运营页面", () => {
     expect(
       screen.getByRole("button", { name: "选择素材 mix-video.mp4" }),
     ).toHaveClass("content-asset");
-    expect(screen.queryByText("网格视图")).toBeInTheDocument();
+    // 视图切换收纳进工具栏后为图标按钮，靠 aria-label 寻址
+    expect(
+      screen.queryByRole("button", { name: "网格视图" }),
+    ).toBeInTheDocument();
   });
 
   it("MATERIAL-UX-07：音频标签页列表化区分用途并可去往音频口播", async () => {

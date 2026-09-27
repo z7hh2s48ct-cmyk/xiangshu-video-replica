@@ -594,6 +594,7 @@ describe("ViralVideosPage", () => {
     expect(
       await screen.findByText(/登记 4 次；已确认 3 次/),
     ).toBeInTheDocument();
+    expect(screen.getByText(/未成功 1 次；处理中 0 次/)).toBeInTheDocument();
     expect(screen.getByText(/失败 1 笔；待扣 0 笔/)).toBeInTheDocument();
     expect(screen.getByText(/已知成本 ¥0.00000125/)).toBeInTheDocument();
     expect(fetchMock.mock.calls[0][0]).not.toContain("user_id=other");
@@ -601,5 +602,125 @@ describe("ViralVideosPage", () => {
     expect(await screen.findByText("客户甲")).toBeInTheDocument();
     expect(screen.getByText("余额不足，扣费失败")).toBeInTheDocument();
     expect(screen.getByText("3 / 0 积分")).toBeInTheDocument();
+  });
+
+  it("已展示视频可置顶并在列表中标记，取消置顶回到默认", async () => {
+    let pinned = false;
+    const fetchMock = installFetch({
+      list: () => ({
+        items: [
+          row({ homepage_featured: true, homepage_rank: pinned ? 0 : null }),
+        ],
+        total: 1,
+      }),
+      write: (url, init) => {
+        if (
+          url.includes("/curation") &&
+          JSON.parse(String(init?.body)).action === "pin"
+        )
+          pinned = true;
+        return undefined;
+      },
+    });
+    render(<ViralVideosPage />);
+    expect(await screen.findByText("展示中")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "置顶" }));
+    fireEvent.change(screen.getByLabelText("操作原因"), {
+      target: { value: "首页重点推荐" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认操作" }));
+    await screen.findByText("已置顶，客户端首页将优先展示该视频。");
+    const patch = writesOf(fetchMock).find(([url]) =>
+      url.includes("/curation"),
+    );
+    expect(patch?.[0]).toContain("opaque%2Fvideo%3Did/curation");
+    expect(JSON.parse(String(patch?.[1]?.body))).toMatchObject({
+      action: "pin",
+      confirm: true,
+      reason: "首页重点推荐",
+    });
+    expect(screen.getByText("已置顶")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "取消置顶" })).toBeEnabled();
+  });
+
+  it("行内隐藏视频需确认原因并调用可用状态接口", async () => {
+    let hidden = false;
+    const fetchMock = installFetch({
+      list: () => ({
+        items: [row({ availability: hidden ? "HIDDEN" : "AVAILABLE" })],
+        total: 1,
+      }),
+      write: (url, init) => {
+        if (
+          url.includes("/availability") &&
+          JSON.parse(String(init?.body)).status === "HIDDEN"
+        )
+          hidden = true;
+        return undefined;
+      },
+    });
+    render(<ViralVideosPage />);
+    await screen.findByText("庭院施工案例");
+
+    fireEvent.click(screen.getByRole("button", { name: "隐藏" }));
+    fireEvent.change(screen.getByLabelText("操作原因"), {
+      target: { value: "内容不符合上架要求" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认操作" }));
+    await screen.findByText("视频已隐藏，前台不再展示。");
+
+    const patch = writesOf(fetchMock).find(([url]) =>
+      url.includes("/availability"),
+    );
+    expect(patch?.[0]).toContain("/availability");
+    expect(JSON.parse(String(patch?.[1]?.body))).toMatchObject({
+      status: "HIDDEN",
+      confirm: true,
+      reason: "内容不符合上架要求",
+    });
+    expect(patch?.[1]?.headers).toMatchObject({
+      "X-Admin-CSRF": "csrf-curation-test",
+    });
+    await screen.findByRole("button", { name: "恢复显示" });
+  });
+
+  it("已隐藏视频显示恢复显示按钮并恢复为可用", async () => {
+    let restored = false;
+    const fetchMock = installFetch({
+      list: () => ({
+        items: [row({ availability: restored ? "AVAILABLE" : "HIDDEN" })],
+        total: 1,
+      }),
+      write: (url) => {
+        if (url.includes("/availability")) restored = true;
+        return undefined;
+      },
+    });
+    render(<ViralVideosPage />);
+    await screen.findByText("庭院施工案例");
+    expect(
+      screen.getByRole("button", { name: "恢复显示" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "隐藏" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "恢复显示" }));
+    fireEvent.change(screen.getByLabelText("操作原因"), {
+      target: { value: "内容复核通过" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认操作" }));
+    await screen.findByText("视频已恢复可用，前台可正常浏览。");
+
+    const patch = writesOf(fetchMock).find(([url]) =>
+      url.includes("/availability"),
+    );
+    expect(JSON.parse(String(patch?.[1]?.body))).toMatchObject({
+      status: "AVAILABLE",
+      confirm: true,
+      reason: "内容复核通过",
+    });
+    await screen.findByRole("button", { name: "隐藏" });
   });
 });

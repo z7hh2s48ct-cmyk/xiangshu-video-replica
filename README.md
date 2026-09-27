@@ -80,6 +80,10 @@ uv sync --project server --locked
 - 开发身份 Header 只在 Vite 开发构建中发送；生产构建即使误设 `VITE_DEV_USER_ID` 也会忽略。
 - Provider API Key 与云存储凭据经 Fernet 加密写入数据库（Windows 下主密钥由当前用户 DPAPI 保护，
   macOS 使用钥匙串），启动时校验可解密。任何真实密钥不得进入代码、日志或 PR。
+- 视频拆解模型可在「模型服务」设置中配置：`analysis_model` 留空使用服务端默认主模型；
+  `analysis_model_fallbacks` 留空使用内置备选，填写一个模型名可替换内置备选，填写 `disabled` 可关闭自动切换。
+  为控制一次任务的耗时和费用，最多允许一个备选模型；超量配置会被拒绝。
+  仅当主模型返回 HTTP 429 或明确报告模型不可用的 HTTP 400/404 时切换，网络超时及其他错误保留原失败结果。
 
 ## 验证与门禁
 

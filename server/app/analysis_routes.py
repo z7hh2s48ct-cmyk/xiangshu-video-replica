@@ -32,6 +32,7 @@ from app.analysis import (
     find_analysis_version_for_asset,
     find_latest_analysis_task,
     get_version,
+    parse_analysis_fallback_models,
     validate_shot_cards,
 )
 from app.async_compat import reject_legacy_sync_operation
@@ -127,6 +128,9 @@ def get_video_analysis_provider(conn: Database) -> VideoAnalysisProvider:
         # upstream retires preview models without notice and every analysis
         # then fails with HTTP 400 until a new build ships.
         model=(config.get("analysis_model") or "").strip() or APILIO_ANALYSIS_MODEL,
+        # 主模型限流/下线时自动换道；出厂名单见
+        # APILIO_ANALYSIS_FALLBACK_MODELS，设置项可整组覆盖。
+        fallback_models=parse_analysis_fallback_models(config.get("analysis_model_fallbacks")),
     )
 
 

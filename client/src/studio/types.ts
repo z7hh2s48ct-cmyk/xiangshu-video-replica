@@ -125,6 +125,8 @@ export type StudioPerson = {
 };
 export type StudioVideo = {
   homepageFeatured?: boolean;
+  /** 首页精选置顶顺序；数值越小越靠前，空值表示未置顶。 */
+  homepageRank?: number | null;
   id: string;
   title: string;
   author: string;
@@ -152,6 +154,8 @@ export type StudioVideo = {
   hasCopy?: boolean;
   /** 「查看详情」已购买：同账号同视频只扣一次，卡片据此免报价。 */
   detailCharged?: boolean;
+  /** 爆款源视频时长（毫秒）：详情页按时长分流复刻入口（≤15s 才可复刻）。 */
+  durationMs?: number;
   playUrl?: string | null;
 };
 export type StudioTask = {

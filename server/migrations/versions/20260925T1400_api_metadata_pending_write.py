@@ -11,8 +11,13 @@
 一旦进入终态（SUCCEEDED / FAILED / CANCELLED）整行依旧冻结——金额事实的审计
 语义不变，只是把描述性元数据与账务事实分开对待。
 
+本迁移在原分支上是接在 ``20260924T0200`` 之后的新 head；合并 main 时 main 已把
+``20260926T0000_viral_homepage_rank`` 接在同一父节点上。分支未合并，故按
+ADR「重挂未合并分支的 down_revision」处置（而不是新增 merge revision），
+链序由 ``down_revision`` 决定，与文件名时间戳先后无关。
+
 Revision ID: 20260925T1400_api_metadata_pending_write
-Revises: 20260924T0200_customer_oral_task_visibility
+Revises: 20260926T0000_viral_homepage_rank
 """
 
 from __future__ import annotations
@@ -20,7 +25,7 @@ from __future__ import annotations
 from alembic import op
 
 revision = "20260925T1400_api_metadata_pending_write"
-down_revision = "20260924T0200_customer_oral_task_visibility"
+down_revision = "20260926T0000_viral_homepage_rank"
 branch_labels = None
 depends_on = None
 

@@ -14,6 +14,7 @@ import {
   previewCollectedViralVideo,
   refreshCollectedVideoStatistics,
   updateViralRuntimeControls,
+  updateViralVideoAvailability,
   type ViralLibraryOverview,
   type ViralRuntimeControls,
   viralLibraryOverview,
@@ -23,10 +24,23 @@ import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
 import { type BadgeTone, StatusBadge } from "./ui/StatusBadge";
 
-type Action = "feature" | "unfeature" | "delete" | "archive";
-type BatchAction = Exclude<Action, "archive">;
+type Action =
+  | "feature"
+  | "unfeature"
+  | "delete"
+  | "archive"
+  | "hide"
+  | "restore"
+  | "pin"
+  | "unpin";
+/** 批量接口只支持这三种：置顶 / 隐藏必须逐条，否则整批会被服务端拒绝。 */
+type BatchAction = "feature" | "unfeature" | "delete";
 /** 「立即采集」不是对某条视频的动作，但共用同一个确认框与提交路径。 */
 type PendingAction = Action | "collect";
+
+function isBatchAction(action: PendingAction): action is BatchAction {
+  return action === "feature" || action === "unfeature" || action === "delete";
+}
 
 type Pending = {
   action: PendingAction;
@@ -350,7 +364,11 @@ function ViralRow({
                 : "admin-viral-muted"
             }
           >
-            {video.homepage_featured ? "展示中" : "未展示"}
+            {video.homepage_featured
+              ? video.homepage_rank == null
+                ? "展示中"
+                : "已置顶"
+              : "未展示"}
           </span>
         </div>
       </td>
@@ -392,6 +410,36 @@ function ViralRow({
             >
               {video.homepage_featured ? "取消展示" : "展示到首页"}
             </button>
+          ) : null}
+          {!readOnly && video.homepage_featured ? (
+            <button
+              disabled={saving}
+              type="button"
+              onClick={() =>
+                onAction(video.homepage_rank == null ? "pin" : "unpin")
+              }
+            >
+              {video.homepage_rank == null ? "置顶" : "取消置顶"}
+            </button>
+          ) : null}
+          {!readOnly ? (
+            (video.availability ?? "AVAILABLE") === "AVAILABLE" ? (
+              <button
+                disabled={saving}
+                type="button"
+                onClick={() => onAction("hide")}
+              >
+                隐藏
+              </button>
+            ) : (
+              <button
+                disabled={saving}
+                type="button"
+                onClick={() => onAction("restore")}
+              >
+                恢复显示
+              </button>
+            )
           ) : null}
           {!readOnly ? (
             <button
@@ -524,6 +572,28 @@ function pendingCopy(action: PendingAction, count: number) {
           description:
             "取消后首页不再展示，视频仍保留在爆款列表。请填写操作原因。",
         };
+  if (action === "hide")
+    return {
+      title: "隐藏爆款视频",
+      description:
+        "隐藏后客户端不再展示该视频，已导入项目的素材保留。请填写操作原因。",
+    };
+  if (action === "restore")
+    return {
+      title: "恢复爆款视频展示",
+      description: "恢复后客户端可正常浏览与播放该视频。请填写操作原因。",
+    };
+  if (action === "pin")
+    return {
+      title: "置顶爆款视频",
+      description:
+        "置顶后该视频在客户端首页排到最前，可多次置顶叠加优先级。请填写操作原因。",
+    };
+  if (action === "unpin")
+    return {
+      title: "取消置顶",
+      description: "取消后该视频回到首页默认顺序，仍保持展示。请填写操作原因。",
+    };
   return batch
     ? {
         title: `批量展示 ${count} 条到首页`,
@@ -540,6 +610,13 @@ function batchNotice(action: BatchAction, count: number) {
   if (action === "feature") return `已批量展示 ${count} 条视频到首页。`;
   if (action === "unfeature") return `已批量取消展示 ${count} 条视频。`;
   return `已删除 ${count} 条视频，前台不再展示。`;
+}
+
+function curationNotice(action: Action) {
+  if (action === "delete") return "视频已删除，前台不再展示。";
+  if (action === "pin") return "已置顶，客户端首页将优先展示该视频。";
+  if (action === "unpin") return "已取消置顶，该视频恢复默认首页顺序。";
+  return "首页展示设置已更新。";
 }
 
 export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
@@ -746,7 +823,23 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
           "已提交后台转存，可刷新数据查看进度。归档不会自动修改首页展示。",
         );
         patchUpstream(rows, { archive_status: "PENDING" });
-      } else if (rows.length > 1) {
+      } else if (action === "hide" || action === "restore") {
+        await updateViralVideoAvailability(
+          rows[0].platform,
+          rows[0].video_id,
+          action === "hide" ? "HIDDEN" : "AVAILABLE",
+          reason,
+          key,
+        );
+        setNotice(
+          action === "hide"
+            ? "视频已隐藏，前台不再展示。"
+            : "视频已恢复可用，前台可正常浏览。",
+        );
+        patchUpstream(rows, {
+          availability: action === "hide" ? "HIDDEN" : "AVAILABLE",
+        });
+      } else if (rows.length > 1 && isBatchAction(action)) {
         const result = await curateViralVideosBatch(rows, action, reason, key);
         setNotice(batchNotice(action, result.count));
         patchUpstream(
@@ -757,17 +850,16 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
         );
       } else {
         await curateViralVideo(rows[0], action, reason, key);
-        setNotice(
-          action === "delete"
-            ? "视频已删除，前台不再展示。"
-            : "首页展示设置已更新。",
-        );
-        patchUpstream(
-          rows,
-          action === "delete"
-            ? null
-            : { homepage_featured: action === "feature" },
-        );
+        setNotice(curationNotice(action));
+        if (action === "delete") patchUpstream(rows, null);
+        else if (action === "feature")
+          patchUpstream(rows, { homepage_featured: true });
+        else if (action === "unfeature")
+          patchUpstream(rows, { homepage_featured: false });
+        // 置顶只改顺序：本地先按「已置顶 / 已还原」回显，等下一次列表刷新对齐。
+        else if (action === "pin") patchUpstream(rows, { homepage_rank: 0 });
+        else if (action === "unpin")
+          patchUpstream(rows, { homepage_rank: null });
       }
       setPending(null);
       if (action === "delete") {

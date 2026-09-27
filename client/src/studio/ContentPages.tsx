@@ -52,7 +52,10 @@ import {
   saveViralFavorite,
   updateMaterial,
 } from "../api";
-import { isInsufficientCredits } from "../insufficientCredits";
+import {
+  isInsufficientCredits,
+  openWalletIfInsufficientCredits,
+} from "../insufficientCredits";
 import { VideoPreview } from "../VideoPreview";
 import { CharacterMaterialViews } from "./CharacterMaterialViews";
 import { useStudio } from "./context";
@@ -914,7 +917,7 @@ function ViralCard({
   /** 「查看详情」单价（积分）；未知时不报价，费用以服务端回执为准。 */
   detailPrice?: number;
 }) {
-  const { review, navigate, notify } = useStudio();
+  const { review, navigate, notify, openLive } = useStudio();
   const playerRef = useRef<HTMLVideoElement | null>(null);
   const [downloadBusy, setDownloadBusy] = useState(false);
   const { playback, play, retry, markFailed, activate } = useViralPlayback(
@@ -979,7 +982,14 @@ function ViralCard({
         else if (result.status === "started")
           notify("已开始下载，请在新窗口完成保存");
       } catch (cause) {
-        notify(cause instanceof Error ? cause.message : "下载失败，请重试。");
+        if (
+          !openWalletIfInsufficientCredits(cause, {
+            notify,
+            openWallet: () => openLive("wallet"),
+          })
+        ) {
+          notify(cause instanceof Error ? cause.message : "下载失败，请重试。");
+        }
       } finally {
         setDownloadBusy(false);
       }
@@ -2117,6 +2127,34 @@ export function ViralDetailPage() {
     }
     void start(video, "copy", goExtract);
   };
+  // 复刻方向只适用于 4–15s 的爆款；与服务端参考视频校验保持一致。
+  // 时长未知或超限时隐藏入口，视频仍可走「提取文案→口播数字人」方向。
+  const canReplicate =
+    typeof video.durationMs === "number" &&
+    video.durationMs >= 4_000 &&
+    video.durationMs <= 15_000;
+  const goReplica = (task: ViralImportTask) => {
+    if (!task.canAnalyze || !task.projectId || !task.sourceAssetId) {
+      notify("该来源暂不支持视频复刻");
+      return;
+    }
+    patchDraft({
+      projectId: task.projectId,
+      sourceId: task.sourceAssetId,
+      sourceAssetId: task.sourceAssetId,
+    });
+    navigate("replica", {
+      selectedVideoId: video.id,
+      returnTo: "viral-detail",
+    });
+  };
+  const beginReplicate = () => {
+    if (review) {
+      notify("审核模式仅演示，不执行导入");
+      return;
+    }
+    void start(video, "replica", goReplica);
+  };
   // 刷新资源（仅抖音，按次计费）：封面失效/直链过期时的自救入口。
   const beginRefresh = () => {
     if (review || refreshBusy) return;
@@ -2281,6 +2319,20 @@ export function ViralDetailPage() {
                 提取文案
               </Button>
             </div>
+            {canReplicate && (
+              <div className="content-detail-action">
+                <Button
+                  disabled={
+                    importState.status === "loading" ||
+                    detailAvailability !== "available"
+                  }
+                  variant="outline"
+                  onClick={beginReplicate}
+                >
+                  {importState.status === "loading" ? "导入中…" : "去复刻"}
+                </Button>
+              </div>
+            )}
             {!review && video.platformKey === "douyin" && (
               <div className="content-detail-action">
                 <Button
@@ -2474,7 +2526,6 @@ type MaterialsViewState = {
   kind: "全部" | StudioAsset["kind"];
   source: "" | MaterialItem["source"];
   sort: MaterialSort;
-  objectMode: "" | "person" | "project";
   personFilter: string;
   projectFilter: string;
   tagFilter: string;
@@ -2489,7 +2540,6 @@ const MATERIALS_VIEW_DEFAULT: MaterialsViewState = {
   kind: "全部",
   source: "",
   sort: "created_desc",
-  objectMode: "",
   personFilter: "",
   projectFilter: "",
   tagFilter: "",
@@ -2532,12 +2582,9 @@ function MaterialsPageContent() {
   const [source, setSource] = useState<"" | MaterialItem["source"]>(
     initialView.source,
   );
-  // MATERIAL-UX-03：排序维度 + 对象（人物/项目）二级筛选。objectMode 决定第二级
-  // 下拉数据源；选中后 personFilter/projectFilter 之一非空，随请求下发。
+  // MATERIAL-UX-03：排序维度 + 对象（人物/项目）筛选。单个 optgroup 下拉直接
+  // 选中人物/项目，personFilter/projectFilter 之一非空，随请求下发。
   const [sort, setSort] = useState<MaterialSort>(initialView.sort);
-  const [objectMode, setObjectMode] = useState<"" | "person" | "project">(
-    initialView.objectMode,
-  );
   const [personFilter, setPersonFilter] = useState(initialView.personFilter);
   const [projectFilter, setProjectFilter] = useState(initialView.projectFilter);
   // MATERIAL-UX-05：标签筛选 + 详情面板标签编辑（建议来自聚合端点）。
@@ -2998,7 +3045,6 @@ function MaterialsPageContent() {
       kind,
       source,
       sort,
-      objectMode,
       personFilter,
       projectFilter,
       tagFilter,
@@ -3777,11 +3823,21 @@ function MaterialsPageContent() {
         }
       }}
     >
-      <header className="content-title">
-        <div>
-          <h1>素材库</h1>
-          <p>统一管理和复用乡墅创作素材</p>
-        </div>
+      <header className="content-title content-material-title">
+        <h1>素材库</h1>
+        <Tabs
+          items={[
+            { id: "全部", label: "全部" },
+            { id: "video", label: "视频" },
+            { id: "image", label: "图片" },
+            { id: "audio", label: "音频" },
+          ]}
+          value={kind}
+          onChange={(value) => {
+            setKind(value as typeof kind);
+            setPage(1);
+          }}
+        />
         <input
           accept={[
             ".jpg",
@@ -3802,62 +3858,63 @@ function MaterialsPageContent() {
           ref={uploadInputRef}
           type="file"
         />
-        {!review ? (
-          <div className="content-material-upload-group">
-            <select
-              aria-label="上传目标分组"
-              value={uploadGroup}
-              onChange={(event) => {
-                setUploadGroup(event.target.value);
-                if (event.target.value !== "__new__") setUploadGroupDraft("");
-              }}
-            >
-              {[
-                ...new Set([
-                  uploadGroup === "__new__" ? "我的上传" : uploadGroup,
-                  "我的上传",
-                  ...groups.map((item) => item.name),
-                ]),
-              ].map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-              <option value="__new__">新建分组…</option>
-            </select>
-            {uploadGroup === "__new__" ? (
-              <input
-                aria-label="上传新分组名称"
-                maxLength={80}
-                placeholder="新分组名称"
-                value={uploadGroupDraft}
-                onChange={(event) => setUploadGroupDraft(event.target.value)}
-              />
-            ) : null}
-          </div>
-        ) : null}
-        <Button
-          className="content-title-action"
-          disabled={busyAction === "upload"}
-          variant="primary"
-          onClick={() =>
-            review
-              ? notify("审核模式保留示例素材，不执行真实上传")
-              : uploadInputRef.current?.click()
-          }
-        >
-          {(() => {
-            const uploadingIndex = uploadQueue.findIndex(
-              (item) => item.status === "uploading",
-            );
-            if (uploadingIndex >= 0) {
-              return `上传中 ${uploadingIndex + 1}/${uploadQueue.length}`;
+        <div className="content-material-title__actions">
+          {!review ? (
+            <div className="content-material-upload-group">
+              <select
+                aria-label="上传目标分组"
+                value={uploadGroup}
+                onChange={(event) => {
+                  setUploadGroup(event.target.value);
+                  if (event.target.value !== "__new__") setUploadGroupDraft("");
+                }}
+              >
+                {[
+                  ...new Set([
+                    uploadGroup === "__new__" ? "我的上传" : uploadGroup,
+                    "我的上传",
+                    ...groups.map((item) => item.name),
+                  ]),
+                ].map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+                <option value="__new__">新建分组…</option>
+              </select>
+              {uploadGroup === "__new__" ? (
+                <input
+                  aria-label="上传新分组名称"
+                  maxLength={80}
+                  placeholder="新分组名称"
+                  value={uploadGroupDraft}
+                  onChange={(event) => setUploadGroupDraft(event.target.value)}
+                />
+              ) : null}
+            </div>
+          ) : null}
+          <Button
+            disabled={busyAction === "upload"}
+            variant="primary"
+            onClick={() =>
+              review
+                ? notify("审核模式保留示例素材，不执行真实上传")
+                : uploadInputRef.current?.click()
             }
-            return uploadProgress === undefined
-              ? "上传素材"
-              : `上传中 ${uploadProgress}%`;
-          })()}
-        </Button>
+          >
+            {(() => {
+              const uploadingIndex = uploadQueue.findIndex(
+                (item) => item.status === "uploading",
+              );
+              if (uploadingIndex >= 0) {
+                return `上传中 ${uploadingIndex + 1}/${uploadQueue.length}`;
+              }
+              return uploadProgress === undefined
+                ? "上传素材"
+                : `上传中 ${uploadProgress}%`;
+            })()}
+          </Button>
+        </div>
       </header>
       {uploadQueue.length > 0 ? (
         <div
@@ -3905,35 +3962,6 @@ function MaterialsPageContent() {
           ) : null}
         </div>
       ) : null}
-      <Tabs
-        items={[
-          { id: "全部", label: "全部" },
-          { id: "video", label: "视频" },
-          { id: "image", label: "图片" },
-          { id: "audio", label: "音频" },
-        ]}
-        value={kind}
-        onChange={(value) => {
-          setKind(value as typeof kind);
-          setPage(1);
-        }}
-      />
-      {!review ? (
-        <div className="content-view-switch">
-          <Button
-            variant={viewMode === "grid" ? "primary" : "outline"}
-            onClick={() => setViewMode("grid")}
-          >
-            网格视图
-          </Button>
-          <Button
-            variant={viewMode === "list" ? "primary" : "outline"}
-            onClick={() => setViewMode("list")}
-          >
-            列表视图
-          </Button>
-        </div>
-      ) : null}
       {!review ? (
         <section aria-label="本机素材缓存" className="content-material-cache">
           <span>
@@ -3950,10 +3978,13 @@ function MaterialsPageContent() {
           >
             {clearingCache ? "正在清理…" : "清理本机缓存"}
           </Button>
-          <p>
-            首屏优先在线预览并复用已有本机缓存；视频和音频首次播放时后台缓存。
-            单个文件不超过 50 MB，超限继续在线预览。
-          </p>
+          <details className="content-material-cache__hint">
+            <summary>缓存说明</summary>
+            <p>
+              首屏优先在线预览并复用已有本机缓存；视频和音频首次播放时后台缓存。
+              单个文件不超过 50 MB，超限继续在线预览。
+            </p>
+          </details>
           {cacheMessage ? <p role="status">{cacheMessage}</p> : null}
         </section>
       ) : null}
@@ -3990,66 +4021,45 @@ function MaterialsPageContent() {
             <option value="generation">视频成片</option>
           </select>
           <select
-            aria-label="排序方式"
-            value={sort}
+            aria-label="对象筛选"
+            className="content-material-filters__object"
+            value={
+              personFilter
+                ? `person:${personFilter}`
+                : projectFilter
+                  ? `project:${projectFilter}`
+                  : ""
+            }
             onChange={(event) => {
-              setSort(event.target.value as MaterialSort);
-              setPage(1);
-            }}
-          >
-            <option value="created_desc">最新上传</option>
-            <option value="created_asc">最早上传</option>
-            <option value="title_asc">名称 A→Z</option>
-            <option value="size_desc">文件大小</option>
-          </select>
-          <select
-            aria-label="对象筛选方式"
-            value={objectMode}
-            onChange={(event) => {
-              setObjectMode(event.target.value as typeof objectMode);
-              setPersonFilter("");
-              setProjectFilter("");
+              const value = event.target.value;
+              const separator = value.indexOf(":");
+              const mode = separator < 0 ? "" : value.slice(0, separator);
+              const id = separator < 0 ? "" : value.slice(separator + 1);
+              setPersonFilter(mode === "person" ? id : "");
+              setProjectFilter(mode === "project" ? id : "");
               setPage(1);
             }}
           >
             <option value="">全部对象</option>
-            <option value="person">按人物</option>
-            <option value="project">按项目</option>
+            {data.people.length > 0 ? (
+              <optgroup label="按人物">
+                {data.people.map((person) => (
+                  <option key={person.id} value={`person:${person.id}`}>
+                    {person.name}
+                  </option>
+                ))}
+              </optgroup>
+            ) : null}
+            {data.projects.length > 0 ? (
+              <optgroup label="按项目">
+                {data.projects.map((project) => (
+                  <option key={project.id} value={`project:${project.id}`}>
+                    {project.name}
+                  </option>
+                ))}
+              </optgroup>
+            ) : null}
           </select>
-          {objectMode === "person" ? (
-            <select
-              aria-label="按人物筛选"
-              value={personFilter}
-              onChange={(event) => {
-                setPersonFilter(event.target.value);
-                setPage(1);
-              }}
-            >
-              <option value="">全部人物</option>
-              {data.people.map((person) => (
-                <option key={person.id} value={person.id}>
-                  {person.name}
-                </option>
-              ))}
-            </select>
-          ) : null}
-          {objectMode === "project" ? (
-            <select
-              aria-label="按项目筛选"
-              value={projectFilter}
-              onChange={(event) => {
-                setProjectFilter(event.target.value);
-                setPage(1);
-              }}
-            >
-              <option value="">全部项目</option>
-              {data.projects.map((project) => (
-                <option key={project.id} value={project.id}>
-                  {project.name}
-                </option>
-              ))}
-            </select>
-          ) : null}
           <select
             aria-label="方向筛选"
             value={orientationFilter}
@@ -4082,16 +4092,20 @@ function MaterialsPageContent() {
               ))}
             </select>
           ) : null}
-          <Button
-            variant={trashedView ? "primary" : "outline"}
-            onClick={() => {
-              setTrashedView((value) => !value);
-              setOrganize(false);
+          <select
+            aria-label="排序方式"
+            className="content-material-filters__sort"
+            value={sort}
+            onChange={(event) => {
+              setSort(event.target.value as MaterialSort);
               setPage(1);
             }}
           >
-            {trashedView ? "返回素材库" : "已移除"}
-          </Button>
+            <option value="created_desc">最新上传</option>
+            <option value="created_asc">最早上传</option>
+            <option value="title_asc">名称 A→Z</option>
+            <option value="size_desc">文件大小</option>
+          </select>
           <Button type="submit" variant="outline">
             搜索
           </Button>
@@ -4152,6 +4166,34 @@ function MaterialsPageContent() {
                   </Button>
                 </>
               ) : null}
+              <Button
+                variant={trashedView ? "primary" : "outline"}
+                onClick={() => {
+                  setTrashedView((value) => !value);
+                  setOrganize(false);
+                  setPage(1);
+                }}
+              >
+                {trashedView ? "返回素材库" : "已移除"}
+              </Button>
+              <div className="content-view-switch">
+                <Button
+                  aria-label="网格视图"
+                  aria-pressed={viewMode === "grid"}
+                  variant={viewMode === "grid" ? "primary" : "outline"}
+                  onClick={() => setViewMode("grid")}
+                >
+                  ▦
+                </Button>
+                <Button
+                  aria-label="列表视图"
+                  aria-pressed={viewMode === "list"}
+                  variant={viewMode === "list" ? "primary" : "outline"}
+                  onClick={() => setViewMode("list")}
+                >
+                  ☰
+                </Button>
+              </div>
               <Button
                 variant={organize ? "primary" : "outline"}
                 onClick={toggleOrganize}

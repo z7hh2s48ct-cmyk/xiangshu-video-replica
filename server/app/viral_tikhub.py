@@ -26,6 +26,8 @@ from collections import OrderedDict
 from collections.abc import Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -75,6 +77,24 @@ _BROWSER_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 )
 
+# 数据源重试（T6）：仅对 429/5xx 这类「请求未被上游受理」的状态重试，
+# 退避尊重 Retry-After（封顶防阻塞 worker），否则 0.5s/1.0s 指数退避。
+_VIRAL_SOURCE_MAX_ATTEMPTS = 3
+_VIRAL_SOURCE_BACKOFF_SECONDS: tuple[float, ...] = (0.5, 1.0)
+_VIRAL_SOURCE_MAX_BACKOFF_SECONDS = 5.0
+
+
+def _is_retryable_status(status: int) -> bool:
+    return status == 429 or 500 <= status <= 599
+
+
+def _retry_backoff_delay(attempt: int, retry_after: float | None) -> float:
+    if retry_after is not None:
+        return min(retry_after, _VIRAL_SOURCE_MAX_BACKOFF_SECONDS)
+    index = min(attempt - 1, len(_VIRAL_SOURCE_BACKOFF_SECONDS) - 1)
+    return _VIRAL_SOURCE_BACKOFF_SECONDS[index]
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -84,6 +104,32 @@ class ViralSourceError(RuntimeError):
 
 class ViralSourceUnavailable(ViralSourceError):
     """爆款数据源未配置或不可读。"""
+
+
+class ViralSourceHttpStatusError(ViralSourceError):
+    """数据源返回了可分类的 HTTP 状态（429/5xx 驱动重试决策）."""
+
+    def __init__(self, status: int, retry_after: float | None = None) -> None:
+        super().__init__("爆款数据源暂时不可用，请稍后重试")
+        self.status = status
+        self.retry_after = retry_after
+
+
+def _retry_after_seconds(headers: Any) -> float | None:
+    """从响应头读 Retry-After（秒或 HTTP 日期）；缺失或非法时返回 None."""
+    value = headers.get("Retry-After") if headers is not None else None
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        try:
+            retry_at = parsedate_to_datetime(str(value))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=UTC)
+        return max(0.0, (retry_at - datetime.now(UTC)).total_seconds())
 
 
 class ViralHttpTransport:
@@ -128,7 +174,7 @@ class UrllibViralHttpTransport(ViralHttpTransport):
                 exc.code,
                 type(exc).__name__,
             )
-            raise ViralSourceError("爆款数据源暂时不可用，请稍后重试") from exc
+            raise ViralSourceHttpStatusError(exc.code, _retry_after_seconds(exc.headers)) from exc
         except (TimeoutError, URLError, OSError) as exc:
             logger.warning("Viral source request failed: %s", type(exc).__name__)
             raise ViralSourceError("爆款数据源网络异常，请稍后重试") from exc
@@ -166,12 +212,15 @@ class ViralVideo:
     # 封面落主存储后的对象 key；存在时客户端下发自有稳定地址。
     cover_key: str | None = None
     homepage_featured: bool = False
+    # 策展置顶序（T4）：NULL 表示未置顶，featured 列表按 ASC NULLS LAST 排序。
+    homepage_rank: int | None = None
 
     def to_client_dict(self) -> dict[str, Any]:
         return {
             "platform": self.platform,
             "videoId": self.video_id,
             "homepageFeatured": self.homepage_featured,
+            "homepageRank": self.homepage_rank,
             "category": self.category,
             "title": self.title,
             "sourceDescription": str(self.native.get("source_description") or "") or None,
@@ -594,6 +643,7 @@ def _parse_viral_envelope(content: bytes) -> dict[str, Any]:
 
     除 JSON 解码失败外还兜住 ``UnicodeDecodeError``（非 UTF-8 的网关错误页）：
     这两类响应都代表"这次调用没拿到数据"，需要能被上层判定为可切换的失败。
+    可重试状态（429/5xx）带状态码抛出，供请求层决定"原地重试还是换通道"。
     """
     try:
         envelope = json.loads(_maybe_gunzip(content))
@@ -602,7 +652,9 @@ def _parse_viral_envelope(content: bytes) -> dict[str, Any]:
     if not isinstance(envelope, dict):
         raise ViralSourceError("爆款数据源响应结构异常")
     code = envelope.get("code")
-    if isinstance(code, int) and code != 200:
+    if isinstance(code, int) and not isinstance(code, bool) and code != 200:
+        if _is_retryable_status(code):
+            raise ViralSourceHttpStatusError(code)
         raise ViralSourceError("爆款数据源暂时不可用，请稍后重试")
     data = envelope.get("data")
     if not isinstance(data, dict):
@@ -713,8 +765,8 @@ class ViralSourceClient:
     ) -> dict[str, Any]:
         """按主→备顺序请求；单次失败自动切下一通道，成功立即返回.
 
-        每次物理请求独立计量：失败的尝试记 0 用量，平台成本只落在真正取到数据
-        的那一次调用上，客户端侧不会因切换被重复计费。
+        每次物理请求独立计量：客户侧只对真正取到数据的那一次调用计费；供应商侧
+        按每次拿到响应独立确认用量，平台成本因此可能高于客户计费。
         """
         channels = self._candidate_channels()
         last_error: ViralSourceError | None = None
@@ -765,12 +817,32 @@ class ViralSourceClient:
         from app.billing_meter import meter_call, set_api_type
 
         api_type = _API_TYPE_BY_PATH.get(path)
-        # 计量圈住"取回响应 + 校验响应"整段：网关错误码、上游失败与不可解析响应
-        # 都不算成功调用，平台成本只落在真实取到数据的那一次尝试上。
+        # 没有备用通道时"原地重试"是唯一的韧性手段；有备用通道时换节点优先——
+        # 刚失败的节点立刻重试等于白等一次超时（见 _CHANNEL_COOLDOWN_SECONDS 的取舍）。
+        max_attempts = _VIRAL_SOURCE_MAX_ATTEMPTS if len(self._channels) == 1 else 1
+        # 搜索是只读查询，HTTP 状态或业务包中的 429/5xx 可安全重试。超时/网络
+        # 错误的结果不可知且重试会放大计费成本，不做重试。每次物理外呼都独立
+        # 计量：供应商已返回响应即确认供应商用量，客户侧成功与否由整段计量圈定。
         with set_api_type(api_type) if api_type else nullcontext():
-            with meter_call("viral_data", units=billing_units):
-                content = transport.request("POST", url, headers=headers, body=body)
-                return _parse_viral_envelope(content)
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    with meter_call("viral_data", units=billing_units) as metered_call:
+                        content = transport.request("POST", url, headers=headers, body=body)
+                        metered_call.record_usage()
+                        return _parse_viral_envelope(content)
+                except ViralSourceHttpStatusError as exc:
+                    if attempt >= max_attempts or not _is_retryable_status(exc.status):
+                        raise
+                    delay = _retry_backoff_delay(attempt, exc.retry_after)
+                    logger.warning(
+                        "Viral source request got HTTP %s, retrying in %.1fs (attempt %s/%s)",
+                        exc.status,
+                        delay,
+                        attempt,
+                        max_attempts - 1,
+                    )
+                    time.sleep(delay)
+        raise AssertionError("数据源重试循环必须返回或抛出异常")
 
     # -- 抖音 ----------------------------------------------------------------
 

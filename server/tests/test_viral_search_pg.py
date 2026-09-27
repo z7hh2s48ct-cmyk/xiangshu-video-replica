@@ -9,6 +9,8 @@ module 级建库 → alembic head → 每用例 TRUNCATE users/wallets 等）。
 
 import json
 import uuid
+from base64 import urlsafe_b64encode
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import psycopg
@@ -24,6 +26,29 @@ from test_customer_pricing import (  # noqa: F401
 from test_usage_billing import credit_lot  # noqa: F401
 
 from app.db_portable import BusinessConnection
+
+
+def test_nonfeatured_page_rejects_featured_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app import viral_store
+
+    monkeypatch.setattr(viral_store, "_collection_window_end", lambda *_args: 0)
+    monkeypatch.setattr(viral_store, "viral_fetched_at", lambda *_args, **_kwargs: "v1")
+    payload = {"v": 3, "p": "douyin", "s": "hot", "d": "v1", "k": [0, 10, 1, "video"]}
+    cursor = urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+
+    with pytest.raises(viral_store.InvalidViralCursorError):
+        viral_store.list_viral_video_page(
+            object(), platform="douyin", sort="hot", limit=1, cursor=cursor
+        )
+
+
+def test_viral_response_keeps_homepage_rank() -> None:
+    from app.viral_routes import ViralVideoItem
+
+    video = replace(_viral_seed(), homepage_featured=True, homepage_rank=-1)
+    response = ViralVideoItem.model_validate(video.to_client_dict()).model_dump()
+
+    assert response["homepageRank"] == -1
 
 
 def test_viral_search_discoveries_schema_present_at_head(route_state: str) -> None:

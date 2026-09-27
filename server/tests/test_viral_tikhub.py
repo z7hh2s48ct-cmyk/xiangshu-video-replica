@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import email.message
 import gzip
 import io
 import json
@@ -12,6 +13,8 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from typing import Any
 from urllib.error import HTTPError
 
@@ -26,6 +29,7 @@ from app.viral_tikhub import (
     UrllibViralHttpTransport,
     ViralSourceClient,
     ViralSourceError,
+    ViralSourceHttpStatusError,
     ViralSourceUnavailable,
     _pick_image_url,
     _reset_channel_cooldowns,
@@ -214,6 +218,7 @@ def test_normalize_douyin_aweme_caps_tags_and_maps_stats() -> None:
     assert video.tags == ["锦鲤体型", "鱼池养锦鲤", "第三个", "第四个", "第五个", "第六个"]
     client_dict = video.to_client_dict()
     assert client_dict["hasPlayableAudio"] is True
+    assert client_dict["homepageRank"] is None
     assert client_dict["native"] == {"aweme_id": "7680753914849346171"}
 
 
@@ -728,9 +733,28 @@ def test_wechat_video_detail_rejects_actual_error_envelope_with_neutral_message(
 
 
 def test_non_200_envelope_raises() -> None:
-    client, _ = _client([{"code": 429, "message": "rate limited"}])
+    failure = {"code": 429, "message": "rate limited"}
+    client, _ = _client([failure, failure, failure])
     with pytest.raises(ViralSourceError):
         client.douyin_search(keyword="乡墅")
+
+
+@pytest.mark.parametrize("status", [429, 502])
+def test_retry_on_retryable_envelope_then_succeeds(
+    status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("app.viral_tikhub.time.sleep", lambda seconds: sleeps.append(seconds))
+    client, transports = _client(
+        [
+            {"code": status, "message": "temporary failure"},
+            {"code": 200, "data": {"business_data": []}},
+        ]
+    )
+
+    assert client.douyin_search(keyword="乡墅") == []
+    assert len(transports[0].requests) == 2
+    assert sleeps == [0.5]
 
 
 def test_http_error_log_does_not_echo_upstream_response(
@@ -924,10 +948,11 @@ def test_backup_call_needs_gunzip_and_parse_like_primary() -> None:
     assert [video.video_id for video in videos] == ["v-2"]
 
 
-def test_without_backup_entry_failure_is_not_retried() -> None:
+def test_without_backup_entry_failure_has_no_channel_to_fail_over() -> None:
+    """单通道且不可重试的失败：既没有第二条通道，也不会原地打转."""
     _reset_wechat_detail_cache()
     _reset_channel_cooldowns()
-    transport = FakeTransport([{"code": 502}])
+    transport = FakeTransport([{"code": 400}])
     client = ViralSourceClient(api_key="primary-key", transport=transport)
 
     with pytest.raises(ViralSourceError):
@@ -939,7 +964,7 @@ def test_without_backup_entry_failure_is_not_retried() -> None:
 def test_backup_entry_equal_to_primary_is_not_configured() -> None:
     _reset_wechat_detail_cache()
     _reset_channel_cooldowns()
-    transport = FakeTransport([{"code": 502}])
+    transport = FakeTransport([{"code": 400}])
     client = ViralSourceClient(
         api_key="primary-key",
         transport=transport,
@@ -1010,7 +1035,11 @@ def test_channel_cooldown_expires_and_primary_is_tried_again(
 def test_failed_attempt_meters_zero_usage_and_backup_success_meters_units(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """平台成本只记成功那一次：失败尝试记 0 用量，成功尝试记 1 个单位."""
+    """客户侧只记成功那一次：失败尝试记 0 单位，成功尝试记 1 个单位.
+
+    供应商侧用量另算：主通道拿到了响应（哪怕是失败信封）就确认供应商成本，
+    这是 request 层 record_usage 的职责，与这里的客户侧结果分开。
+    """
     import app.billing_meter as billing_meter
 
     recorded: list[dict[str, Any]] = []
@@ -1024,8 +1053,8 @@ def test_failed_attempt_meters_zero_usage_and_backup_success_meters_units(
             "succeeded": False,
         }
         recorded.append(entry)
-        with real_meter_call(service, units=units):
-            yield
+        with real_meter_call(service, units=units) as metered_call:
+            yield metered_call
         entry["succeeded"] = True
 
     monkeypatch.setattr(billing_meter, "meter_call", recording_meter_call)
@@ -1098,3 +1127,162 @@ def test_backup_key_is_masked_like_other_credentials() -> None:
 
     assert is_secret_field("backup_api_key") is True
     assert mask_secret("backup-secret-value") == "********alue"
+
+
+# ---------------------------------------------------------------------------
+# 429/5xx 重试与退避：仅重试"请求未被受理"的状态；网络错误不重试
+# ---------------------------------------------------------------------------
+
+
+class FlakyStatusTransport:
+    """前 N 次抛出带状态码的传输层错误，之后恢复返回空搜索页."""
+
+    def __init__(self, fail_times: int, status: int, retry_after: float | None = None) -> None:
+        self.fail_times = fail_times
+        self.status = status
+        self.retry_after = retry_after
+        self.calls = 0
+
+    def request(self, method: str, url: str, *, headers, body=None) -> bytes:
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise ViralSourceHttpStatusError(self.status, self.retry_after)
+        return json.dumps({"code": 200, "data": {"business_data": []}}).encode("utf-8")
+
+
+class NetworkErrorTransport:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def request(self, method: str, url: str, *, headers, body=None) -> bytes:
+        self.calls += 1
+        raise ViralSourceError("爆款数据源网络异常，请稍后重试")
+
+
+def _retry_client(transport: Any) -> ViralSourceClient:
+    return ViralSourceClient(
+        api_key="test-key",
+        transport=transport,
+        detail_transport=FakeTransport([]),
+    )
+
+
+def test_retry_on_429_honours_retry_after_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("app.viral_tikhub.time.sleep", lambda seconds: sleeps.append(seconds))
+    transport = FlakyStatusTransport(fail_times=1, status=429, retry_after=2.0)
+
+    videos = _retry_client(transport).douyin_search(keyword="别墅")
+
+    assert videos == []
+    assert transport.calls == 2
+    assert sleeps == [2.0]
+
+
+def test_retry_on_429_uses_backoff_and_stops_after_max_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("app.viral_tikhub.time.sleep", lambda seconds: sleeps.append(seconds))
+    transport = FlakyStatusTransport(fail_times=5, status=429)
+
+    with pytest.raises(ViralSourceError):
+        _retry_client(transport).douyin_search(keyword="别墅")
+
+    assert transport.calls == 3
+    assert sleeps == [0.5, 1.0]
+
+
+def test_retry_on_5xx_recovers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.viral_tikhub.time.sleep", lambda seconds: None)
+    transport = FlakyStatusTransport(fail_times=1, status=502)
+
+    assert _retry_client(transport).douyin_search(keyword="别墅") == []
+    assert transport.calls == 2
+
+
+def test_no_retry_on_other_4xx(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("app.viral_tikhub.time.sleep", lambda seconds: sleeps.append(seconds))
+    transport = FlakyStatusTransport(fail_times=3, status=404)
+
+    with pytest.raises(ViralSourceError):
+        _retry_client(transport).douyin_search(keyword="别墅")
+
+    assert transport.calls == 1
+    assert sleeps == []
+
+
+def test_no_retry_on_network_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("app.viral_tikhub.time.sleep", lambda seconds: sleeps.append(seconds))
+    transport = NetworkErrorTransport()
+
+    with pytest.raises(ViralSourceError):
+        _retry_client(transport).douyin_search(keyword="别墅")
+
+    assert transport.calls == 1
+    assert sleeps == []
+
+
+def test_transport_exposes_status_and_retry_after_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = email.message.Message()
+    message["Retry-After"] = "3"
+
+    def fail_request(*args: object, **kwargs: object) -> bytes:
+        raise HTTPError(
+            "https://source.test/search",
+            429,
+            "too many requests",
+            hdrs=message,
+            fp=io.BytesIO(b"{}"),
+        )
+
+    monkeypatch.setattr("app.viral_tikhub.urlopen", fail_request)
+
+    with pytest.raises(ViralSourceHttpStatusError) as excinfo:
+        UrllibViralHttpTransport().request(
+            "POST", "https://source.test/search", headers={}, body=b"{}"
+        )
+
+    assert excinfo.value.status == 429
+    assert excinfo.value.retry_after == 3.0
+
+
+def test_transport_without_retry_after_header_yields_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_request(*args: object, **kwargs: object) -> bytes:
+        raise HTTPError(
+            "https://source.test/search",
+            502,
+            "bad gateway",
+            hdrs=None,
+            fp=io.BytesIO(b"{}"),
+        )
+
+    monkeypatch.setattr("app.viral_tikhub.urlopen", fail_request)
+
+    with pytest.raises(ViralSourceHttpStatusError) as excinfo:
+        UrllibViralHttpTransport().request(
+            "POST", "https://source.test/search", headers={}, body=b"{}"
+        )
+
+    assert excinfo.value.status == 502
+    assert excinfo.value.retry_after is None
+
+
+def test_retry_after_accepts_http_date() -> None:
+    from app.viral_tikhub import _retry_after_seconds
+
+    message = email.message.Message()
+    message["Retry-After"] = format_datetime(datetime.now(UTC) + timedelta(seconds=3))
+
+    retry_after = _retry_after_seconds(message)
+
+    assert retry_after is not None
+    assert 0.0 <= retry_after <= 3.0

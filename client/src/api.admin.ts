@@ -1862,8 +1862,12 @@ export type CollectedViralVideo = {
   created_at: string;
   homepage_featured: boolean;
   collection_published: boolean;
+  /** 置顶序：非空表示已置顶（越小越靠前）；置顶才写入，取消置顶归 NULL。 */
+  homepage_rank?: number | null;
   media_status: string;
   storage_uri: string | null;
+  /** 平台可见状态；列表接口未返回时按 AVAILABLE 处理。 */
+  availability?: "AVAILABLE" | "HIDDEN" | "UNAVAILABLE";
 };
 
 /** 列表状态分段：与后端 `status` 查询参数一一对应，服务端过滤后再分页。 */
@@ -1923,7 +1927,7 @@ export function archiveCollectedViralVideo(
 
 export function curateViralVideo(
   video: CollectedViralVideo,
-  action: "feature" | "unfeature" | "delete",
+  action: "feature" | "unfeature" | "delete" | "pin" | "unpin",
   reason: string,
   idempotencyKey: string,
 ) {
