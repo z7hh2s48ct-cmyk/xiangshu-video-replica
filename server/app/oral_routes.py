@@ -7,6 +7,7 @@ fields so the customer UI cannot leak the upstream provider name.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -26,18 +27,25 @@ from app.internal_billing import (
     reconcile_oral_billing_by_evidence,
 )
 from app.oral import (
+    MAX_CLONE_TITLE_CHARS,
     ORAL_CONSENT_TEXT_VERSION,
+    VOICE_SETTING_RANGES,
     OralConflictError,
     OralDomainError,
     OralResourceInUseError,
     OralResourceNotFoundError,
     OralTaskNotFoundError,
+    VoiceLanguage,
+    VoiceSettings,
+    apply_voice_settings_to_vendor,
+    begin_voice_settings_update,
     cancel_oral_task,
     confirm_voice_clone,
     create_oral_consent,
     create_oral_task,
     delete_avatar_clone,
     delete_voice_clone,
+    finish_voice_settings_update,
     hide_oral_task,
     list_avatars,
     list_oral_consents,
@@ -49,6 +57,8 @@ from app.oral import (
     read_avatar_clone,
     read_oral_task,
     read_voice_clone,
+    rename_avatar_clone,
+    rename_voice_clone,
     start_avatar_clone,
     start_voice_clone,
 )
@@ -128,12 +138,17 @@ def _vendor_guard(exc: HiflyError) -> HTTPException:
 
 def _serialize(row: dict[str, Any]) -> dict[str, Any]:
     """Customer-facing projection: opaque task ids only, never vendor fields."""
-    return {
+    data = {
         key: value
         for key, value in row.items()
         if not key.startswith("vendor_")
         and key not in {"idempotency_key", "request_hash", "subtitle_json"}
     }
+    # 音色参数在库里是 NUMERIC（Decimal），默认会被序列化成字符串；按数值下发给界面。
+    for field in VOICE_SETTING_RANGES:
+        if isinstance(data.get(field), Decimal):
+            data[field] = float(data[field])
+    return data
 
 
 _TERMINAL_BILLING_LABELS = {"SETTLE": "SETTLED", "RELEASE": "RELEASED", "FREE": "FREE"}
@@ -252,8 +267,32 @@ def list_oral_avatars(
     identity_id: Annotated[str, Query(min_length=1, max_length=128)],
     conn: Database,
     actor: AuthenticatedUser,
+    q: Annotated[str | None, Query(max_length=MAX_CLONE_TITLE_CHARS)] = None,
 ) -> list[dict[str, Any]]:
-    return [_serialize(row) for row in list_avatars(conn, actor=actor, identity_id=identity_id)]
+    return [
+        _serialize(row) for row in list_avatars(conn, actor=actor, identity_id=identity_id, query=q)
+    ]
+
+
+class CloneRenameRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=MAX_CLONE_TITLE_CHARS)
+
+
+@router.patch("/avatars/{avatar_id}")
+def rename_avatar(
+    avatar_id: str,
+    request: CloneRenameRequest,
+    db: BusinessDbDep,
+) -> dict[str, Any]:
+    with db.write() as (conn, actor):
+        try:
+            return _serialize(
+                rename_avatar_clone(conn, actor=actor, avatar_id=avatar_id, title=request.title)
+            )
+        except OralDomainError as exc:
+            raise _domain_guard(exc) from exc
 
 
 class AvatarCloneRequest(BaseModel):
@@ -322,8 +361,26 @@ def list_oral_voices(
     identity_id: Annotated[str, Query(min_length=1, max_length=128)],
     conn: Database,
     actor: AuthenticatedUser,
+    q: Annotated[str | None, Query(max_length=MAX_CLONE_TITLE_CHARS)] = None,
 ) -> list[dict[str, Any]]:
-    return [_serialize(row) for row in list_voices(conn, actor=actor, identity_id=identity_id)]
+    return [
+        _serialize(row) for row in list_voices(conn, actor=actor, identity_id=identity_id, query=q)
+    ]
+
+
+@router.patch("/voices/{voice_id}")
+def rename_voice(
+    voice_id: str,
+    request: CloneRenameRequest,
+    db: BusinessDbDep,
+) -> dict[str, Any]:
+    with db.write() as (conn, actor):
+        try:
+            return _serialize(
+                rename_voice_clone(conn, actor=actor, voice_id=voice_id, title=request.title)
+            )
+        except OralDomainError as exc:
+            raise _domain_guard(exc) from exc
 
 
 class VoiceCloneRequest(BaseModel):
@@ -334,6 +391,7 @@ class VoiceCloneRequest(BaseModel):
     source_asset_id: str = Field(min_length=1, max_length=128)
     consent_id: str = Field(min_length=1, max_length=128)
     idempotency_key: str = Field(min_length=8, max_length=128)
+    language: VoiceLanguage = "zh"
 
 
 @router.post("/voices", status_code=status.HTTP_202_ACCEPTED)
@@ -353,6 +411,7 @@ def create_voice_clone(
                 source_asset_id=request.source_asset_id,
                 consent_id=request.consent_id,
                 idempotency_key=request.idempotency_key,
+                language=request.language,
             )
         except OralDomainError as exc:
             domain_error = exc
@@ -388,6 +447,49 @@ def confirm_voice(
     with db.write() as (conn, actor):
         try:
             return _serialize(confirm_voice_clone(conn, voice_id=voice_id, actor=actor))
+        except OralDomainError as exc:
+            raise _domain_guard(exc) from exc
+
+
+class VoiceSettingsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    speech_rate: Decimal = Field(ge=Decimal("0.5"), le=Decimal("2.0"), decimal_places=1)
+    volume: Decimal = Field(ge=Decimal("0.1"), le=Decimal("2.0"), decimal_places=1)
+    pitch: Decimal = Field(ge=Decimal("0.1"), le=Decimal("2.0"), decimal_places=1)
+
+
+@router.put("/voices/{voice_id}/settings")
+def update_voice_settings(
+    voice_id: str,
+    request: VoiceSettingsRequest,
+    db: BusinessDbDep,
+    vendor: OralVendor,
+) -> dict[str, Any]:
+    """整体覆盖声音的语速/音量/音调；PUT 语义，重复提交同一组值是幂等的。"""
+    settings = VoiceSettings(
+        speech_rate=request.speech_rate, volume=request.volume, pitch=request.pitch
+    )
+    with db.write() as (conn, actor):
+        try:
+            vendor_voice_id = begin_voice_settings_update(conn, actor=actor, voice_id=voice_id)
+        except OralDomainError as exc:
+            raise _domain_guard(exc) from exc
+    try:
+        apply_voice_settings_to_vendor(vendor, vendor_voice_id=vendor_voice_id, settings=settings)
+    except HiflyError as exc:
+        raise _vendor_guard(exc) from exc
+    with db.write() as (conn, actor):
+        try:
+            return _serialize(
+                finish_voice_settings_update(
+                    conn,
+                    actor=actor,
+                    voice_id=voice_id,
+                    vendor_voice_id=vendor_voice_id,
+                    settings=settings,
+                )
+            )
         except OralDomainError as exc:
             raise _domain_guard(exc) from exc
 

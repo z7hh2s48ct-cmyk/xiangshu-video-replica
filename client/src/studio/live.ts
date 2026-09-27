@@ -706,6 +706,10 @@ function studioVoice(voice: OralVoiceRecord, url?: string): StudioVoice {
     error: voice.error_message ?? undefined,
     url,
     demoAssetId: voice.demo_asset_id ?? undefined,
+    language: voice.language,
+    speechRate: voice.speech_rate,
+    volume: voice.volume,
+    pitch: voice.pitch,
   };
 }
 

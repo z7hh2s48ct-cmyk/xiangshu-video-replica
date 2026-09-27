@@ -87,8 +87,9 @@ REPO_ROOT = SERVER_DIR.parent
 # 20260925T1400_api_metadata_pending_write（api_metadata 允许在 PENDING 期写入的
 # 追加修复）再依次叠加于链尾；
 # 20260927T1200_admin_offline_payment_source（管理员代客开通套餐的「线下收款」来源单
-# 类型）再追加其上，故链尾为该值。
-HEAD_REVISION = "20260927T1200_admin_offline_payment_source"
+# 类型）再追加其上；20260927T0000_oral_voice_language_settings（声音克隆样本语言与
+# 语速/音量/音调参数）重挂于其后，故链尾为该值。
+HEAD_REVISION = "20260927T0000_oral_voice_language_settings"
 
 # 最后一个已发布（受支持）起点。其后的 056…090 与本迁移尚未随任何受支持版本发布，
 # 故冻结范围止于此——把未发布 revision 也纳入哈希会让每次新增迁移都必须改常量，
@@ -157,8 +158,11 @@ HEAD_SCHEMA_COUNTS = {
     # pg_get_functiondef 文本，必然重算（见下）。
     # 20260927T1200 只 drop+recreate ck_admin_adjustments_source_type（追加
     # OFFLINE_PAYMENT）：计数净 0；约束文本变了，digest 重算（见下）。
-    "check_constraints": 323,
-    "columns": 1226,
+    # 20260927T0000 给 oral_voices 增加 language / speech_rate / volume / pitch 四列，
+    # 各带一条 CHECK（语言键白名单与上游取值范围）：columns 1226 → 1230、
+    # check_constraints 323 → 327；不加表 / 索引 / 外键，digest 重算（见下）。
+    "check_constraints": 327,
+    "columns": 1230,
     "foreign_keys": 195,
     "identity_columns": 0,
     "jsonb_columns": 6,
@@ -369,6 +373,9 @@ HEAD_TABLE_NAMES = (
 #   「合并后新链」重算。
 # - 20260927T1200_admin_offline_payment_source（管理员代客开通套餐）：来源单枚举
 #   CHECK 追加 OFFLINE_PAYMENT（drop+recreate，计数净 0），digest 随约束文本重算。
+# - 20260927T0000_oral_voice_language_settings（声音克隆样本语言与语速/音量/音调，
+#   重挂于 20260927T1200 之后）：oral_voices +4 列、+4 条 CHECK，digest 由
+#   migration_manifest.py --print-schema 在全新迁移到 head 的库上重算。
 # digest/counts 以 scripts/ci/migration_manifest.py --print-schema 于 postgres:16 重算
 # （合并后的新 head：sub_account_permissions + 三个 analysis 迁移 + viral 搜索发现表
 #  + main 的 MATERIAL-UX tags_json 列 + REFUND 调账迁移 + 1800 垫片 + 交易号唯一
@@ -376,7 +383,7 @@ HEAD_TABLE_NAMES = (
 #  两侧原来的 digest 都不能用——本分支那条是接在 viral 之后的旧链、main 那条只到
 #  MATERIAL-UX，合并后 head 变成接在 MATERIAL-UX 之后的本分支迁移，约束文本随之变化，
 #  digest 必然要重算。由 scripts/ci/migration_manifest.py --print-schema 在 PG 上重算后粘贴。
-HEAD_SCHEMA_DIGEST = "54b2a7e56a4534d51522b94450641fcbbb9198dbb791e5cf5d00c8f47b914651"
+HEAD_SCHEMA_DIGEST = "b37360656e18dec866cd114c33255f40009d35e988709352b4c660e2de154297"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

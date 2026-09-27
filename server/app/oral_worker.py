@@ -34,6 +34,7 @@ from app.media_tools import (
     inspect_media_bytes,
     normalize_audio_to_mp3,
 )
+from app.oral import DEFAULT_VOICE_LANGUAGE
 from app.storage import StorageAdapter, StoredObject
 
 logger = logging.getLogger(__name__)
@@ -550,7 +551,12 @@ def _perform_submission(
         )
         target = vendor.create_upload_url("mp3")
         vendor.upload_file(target, normalized)
-        task_id = vendor.create_voice(title=str(row["title"])[:20], file_id=target.file_id)
+        language = str(row.get("language") or DEFAULT_VOICE_LANGUAGE)
+        task_id = vendor.create_voice(
+            title=str(row["title"])[:20],
+            file_id=target.file_id,
+            languages=None if language == DEFAULT_VOICE_LANGUAGE else language,
+        )
         return OralWorkResult("submitted", provider_task_id=task_id)
     if str(row["mode"]) == "TTS":
         task_id = vendor.create_video_by_tts(

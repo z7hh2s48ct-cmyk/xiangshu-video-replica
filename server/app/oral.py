@@ -19,7 +19,8 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from decimal import Decimal
+from typing import Any, Literal, get_args
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -46,6 +47,20 @@ ORAL_SOURCE_MAX_BYTES = {
 }
 ORAL_CONSENT_TEXT_VERSION = "2026-09-06-v1"
 ORAL_CONSENT_PURPOSES = {"AVATAR_CLONE", "VOICE_CLONE"}
+
+# 声音克隆样本语言：只开放普通话与国内方言（上游另支持的外语不开放），键与上游
+# 字典一致，并与迁移 20260927T0000 的 CHECK 约束同步维护。
+VoiceLanguage = Literal[
+    "zh",
+    "zh_cantonese",
+    "zh_sichuanese",
+    "zh_shanghainese",
+    "zh_tianjinese",
+    "zh_zhengzhounese",
+    "zh_wuhanese",
+]
+VOICE_LANGUAGES: frozenset[str] = frozenset(get_args(VoiceLanguage))
+DEFAULT_VOICE_LANGUAGE = "zh"
 
 AvatarStatus = str  # PENDING/RUNNING/READY/FAILED
 TaskStatus = str  # QUEUED/RUNNING/SUCCEEDED/FAILED/CANCELLED
@@ -474,6 +489,7 @@ def start_voice_clone(
     source_asset_id: str,
     consent_id: str,
     idempotency_key: str,
+    language: str = DEFAULT_VOICE_LANGUAGE,
     vendor: HiflyClient | None = None,
 ) -> CloneStartResult:
     require_not_auditor(
@@ -503,15 +519,19 @@ def start_voice_clone(
         source_sha256=str(asset["sha256"]),
         purpose="VOICE_CLONE",
     )
+    if language not in VOICE_LANGUAGES:
+        raise OralDomainError("不支持的声音样本语言")
     clean_title = title.strip() or "克隆声音"
-    request_hash = _request_hash(
-        {
-            "identity_id": identity_id,
-            "title": clean_title,
-            "source_asset_id": source_asset_id,
-            "consent_id": consent_id,
-        }
-    )
+    hashed_request: dict[str, Any] = {
+        "identity_id": identity_id,
+        "title": clean_title,
+        "source_asset_id": source_asset_id,
+        "consent_id": consent_id,
+    }
+    # 普通话不进哈希：上线前提交的请求（没有语言字段）重放时哈希不变，不会被误判冲突。
+    if language != DEFAULT_VOICE_LANGUAGE:
+        hashed_request["language"] = language
+    request_hash = _request_hash(hashed_request)
     existing = conn.execute(
         """
         SELECT id, status, submission_state, request_hash
@@ -535,8 +555,8 @@ def start_voice_clone(
         """
         INSERT INTO oral_voices (
             id, identity_id, owner_user_id, title, status, source_asset_id,
-            consent_id, idempotency_key, request_hash, submission_state
-        ) VALUES (%s, %s, %s, %s, 'PENDING', %s, %s, %s, %s, 'LOCAL_PENDING')
+            consent_id, idempotency_key, request_hash, submission_state, language
+        ) VALUES (%s, %s, %s, %s, 'PENDING', %s, %s, %s, %s, 'LOCAL_PENDING', %s)
         """,
         (
             voice_id,
@@ -547,6 +567,7 @@ def start_voice_clone(
             consent_id,
             idempotency_key,
             request_hash,
+            language,
         ),
     )
     from app.usage_billing import accept_operation
@@ -1389,18 +1410,114 @@ def confirm_voice_clone(
     return dict(confirmed)
 
 
+MAX_CLONE_TITLE_CHARS = 60
+
+
+def _title_search_clause(query: str | None) -> tuple[str, tuple[object, ...]]:
+    """按名称模糊搜索；转义 LIKE 通配符，让用户输入的 % 与 _ 按字面匹配。"""
+    clean = (query or "").strip()
+    if not clean:
+        return "", ()
+    escaped = clean.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return " AND title ILIKE %s ESCAPE '\\'", (f"%{escaped}%",)
+
+
+def _clean_clone_title(title: str) -> str:
+    clean = title.strip()
+    if not clean:
+        raise OralDomainError("名称不能为空")
+    if len(clean) > MAX_CLONE_TITLE_CHARS:
+        raise OralDomainError(f"名称不能超过 {MAX_CLONE_TITLE_CHARS} 个字")
+    return clean
+
+
 def list_avatars(
-    conn: BusinessConnection, *, actor: CurrentUser, identity_id: str
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    identity_id: str,
+    query: str | None = None,
 ) -> list[dict[str, Any]]:
+    # 只查本系统记录的、当前账号创建的分身：上游「自己的数字人」列表是整个平台账号
+    # 维度，含其他用户的分身，不能直接透出。
+    search_sql, search_params = _title_search_clause(query)
     rows = conn.execute(
-        """
+        f"""
         SELECT * FROM oral_avatars
-        WHERE identity_id = %s AND owner_user_id = %s AND deleted_at IS NULL
+        WHERE identity_id = %s AND owner_user_id = %s AND deleted_at IS NULL{search_sql}
         ORDER BY created_at DESC
         """,
-        (identity_id, actor.id),
+        (identity_id, actor.id, *search_params),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def _rename_clone(
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    table: Literal["oral_avatars", "oral_voices"],
+    entity_type: Literal["oral_avatar", "oral_voice"],
+    record_id: str,
+    title: str,
+    missing_message: str,
+) -> dict[str, Any]:
+    """只改本地名称：上游没有改名接口，界面、搜索与列表都以本地名称为准。"""
+    action = f"{entity_type.replace('_', '.')}.rename"
+    require_not_auditor(
+        conn, actor=actor, action=action, entity_type=entity_type, entity_id=record_id
+    )
+    clean_title = _clean_clone_title(title)
+    before = conn.execute(
+        f"SELECT title FROM {table} "
+        "WHERE id = %s AND owner_user_id = %s AND deleted_at IS NULL FOR UPDATE",
+        (record_id, actor.id),
+    ).fetchone()
+    if before is None:
+        raise OralDomainError(missing_message)
+    if str(before["title"]) != clean_title:
+        conn.execute(
+            f"UPDATE {table} SET title = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+            (clean_title, record_id),
+        )
+        write_audit(
+            conn,
+            actor=actor,
+            action=action,
+            entity_type=entity_type,
+            entity_id=record_id,
+            metadata={"before": str(before["title"]), "after": clean_title},
+            commit=False,
+        )
+    return dict(conn.execute(f"SELECT * FROM {table} WHERE id = %s", (record_id,)).fetchone())
+
+
+def rename_avatar_clone(
+    conn: BusinessConnection, *, actor: CurrentUser, avatar_id: str, title: str
+) -> dict[str, Any]:
+    return _rename_clone(
+        conn,
+        actor=actor,
+        table="oral_avatars",
+        entity_type="oral_avatar",
+        record_id=avatar_id,
+        title=title,
+        missing_message="口播分身任务不存在",
+    )
+
+
+def rename_voice_clone(
+    conn: BusinessConnection, *, actor: CurrentUser, voice_id: str, title: str
+) -> dict[str, Any]:
+    return _rename_clone(
+        conn,
+        actor=actor,
+        table="oral_voices",
+        entity_type="oral_voice",
+        record_id=voice_id,
+        title=title,
+        missing_message="声音克隆任务不存在",
+    )
 
 
 def read_avatar_clone(
@@ -1416,15 +1533,21 @@ def read_avatar_clone(
 
 
 def list_voices(
-    conn: BusinessConnection, *, actor: CurrentUser, identity_id: str
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    identity_id: str,
+    query: str | None = None,
 ) -> list[dict[str, Any]]:
+    # 与分身同理：上游声音列表是平台账号维度，只能以本系统的归属记录为准。
+    search_sql, search_params = _title_search_clause(query)
     rows = conn.execute(
-        """
+        f"""
         SELECT * FROM oral_voices
-        WHERE identity_id = %s AND owner_user_id = %s AND deleted_at IS NULL
+        WHERE identity_id = %s AND owner_user_id = %s AND deleted_at IS NULL{search_sql}
         ORDER BY created_at DESC
         """,
-        (identity_id, actor.id),
+        (identity_id, actor.id, *search_params),
     ).fetchall()
     return [dict(row) for row in rows]
 
@@ -1439,6 +1562,125 @@ def read_voice_clone(
     if row is None:
         raise OralDomainError("声音克隆任务不存在")
     return dict(row)
+
+
+# --------------------------------------------------------------------------- #
+# Voice settings (语速 / 音量 / 音调).
+#
+# 上游的生成接口不接受这三个参数，只能通过编辑接口改写声音本身，之后用该声音
+# 生成的口播都按新参数合成。上游调用可能耗时数十秒，不能占着围栏事务里的会话行
+# 锁，所以拆成三段：事务内校验取标识 → 事务外调用上游 → 新事务复核后落库与审计。
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class VoiceSettings:
+    speech_rate: Decimal
+    volume: Decimal
+    pitch: Decimal
+
+
+VOICE_SETTING_RANGES: dict[str, tuple[Decimal, Decimal, str]] = {
+    "speech_rate": (Decimal("0.5"), Decimal("2.0"), "语速"),
+    "volume": (Decimal("0.1"), Decimal("2.0"), "音量"),
+    "pitch": (Decimal("0.1"), Decimal("2.0"), "音调"),
+}
+
+
+def _require_valid_voice_settings(settings: VoiceSettings) -> None:
+    for field, (low, high, label) in VOICE_SETTING_RANGES.items():
+        value: Decimal = getattr(settings, field)
+        # 库列是 NUMERIC(2,1)，多余的小数位会被静默四舍五入，与上游实际值不一致。
+        exponent = value.as_tuple().exponent
+        if (
+            not value.is_finite()
+            or not low <= value <= high
+            or (isinstance(exponent, int) and exponent < -1)
+        ):
+            raise OralDomainError(f"{label}需在 {low}–{high} 之间，且最多一位小数")
+
+
+def begin_voice_settings_update(
+    conn: BusinessConnection, *, actor: CurrentUser, voice_id: str
+) -> str:
+    """校验声音可调参数并返回上游声音标识，供调用方在事务外调用上游。"""
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="oral.voice.settings",
+        entity_type="oral_voice",
+        entity_id=voice_id,
+    )
+    row = conn.execute(
+        "SELECT status, vendor_voice_id FROM oral_voices "
+        "WHERE id = %s AND owner_user_id = %s AND deleted_at IS NULL",
+        (voice_id, actor.id),
+    ).fetchone()
+    if row is None:
+        raise OralDomainError("声音克隆任务不存在")
+    if row["status"] != "READY" or not row["vendor_voice_id"]:
+        raise OralDomainError("声音尚未克隆完成，暂不能调整参数")
+    return str(row["vendor_voice_id"])
+
+
+def apply_voice_settings_to_vendor(
+    vendor: HiflyClient, *, vendor_voice_id: str, settings: VoiceSettings
+) -> None:
+    _require_valid_voice_settings(settings)
+    vendor.edit_voice(
+        voice=vendor_voice_id,
+        rate=format(settings.speech_rate, ".1f"),
+        volume=format(settings.volume, ".1f"),
+        pitch=format(settings.pitch, ".1f"),
+    )
+
+
+def finish_voice_settings_update(
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    voice_id: str,
+    vendor_voice_id: str,
+    settings: VoiceSettings,
+) -> dict[str, Any]:
+    """上游已接受新参数后落库并审计；声音在此期间被删除或替换则报冲突。"""
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="oral.voice.settings",
+        entity_type="oral_voice",
+        entity_id=voice_id,
+    )
+    _require_valid_voice_settings(settings)
+    before = conn.execute(
+        "SELECT speech_rate, volume, pitch FROM oral_voices "
+        "WHERE id = %s AND owner_user_id = %s AND deleted_at IS NULL "
+        "AND vendor_voice_id = %s FOR UPDATE",
+        (voice_id, actor.id, vendor_voice_id),
+    ).fetchone()
+    if before is None:
+        raise OralConflictError("声音状态已变化，请刷新后重试")
+    conn.execute(
+        """
+        UPDATE oral_voices
+        SET speech_rate = %s, volume = %s, pitch = %s, updated_at = CURRENT_TIMESTAMP
+        WHERE id = %s
+        """,
+        (settings.speech_rate, settings.volume, settings.pitch, voice_id),
+    )
+    write_audit(
+        conn,
+        actor=actor,
+        action="oral.voice.settings",
+        entity_type="oral_voice",
+        entity_id=voice_id,
+        metadata={
+            field: {"before": str(before[field]), "after": str(getattr(settings, field))}
+            for field in VOICE_SETTING_RANGES
+        },
+        commit=False,
+    )
+    return dict(conn.execute("SELECT * FROM oral_voices WHERE id = %s", (voice_id,)).fetchone())
 
 
 # --------------------------------------------------------------------------- #
