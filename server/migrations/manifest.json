@@ -662,7 +662,7 @@
     },
     "20260927T0000_oral_voice_language_settings": {
       "file": "versions/20260927T0000_oral_voice_language_settings.py",
-      "sha256": "1f44af8f4d436823d74402d94289b54011af803605911ed2766af3cd686edeb6"
+      "sha256": "185580fcfb2a3be9ac7f9cf39765f50c480ed7f954c8ee4b0f3df37ba6f1a5c2"
     },
     "20260927T1200_admin_offline_payment_source": {
       "file": "versions/20260927T1200_admin_offline_payment_source.py",
