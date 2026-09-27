@@ -19,6 +19,7 @@ cases deliberately cover only the answers that never reach a wallet.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import datetime as dt
 import hashlib
@@ -748,3 +749,133 @@ def test_callback_plaintext_for_another_appid_is_not_settleable(
 
     assert result.authenticated is True
     assert result.error_code == WECHAT_CALLBACK_MERCHANT_MISMATCH
+
+
+# ---------------------------------------------------------------------------
+# 微信支付公钥模式 —— 新商户没有平台证书，老商户切换期两种签名灰度混用
+# ---------------------------------------------------------------------------
+
+PUBLIC_KEY_ID = "PUB_KEY_ID_0114232134912410000000000000"
+
+
+@pytest.fixture
+def public_key_merchant(
+    merchant: MerchantConfig, platform_key: rsa.RSAPrivateKey
+) -> MerchantConfig:
+    public_key_pem = (
+        platform_key.public_key()
+        .public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+        .decode("ascii")
+    )
+    return MerchantConfig(
+        provider=merchant.provider,
+        raw={**merchant.raw, "public_key_id": PUBLIC_KEY_ID, "public_key": public_key_pem},
+        allowed_channels=merchant.allowed_channels,
+    )
+
+
+def test_public_key_signed_callback_verifies_without_the_certificate_manager(
+    public_key_merchant: MerchantConfig, platform_key: rsa.RSAPrivateKey
+) -> None:
+    stub = StubCertManager(None, unavailable=True)
+    provider = WeChatNativeProvider(cert_manager=stub)
+    raw_body, headers = signed_callback(platform_key)
+
+    result = provider.verify_notification_raw(
+        raw_body=raw_body, merchant=public_key_merchant, **{**headers, "serial": PUBLIC_KEY_ID}
+    )
+
+    assert result.authenticated is True
+    assert result.error_code is None
+    assert result.merchant_order_no == OUT_TRADE_NO
+    assert stub.calls == 0  # 公钥回调不触发任何证书下载
+
+
+def test_certificate_signed_callback_still_verifies_after_configuring_a_public_key(
+    public_key_merchant: MerchantConfig,
+    certificate: WeChatPlatformCertificate,
+    platform_key: rsa.RSAPrivateKey,
+) -> None:
+    """灰度期内同一商户的回调可能仍用平台证书签名。"""
+    provider = WeChatNativeProvider(cert_manager=StubCertManager(certificate))
+    raw_body, headers = signed_callback(platform_key)
+
+    result = provider.verify_notification_raw(
+        raw_body=raw_body, merchant=public_key_merchant, **headers
+    )
+
+    assert result.authenticated is True
+    assert result.error_code is None
+
+
+def test_public_key_callback_forged_with_another_key_is_rejected(
+    public_key_merchant: MerchantConfig, platform_key: rsa.RSAPrivateKey
+) -> None:
+    impostor = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    raw_body, _ = signed_callback(platform_key)
+    forged = {**sign_headers(impostor, raw_body), "serial": PUBLIC_KEY_ID}
+
+    result = WeChatNativeProvider(
+        cert_manager=StubCertManager(None, unavailable=True)
+    ).verify_notification_raw(raw_body=raw_body, merchant=public_key_merchant, **forged)
+
+    assert result.authenticated is False
+    assert result.error_code == WECHAT_CALLBACK_SIGNATURE_INVALID
+
+
+def test_public_key_callback_without_a_configured_public_key_is_retryable(
+    merchant: MerchantConfig, platform_key: rsa.RSAPrivateKey
+) -> None:
+    """商户还没录公钥时，公钥签名的回调按“暂不可用”处理：路由回 503 让微信重试，
+    运营补完配置后仍能入账，而不是 400 让微信放弃。"""
+    stub = StubCertManager(None, unavailable=True)
+    raw_body, headers = signed_callback(platform_key)
+
+    result = WeChatNativeProvider(cert_manager=stub).verify_notification_raw(
+        raw_body=raw_body, merchant=merchant, **{**headers, "serial": PUBLIC_KEY_ID}
+    )
+
+    assert result.authenticated is False
+    assert result.error_code == WECHAT_CALLBACK_CERT_UNAVAILABLE
+    assert stub.calls == 0
+
+
+# ---------------------------------------------------------------------------
+# 回调的同步工作不得阻塞事件循环
+# ---------------------------------------------------------------------------
+
+
+def test_route_runs_merchant_load_and_verification_off_the_event_loop(
+    merchant: MerchantConfig,
+    certificate: WeChatPlatformCertificate,
+    platform_key: rsa.RSAPrivateKey,
+) -> None:
+    """读配置查库、下载证书都是同步阻塞调用，必须在线程池里跑。"""
+    seen: list[str] = []
+
+    def assert_off_loop(step: str) -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            seen.append(step)
+            return
+        raise AssertionError(f"{step} ran on the event loop")
+
+    class _LoopCheckingProvider(_CannedMerchantProvider):
+        def load_merchant_config(self, conn: object) -> MerchantConfig:  # type: ignore[override]
+            assert_off_loop("load_merchant_config")
+            return super().load_merchant_config(conn)
+
+        def verify_notification_raw(self, **kwargs):  # type: ignore[no-untyped-def,override]
+            assert_off_loop("verify_notification_raw")
+            return super().verify_notification_raw(**kwargs)
+
+    provider = _LoopCheckingProvider(merchant, cert_manager=StubCertManager(certificate))
+    pending = {k: v for k, v in SETTLEABLE_TRANSACTION.items() if k != "transaction_id"}
+    raw_body, headers = signed_callback(platform_key, {**pending, "trade_state": "NOTPAY"})
+
+    for client in _notify_client(provider):
+        response = _post(client, raw_body, headers)
+
+    assert response.status_code == 200
+    assert seen == ["load_merchant_config", "verify_notification_raw"]

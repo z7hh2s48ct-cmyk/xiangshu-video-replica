@@ -36,7 +36,7 @@ from app.payment_provider import (
 )
 from app.settings import SettingsRepository
 from app.wechat_native_client import (
-    PlatformCertificateManager,
+    CertificateSource,
     WeChatDeploymentConfig,
     WeChatMerchantConfig,
     WeChatNativeClient,
@@ -46,6 +46,7 @@ from app.wechat_native_client import (
     default_certificate_manager,
     deployment_config_from_environment,
     merchant_config_from_settings,
+    resolve_verification_key,
     verify_sha256_rsa,
 )
 
@@ -107,14 +108,14 @@ class WeChatNativeProvider(PaymentProvider):
         self,
         *,
         client: WeChatNativeClient | None = None,
-        cert_manager: PlatformCertificateManager | None = None,
+        cert_manager: CertificateSource | None = None,
     ) -> None:
         self._client = client
         # Provider-level certificate manager for raw callback verification. Injected in
         # tests (a stub with a canned self-signed platform cert); defaults to the
         # process-wide downloader. The registry builds a fresh provider per request, so
         # a per-instance manager would re-download the certificates on every callback.
-        self._cert_manager = cert_manager or default_certificate_manager()
+        self._cert_manager: CertificateSource = cert_manager or default_certificate_manager()
 
     @property
     def name(self) -> str:
@@ -287,7 +288,7 @@ class WeChatNativeProvider(PaymentProvider):
                 authenticated=False, error_code=WECHAT_CALLBACK_CONFIG_INVALID
             )
         try:
-            certificate = self._cert_manager.get_certificate(wechat_merchant, serial)
+            public_key = resolve_verification_key(wechat_merchant, serial, self._cert_manager)
         except WeChatNativeError:
             return WeChatNotificationResult(
                 authenticated=False, error_code=WECHAT_CALLBACK_CERT_UNAVAILABLE
@@ -299,9 +300,7 @@ class WeChatNativeProvider(PaymentProvider):
                 authenticated=False, error_code=WECHAT_CALLBACK_BODY_INVALID
             )
         message = build_response_verify_message(timestamp=timestamp, nonce=nonce, body=body_text)
-        if not verify_sha256_rsa(
-            public_key=certificate.public_key, signature_b64=signature, message=message
-        ):
+        if not verify_sha256_rsa(public_key=public_key, signature_b64=signature, message=message):
             return WeChatNotificationResult(
                 authenticated=False, error_code=WECHAT_CALLBACK_SIGNATURE_INVALID
             )

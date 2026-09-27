@@ -123,7 +123,32 @@ async def wechat_native_notify(
     acknowledgement shape rather than zpay's plain text: ``{"code":"SUCCESS"}`` stops
     retries, ``{"code":"FAIL"}`` (with a 5xx status for transient faults) triggers them.
     """
+    # 只有读原始请求体需要事件循环；其余全是同步阻塞调用（查库读商户配置、可能
+    # 下载平台证书最长 10 秒、等订单行锁），放在事件循环上会拖住整个进程的所有
+    # 请求，所以整体移进线程池。
     raw_body = await request.body()
+    return await run_in_threadpool(
+        _handle_wechat_notification,
+        conn,
+        provider,
+        raw_body=raw_body,
+        timestamp=request.headers.get("Wechatpay-Timestamp"),
+        nonce=request.headers.get("Wechatpay-Nonce"),
+        signature=request.headers.get("Wechatpay-Signature"),
+        serial=request.headers.get("Wechatpay-Serial"),
+    )
+
+
+def _handle_wechat_notification(
+    conn: BusinessConnection,
+    provider: WeChatNativeProvider,
+    *,
+    raw_body: bytes,
+    timestamp: str | None,
+    nonce: str | None,
+    signature: str | None,
+    serial: str | None,
+) -> JSONResponse:
     try:
         merchant = provider.load_merchant_config(conn)
     except ValueError as exc:
@@ -132,10 +157,10 @@ async def wechat_native_notify(
 
     result = provider.verify_notification_raw(
         raw_body=raw_body,
-        timestamp=request.headers.get("Wechatpay-Timestamp"),
-        nonce=request.headers.get("Wechatpay-Nonce"),
-        signature=request.headers.get("Wechatpay-Signature"),
-        serial=request.headers.get("Wechatpay-Serial"),
+        timestamp=timestamp,
+        nonce=nonce,
+        signature=signature,
+        serial=serial,
         merchant=merchant,
     )
     if not result.authenticated:
@@ -163,10 +188,10 @@ async def wechat_native_notify(
     assert result.channel is not None
     assert result.source_digest is not None
     try:
-        # Synchronous PG lock waits must not block dependency teardown on this
-        # event loop: another callback may hold the order lock until commit.
-        await run_in_threadpool(
-            confirm_recharge_payment,
+        # Runs on the threadpool (see wechat_native_notify): synchronous PG lock
+        # waits must not block dependency teardown on the event loop, since another
+        # callback may hold the order lock until commit.
+        confirm_recharge_payment(
             conn,
             merchant_order_no=result.merchant_order_no,
             provider_trade_no=result.provider_trade_no,

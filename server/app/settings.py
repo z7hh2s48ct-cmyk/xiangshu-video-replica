@@ -206,7 +206,17 @@ class SettingsRepository:
     ) -> dict[str, Any]:
         from app.wechat_native_client import load_private_key, merchant_config_from_settings
 
-        allowed = {"appid", "mchid", "serial_no", "api_v3_key", "private_key"}
+        # public_key_id / public_key 为微信支付公钥模式；二者留空即回到平台证书
+        # 模式，所以不像两个密钥那样“留空保留”。
+        allowed = {
+            "appid",
+            "mchid",
+            "serial_no",
+            "api_v3_key",
+            "private_key",
+            "public_key_id",
+            "public_key",
+        }
         if set(changes) - allowed:
             raise ValueError("Unsupported WeChat merchant setting")
         current = self.load_wechat_native_config()

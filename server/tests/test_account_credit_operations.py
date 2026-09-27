@@ -814,6 +814,7 @@ def test_wechat_credential_self_check_reports_without_saving(
         "ok": True,
         "code": None,
         "message": "商户凭据有效：签名被微信接受，平台证书解密成功。",
+        "verification_mode": "platform_certificate",
         "platform_certificates": 2,
     }, body
 
@@ -842,3 +843,85 @@ def test_wechat_credential_self_check_reports_without_saving(
     body = probe.json()
     assert body["ok"] is False and body["code"] == "WECHAT_SELF_CHECK_FAILED"
     assert "SIGN_ERROR" in body["message"], body
+
+
+def test_wechat_public_key_settings_save_and_self_check(
+    operations_client, route_state, monkeypatch
+):
+    """微信支付公钥模式：公钥 ID 与公钥成对保存；自检不下载平台证书（公钥商户
+    没有平台证书），改用一次必然查无此单的签名请求验证三件套。"""
+    import secrets as secrets_module
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    from app import wechat_native_client as wnc
+
+    client = operations_client
+    admin = admin_login(client, route_state)
+    private_key = (
+        rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        .private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        .decode()
+    )
+    public_key = (
+        rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        .public_key()
+        .public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+        .decode()
+    )
+    base_config = {
+        "appid": "pubkey-app",
+        "mchid": "pubkey-merchant",
+        "serial_no": "PUBKEYSERIAL01",
+        "api_v3_key": secrets_module.token_hex(16),
+        "private_key": private_key,
+    }
+
+    def save(config: dict[str, str]):
+        return client.patch(
+            "/api/control/settings/customer-payments/wechat-native",
+            headers={**admin, "Idempotency-Key": str(uuid4())},
+            json={"confirm": True, "reason": "public key setup", "config": config},
+        )
+
+    # 只填公钥 ID 不填公钥：保存即拒绝，而不是等真实回调验签失败才暴露
+    half = save({**base_config, "public_key_id": "PUB_KEY_ID_0001"})
+    assert half.status_code == 422, half.text
+
+    saved = save({**base_config, "public_key_id": "PUB_KEY_ID_0001", "public_key": public_key})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["config"]["public_key_id"] == "PUB_KEY_ID_0001"
+
+    probed: list[str] = []
+
+    class StubClient:
+        def check_public_key_credentials(self, merchant):
+            probed.append(merchant.public_key_id)
+
+    class ForbiddenManager:
+        def check_credentials(self, merchant):
+            raise AssertionError("公钥模式自检不应下载平台证书")
+
+    monkeypatch.setattr(wnc, "WeChatNativeClient", StubClient)
+    monkeypatch.setattr(wnc, "PlatformCertificateManager", ForbiddenManager)
+
+    path = "/api/control/settings/customer-payments/wechat-native/self-check"
+    probe = client.post(path, headers={**admin, "Idempotency-Key": str(uuid4())})
+    assert probe.status_code == 200, probe.text
+    assert probe.json() == {
+        "ok": True,
+        "code": None,
+        "message": "商户凭据有效：签名被微信接受（微信支付公钥模式）。",
+        "verification_mode": "public_key",
+    }
+    assert probed == ["PUB_KEY_ID_0001"]
+
+    # 两项同时清空即回到平台证书模式
+    cleared = save({**base_config, "public_key_id": "", "public_key": ""})
+    assert cleared.status_code == 200, cleared.text
+    assert not cleared.json()["config"].get("public_key_id")
