@@ -4,7 +4,37 @@ import { type SimpleCharacterResult, uploadSimpleCharacter } from "./api";
 import { StudioDialog } from "./studio/ui";
 
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
-const ALLOWED_TYPES = ["image/png", "image/jpeg", "image/webp"];
+// 浏览器给 BMP/TIFF/AVIF 的 MIME 常为空或非标准写法（如 image/x-ms-bmp），按扩展名兜底。
+const TYPE_BY_EXTENSION: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  jfif: "image/jpeg",
+  webp: "image/webp",
+  gif: "image/gif",
+  bmp: "image/bmp",
+  tif: "image/tiff",
+  tiff: "image/tiff",
+  avif: "image/avif",
+};
+const ALLOWED_TYPES = new Set(Object.values(TYPE_BY_EXTENSION));
+const ACCEPT = [
+  ...ALLOWED_TYPES,
+  ...Object.keys(TYPE_BY_EXTENSION).map((extension) => `.${extension}`),
+].join(",");
+const FORMAT_LABEL = "PNG、JPEG、WebP、GIF、BMP、TIFF 或 AVIF";
+
+function uploadableImage(file: File): File | null {
+  if (ALLOWED_TYPES.has(file.type)) return file;
+  const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
+  const type = TYPE_BY_EXTENSION[extension];
+  if (!type) return null;
+  // 服务端按表单里的 Content-Type 选择格式校验，所以换成标准 MIME 重新包装。
+  return new File([file], file.name, {
+    type,
+    lastModified: file.lastModified,
+  });
+}
 
 export function SimpleCharacterUpload({
   onCreated,
@@ -41,9 +71,9 @@ export function SimpleCharacterUpload({
       setFileName("");
       return;
     }
-    if (!ALLOWED_TYPES.includes(file.type)) {
+    if (!uploadableImage(file)) {
       setFileName("");
-      setError("仅支持 PNG、JPEG 或 WebP 图片。");
+      setError(`仅支持 ${FORMAT_LABEL} 图片。`);
       return;
     }
     if (file.size > MAX_UPLOAD_BYTES) {
@@ -61,12 +91,13 @@ export function SimpleCharacterUpload({
       setError("请选择图片并填写人物名称。");
       return;
     }
-    if (!ALLOWED_TYPES.includes(file.type) || file.size > MAX_UPLOAD_BYTES) {
-      setError("请选择不超过 10MB 的 PNG、JPEG 或 WebP 图片。");
+    const image = uploadableImage(file);
+    if (!image || image.size > MAX_UPLOAD_BYTES) {
+      setError(`请选择不超过 10MB 的 ${FORMAT_LABEL} 图片。`);
       return;
     }
     setAuthorizationAccepted(false);
-    setAuthorization({ file, name });
+    setAuthorization({ file: image, name });
   }
 
   async function confirmAndSubmit() {
@@ -132,7 +163,8 @@ export function SimpleCharacterUpload({
           上传人物图片，生成五视图拼合图
         </p>
         <p className="simple-character-upload__note">
-          授权图片 PNG / JPEG / WebP，不超过 10MB · AI 绘制约 1~3 分钟
+          授权图片 PNG / JPEG / WebP / GIF / BMP / TIFF / AVIF，不超过 10MB · AI
+          绘制约 1~3 分钟
         </p>
       </div>
       <div className="simple-character-upload-form">
@@ -147,7 +179,7 @@ export function SimpleCharacterUpload({
         </label>
         <div className="simple-character-upload__picker">
           <input
-            accept={ALLOWED_TYPES.join(",")}
+            accept={ACCEPT}
             aria-label="授权图片"
             hidden
             onChange={(event) => pickFile(event.target.files?.[0])}

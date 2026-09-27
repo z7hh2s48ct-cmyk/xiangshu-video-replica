@@ -24,6 +24,8 @@ from typing import Literal
 FFMPEG_DIR_ENV = "VIDEO_REPLICA_FFMPEG_DIR"
 FFMPEG_TIMEOUT_SECONDS = 300
 IMAGE_DECODE_TIMEOUT_SECONDS = 15
+# 规范化比单纯解码多了缩放与 PNG 编码，1 亿像素上限的原图需要更宽的预算。
+IMAGE_NORMALIZE_TIMEOUT_SECONDS = 30
 GENERATED_VIDEO_MAX_BYTES = 50 * 1024 * 1024
 GENERATED_VIDEO_MAX_SECONDS = 60
 logger = logging.getLogger(__name__)
@@ -628,6 +630,87 @@ def validate_image_decodable(ffmpeg_path: str, content: bytes) -> None:
         raise MediaToolFailed("ffmpeg 图片解码校验执行失败") from exc
     if completed.returncode != 0:
         raise MediaToolFailed("ffmpeg 无法解码图片")
+
+
+# 按 EXIF 规范把「存储方向」变换成「显示方向」。部署用的发行版 ffmpeg 版本不一，
+# 老版本不会按 JPEG 的 EXIF 方向自动旋转，所以统一关掉自动旋转、由这里显式处理，
+# 新老版本才能得到同一结果且不会被转两次。
+_EXIF_ORIENTATION_FILTERS = {
+    1: "",
+    2: "hflip",
+    3: "hflip,vflip",
+    4: "vflip",
+    5: "transpose=0",
+    6: "transpose=1",
+    7: "transpose=3",
+    8: "transpose=2",
+}
+
+
+def normalize_photo_to_png(
+    ffmpeg_path: str,
+    content: bytes,
+    *,
+    exif_orientation: int | None,
+    max_edge: int,
+    max_pixels: int,
+) -> bytes:
+    """把一张照片摆正、限制长边，并输出 8 位 RGB/RGBA 非隔行 PNG。
+
+    ``exif_orientation`` 为 None 表示方向由容器自身的变换属性描述（AVIF 的
+    irot/imir），此时交给 ffmpeg 自动旋转，而不是按 EXIF 显式处理。
+    """
+    filters = [
+        _EXIF_ORIENTATION_FILTERS.get(exif_orientation or 1, ""),
+        (
+            f"scale=w='min({max_edge},iw)':h='min({max_edge},ih)'"
+            ":force_original_aspect_ratio=decrease:flags=lanczos"
+        ),
+        # 下游纯 Python PNG 解码只认 8 位 RGB/RGBA；透明图保留 alpha 交给出图服务。
+        "format=pix_fmts=rgb24|rgba",
+    ]
+    try:
+        # TIFF 的 IFD 常写在像素数据之后，管道输入无法回跳读取，所以落临时文件。
+        with tempfile.TemporaryDirectory(prefix="video-replica-photo-") as directory:
+            source = Path(directory) / "source"
+            source.write_bytes(content)
+            command = [
+                ffmpeg_path,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-xerror",
+                "-threads",
+                "1",
+                *(["-noautorotate"] if exif_orientation is not None else []),
+                # 解码器在分配帧之前按像素上限拒图，签名校验之外的解压炸弹兜底。
+                "-max_pixels",
+                str(max_pixels),
+                "-i",
+                str(source),
+                "-map",
+                "0:v:0",
+                "-frames:v",
+                "1",
+                "-vf",
+                ",".join(item for item in filters if item),
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "png",
+                "pipe:1",
+            ]
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                timeout=IMAGE_NORMALIZE_TIMEOUT_SECONDS,
+            )
+    except (subprocess.SubprocessError, OSError) as exc:
+        logger.warning("ffmpeg photo normalization failed to run: %s", type(exc).__name__)
+        raise MediaToolFailed("ffmpeg 图片规范化执行失败") from exc
+    if completed.returncode != 0 or not completed.stdout.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise MediaToolFailed("ffmpeg 无法规范化图片")
+    return completed.stdout
 
 
 def _run(command: list[str]) -> None:

@@ -51,12 +51,12 @@ from app.simple_character import (
     delete_simple_character_identity,
     list_simple_library_page,
     list_simple_scene_looks_page,
+    normalize_simple_character_source,
     prepare_simple_character_generation,
     regenerate_simple_character_contact_sheet,
     rename_simple_character_identity,
     store_simple_character_publication,
     update_simple_character_profile,
-    validate_simple_character_source,
 )
 from app.storage import (
     StorageAdapter,
@@ -915,8 +915,12 @@ async def _prepare_simple_character_upload(
             "SIMPLE_CHARACTER_IMAGE_TOO_LARGE",
             "人物授权图片超过 10MB 限制。",
         )
-    content = await file.read()
-    content_type = file.content_type or "application/octet-stream"
+    content, content_type = await run_in_threadpool(
+        normalize_simple_character_source,
+        await file.read(),
+        file.content_type or "application/octet-stream",
+        display_name,
+    )
     effective_persona_name = persona_name.strip() or display_name.strip()
     generation = await run_in_threadpool(
         prepare_simple_character_generation,
@@ -1042,11 +1046,10 @@ async def _enqueue_simple_character_upload(
         raise character_error(
             422, "SIMPLE_CHARACTER_IMAGE_TOO_LARGE", "人物授权图片超过 10MB 限制。"
         )
-    content_type = (file.content_type or "application/octet-stream").split(";", 1)[0].lower()
-    await run_in_threadpool(
-        validate_simple_character_source,
+    content, content_type = await run_in_threadpool(
+        normalize_simple_character_source,
         content,
-        content_type,
+        file.content_type or "application/octet-stream",
         display_name,
     )
     content_sha256 = hashlib.sha256(content).hexdigest()
