@@ -6,18 +6,50 @@ import { SimpleCharacterUpload } from "./SimpleCharacterUpload";
 vi.mock("./api", () => ({ uploadSimpleCharacter: vi.fn() }));
 beforeEach(() => vi.clearAllMocks());
 
-function prepare() {
+function prepare(
+  file = new File(["image"], "portrait.png", { type: "image/png" }),
+) {
   render(<SimpleCharacterUpload onCreated={vi.fn()} />);
   fireEvent.change(screen.getByLabelText("人物名称"), {
     target: { value: "测试人物" },
   });
   fireEvent.change(screen.getByLabelText("授权图片"), {
-    target: {
-      files: [new File(["image"], "portrait.png", { type: "image/png" })],
-    },
+    target: { files: [file] },
   });
   fireEvent.click(screen.getByRole("button", { name: "一键生成五视图拼合图" }));
 }
+
+function confirmAuthorization() {
+  fireEvent.click(
+    screen.getByRole("checkbox", { name: "我已阅读并确认以上图像授权声明" }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "确认授权并生成" }));
+}
+
+it.each([
+  ["scan.tif", "", "image/tiff"],
+  ["photo.AVIF", "", "image/avif"],
+  ["legacy.bmp", "image/x-ms-bmp", "image/bmp"],
+  ["meme.gif", "image/gif", "image/gif"],
+])("uploads %s (browser type %j) as %s", (name, browserType, expectedType) => {
+  vi.mocked(api.uploadSimpleCharacter).mockReturnValue(new Promise(() => {}));
+  prepare(new File(["image"], name, { type: browserType }));
+  confirmAuthorization();
+  const uploaded = vi.mocked(api.uploadSimpleCharacter).mock.calls[0][1];
+  expect(uploaded.name).toBe(name);
+  expect(uploaded.type).toBe(expectedType);
+});
+
+it("rejects formats outside the supported list before authorization", () => {
+  prepare(new File(["image"], "IMG_0001.heic", { type: "image/heic" }));
+  expect(screen.queryByRole("dialog", { name: "人物图像使用授权" })).toBeNull();
+  expect(
+    screen.getByText(
+      "请选择不超过 10MB 的 PNG、JPEG、WebP、GIF、BMP、TIFF 或 AVIF 图片。",
+    ),
+  ).toBeTruthy();
+  expect(api.uploadSimpleCharacter).not.toHaveBeenCalled();
+});
 
 it("does not upload until the user explicitly confirms image authorization", () => {
   vi.mocked(api.uploadSimpleCharacter).mockReturnValue(new Promise(() => {}));

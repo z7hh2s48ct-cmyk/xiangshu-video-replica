@@ -9,6 +9,7 @@ server/tests/test_customer_chain_e2e.py
 server/tests/test_customer_devices.py
 server/tests/test_customer_idempotency.py
 server/tests/test_customer_recharge.py
+server/tests/test_customer_release_preflight.py
 server/tests/test_customer_security.py
 server/tests/test_customer_sub_account_self_service.py
 server/tests/test_cw028_shared_settings_contract.py
@@ -17,6 +18,7 @@ server/tests/test_cw054_pg_portable_contract.py
 server/tests/test_cw059_billing_pg_matrix.py
 server/tests/test_cw061_shard_coverage_guard.py
 server/tests/test_delete_object_gate.py
+server/tests/test_gate1_bootstrap.py
 server/tests/test_gate1_e2e.py
 server/tests/test_h3_account_pool.py
 server/tests/test_independent_request_model.py
@@ -27,11 +29,11 @@ server/tests/test_ops_alerts.py
 server/tests/test_oral_domain.py
 server/tests/test_publish_accounts.py
 server/tests/test_publish_delivery.py
-server/tests/test_security_contracts.py
 server/tests/test_signed_thumbnail_grant.py
-server/tests/test_sub_account_quota.py
-server/tests/test_viral_detail_billing_pg.py
-server/tests/test_viral_search_pg.py
-server/tests/test_wechat_native_callback_verify.py
+server/tests/test_sub_account_permissions.py
+server/tests/test_usage_billing.py
+server/tests/test_viral_link_media.py
+server/tests/test_viral_tikhub.py
+server/tests/test_wechat_native_callback_pg.py
+server/tests/test_worker_concurrency_config.py
 server/tests/test_worker_crash_recovery.py
-server/tests/test_zpay.py

@@ -17,7 +17,7 @@ import sqlite3
 import struct
 import uuid
 import zlib
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, cast
@@ -58,6 +58,7 @@ from app.media import storage_key_from_uri
 from app.media_tools import (
     MediaToolFailed,
     MediaToolUnavailable,
+    normalize_photo_to_png,
     resolve_media_binary,
     validate_image_decodable,
 )
@@ -79,7 +80,15 @@ SIMPLE_UPLOAD_ALLOWED_TYPES = {
     "image/png": ".png",
     "image/jpeg": ".jpg",
     "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/bmp": ".bmp",
+    "image/tiff": ".tiff",
+    "image/avif": ".avif",
 }
+# 上传原图统一转成 PNG 后的长边上限。取 1536 是因为 RGBA PNG 在此尺寸下的最坏体积
+# （1536²×4 ≈ 9.4MB）仍低于 SIMPLE_UPLOAD_MAX_BYTES，worker 复验规范化源图时
+# 不会被体积上限误拒；对五视图的身份参考而言这个清晰度也已足够。
+SIMPLE_SOURCE_MAX_EDGE = 1536
 SIMPLE_AUTHORIZATION_SCOPE = ["internal-short-video"]
 SIMPLE_PERSONA_USAGE_SCOPE = ["internal-short-video"]
 SIMPLE_GENERATION_MODE = "simple_upload"
@@ -2349,6 +2358,76 @@ def validate_simple_character_source(
     content_type: str,
     display_name: str,
 ) -> None:
+    normalized_type = _validate_simple_character_source_shape(content, content_type, display_name)
+    if normalized_type == "image/png" and _decode_png_rgb(content) is not None:
+        return
+    try:
+        ffmpeg_path = resolve_media_binary("ffmpeg")
+        validate_image_decodable(ffmpeg_path, _without_trailing_data(content, normalized_type))
+    except MediaToolUnavailable as exc:
+        raise _source_validation_unavailable() from exc
+    except MediaToolFailed as exc:
+        raise _source_undecodable() from exc
+
+
+def normalize_simple_character_source(
+    content: bytes,
+    content_type: str,
+    display_name: str,
+) -> tuple[bytes, str]:
+    """校验上传原图，并转成摆正、限尺寸的 PNG 作为唯一源图。
+
+    手机原图常带 EXIF 方向、动态照片的尾部附加数据或上亿像素，原样存储并发给出图
+    服务会让人物横躺、请求被拒或五视图失败；截图能成功正是因为它已是干净的小图。
+    规范化后授权存档、worker 复验与出图输入用的是同一份字节。
+    """
+    normalized_type = _validate_simple_character_source_shape(content, content_type, display_name)
+    try:
+        normalized = normalize_photo_to_png(
+            resolve_media_binary("ffmpeg"),
+            _without_trailing_data(content, normalized_type),
+            exif_orientation=_source_exif_orientation(content, normalized_type),
+            max_edge=SIMPLE_SOURCE_MAX_EDGE,
+            max_pixels=SIMPLE_IMAGE_MAX_PIXELS,
+        )
+    except MediaToolUnavailable as exc:
+        raise _source_validation_unavailable() from exc
+    except MediaToolFailed as exc:
+        raise _source_undecodable() from exc
+    # 只校验头部而不整图解码：纯 Python 解码 1536 边长约需 1 秒，worker 复验时已会做。
+    parsed = _parse_png(normalized)
+    if (
+        parsed is None
+        or parsed.bit_depth != 8
+        or parsed.color_type not in {2, 6}
+        or parsed.interlace != 0
+        or len(normalized) > SIMPLE_UPLOAD_MAX_BYTES
+    ):
+        raise _source_undecodable()
+    return normalized, "image/png"
+
+
+def _source_validation_unavailable() -> HTTPException:
+    return character_error(
+        503,
+        "SIMPLE_CHARACTER_IMAGE_VALIDATION_UNAVAILABLE",
+        "人物图片校验工具暂不可用，请稍后重试。",
+    )
+
+
+def _source_undecodable() -> HTTPException:
+    return character_error(
+        422,
+        "SIMPLE_CHARACTER_IMAGE_INVALID",
+        "人物授权图片无法解码，请重新选择原图。",
+    )
+
+
+def _validate_simple_character_source_shape(
+    content: bytes,
+    content_type: str,
+    display_name: str,
+) -> str:
     name = display_name.strip()
     if not name:
         raise character_error(422, "SIMPLE_CHARACTER_NAME_REQUIRED", "请填写人物名称。")
@@ -2365,7 +2444,7 @@ def validate_simple_character_source(
         raise character_error(
             422,
             "SIMPLE_CHARACTER_IMAGE_TYPE_UNSUPPORTED",
-            "仅支持 PNG、JPEG 或 WebP 图片。",
+            "仅支持 PNG、JPEG、WebP、GIF、BMP、TIFF 或 AVIF 图片。",
         )
     if not _has_valid_image_structure(content, normalized_type):
         raise character_error(
@@ -2373,33 +2452,37 @@ def validate_simple_character_source(
             "SIMPLE_CHARACTER_IMAGE_INVALID",
             "人物授权图片文件无效，请重新选择原图。",
         )
-    if normalized_type == "image/png" and _decode_png_rgb(content) is not None:
-        return
-    try:
-        ffmpeg_path = resolve_media_binary("ffmpeg")
-        validate_image_decodable(ffmpeg_path, content)
-    except MediaToolUnavailable as exc:
-        raise character_error(
-            503,
-            "SIMPLE_CHARACTER_IMAGE_VALIDATION_UNAVAILABLE",
-            "人物图片校验工具暂不可用，请稍后重试。",
-        ) from exc
-    except MediaToolFailed as exc:
-        raise character_error(
-            422,
-            "SIMPLE_CHARACTER_IMAGE_INVALID",
-            "人物授权图片无法解码，请重新选择原图。",
-        ) from exc
+    return normalized_type
 
 
 def _has_valid_image_structure(content: bytes, content_type: str) -> bool:
     if content_type == "image/png":
-        return _parse_png(content) is not None
+        return _parse_png(content, allow_trailing_data=True) is not None
     if content_type == "image/jpeg":
         return _jpeg_structure_is_valid(content)
     if content_type == "image/webp":
         return _webp_structure_is_valid(content)
+    # 以下格式只核对文件签名：像素上限由 ffmpeg 的 -max_pixels 在解码分配前兜底，
+    # 能否解码也以 ffmpeg 为准，不再为每种格式手写头部解析。
+    if content_type == "image/gif":
+        return content[:6] in {b"GIF87a", b"GIF89a"}
+    if content_type == "image/bmp":
+        return len(content) >= 26 and content[:2] == b"BM"
+    if content_type == "image/tiff":
+        return len(content) >= 8 and content[:4] in {b"II*\x00", b"MM\x00*"}
+    if content_type == "image/avif":
+        return _avif_brand_is_valid(content)
     return False
+
+
+def _avif_brand_is_valid(content: bytes) -> bool:
+    if len(content) < 16 or content[4:8] != b"ftyp":
+        return False
+    box_end = min(int.from_bytes(content[:4], "big"), len(content))
+    brands = [content[8:12]] + [
+        content[offset : offset + 4] for offset in range(16, box_end - 3, 4)
+    ]
+    return b"avif" in brands or b"avis" in brands
 
 
 JPEG_START_OF_FRAME_MARKERS = frozenset(
@@ -2422,11 +2505,9 @@ JPEG_START_OF_FRAME_MARKERS = frozenset(
 
 
 def _jpeg_structure_is_valid(content: bytes) -> bool:
-    if (
-        len(content) < 12
-        or not content.startswith(b"\xff\xd8")
-        or not content.endswith(b"\xff\xd9")
-    ):
+    # 不要求文件以 EOI 结尾：动态照片会在 EOI 后拼接 MP4，三星等机型会追加私有
+    # 尾部数据，这些原图本身完全可解码，能否解码由后续 ffmpeg 判定。
+    if len(content) < 12 or not content.startswith(b"\xff\xd8"):
         return False
     offset = 2
     found_frame = False
@@ -2466,13 +2547,13 @@ def _jpeg_structure_is_valid(content: bytes) -> bool:
 
 
 def _webp_structure_is_valid(content: bytes) -> bool:
-    if (
-        len(content) < 20
-        or content[:4] != b"RIFF"
-        or content[8:12] != b"WEBP"
-        or int.from_bytes(content[4:8], "little") + 8 != len(content)
-    ):
+    if len(content) < 20 or content[:4] != b"RIFF" or content[8:12] != b"WEBP":
         return False
+    # RIFF 声明长度之后的尾部字节与 JPEG 尾部数据同理放行，只校验声明范围内的块。
+    riff_end = int.from_bytes(content[4:8], "little") + 8
+    if riff_end > len(content):
+        return False
+    content = content[:riff_end]
     offset = 12
     found_image = False
     while offset < len(content):
@@ -2501,6 +2582,135 @@ def _webp_structure_is_valid(content: bytes) -> bool:
             found_image = 0 < width * height <= SIMPLE_IMAGE_MAX_PIXELS
         offset = padded_end
     return found_image
+
+
+EXIF_ORIENTATION_TAG = 0x0112
+
+
+def _source_exif_orientation(content: bytes, content_type: str) -> int | None:
+    """读取原图 EXIF 方向（1-8）；缺失或损坏一律按 1 处理，不因元数据拒图。
+
+    AVIF 返回 None：它的方向由 irot/imir 属性描述，且规范要求以它们为准。
+    """
+    if content_type == "image/avif":
+        return None
+    try:
+        if content_type == "image/jpeg":
+            tiff = _jpeg_exif_tiff(content)
+        elif content_type == "image/webp":
+            tiff = _riff_chunk(content, b"EXIF")
+        elif content_type == "image/png":
+            tiff = _png_chunk(content, b"eXIf")
+        elif content_type == "image/tiff":
+            # TIFF 文件本身就是 EXIF 所用的 TIFF 结构，方向标签直接在 IFD0 里。
+            tiff = content
+        else:
+            tiff = None
+        return 1 if tiff is None else _tiff_orientation(tiff)
+    except (IndexError, struct.error, ValueError):
+        return 1
+
+
+def _without_trailing_data(content: bytes, content_type: str) -> bytes:
+    """截掉主图之后的附加数据再交给 ffmpeg。
+
+    ffmpeg 的图片序列解复用器会把尾部字节当成下一帧去解码，在 -xerror 下整张图被判
+    失败；结构校验已放行这类尾部，这里按各格式自身的结束位置截断。其余格式没有这类
+    常见尾部，原样交给 ffmpeg。
+    """
+    if content_type == "image/png":
+        end = next(
+            (body_end + 4 for kind, _, body_end in _png_chunks(content) if kind == b"IEND"),
+            None,
+        )
+    elif content_type == "image/webp":
+        end = int.from_bytes(content[4:8], "little") + 8
+    elif content_type == "image/jpeg":
+        end = _jpeg_end(content)
+    else:
+        end = None
+    return content if end is None else content[:end]
+
+
+def _jpeg_header_segments(content: bytes) -> Iterator[tuple[int, int, int]]:
+    """逐个产出扫描数据之前的 JPEG 段 (marker, 负载起点, 段终点)，止于首个 SOS。"""
+    offset = 2
+    while offset + 4 <= len(content) and content[offset] == 0xFF:
+        marker = content[offset + 1]
+        if marker == 0xD9:
+            return
+        segment_end = offset + 2 + int.from_bytes(content[offset + 2 : offset + 4], "big")
+        yield marker, offset + 4, segment_end
+        if marker == 0xDA:
+            return
+        offset = segment_end
+
+
+def _jpeg_exif_tiff(content: bytes) -> bytes | None:
+    for marker, payload_start, segment_end in _jpeg_header_segments(content):
+        payload = content[payload_start:segment_end]
+        if marker == 0xE1 and payload.startswith(b"Exif\x00\x00"):
+            return payload[6:]
+    return None
+
+
+def _jpeg_end(content: bytes) -> int | None:
+    # 熵编码数据里的 0xFF 都会被填充成 FF00 或 RSTn，扫描后的首个 FFD9 就是主图 EOI；
+    # 缩略图等内嵌 JPEG 位于扫描前的 APP 段内，不会被误认。
+    for marker, _, segment_end in _jpeg_header_segments(content):
+        if marker == 0xDA:
+            eoi = content.find(b"\xff\xd9", segment_end)
+            return None if eoi < 0 else eoi + 2
+    return None
+
+
+def _riff_chunk(content: bytes, wanted: bytes) -> bytes | None:
+    offset = 12
+    while offset + 8 <= len(content):
+        chunk_size = int.from_bytes(content[offset + 4 : offset + 8], "little")
+        if content[offset : offset + 4] == wanted:
+            return content[offset + 8 : offset + 8 + chunk_size]
+        offset += 8 + chunk_size + (chunk_size % 2)
+    return None
+
+
+def _png_chunks(content: bytes) -> Iterator[tuple[bytes, int, int]]:
+    """逐个产出 PNG 块 (类型, 负载起点, 负载终点)，止于 IEND。"""
+    offset = 8
+    while offset + 8 <= len(content):
+        length = struct.unpack(">I", content[offset : offset + 4])[0]
+        chunk_type = content[offset + 4 : offset + 8]
+        yield chunk_type, offset + 8, offset + 8 + length
+        if chunk_type == b"IEND":
+            return
+        offset += 12 + length
+
+
+def _png_chunk(content: bytes, wanted: bytes) -> bytes | None:
+    for chunk_type, body_start, body_end in _png_chunks(content):
+        if chunk_type == wanted:
+            return content[body_start:body_end]
+    return None
+
+
+def _tiff_orientation(tiff: bytes) -> int:
+    # 部分编码器在 WebP/PNG 的 EXIF 块里也带 JPEG 式前缀，规范并不要求。
+    tiff = tiff.removeprefix(b"Exif\x00\x00")
+    if tiff[:4] == b"II*\x00":
+        order = "<"
+    elif tiff[:4] == b"MM\x00*":
+        order = ">"
+    else:
+        return 1
+    ifd_offset = struct.unpack(f"{order}I", tiff[4:8])[0]
+    entry_count = struct.unpack(f"{order}H", tiff[ifd_offset : ifd_offset + 2])[0]
+    for index in range(entry_count):
+        entry = ifd_offset + 2 + index * 12
+        tag, field_type = struct.unpack(f"{order}HH", tiff[entry : entry + 4])
+        if tag == EXIF_ORIENTATION_TAG and field_type == 3:
+            value = struct.unpack(f"{order}H", tiff[entry + 8 : entry + 10])[0]
+            return value if 1 <= value <= 8 else 1
+    return 1
 
 
 def _store_source_asset(
@@ -2835,7 +3045,7 @@ class _ParsedPng:
     compressed: bytes
 
 
-def _parse_png(data: bytes) -> _ParsedPng | None:
+def _parse_png(data: bytes, *, allow_trailing_data: bool = False) -> _ParsedPng | None:
     if not data.startswith(b"\x89PNG\r\n\x1a\n"):
         return None
     width = height = bit_depth = color_type = interlace = 0
@@ -2887,7 +3097,7 @@ def _parse_png(data: bytes) -> _ParsedPng | None:
         not seen_header
         or not seen_image_data
         or not seen_end
-        or pos != len(data)
+        or (pos != len(data) and not allow_trailing_data)
         or width <= 0
         or height <= 0
         or width * height > SIMPLE_IMAGE_MAX_PIXELS
