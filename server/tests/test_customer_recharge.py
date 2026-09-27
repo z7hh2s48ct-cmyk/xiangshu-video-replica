@@ -542,7 +542,10 @@ def test_customer_session_recharge_public_origin_missing_503(
         f"Expected 503 for missing ZPay config, got {response.status_code}"
     )
     detail = response.json().get("detail", {})
-    assert detail.get("code") == "ZPAY_CONFIGURATION_INVALID"
+    assert detail.get("code") == "PAYMENT_CHANNEL_UNAVAILABLE"
+    # 红线：客户可见的错误码与文案都不得出现供应商名称。
+    assert "zpay" not in detail.get("code", "").lower()
+    assert "zpay" not in detail.get("message", "").lower()
 
 
 def test_customer_session_recharge_negative_amount_rejected(

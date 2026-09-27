@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -12,6 +13,24 @@ from app.publish_avatars import MAX_AVATAR_BYTES, avatar_object_key, rehost_avat
 from app.storage import StoredObject
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 64
+
+_REAL_GETADDRINFO = socket.getaddrinfo
+
+
+@pytest.fixture(autouse=True)
+def _fake_public_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """让测试用的 ``cdn`` 主机解析为公网 IP；IP 字面量仍走真实解析。
+
+    SSRF 守卫会在建立 HTTP 连接前做 DNS 解析，因此把示例 CDN 主机映射到一个
+    公网地址，既保留既有用例语义，又能让新增的内网拒绝用例走真实判定。
+    """
+
+    def fake_getaddrinfo(host: object, *args: object, **kwargs: object) -> list[object]:
+        if host == "cdn":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+        return _REAL_GETADDRINFO(host, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("app.publish_avatars.socket.getaddrinfo", fake_getaddrinfo)
 
 
 @dataclass
@@ -119,4 +138,27 @@ def test_only_https_links_are_fetched(url: str | None) -> None:
         raise AssertionError("non-https avatar must not be fetched")
 
     assert rehost(storage, httpx.MockTransport(handler), url) is None  # type: ignore[arg-type]
+    assert storage.objects == {}
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://127.0.0.1/a.png",  # 回环
+        "https://localhost/a.png",  # 回环主机名
+        "https://169.254.169.254/a.png",  # 云元数据链路本地
+        "https://10.0.0.5/a.png",  # 私网
+        "https://198.18.0.1/a.png",  # RFC2544 基准/代理合成 fake-ip
+        "https://user:pass@cdn/a.png",  # 携带凭据
+        "https://cdn:8443/a.png",  # 非标准端口
+    ],
+)
+def test_internal_or_malformed_hosts_are_never_fetched(url: str) -> None:
+    """SSRF 守卫：内网/链路本地/凭据/非标端口的头像 URL 一律跳过，绝不发起请求。"""
+    storage = FakeStorage()
+
+    def handler(_request: httpx.Request) -> httpx.Response:  # pragma: no cover - must not run
+        raise AssertionError("unsafe avatar URL must not be fetched")
+
+    assert rehost(storage, httpx.MockTransport(handler), url) is None
     assert storage.objects == {}

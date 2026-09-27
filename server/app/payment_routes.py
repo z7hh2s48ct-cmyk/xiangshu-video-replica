@@ -239,9 +239,14 @@ def sync_recharge_order_with_zpay(
     try:
         deployment = provider.load_deployment_config()
     except ValueError as exc:
+        # 红线：对外响应文案不得出现供应商名称，配置细节只进服务端日志。
+        logger.warning("Recharge order sync failed on deployment config: %s", exc)
         raise HTTPException(
             status_code=503,
-            detail={"code": "ZPAY_CONFIGURATION_INVALID", "message": str(exc)},
+            detail={
+                "code": "PAYMENT_CHANNEL_UNAVAILABLE",
+                "message": "支付通道配置不完整，暂时无法同步订单状态。",
+            },
         ) from exc
     try:
         remote_order = provider.query_order(
@@ -253,8 +258,8 @@ def sync_recharge_order_with_zpay(
         raise HTTPException(
             status_code=exc.status_code,
             detail={
-                "code": "ZPAY_QUERY_FAILED",
-                "message": "ZPay order status could not be confirmed.",
+                "code": "PAYMENT_QUERY_FAILED",
+                "message": "支付通道订单状态暂时无法确认。",
             },
         ) from exc
 
@@ -308,9 +313,14 @@ def _load_merchant_config(
     try:
         return provider.load_merchant_config(conn)
     except ValueError as exc:
+        # 红线：对外响应文案不得出现供应商名称，配置细节只进服务端日志。
+        logger.warning("Payment provider merchant config invalid: %s", exc)
         raise HTTPException(
             status_code=503,
-            detail={"code": "ZPAY_CONFIGURATION_INVALID", "message": str(exc)},
+            detail={
+                "code": "PAYMENT_CHANNEL_UNAVAILABLE",
+                "message": "支付通道配置不完整，暂时无法处理该操作。",
+            },
         ) from exc
 
 
