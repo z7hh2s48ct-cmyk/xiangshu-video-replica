@@ -291,12 +291,16 @@ export function Media({
   onAspectRatioChange,
   fallback,
   fitContainer = false,
+  audioControls = true,
 }: {
   presentation?: "video";
   aspectRatio?: string;
   onAspectRatioChange?: (ratio: number) => void;
   fallback?: ReactNode;
   fitContainer?: boolean;
+  // 卡片本体是 <button>，内嵌原生播放器属于交互元素嵌套（不合法且抢点击）；
+  // 卡片形态传 false，只保留波形与常显时长角标，播放收敛到详情面板。
+  audioControls?: boolean;
   onPlay?: () => void;
   asset?: StudioAsset;
   alt: string;
@@ -325,15 +329,17 @@ export function Media({
       <div className={`studio-media studio-media--audio ${className}`}>
         <Waveform />
         {asset.url ? (
-          <audio
-            controls
-            onPlay={onPlay}
-            src={asset.url}
-            aria-label={alt}
-            onError={() => onError?.(asset.url)}
-          >
-            <track kind="captions" />
-          </audio>
+          audioControls ? (
+            <audio
+              controls
+              onPlay={onPlay}
+              src={asset.url}
+              aria-label={alt}
+              onError={() => onError?.(asset.url)}
+            >
+              <track kind="captions" />
+            </audio>
+          ) : null
         ) : (
           <span>完整口播音频 · {asset.duration || "待读取时长"}</span>
         )}

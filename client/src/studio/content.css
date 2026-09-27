@@ -546,9 +546,11 @@
 }
 .content-material-row {
   align-items: center;
-  background: var(--studio-surface, #fff);
-  border: 1px solid var(--studio-border, #e2e4e8);
+  /* --studio-surface 无定义，白底回退在深色工作台里刺眼；与卡片同色系 */
+  background: #101111;
+  border: 1px solid #292a27;
   border-radius: 10px;
+  color: #ecece8;
   display: flex;
   gap: 12px;
   padding: 8px 12px;
@@ -556,6 +558,7 @@
 .content-material-row__main {
   background: none;
   border: 0;
+  color: #ecece8;
   cursor: pointer;
   flex: 1;
   font-weight: 600;
@@ -589,6 +592,7 @@
   background: rgba(74, 125, 255, 0.1);
   border: 0;
   border-radius: 8px;
+  color: #cfdcff;
   cursor: pointer;
   font-size: var(--font-caption, 12px);
   padding: 4px 8px;
@@ -606,6 +610,8 @@
   min-height: 38px;
 }
 .content-material-filters select {
+  /* 全局 select 默认 width:100%，会把筛选行撑成整行竖排，这里收回自适应宽度 */
+  width: auto;
   max-width: 100%;
   min-width: 0;
   min-height: 38px;
@@ -2226,4 +2232,19 @@ span.viral-card-cover-empty.content-player-viral-poster {
   display: flex;
   gap: 8px;
   margin-left: auto;
+}
+/* 全局顶栏绝对定位在右上（studio.css .studio-topbar），页头右侧动作区须按
+   creation-heading 同款口径预留避让带，否则上传按钮被顶栏盖住不可点击。 */
+.content-material-title {
+  padding-right: 520px;
+}
+@media (max-width: 1380px) {
+  .content-material-title {
+    padding-right: 430px;
+  }
+}
+@media (max-width: 800px) {
+  .content-material-title {
+    padding-right: 0;
+  }
 }

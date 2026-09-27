@@ -2416,6 +2416,7 @@ function AssetCard({
         asset={asset}
         alt={asset.name}
         fitContainer
+        audioControls={false}
         onError={onPreviewError}
         onPlay={onPlay}
       />
@@ -2444,14 +2445,12 @@ function AssetCard({
 // 兄弟节点，避免 button 嵌套。
 function MaterialRow({
   asset,
-  compact,
   showPurpose,
   quickActions,
   onOralUse,
   onSelect,
 }: {
   asset: StudioAsset;
-  compact?: boolean;
   showPurpose?: boolean;
   quickActions: { key: string; label: string; run: () => void }[];
   onOralUse?: () => void;
@@ -2466,9 +2465,7 @@ function MaterialRow({
           ? "参考音频"
           : undefined;
   return (
-    <div
-      className={`content-material-row${compact ? " content-material-row--compact" : ""}`}
-    >
+    <div className="content-material-row">
       <button
         type="button"
         className="content-material-row__main"
@@ -2483,17 +2480,13 @@ function MaterialRow({
       <span className="content-material-row__meta">
         {asset.duration ?? "—"}
       </span>
-      {!compact ? (
-        <>
-          <span className="content-material-row__meta">
-            {formatMaterialSize(asset.sizeBytes) ?? "—"}
-          </span>
-          <span className="content-material-row__meta">
-            {asset.createdAt ? formatTaskTime(asset.createdAt) : "—"}
-          </span>
-          <span className="content-material-row__meta">{asset.source}</span>
-        </>
-      ) : null}
+      <span className="content-material-row__meta">
+        {formatMaterialSize(asset.sizeBytes) ?? "—"}
+      </span>
+      <span className="content-material-row__meta">
+        {asset.createdAt ? formatTaskTime(asset.createdAt) : "—"}
+      </span>
+      <span className="content-material-row__meta">{asset.source}</span>
       <span className="content-material-row__actions">
         {onOralUse ? (
           <button
@@ -3255,13 +3248,11 @@ function MaterialsPageContent() {
   const currentAssets = review
     ? assets.slice((page - 1) * pageSize, page * pageSize)
     : assets;
-  // MATERIAL-UX-07：音频 tab 恒为列表形态；“全部”tab 音频折叠为紧凑横条；
-  // 整理模式强制网格（勾选交互在卡片上）。
+  // MATERIAL-UX-07：音频 tab 与列表视图恒为行式；网格视图里音频与图片/视频
+  // 同为波形卡片（行式会打断 auto 网格节奏，且与整理模式强制的卡片形态不
+  // 一致，2026-09-27 决策放弃紧凑横条折叠）。整理模式强制网格（勾选交互
+  // 在卡片上）。
   const rowsMode = !organize && (viewMode === "list" || kind === "audio");
-  const audioCompactRows = !organize && kind === "全部" && viewMode === "grid";
-  const audioCompactAssets = audioCompactRows
-    ? currentAssets.filter((asset) => asset.kind === "audio")
-    : [];
 
   const retainForDraft = (asset: StudioAsset) => {
     const retained = asset.url?.startsWith("blob:")
@@ -4299,106 +4290,81 @@ function MaterialsPageContent() {
             </div>
           ) : (
             <div className="content-asset-grid">
-              {currentAssets
-                .filter((asset) => !audioCompactRows || asset.kind !== "audio")
-                .map((asset) => {
-                  const authId = asset.previewAssetId ?? asset.assetId ?? "";
-                  // MATERIAL-UX-06/07/09：卡片快捷动作——回收站视图替换为“恢复”。
-                  const quickActions = trashedView
-                    ? [
-                        {
-                          key: "restore",
-                          label: "恢复",
-                          run: () => void restoreMaterial(asset),
-                        },
-                      ]
-                    : quickActionsFor(asset);
-                  // MATERIAL-THUMBS-B / MATERIAL-UX-02：带封面的视频瓦片用 img 展示
-                  // 缩略图（懒加载），不再让浏览器经服务端代理流式拉原视频；图片瓦片
-                  // 同样走派生缩略图（单张手机照片可达 10MB）；点开详情仍用原图/原视频。
-                  const thumbnailUrl =
-                    asset.kind === "video" || asset.kind === "image"
-                      ? thumbnailUrls[authId]
-                      : undefined;
-                  return (
-                    <div className="content-asset-cell" key={asset.id}>
-                      <AssetCard
-                        asset={{
-                          ...asset,
-                          url:
-                            asset.kind === "image"
-                              ? (thumbnailUrl ??
-                                asset.url ??
-                                previewStates[asset.id]?.url)
-                              : thumbnailUrl
-                                ? undefined
-                                : (asset.url ?? previewStates[asset.id]?.url),
-                          poster: thumbnailUrl ?? asset.poster,
-                        }}
-                        selected={selected?.id === asset.id}
-                        organize={organize}
-                        checked={selectedIds.has(asset.id)}
-                        previewStatus={previewStates[asset.id]?.status}
-                        onSelect={() => {
-                          if (organize) {
-                            toggleSelected(asset.id);
-                            return;
-                          }
-                          if (previewStates[asset.id]?.status === "error")
-                            void loadPreview(asset);
-                          setSelectedAsset(asset);
-                          patchState({ selectedAssetId: asset.id });
-                        }}
-                        onPreviewError={(failedUrl) => {
-                          invalidatePreview(asset, failedUrl);
-                        }}
-                        onPlay={() => void warmPreview(asset)}
-                      />
-                      {/* MATERIAL-UX-06：hover 快捷动作（卡片 button 的兄弟浮层，避免嵌套交互元素）。 */}
-                      {!organize && quickActions.length > 0 ? (
-                        <div className="content-asset__quick">
-                          {quickActions.map((action) => (
-                            <button
-                              key={action.key}
-                              type="button"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                action.run();
-                              }}
-                            >
-                              {action.label}
-                            </button>
-                          ))}
-                        </div>
-                      ) : null}
-                    </div>
-                  );
-                })}
+              {currentAssets.map((asset) => {
+                const authId = asset.previewAssetId ?? asset.assetId ?? "";
+                // MATERIAL-UX-06/07/09：卡片快捷动作——回收站视图替换为“恢复”。
+                const quickActions = trashedView
+                  ? [
+                      {
+                        key: "restore",
+                        label: "恢复",
+                        run: () => void restoreMaterial(asset),
+                      },
+                    ]
+                  : quickActionsFor(asset);
+                // MATERIAL-THUMBS-B / MATERIAL-UX-02：带封面的视频瓦片用 img 展示
+                // 缩略图（懒加载），不再让浏览器经服务端代理流式拉原视频；图片瓦片
+                // 同样走派生缩略图（单张手机照片可达 10MB）；点开详情仍用原图/原视频。
+                const thumbnailUrl =
+                  asset.kind === "video" || asset.kind === "image"
+                    ? thumbnailUrls[authId]
+                    : undefined;
+                return (
+                  <div className="content-asset-cell" key={asset.id}>
+                    <AssetCard
+                      asset={{
+                        ...asset,
+                        url:
+                          asset.kind === "image"
+                            ? (thumbnailUrl ??
+                              asset.url ??
+                              previewStates[asset.id]?.url)
+                            : thumbnailUrl
+                              ? undefined
+                              : (asset.url ?? previewStates[asset.id]?.url),
+                        poster: thumbnailUrl ?? asset.poster,
+                      }}
+                      selected={selected?.id === asset.id}
+                      organize={organize}
+                      checked={selectedIds.has(asset.id)}
+                      previewStatus={previewStates[asset.id]?.status}
+                      onSelect={() => {
+                        if (organize) {
+                          toggleSelected(asset.id);
+                          return;
+                        }
+                        if (previewStates[asset.id]?.status === "error")
+                          void loadPreview(asset);
+                        setSelectedAsset(asset);
+                        patchState({ selectedAssetId: asset.id });
+                      }}
+                      onPreviewError={(failedUrl) => {
+                        invalidatePreview(asset, failedUrl);
+                      }}
+                      onPlay={() => void warmPreview(asset)}
+                    />
+                    {/* MATERIAL-UX-06：hover 快捷动作（卡片 button 的兄弟浮层，避免嵌套交互元素）。 */}
+                    {!organize && quickActions.length > 0 ? (
+                      <div className="content-asset__quick">
+                        {quickActions.map((action) => (
+                          <button
+                            key={action.key}
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              action.run();
+                            }}
+                          >
+                            {action.label}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
             </div>
           )}
-          {audioCompactRows && audioCompactAssets.length > 0 ? (
-            <div className="content-material-rows">
-              {audioCompactAssets.map((asset) => (
-                <MaterialRow
-                  key={asset.id}
-                  asset={asset}
-                  compact
-                  quickActions={
-                    trashedView
-                      ? [
-                          {
-                            key: "restore",
-                            label: "恢复",
-                            run: () => void restoreMaterial(asset),
-                          },
-                        ]
-                      : quickActionsFor(asset)
-                  }
-                  onSelect={() => selectAsset(asset)}
-                />
-              ))}
-            </div>
-          ) : null}
           {remoteLoading ? <Hint>正在读取云端素材…</Hint> : null}
           {remoteError ? <Hint>{remoteError}</Hint> : null}
           {!remoteLoading && !remoteError && currentAssets.length === 0 ? (

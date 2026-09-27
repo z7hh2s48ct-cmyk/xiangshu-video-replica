@@ -4562,8 +4562,8 @@ describe("V1.4 内容与运营页面", () => {
     expect(getAssetDownloadUrl).toHaveBeenCalledTimes(2);
   });
 
-  // MATERIAL-UX-07 后音频素材在网格中折叠为紧凑行（无瓦片 Media），
-  // 媒体错误重签机制由 image / video 两个分支覆盖；音频播放经详情面板。
+  // 音频素材在网格中为波形卡片（瓦片不含播放器），媒体错误重签机制由
+  // image / video 两个分支覆盖；音频播放经详情面板。
   it.each([
     ["image", "image/png", "img"],
     ["video", "video/mp4", "video"],
@@ -5634,7 +5634,7 @@ describe("V1.4 内容与运营页面", () => {
     ).toHaveClass("content-asset");
   });
 
-  it("MATERIAL-UX-07：全部标签页音频折叠为紧凑行，视频仍为卡片", async () => {
+  it("MATERIAL-UX-07：全部标签页网格中音频与视频同为波形卡片，瓦片不内嵌播放器", async () => {
     listMaterials.mockResolvedValue({
       items: [
         material("mix-audio", {
@@ -5657,12 +5657,13 @@ describe("V1.4 内容与运营页面", () => {
     useStudio.mockReturnValue(studio({ review: false }));
     render(<MaterialsPage />);
 
-    const audioRow = await screen.findByRole("button", {
+    const audioCard = await screen.findByRole("button", {
       name: "选择素材 mix-audio.mp3",
     });
-    expect(
-      audioRow.closest(".content-material-row--compact"),
-    ).toBeInTheDocument();
+    expect(audioCard).toHaveClass("content-asset");
+    expect(audioCard).toHaveClass("content-asset--audio");
+    // 卡片本体是 button，不允许嵌套原生播放器（播放收敛到详情面板）
+    expect(audioCard.querySelector("audio")).toBeNull();
     expect(
       screen.getByRole("button", { name: "选择素材 mix-video.mp4" }),
     ).toHaveClass("content-asset");
