@@ -236,13 +236,13 @@ def test_customer_package_mounts_files_and_enables_postgres_tls() -> None:
     assert "ssl_key_file=/etc/postgresql/tls/server.key" in db
     for service in ("api-1", "api-2"):
         assert "--no-proxy-headers" in _service_block(service)
-    assert "--volume /etc/video-replica/cos-bootstrap.json:" in README.read_text()
+    assert "--volume /etc/video-replica/cos-bootstrap.json:" in README.read_text(encoding="utf-8")
 
 
 def test_postgres_tls_policy_preserves_physical_backup_connections() -> None:
     # PostgreSQL's database keyword "all" does not match physical replication.
     # The PITR pg_basebackup lane needs an explicit replication entry as well.
-    policy = (REPO_ROOT / "deploy/postgres/customer-pg_hba.conf").read_text()
+    policy = (REPO_ROOT / "deploy/postgres/customer-pg_hba.conf").read_text(encoding="utf-8")
     assert "hostssl replication all all scram-sha-256" in policy
     assert "hostnossl replication all all reject" in policy
 

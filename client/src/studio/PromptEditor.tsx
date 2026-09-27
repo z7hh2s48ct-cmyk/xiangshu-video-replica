@@ -7,10 +7,14 @@ import {
   getLatestGenerationPrompt,
   getLatestProjectShotCards,
   type PromptGenerationContext,
+  type PromptReferencePlanItem,
 } from "../api";
 import { anchorReplicaPromptToFirstFrame } from "./promptIdentity";
-import { Icon } from "./ui";
-import { usePromptOptimization } from "./usePromptOptimization";
+import { Button, Icon } from "./ui";
+import {
+  type OptimizationReview,
+  usePromptOptimization,
+} from "./usePromptOptimization";
 import "./prompt-editor.css";
 
 export type FinalReplicaSnapshot = {
@@ -449,6 +453,198 @@ export function ReplicaFinalPromptControls({
   );
 }
 
+/** 02 面板格式状态行：模式徽标 + 当前该说的一句说明。 */
+export type PromptFormatStatus = {
+  label: string;
+  title?: string;
+  hint: string;
+  ready: boolean;
+};
+
+// 音频用途快捷项：与服务端默认「音色参考」同口径，用户点选后按该用途重新生成。
+// 系统不分析音轨内容，所以这里只给「怎么说」，不给「听起来像什么」的判断。
+const AUDIO_PURPOSE_CHIPS = [
+  "音色参考",
+  "节奏参考",
+  "环境音参考",
+  "不用它的声音",
+];
+
+/** 核对区里素材用途一行的说法：区分「系统按默认值生成」与「系统看图判断」。 */
+function planPurposeLine(
+  item: PromptReferencePlanItem,
+  note: string | undefined,
+): string {
+  if (note === "AUDIO_PURPOSE_INFERRED")
+    return `用途「${item.purpose}」 · 系统未分析音轨，待你确认`;
+  if (note === "REFERENCE_PURPOSE_UNDECLARED")
+    return "用途未填 · 系统按画面内容判断";
+  return `用途「${item.purpose}」`;
+}
+
+/** 生成结果核对区：把「系统替你补了什么」摊开，用户核对后再提交。 */
+function PromptReview({
+  value,
+  review,
+  formatStatus,
+  actionLabel,
+  assetNames,
+  onPurposeChange,
+  readOnly,
+  busy,
+  onRegenerate,
+  onFocusEditor,
+}: {
+  value: string;
+  review: OptimizationReview;
+  formatStatus?: PromptFormatStatus;
+  actionLabel: string;
+  assetNames?: Record<string, string>;
+  onPurposeChange?: (assetId: string, purpose: string) => void;
+  readOnly: boolean;
+  busy: boolean;
+  onRegenerate: () => void;
+  onFocusEditor: () => void;
+}) {
+  const [collapsed, setCollapsed] = useState(false);
+  const notesByAlias = new Map(
+    review.needsConfirmation.map((item) => [item.alias ?? "", item.code]),
+  );
+  const pendingAudio = review.referencePlan.filter(
+    (item) => notesByAlias.get(item.alias) === "AUDIO_PURPOSE_INFERRED",
+  );
+  const shots = value.match(/\[Shot \d+\]/g)?.length ?? 0;
+  const status = [
+    "✓ 结构自检通过",
+    formatStatus?.ready ? "六段齐全" : null,
+    review.referencePlan.length ? "标签已绑定" : null,
+    shots ? `${shots} 个镜头` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <section className="h3-prompt-review" aria-label="生成结果核对">
+      <header className="h3-review-head">
+        <strong>生成结果核对</strong>
+        <span className="h3-review-status">{status}</span>
+        <Button
+          variant="quiet"
+          onClick={() => setCollapsed((previous) => !previous)}
+        >
+          {collapsed ? "展开" : "收起"}
+        </Button>
+      </header>
+      {collapsed ? null : (
+        <>
+          <div className="h3-review-grid">
+            {review.referencePlan.length ? (
+              <div className="h3-review-block">
+                <span className="h3-review-title">
+                  素材对齐（{review.referencePlan.length}）
+                </span>
+                <ul className="h3-review-list">
+                  {review.referencePlan.map((item) => (
+                    <li key={item.asset_id}>
+                      <span>
+                        <code>
+                          {item.alias} → {item.label}
+                        </code>{" "}
+                        {assetNames?.[item.asset_id] ?? ""}
+                      </span>
+                      <span>
+                        <em>
+                          {planPurposeLine(item, notesByAlias.get(item.alias))}
+                        </em>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {review.assumptions.length ? (
+              <div className="h3-review-block">
+                <span className="h3-review-title">
+                  假设清单（{review.assumptions.length}）
+                  <small>需求没提到的信息，按下列假设生成</small>
+                </span>
+                <ol className="h3-review-list">
+                  {review.assumptions.map((item) => (
+                    <li key={`${item.code}:${item.message}`}>{item.message}</li>
+                  ))}
+                </ol>
+                <span className="h3-review-note">
+                  {`要调整就改上面的需求或直接编辑提示词，再点「${actionLabel}」重新生成；重新生成会覆盖当前文字，可用「撤销」还原。`}
+                </span>
+              </div>
+            ) : null}
+          </div>
+          {pendingAudio.map((item) => (
+            <div className="h3-review-audio" key={item.asset_id}>
+              <span className="h3-review-title is-warn">音频用途待确认</span>
+              <p>
+                <code>
+                  {item.alias} → {item.label}
+                </code>{" "}
+                {`已按「${item.purpose}」写入提示词。系统不会分析音轨内容，请确认或改选一项。`}
+              </p>
+              {onPurposeChange ? (
+                <div className="creation-purpose-chips">
+                  {AUDIO_PURPOSE_CHIPS.map((term) => (
+                    <button
+                      type="button"
+                      key={term}
+                      className={item.purpose === term ? "is-on" : undefined}
+                      disabled={readOnly || busy}
+                      onClick={() => onPurposeChange(item.asset_id, term)}
+                    >
+                      {term}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ))}
+          <footer className="h3-review-actions">
+            <Button
+              variant="outline"
+              disabled={readOnly || busy || !value.trim()}
+              onClick={onRegenerate}
+            >
+              <Icon name="sparkles" size={16} />
+              重新生成（覆盖，可撤销）
+            </Button>
+            <Button variant="quiet" onClick={onFocusEditor}>
+              在编辑框里手动改
+            </Button>
+            <span className="h3-review-tip">
+              确认无误后点右下角「生成视频」，走现有报价与提交流程。
+            </span>
+          </footer>
+        </>
+      )}
+    </section>
+  );
+}
+
+function PromptStructureCheck({ value }: { value: string }) {
+  const shots = value.match(/\[Shot \d+\]/g)?.length ?? 0;
+  return (
+    <section className="h3-prompt-review is-plain" aria-label="结构自检">
+      <header className="h3-review-head">
+        <strong>结构自检</strong>
+        <span className="h3-review-status">
+          ✓ 已识别为六段式{shots ? ` · ${shots} 个镜头` : ""}
+        </span>
+      </header>
+      <p className="h3-review-note">
+        这段提示词由你编写或从提示词库导入，素材编号会在提交时由服务端校验。点「AI
+        优化」只改文风与措辞，不改六段结构、素材编号与引用规则；如果素材有增减，
+        请重新生成以免编号错位。
+      </p>
+    </section>
+  );
+}
+
 type Props = {
   value: string;
   onChange: (value: string) => void;
@@ -463,6 +659,16 @@ type Props = {
   toolbarStart?: ReactNode;
   showToolbarLabel?: boolean;
   toolbarLabel?: ReactNode;
+  /** 参考生视频专用：六段式状态行与结构自检；其他模式不传，界面保持原样。 */
+  formatStatus?: PromptFormatStatus;
+  /** 核对区素材文件名：asset_id → 名称。 */
+  assetNames?: Record<string, string>;
+  /** 核对区里改音频用途：写回草稿，重新生成时生效。 */
+  onPurposeChange?: (assetId: string, purpose: string) => void;
+  /** 父组件据此在生成期间禁用提交按钮。 */
+  onOptimizationBusyChange?: (busy: boolean) => void;
+  /** 递增这个信号 = 请编辑器直接发起一次生成（用于素材变化后的直达按钮）。 */
+  runSignal?: number;
 };
 
 export function PromptEditor({
@@ -479,9 +685,35 @@ export function PromptEditor({
   toolbarStart,
   showToolbarLabel = false,
   toolbarLabel = "画面描述",
+  formatStatus,
+  assetNames,
+  onPurposeChange,
+  onOptimizationBusyChange,
+  runSignal,
 }: Props) {
   const optimization = usePromptOptimization(value, context, onChange, scope);
+  const textarea = useRef<HTMLTextAreaElement | null>(null);
   const count = Array.from(value).length;
+  const busyCallback = useRef(onOptimizationBusyChange);
+  busyCallback.current = onOptimizationBusyChange;
+  useEffect(() => {
+    busyCallback.current?.(optimization.busy);
+  }, [optimization.busy]);
+  const runRef = useRef(optimization.run);
+  runRef.current = optimization.run;
+  const runSignalSeen = useRef(runSignal);
+  useEffect(() => {
+    if (runSignal === undefined || runSignal === runSignalSeen.current) return;
+    runSignalSeen.current = runSignal;
+    void runRef.current();
+  }, [runSignal]);
+  const review = optimization.review;
+  const reviewFilled = Boolean(
+    review &&
+      (review.assumptions.length ||
+        review.referencePlan.length ||
+        review.needsConfirmation.length),
+  );
   return (
     <div className="h3-prompt-editor">
       <div className="h3-prompt-tools">
@@ -514,8 +746,18 @@ export function PromptEditor({
           </span>
         </button>
       </div>
+      {formatStatus && (
+        <p className="h3-prompt-meta">
+          <span className="h3-prompt-mode" title={formatStatus.title}>
+            <i className={formatStatus.ready ? "is-ready" : undefined} />
+            <span>{formatStatus.label}</span>
+          </span>
+          <span>{formatStatus.hint}</span>
+        </p>
+      )}
       {optimization.message && <p role="status">{optimization.message}</p>}
       <textarea
+        ref={textarea}
         aria-label={label}
         className="creation-textarea"
         value={value}
@@ -527,6 +769,22 @@ export function PromptEditor({
       />
       <small>{count}/7000 字</small>
       {count > 7000 && <p role="alert">提示词超过 7000 字，请精简后提交。</p>}
+      {review && reviewFilled ? (
+        <PromptReview
+          value={value}
+          review={review}
+          formatStatus={formatStatus}
+          actionLabel={optimizationActionLabel}
+          assetNames={assetNames}
+          onPurposeChange={onPurposeChange}
+          readOnly={readOnly}
+          busy={optimization.busy}
+          onRegenerate={() => void optimization.run()}
+          onFocusEditor={() => textarea.current?.focus()}
+        />
+      ) : formatStatus?.ready ? (
+        <PromptStructureCheck value={value} />
+      ) : null}
       {optimization.pending && (
         <details>
           <summary>查看基于旧内容的优化结果</summary>

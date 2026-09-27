@@ -107,7 +107,7 @@ def test_no_sentry_sdk_enters_the_server_runtime() -> None:
     this contract fails and plaintext-leak assertions for captured events
     (CW-009 S2) must land in the same change.
     """
-    pyproject = (REPO_ROOT / "server" / "pyproject.toml").read_text()
+    pyproject = (REPO_ROOT / "server" / "pyproject.toml").read_text(encoding="utf-8")
     assert "sentry" not in pyproject.lower()
     for path in sorted((REPO_ROOT / "server" / "app").rglob("*.py")):
-        assert "sentry" not in path.read_text().lower(), str(path)
+        assert "sentry" not in path.read_text(encoding="utf-8").lower(), str(path)

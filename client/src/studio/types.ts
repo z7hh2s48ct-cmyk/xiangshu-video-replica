@@ -272,6 +272,9 @@ export type StudioDraft = {
   /** 当前脚本是否包含尚未发布为项目版本的本地编辑，包括主动清空。 */
   scriptEdited?: boolean;
   prompt: string;
+  /** 参考生视频的正文（H3 Ref2VA 六段式）：与文/图生视频的集成描述分仓，
+   * 两种实现方式不共用一段文字，切页签也不会互相覆盖。 */
+  referencePrompt?: string;
   /** 复刻准备保留拆解依据，最终提示词独立存于 prompt。 */
   replicaSourcePrompt?: string;
   /** 新提示词对应的项目、来源、文案与拆解内容，供交接前校验。 */

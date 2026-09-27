@@ -56,7 +56,11 @@ import { isInsufficientCredits } from "../insufficientCredits";
 import { VideoPreview } from "../VideoPreview";
 import { CharacterMaterialViews } from "./CharacterMaterialViews";
 import { useStudio } from "./context";
-import { studioAssetFromMaterial, studioVideoFromViral } from "./live";
+import {
+  readAudioDuration,
+  studioAssetFromMaterial,
+  studioVideoFromViral,
+} from "./live";
 import {
   type CloudPublishAccount,
   canUseLocalPublishAccounts,
@@ -164,6 +168,54 @@ function formatMaterialSize(bytes?: number): string | undefined {
 // （图片 10 MB，其余 50 MB）；超限在客户端拦截，不等后端 413。
 const UPLOAD_IMAGE_LIMIT = 10 * 1024 * 1024;
 const UPLOAD_FILE_LIMIT = 50 * 1024 * 1024;
+
+// 素材库是通用入口，音频必须声明用途（服务端 MATERIAL_AUDIO_PURPOSE_REQUIRED），
+// 因此按探测时长取一个「最宽可用」用途，避免让用户先选用途再上传：
+// 2–15 秒 → 参考（R2V 选取器可用）；MP3 超出该区间 → 完整口播；其余 5–180 秒 → 声音克隆。
+const LIBRARY_REFERENCE_MIN_SECONDS = 2;
+const LIBRARY_REFERENCE_MAX_SECONDS = 15;
+const LIBRARY_AUDIO_EXTENSIONS = [
+  ".mp3",
+  ".wav",
+  ".m4a",
+  ".aac",
+  ".flac",
+  ".ogg",
+  ".opus",
+];
+const VOICE_CLONE_ONLY_EXTENSIONS = [".wma", ".wmv", ".aiff", ".aif", ".amr"];
+
+function withExtension(name: string, extensions: string[]) {
+  const lower = name.toLowerCase();
+  return extensions.some((extension) => lower.endsWith(extension));
+}
+
+function libraryAudioOptions(
+  name: string,
+  duration: number,
+):
+  | {
+      audioPurpose: "reference" | "oral_audio" | "voice_clone";
+      durationSeconds: number;
+    }
+  | { error: string } {
+  if (
+    duration >= LIBRARY_REFERENCE_MIN_SECONDS &&
+    duration <= LIBRARY_REFERENCE_MAX_SECONDS
+  ) {
+    return { audioPurpose: "reference", durationSeconds: duration };
+  }
+  if (name.toLowerCase().endsWith(".mp3")) {
+    return { audioPurpose: "oral_audio", durationSeconds: duration };
+  }
+  if (duration >= 5 && duration <= 180) {
+    return { audioPurpose: "voice_clone", durationSeconds: duration };
+  }
+  return {
+    error:
+      "音频时长不在可用范围（参考音频须 2–15 秒，声音克隆须 5–180 秒），请更换素材后重试。",
+  };
+}
 
 function uploadSizeError(file: File): string | undefined {
   const isImage = file.type.startsWith("image/");
@@ -3203,9 +3255,35 @@ function MaterialsPageContent() {
       // MATERIAL-UX-01：标题区可选上传目标分组，默认“我的上传”。
       const targetGroup =
         uploadGroup === "__new__" ? uploadGroupDraft.trim() : uploadGroup;
+      let audioOptions:
+        | {
+            audioPurpose: "reference" | "oral_audio" | "voice_clone";
+            durationSeconds: number;
+          }
+        | undefined;
+      if (withExtension(file.name, VOICE_CLONE_ONLY_EXTENSIONS)) {
+        throw new Error("该音频格式仅用于声音克隆样本，请在声音克隆入口上传。");
+      }
+      if (withExtension(file.name, LIBRARY_AUDIO_EXTENSIONS)) {
+        // 探测失败（WebView 解不了该容器）要给可操作提示，不能只报「上传失败」。
+        let duration: number;
+        try {
+          duration = await readAudioDuration(file);
+        } catch (error) {
+          throw new Error(
+            error instanceof Error && error.message
+              ? error.message
+              : "无法读取音频时长，请改用 MP3、WAV、M4A 等常见格式后重试。",
+          );
+        }
+        const resolved = libraryAudioOptions(file.name, duration);
+        if ("error" in resolved) throw new Error(resolved.error);
+        audioOptions = resolved;
+      }
       const intent = await createMaterialUploadIntent(file, {
         title: file.name,
         group: targetGroup || "我的上传",
+        ...audioOptions,
       });
       if (intent.upload_required === false) {
         notify("检测到相同文件，已复用已有素材");
@@ -3705,7 +3783,14 @@ function MaterialsPageContent() {
           <p>统一管理和复用乡墅创作素材</p>
         </div>
         <input
-          accept=".jpg,.jpeg,.png,.mp3,.mp4,.mov"
+          accept={[
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".mp4",
+            ".mov",
+            ...LIBRARY_AUDIO_EXTENSIONS,
+          ].join(",")}
           aria-label="选择上传素材"
           hidden
           multiple

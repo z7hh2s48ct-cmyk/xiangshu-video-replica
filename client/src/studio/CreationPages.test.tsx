@@ -41,6 +41,7 @@ const replicaApi = vi.hoisted(() => ({
   createScriptVersion: vi.fn(),
   compileGenerationPrompt: vi.fn(),
   saveShotCards: vi.fn(),
+  createPromptOptimization: vi.fn(),
 }));
 const replicaLive = vi.hoisted(() => ({
   readAudioDuration: vi.fn(),
@@ -322,6 +323,15 @@ const referenceCapabilities = {
   max_reference_audios: 3,
   max_quantity: 4,
 };
+
+const SIX_SECTION_PROMPT = [
+  "subject_definitions: <Subject 1> 主讲人。",
+  "summary: 一句话概述。",
+  "retention_analysis: 保留镜头推进。",
+  "detailed_description: [Shot 1] At 00:00.000 开场。",
+  "overall_soundscape: 自然环境音。",
+  "non_diegetic_music: 无。",
+].join("\n");
 
 describe("V1.4 创作页面", () => {
   beforeEach(() => {
@@ -2791,7 +2801,7 @@ describe("V1.4 创作页面", () => {
       page: "reference",
       draft: {
         ...value.state.draft,
-        prompt: "用@2的人物替换视频@1中的主要角色",
+        referencePrompt: "用@2的人物替换视频@1中的主要角色",
         referenceIds: ["reference-1"],
         promptBindingsStale: true,
         importedPromptContext: {
@@ -2821,9 +2831,151 @@ describe("V1.4 创作页面", () => {
       target: { value: "手动改写后的参考提示词" },
     });
     expect(value.patchDraft).toHaveBeenCalledWith({
-      prompt: "手动改写后的参考提示词",
+      referencePrompt: "手动改写后的参考提示词",
       promptEdited: true,
       importedPromptContext: undefined,
+    });
+  });
+
+  it("两种模式的提示词分仓：参考页只认 referencePrompt，并按结构切换按钮文案", () => {
+    const value = studio({ videoCapabilities: referenceCapabilities });
+    value.state = {
+      ...value.state,
+      page: "reference",
+      draft: {
+        ...value.state.draft,
+        prompt: "文/图模式的集成描述",
+        referencePrompt: "",
+        referenceIds: ["reference-1"],
+      },
+    };
+    useStudio.mockReturnValue(value);
+    const view = render(<VideoPage />);
+
+    // 文图那栏的稿子既不能点亮提交，也不能让按钮以为「已经有内容了」。
+    expect(screen.getByLabelText("提示词")).toHaveValue("");
+    expect(
+      screen.getByRole("button", { name: "AI 优化提示词" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "生成视频" })).toBeDisabled();
+    expect(screen.getByText(/直接用一句话写需求即可/)).toBeInTheDocument();
+
+    value.state = {
+      ...value.state,
+      draft: { ...value.state.draft, referencePrompt: "用@1的构图替换主体" },
+    };
+    view.rerender(<VideoPage />);
+    expect(screen.getByLabelText("提示词")).toHaveValue("用@1的构图替换主体");
+    expect(screen.getByRole("button", { name: "生成视频" })).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "AI 优化提示词" }),
+    ).toHaveTextContent("生成标准提示词");
+
+    value.state = {
+      ...value.state,
+      draft: { ...value.state.draft, referencePrompt: SIX_SECTION_PROMPT },
+    };
+    view.rerender(<VideoPage />);
+    expect(
+      screen.getByText(/已识别为六段式（你手写或从提示词库导入）/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "AI 优化提示词" }),
+    ).toHaveTextContent("AI 优化");
+    expect(
+      screen.getByRole("region", { name: "结构自检" }),
+    ).toBeInTheDocument();
+  });
+
+  it("参考音频行的用途留空标「用途待确认」，快捷项对音频单选替换", () => {
+    const value = studio({ videoCapabilities: referenceCapabilities });
+    value.state = {
+      ...value.state,
+      page: "reference",
+      draft: {
+        ...value.state.draft,
+        referencePrompt: "人物用@2的音色与@1的运镜",
+        referenceIds: ["reference-1", "audio-1"],
+      },
+    };
+    useStudio.mockReturnValue(value);
+    const view = render(<VideoPage />);
+
+    const purpose = screen.getByLabelText("建房预算-录音.wav的参考用途");
+    expect(purpose).toHaveAttribute(
+      "placeholder",
+      expect.stringContaining("可留空"),
+    );
+    expect(screen.getByText("用途待确认")).toBeInTheDocument();
+    expect(screen.getByText(/系统不会分析音轨内容/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "音色参考" }));
+    expect(value.patchDraft).toHaveBeenCalledWith({
+      referencePurposes: { "audio-1": "音色参考" },
+    });
+
+    // 音频用途是单选：改选另一项直接替换，而不是拼成「音色参考、节奏参考」。
+    value.state = {
+      ...value.state,
+      draft: {
+        ...value.state.draft,
+        referencePurposes: { "audio-1": "音色参考" },
+      },
+    };
+    view.rerender(<VideoPage />);
+    expect(screen.queryByText("用途待确认")).toBeNull();
+    expect(screen.getByRole("button", { name: "音色参考" })).toHaveClass(
+      "is-on",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "节奏参考" }));
+    expect(value.patchDraft).toHaveBeenLastCalledWith({
+      referencePurposes: { "audio-1": "节奏参考" },
+    });
+  });
+
+  it("参考素材变化后由告警条直达重新生成，生成期间禁用提交", async () => {
+    replicaApi.createPromptOptimization.mockReturnValueOnce(
+      new Promise(() => {}),
+    );
+    const value = studio({ videoCapabilities: referenceCapabilities });
+    value.state = {
+      ...value.state,
+      page: "reference",
+      draft: {
+        ...value.state.draft,
+        referencePrompt: "用一句话需求生成的六段式稿",
+        referenceIds: ["reference-1"],
+        promptBindingsStale: true,
+      },
+    };
+    useStudio.mockReturnValue(value);
+    render(<VideoPage />);
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("参考素材已变化，请核对提示词的素材编号。");
+    const regenerate = within(alert).getByRole("button", {
+      name: "重新生成标准提示词",
+    });
+    expect(screen.getByRole("button", { name: "生成视频" })).toBeEnabled();
+
+    fireEvent.click(regenerate);
+    await waitFor(() =>
+      expect(replicaApi.createPromptOptimization).toHaveBeenCalledOnce(),
+    );
+    // 编号可能已经错位的稿子不许提交：生成完成前先挡住「生成视频」。
+    expect(replicaApi.createPromptOptimization.mock.calls[0][0]).toMatchObject({
+      route: "reference",
+      prompt_text: "用一句话需求生成的六段式稿",
+      references: [{ asset_id: "reference-1", purpose: "unspecified" }],
+    });
+    expect(regenerate).toBeDisabled();
+    expect(screen.getByRole("button", { name: "生成视频" })).toBeDisabled();
+
+    fireEvent.click(
+      within(alert).getByRole("button", { name: "我已手动核对" }),
+    );
+    expect(value.patchDraft).toHaveBeenCalledWith({
+      promptBindingsStale: false,
     });
   });
 
@@ -3099,7 +3251,103 @@ describe("V1.4 创作页面", () => {
     );
   });
 
-  it("参考素材上传器标注视频与音频的 15 秒上限", () => {
+  it("参考素材本机上传对不足 2 秒的音频在发请求前拦截", async () => {
+    replicaLive.readAudioDuration.mockResolvedValue(1.2);
+    const value = studio({
+      review: false,
+      videoCapabilities: referenceCapabilities,
+      state: {
+        ...studio().state,
+        page: "reference",
+        draft: { ...studio().state.draft, referenceIds: [] },
+      },
+    });
+    useStudio.mockReturnValue(value);
+    render(<VideoPage />);
+
+    fireEvent.change(screen.getByLabelText("上传参考素材"), {
+      target: {
+        files: [new File(["audio"], "环境声.wav", { type: "audio/wav" })],
+      },
+    });
+
+    await waitFor(() =>
+      expect(value.notify).toHaveBeenCalledWith(
+        "参考音频时长不能短于 2 秒，请更换素材或裁剪后上传。",
+      ),
+    );
+    expect(replicaLive.uploadReferenceAudioMaterial).not.toHaveBeenCalled();
+  });
+
+  it("参考音频按扩展名放行常见容器，不依赖浏览器给出的 MIME", async () => {
+    replicaLive.readAudioDuration.mockResolvedValue(9);
+    replicaLive.uploadReferenceAudioMaterial.mockResolvedValue({
+      id: "reference-wav",
+      name: "环境声.m4a",
+      kind: "audio",
+      group: "参考素材",
+      source: "本机上传",
+      saved: true,
+    });
+    const value = studio({
+      review: false,
+      videoCapabilities: referenceCapabilities,
+      state: {
+        ...studio().state,
+        page: "reference",
+        draft: { ...studio().state.draft, referenceIds: [] },
+      },
+    });
+    useStudio.mockReturnValue(value);
+    render(<VideoPage />);
+
+    fireEvent.change(screen.getByLabelText("上传参考素材"), {
+      target: {
+        // WebView 对 .m4a 常给出空 MIME，扩展名匹配必须仍然放行。
+        files: [new File(["audio"], "环境声.m4a", { type: "" })],
+      },
+    });
+
+    await waitFor(() =>
+      expect(replicaLive.uploadReferenceAudioMaterial).toHaveBeenCalledWith(
+        expect.any(File),
+        9,
+        expect.any(Function),
+      ),
+    );
+  });
+
+  it("参考音频探测失败时给出可操作提示而不是通用上传失败", async () => {
+    replicaLive.readAudioDuration.mockRejectedValue(
+      new Error("无法读取音频时长，请重新选择声音文件。"),
+    );
+    const value = studio({
+      review: false,
+      videoCapabilities: referenceCapabilities,
+      state: {
+        ...studio().state,
+        page: "reference",
+        draft: { ...studio().state.draft, referenceIds: [] },
+      },
+    });
+    useStudio.mockReturnValue(value);
+    render(<VideoPage />);
+
+    fireEvent.change(screen.getByLabelText("上传参考素材"), {
+      target: {
+        files: [new File(["audio"], "环境声.wav", { type: "audio/wav" })],
+      },
+    });
+
+    await waitFor(() =>
+      expect(value.notify).toHaveBeenCalledWith(
+        "无法读取音频时长，请重新选择声音文件。",
+      ),
+    );
+    expect(replicaLive.uploadReferenceAudioMaterial).not.toHaveBeenCalled();
+  });
+
+  it("参考素材上传器标注视频与音频的 2–15 秒区间", () => {
     const value = studio({
       review: false,
       state: {
@@ -3112,7 +3360,9 @@ describe("V1.4 创作页面", () => {
     render(<VideoPage />);
 
     expect(
-      screen.getByText("视频、音频各累计 ≤15 秒；参考合计 ≤12 项"),
+      screen.getByText(
+        "视频、音频单条 2–15 秒且各累计 ≤15 秒；参考合计 ≤12 项",
+      ),
     ).toBeInTheDocument();
   });
 

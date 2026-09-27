@@ -595,28 +595,78 @@ def test_rule_fields_match_parser_enums() -> None:
     assert motion.camera_motion == "ORBIT"
 
 
-@pytest.mark.parametrize("case", ["dialogue", "warning"])
-def test_optimizer_never_auto_accepts_changed_dialogue_or_uncertainty(case: str) -> None:
+def test_optimizer_never_auto_accepts_changed_dialogue() -> None:
     import json
 
     from app.prompt_optimizer import validate_result
 
     original = "integrated_multimodal_description: [Shot 1] <d>[Chinese] 原句</d>\n"
     original += "overall_soundscape: N/A\nnon_diegetic_music: N/A"
-    output = original.replace("原句", "被改写的台词") if case == "dialogue" else original
-    warnings = [{"code": "UNCERTAIN", "message": "需核对动作"}] if case == "warning" else []
     result, state = validate_result(
-        json.dumps({"prompt_text": output, "warnings": warnings}),
+        json.dumps({"prompt_text": original.replace("原句", "被改写的台词"), "warnings": []}),
         snapshot={
             "prompt_text": original,
             "context": {"mode": "T2VA", "duration_seconds": 8, "generation_assets": []},
         },
     )
-    assert state == ("FAILED" if case == "dialogue" else "NEEDS_INPUT")
-    assert result["validation_status"] != "valid"
-    assert result["warnings"][0]["code"] == (
-        "DIALOGUE_CHANGED" if case == "dialogue" else "UNCERTAIN"
+    assert state == "FAILED"
+    assert result["validation_status"] == "invalid"
+    assert result["issues"][0]["code"] == "DIALOGUE_CHANGED"
+
+
+def test_optimizer_applies_prompt_with_assumption_list() -> None:
+    """warnings 现在是假设清单：记录推断并随结果回传，不再阻断应用。
+
+    用户要的是先拿到标准提示词，再在核对区逐条看推断；把「有推断」当成
+    失败会让每个需求都被打回，等于没有生成能力。
+    """
+    import json
+
+    from app.prompt_optimizer import validate_result
+
+    original = "integrated_multimodal_description: [Shot 1] 原句\n"
+    original += "overall_soundscape: N/A\nnon_diegetic_music: N/A"
+    warnings = [{"code": "UNCERTAIN", "message": "需核对动作"}]
+    result, state = validate_result(
+        json.dumps({"prompt_text": original, "warnings": warnings}),
+        snapshot={
+            "prompt_text": original,
+            "context": {
+                "mode": "T2VA",
+                "duration_seconds": 8,
+                "generation_assets": [],
+                "needs_confirmation": [{"code": "AUDIO_PURPOSE_INFERRED", "message": "音频用途"}],
+            },
+        },
     )
+    assert state == "SUCCEEDED"
+    assert result["validation_status"] == "valid"
+    assert result["assumptions"] == warnings
+    assert result["needs_confirmation"] == [
+        {"code": "AUDIO_PURPOSE_INFERRED", "message": "音频用途"}
+    ]
+
+
+def test_independent_r2v_rejects_replica_draft_and_freeform_prompt() -> None:
+    """R2V 与复刻流是两套提示词实现：复刻稿和随手写的短句都不得进供应商。"""
+    from app.h3_prompts import is_replica_draft, prompt_issues
+
+    replica = (
+        "For the target video, at 0.00 seconds into the target video, <Picture 1> "
+        "(from [Shot 1]) is fully referenced.\n\n"
+        "integrated_multimodal_description: [Shot 1]\n主讲人绑定：<Picture 1> 中的主体"
+    )
+    assert is_replica_draft(replica)
+    issues = prompt_issues(replica, mode="Ref2VA", duration=8, labels=["<Picture 1>"], strict=True)
+    assert issues and issues[0].code == "H3_STRUCTURE_INVALID"
+    freeform = prompt_issues(
+        "视频<Video 1>的人物用图片<Picture 1>替换。",
+        mode="Ref2VA",
+        duration=8,
+        labels=["<Video 1>", "<Picture 1>"],
+        strict=True,
+    )
+    assert [issue.code for issue in freeform] == ["H3_STRUCTURE_INVALID"] * len(freeform)
 
 
 # --- 爆款复刻文案回填：空 original_script 用分段台词兜底 -------------------------

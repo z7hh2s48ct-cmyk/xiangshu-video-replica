@@ -7929,6 +7929,23 @@ export type PromptOptimizeInput = PromptGenerationContext & {
   editor_revision: number;
   prompt_text: string;
 };
+/** 核对区的一行提示：假设清单与用途待确认共用，字段与服务端 Issue 一致。 */
+export type PromptReviewNote = {
+  code: string;
+  message: string;
+  alias?: string;
+  label?: string;
+  purpose?: string;
+};
+/** 服务端解析出的素材对齐清单：@编号 → 标签，核对区据此展示与回改用途。 */
+export type PromptReferencePlanItem = {
+  asset_id: string;
+  alias: string;
+  label: string;
+  role: string;
+  kind: string;
+  purpose: string;
+};
 export type PromptOptimizeResult = {
   task_id: string;
   status:
@@ -7945,8 +7962,14 @@ export type PromptOptimizeResult = {
   error_message?: string | null;
   result?: {
     prompt_text: string | null;
-    warnings: { code: string; message: string }[];
+    warnings: PromptReviewNote[];
     validation_status: string;
+    /** 模型的假设清单：需求没写、由系统按上下文推断的信息，不阻断应用。 */
+    assumptions?: PromptReviewNote[];
+    /** 素材对齐清单；旧任务没有这个字段，核对区按空处理。 */
+    reference_plan?: PromptReferencePlanItem[];
+    /** 用途留空被系统推断的素材，需要用户在核对区确认。 */
+    needs_confirmation?: PromptReviewNote[];
   } | null;
 };
 export function createPromptOptimization(

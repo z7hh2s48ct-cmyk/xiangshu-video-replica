@@ -10,6 +10,11 @@ import {
 import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createReviewData, createReviewState, reviewUser } from "./fixtures";
+import {
+  constrainReferenceVideoPrompt,
+  REFERENCE_VIDEO_DIALOGUE_RULE,
+  REFERENCE_VIDEO_VISUAL_ONLY_RULE,
+} from "./referencePrompt";
 import { StudioWorkspace } from "./StudioWorkspace";
 import { createState } from "./state";
 
@@ -32,6 +37,15 @@ function freshUpdatedAt() {
 async function acceptRestorePrompt() {
   fireEvent.click(await screen.findByRole("button", { name: RESTORE }));
 }
+
+const REF2VA_PROMPT = [
+  "subject_definitions: <Subject 1> 主讲人；<Picture 1> 外立面参考。",
+  "summary: 一句话概述。",
+  "retention_analysis: 保留镜头推进。",
+  "detailed_description: [Shot 1] At 00:00.000 开场。",
+  "overall_soundscape: 自然环境音。",
+  "non_diegetic_music: 无。",
+].join("\n");
 
 const live = vi.hoisted(() => ({
   CREATION_KIND_LABELS: {
@@ -3086,7 +3100,7 @@ describe("视频生成（C2 独立创作）", () => {
       ],
     });
     const initial = createState("reference");
-    initial.draft.prompt = "参考外立面生成";
+    initial.draft.referencePrompt = "参考外立面生成";
     initial.draft.referenceIds = ["image-a", "image-b"];
     render(<StudioWorkspace currentUser={reviewUser} initialState={initial} />);
 
@@ -3142,7 +3156,7 @@ describe("视频生成（C2 独立创作）", () => {
     ).toBeInTheDocument();
   });
 
-  it("参考素材选择器拦截时长超过 15 秒的视频与音频", async () => {
+  it("参考素材选择器拦截时长越界（超 15 秒或不足 2 秒）的视频与音频", async () => {
     api.getIndependentCapabilities.mockResolvedValue({
       extended_modes_enabled: true,
       t2v_enabled: true,
@@ -3181,6 +3195,13 @@ describe("视频生成（C2 独立创作）", () => {
         },
         {
           ...base,
+          id: "audio-short",
+          name: "过短环境声.mp3",
+          kind: "audio",
+          durationSeconds: 1.2,
+        },
+        {
+          ...base,
           id: "video-ok",
           name: "短运镜.mp4",
           kind: "video",
@@ -3189,7 +3210,7 @@ describe("视频生成（C2 独立创作）", () => {
       ],
     });
     const initial = createState("reference");
-    initial.draft.prompt = "参考外立面生成";
+    initial.draft.referencePrompt = "参考外立面生成";
     initial.draft.referenceIds = [];
     render(<StudioWorkspace currentUser={reviewUser} initialState={initial} />);
 
@@ -3201,13 +3222,19 @@ describe("视频生成（C2 独立创作）", () => {
     // 超过 15 秒的视频被拦截、不加入参考
     fireEvent.click(within(picker).getByRole("button", { name: /长运镜/ }));
     expect(
-      await screen.findByText("参考视频时长不能超过 15 秒，请裁剪后再选取。"),
+      await screen.findByText("参考视频须为 2–15 秒，请裁剪后再选取。"),
     ).toBeInTheDocument();
 
     // 超过 15 秒的音频被拦截
     fireEvent.click(within(picker).getByRole("button", { name: /长环境声/ }));
     expect(
-      await screen.findByText("参考音频时长不能超过 15 秒，请裁剪后再选取。"),
+      await screen.findByText("参考音频须为 2–15 秒，请裁剪后再选取。"),
+    ).toBeInTheDocument();
+
+    // 不足 2 秒的音频同样被拦截，避免拖到提交时才被生成端拒绝
+    fireEvent.click(within(picker).getByRole("button", { name: /过短环境声/ }));
+    expect(
+      await screen.findByText("参考音频须为 2–15 秒，请裁剪后再选取。"),
     ).toBeInTheDocument();
 
     // 合规视频（10 秒）可正常选取
@@ -3286,7 +3313,7 @@ describe("视频生成（C2 独立创作）", () => {
       assets: [image("image-a")],
     });
     const initial = createState("reference");
-    initial.draft.prompt = "旧草稿";
+    initial.draft.referencePrompt = "旧草稿";
     initial.draft.referenceIds = ["image-a"];
     render(<StudioWorkspace currentUser={reviewUser} initialState={initial} />);
 
@@ -3323,7 +3350,7 @@ describe("视频生成（C2 独立创作）", () => {
       assets: [image("image-a"), image("image-b"), image("image-c")],
     });
     const initial = createState("reference");
-    initial.draft.prompt = "旧草稿";
+    initial.draft.referencePrompt = "旧草稿";
     initial.draft.referenceIds = ["image-a", "image-b", "image-c"];
     render(<StudioWorkspace currentUser={reviewUser} initialState={initial} />);
 
@@ -3348,7 +3375,7 @@ describe("视频生成（C2 独立创作）", () => {
       max_quantity: 4,
     });
     const restored = createState("reference").draft;
-    restored.prompt = "恢复草稿";
+    restored.referencePrompt = "恢复草稿";
     restored.referenceIds = ["image-restored"];
     live.loadCloudDraft.mockResolvedValue({
       draft: restored,
@@ -3409,7 +3436,7 @@ describe("视频生成（C2 独立创作）", () => {
       max_quantity: 4,
     });
     const restored = createState("reference").draft;
-    restored.prompt = "恢复草稿";
+    restored.referencePrompt = "恢复草稿";
     restored.referenceIds = ["image-restored"];
     live.loadCloudDraft.mockResolvedValue({
       draft: restored,
@@ -3541,7 +3568,7 @@ describe("视频生成（C2 独立创作）", () => {
       ],
     });
     const initial = createState("reference");
-    initial.draft.prompt = "参考外立面生成";
+    initial.draft.referencePrompt = "参考外立面生成";
     initial.draft.referenceIds = ["image-a"];
     render(<StudioWorkspace currentUser={reviewUser} initialState={initial} />);
 
@@ -3583,7 +3610,7 @@ describe("视频生成（C2 独立创作）", () => {
       ],
     });
     const initial = createState("reference");
-    initial.draft.prompt = "参考外立面生成";
+    initial.draft.referencePrompt = "参考外立面生成";
     initial.draft.referenceIds = ["image-a"];
     render(<StudioWorkspace currentUser={reviewUser} initialState={initial} />);
 
@@ -4070,6 +4097,55 @@ describe("视频生成（C2 独立创作）", () => {
     expect(
       screen.getByRole("progressbar", { name: "生成进度" }),
     ).toBeInTheDocument();
+  });
+
+  it("参考生视频提交六段式正文与排除规则，不取文图那栏的稿子", async () => {
+    const imageA = {
+      id: "image-a",
+      name: "外立面 A.jpg",
+      kind: "image" as const,
+      group: "参考素材",
+      source: "素材库",
+      saved: true,
+    };
+    live.loadStudioData.mockResolvedValue({
+      ...emptyStudioData,
+      assets: [imageA],
+    });
+    api.createIndependentVideoTask.mockResolvedValue({
+      id: "batch-video-r2v",
+      project_id: null,
+      creation_kind: "independent",
+      stale: false,
+      progress: { total_count: 1, terminal_count: 0, progress_percent: 0 },
+      tasks: [],
+    });
+    const initial = createState("reference");
+    initial.draft.prompt = "文图模式的集成描述";
+    initial.draft.referencePrompt = REF2VA_PROMPT;
+    initial.draft.referenceIds = ["image-a"];
+    render(<StudioWorkspace currentUser={reviewUser} initialState={initial} />);
+
+    fireEvent.click(await findEnabledButton("生成视频"));
+    fireEvent.click(await findEnabledButton("确认费用并提交"));
+    await waitFor(() =>
+      expect(api.createIndependentVideoTask).toHaveBeenCalledOnce(),
+    );
+    const input = api.createIndependentVideoTask.mock.calls[0][0] as {
+      mode: string;
+      prompt_text: string;
+      reference_asset_ids: string[];
+    };
+    expect(input.mode).toBe("r2v");
+    expect(input.reference_asset_ids).toEqual(["image-a"]);
+    // 两条排除规则由客户端在提交时补进六段式正文：服务端只校验结构，
+    // 少了它们源片的台词与字幕会被当成可复刻内容。
+    expect(input.prompt_text).toBe(
+      constrainReferenceVideoPrompt(REF2VA_PROMPT),
+    );
+    expect(input.prompt_text).toContain(REFERENCE_VIDEO_VISUAL_ONLY_RULE);
+    expect(input.prompt_text).toContain(REFERENCE_VIDEO_DIALOGUE_RULE);
+    expect(input.prompt_text).not.toContain("文图模式的集成描述");
   });
 
   it("旧视频提交响应不会覆盖新打开的确认上下文", async () => {

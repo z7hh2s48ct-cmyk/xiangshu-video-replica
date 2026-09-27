@@ -414,7 +414,7 @@ def create_independent_batch(
 
     from typing import cast
 
-    from app.h3_prompts import Mode, prompt_issues
+    from app.h3_prompts import Mode, is_replica_draft, prompt_issues
 
     labels = (
         list(reference_labels.values())
@@ -432,15 +432,32 @@ def create_independent_batch(
         if first_frame
         else "T2VA"
     )
+    # 复刻稿串入参考生视频是两套提示词实现混用（问题高发点），先给出可辨识的
+    # 专门错误码，而不是让它落进泛化的结构错误。
+    if prompt_mode == "Ref2VA" and is_replica_draft(provider_prompt):
+        raise generation_error(
+            422,
+            "PROMPT_REPLICA_DRAFT_NOT_ALLOWED",
+            "这段提示词来自复刻流程，不适用于参考生视频；"
+            "请用「生成标准提示词」按当前参考素材重写后再提交。",
+        )
+    # 参考生视频提交前做完整结构门禁：六段式缺失、镜头标记或时间轴不成立的内容
+    # 供应商会直接拒收，宁可在建批前拦下，也不要付出一次不确定的提交。
     issues = prompt_issues(
         provider_prompt,
         mode=cast(Mode, prompt_mode),
         duration=request.output_duration_seconds,
         labels=labels,
-        strict=False,
+        strict=prompt_mode == "Ref2VA",
     )
     if issues:
-        raise generation_error(422, issues[0].code, issues[0].message)
+        # 结构门禁的唯一自救路径是重写，错误文案必须说清楚，不能只说“格式错误”。
+        message = (
+            f"{issues[0].message}请用「生成标准提示词」重写，或按六段式结构手动修改。"
+            if issues[0].code in {"H3_STRUCTURE_INVALID", "SHOT_SEQUENCE_INVALID"}
+            else issues[0].message
+        )
+        raise generation_error(422, issues[0].code, message)
 
     try:
         conn.execute("BEGIN IMMEDIATE")

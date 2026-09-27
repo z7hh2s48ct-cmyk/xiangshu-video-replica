@@ -98,6 +98,7 @@ import {
   hasCopyResult,
   isReferenceAsset,
   MAX_REFERENCE_MEDIA_SECONDS,
+  MIN_REFERENCE_MEDIA_SECONDS,
   mergeStudioAssets,
   navigateStudioState,
   pageTitles,
@@ -1118,7 +1119,7 @@ export function StudioWorkspace({
         mode,
         prompt_text:
           mode === "r2v"
-            ? constrainReferenceVideoPrompt(draft.prompt)
+            ? constrainReferenceVideoPrompt(draft.referencePrompt ?? "")
             : draft.prompt,
         first_frame_asset_id:
           mode === "i2v" ? (draft.firstFrameId ?? null) : null,
@@ -1674,7 +1675,12 @@ export function StudioWorkspace({
           Boolean(state.draft.firstFrameId),
           Boolean(state.draft.tailFrameId),
         );
-        if (!state.draft.prompt.trim()) {
+        // 参考生视频用六段式正文（referencePrompt），文/图生视频用集成描述（prompt）。
+        const promptText =
+          mode === "r2v"
+            ? (state.draft.referencePrompt ?? "")
+            : state.draft.prompt;
+        if (!promptText.trim()) {
           throw new Error("请先填写提示词");
         }
         if (!state.draft.videoName?.trim()) {
@@ -1742,6 +1748,7 @@ export function StudioWorkspace({
     if (
       !state.draft.script.text.trim() &&
       !state.draft.prompt.trim() &&
+      !state.draft.referencePrompt?.trim() &&
       !state.draft.sourceId
     ) {
       notify("请先填写创作内容。");
@@ -3159,12 +3166,14 @@ function StudioPicker({
                         if (
                           asset.kind !== "image" &&
                           asset.durationSeconds !== undefined &&
-                          asset.durationSeconds > MAX_REFERENCE_MEDIA_SECONDS
+                          (asset.durationSeconds >
+                            MAX_REFERENCE_MEDIA_SECONDS ||
+                            asset.durationSeconds < MIN_REFERENCE_MEDIA_SECONDS)
                         ) {
                           notify(
                             asset.kind === "video"
-                              ? "参考视频时长不能超过 15 秒，请裁剪后再选取。"
-                              : "参考音频时长不能超过 15 秒，请裁剪后再选取。",
+                              ? `参考视频须为 ${MIN_REFERENCE_MEDIA_SECONDS}–${MAX_REFERENCE_MEDIA_SECONDS} 秒，请裁剪后再选取。`
+                              : `参考音频须为 ${MIN_REFERENCE_MEDIA_SECONDS}–${MAX_REFERENCE_MEDIA_SECONDS} 秒，请裁剪后再选取。`,
                           );
                           return;
                         }

@@ -472,6 +472,60 @@ describe("真实 Studio 只读适配器", () => {
     });
   });
 
+  it("把升级前存在 prompt 里的参考生视频六段式搬进 referencePrompt", async () => {
+    const sixSection = [
+      "subject_definitions: <Subject 1> 主讲人。",
+      "summary: 一句话概述。",
+      "retention_analysis: 保留镜头推进。",
+      "detailed_description: [Shot 1] At 00:00.000 开场。",
+      "overall_soundscape: 自然环境音。",
+      "non_diegetic_music: 无。",
+    ].join("\n");
+    // 老草稿的 payload 里根本没有 referencePrompt 这个键，这里要照着旧形态造。
+    const legacyPayload: Record<string, unknown> = { ...createDraft() };
+    delete legacyPayload.referencePrompt;
+    api.getStudioDraft.mockResolvedValue({
+      draft_kind: "copy",
+      payload: {
+        ...legacyPayload,
+        prompt: sixSection,
+        promptEdited: true,
+        referenceIds: ["ref-1"],
+      },
+      script_confirmed: false,
+      revision: 6,
+      updated_at: "2026-09-07T10:00:00+08:00",
+    });
+
+    const restored = await loadCloudDraft();
+
+    expect(restored?.draft.referencePrompt).toBe(sixSection);
+    expect(restored?.draft.prompt).toBe("");
+    expect(restored?.draft.promptEdited).toBe(false);
+  });
+
+  it("文/图模式的集成描述留在原栏，不会被搬进参考栏", async () => {
+    api.getStudioDraft.mockResolvedValue({
+      draft_kind: "copy",
+      payload: {
+        ...createDraft(),
+        prompt: "integrated_multimodal_description: [Shot 1] 开场推近。",
+        promptEdited: true,
+      },
+      script_confirmed: false,
+      revision: 6,
+      updated_at: "2026-09-07T10:00:00+08:00",
+    });
+
+    const restored = await loadCloudDraft();
+
+    expect(restored?.draft.prompt).toBe(
+      "integrated_multimodal_description: [Shot 1] 开场推近。",
+    );
+    expect(restored?.draft.referencePrompt ?? "").toBe("");
+    expect(restored?.draft.promptEdited).toBe(true);
+  });
+
   it.each([1, 5000, 5001, 0, 1.5])(
     "恢复云端自定义字数 %s 时校验范围",
     async (wordCount) => {

@@ -78,6 +78,7 @@ import {
   restoreOrCreateIdempotencyRecord,
 } from "../useGenerationDrafts";
 import { updateCopyExtractionProgress } from "./copyExtractionProgress";
+import { hasRef2vaStructure } from "./referencePrompt";
 import { createDraft } from "./state";
 import type {
   StudioAsset,
@@ -1447,6 +1448,20 @@ function draftFromPayload(payload: unknown): StudioDraft | null {
       ? payload.rewriteWordCount
       : undefined;
   merged.style = "standard";
+  // 分仓迁移：升级前参考生视频的六段式正文就存在 prompt 里，分仓后参考页会看起来
+  // 被清空。只搬结构明确的六段式——文/图模式的集成描述不含段名，不会被误搬；
+  // 搬完 prompt 是空的，promptEdited 也要跟着复位，否则文图页会挡着不肯写新稿。
+  // 判据用 payload 有没有 referencePrompt 键：线上老草稿没有这个键，new 客户端
+  // 即使留空也会写上（createDraft 的默认值会掩盖「键不存在」这一点）。
+  if (
+    !Object.hasOwn(payload, "referencePrompt") &&
+    typeof merged.prompt === "string" &&
+    hasRef2vaStructure(merged.prompt)
+  ) {
+    merged.referencePrompt = merged.prompt;
+    merged.prompt = "";
+    merged.promptEdited = false;
+  }
   return merged;
 }
 

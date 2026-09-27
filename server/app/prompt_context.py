@@ -25,6 +25,12 @@ IMAGE_KINDS = {
 VIDEO_KINDS = {"reference_video", "generated_video", "video"}
 AUDIO_KINDS = {"reference_audio", "audio", "voice_audio", "audio_input"}
 
+# 用途留空不再让整单失败（旧行为要求用户先逐项填完才允许生成）：音频按默认
+# 「音色参考」生成（音轨不传模型，留空只能猜），图片与视频留给模型按画面判断；
+# 两种情况都写进 needs_confirmation，由核对区提示用户确认。
+_UNDECLARED_PURPOSES = ("unspecified", "reference")
+DEFAULT_AUDIO_PURPOSE = "音色参考"
+
 
 def resolve_context(
     conn: BusinessConnection, *, actor: CurrentUser, request: GenerationContext
@@ -115,21 +121,47 @@ def resolve_context(
         raise HTTPException(422, detail={"code": "DUPLICATE_REFERENCE"})
     if counts["Picture"] > 8 or counts["Video"] > 3 or counts["Audio"] > 3:
         raise HTTPException(422, detail={"code": "REFERENCE_LIMIT_EXCEEDED"})
-    if counts["Picture"] > 1 and any(a["purpose"] in ("unspecified", "reference") for a in assets):
-        issues.append(
+    needs_confirmation: list[dict[str, str]] = []
+    for item in assets:
+        if item["purpose"] not in _UNDECLARED_PURPOSES:
+            continue
+        if item["kind"] == "audio":
+            # 音轨不随上下文传给模型，用途只能来自用户文字：留空必须给一个安全的
+            # 默认值，否则模型会凭空猜声音。默认值本身也是推断，要用户确认。
+            item["purpose"] = DEFAULT_AUDIO_PURPOSE
+            needs_confirmation.append(
+                {
+                    "code": "AUDIO_PURPOSE_INFERRED",
+                    "message": (
+                        f"音频{item['alias']}未填写用途，已按「{DEFAULT_AUDIO_PURPOSE}」生成；"
+                        "系统不分析音轨内容，请核对。"
+                    ),
+                    "alias": item["alias"],
+                    "label": item["label"],
+                    "purpose": item["purpose"],
+                }
+            )
+            continue
+        # 图片与视频会作为素材图交给模型：用途留空就让它按画面内容判断，不按顺序
+        # 臆造用途——把场景图当成人物参考会直接写错 subject_definitions。
+        needs_confirmation.append(
             {
-                "code": "REFERENCE_PURPOSE_REQUIRED",
-                "message": "请说明每张参考图用于人物、服装还是场景。",
+                "code": "REFERENCE_PURPOSE_UNDECLARED",
+                "message": f"{item['label']}未填写用途，系统按画面内容判断，请核对。",
+                "alias": item["alias"],
+                "label": item["label"],
             }
         )
-    if any(a["kind"] == "audio" and a["purpose"] in ("unspecified", "reference") for a in assets):
-        issues.append(
-            {
-                "code": "AUDIO_DESCRIPTION_REQUIRED",
-                "message": "请填写音频参考用途；优化仅使用你的文字说明，不识别音轨。",
-            }
-        )
-    context = {**data, "mode": mode, "generation_assets": assets, "issues": issues}
+    context = {
+        **data,
+        "mode": mode,
+        "generation_assets": assets,
+        "issues": issues,
+    }
+    # 只在真有推断项时才加这个键：分析流（无参考素材）的上下文要与历史行逐字节
+    # 一致，否则升级后重试同一视频会撞上 ANALYSIS_CONTEXT_CONFLICT。
+    if needs_confirmation:
+        context["needs_confirmation"] = needs_confirmation
     context["context_hash"] = digest(context)
     return context
 

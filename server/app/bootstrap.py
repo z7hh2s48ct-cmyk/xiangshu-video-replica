@@ -28,6 +28,11 @@ from app.db_pg import (
     validate_customer_production,
 )
 from app.db_portable import BusinessConnection
+from app.media_tools import (
+    FFMPEG_DIR_ENV,
+    MediaToolUnavailable,
+    resolve_media_binary,
+)
 from app.settings import (
     DEFAULT_BILLING_SETTINGS,
     DEFAULT_RUNTIME_SETTINGS,
@@ -615,6 +620,25 @@ def check_customer_production_runtime_dependencies() -> PgReadyInfo | None:
     return ready
 
 
+def _warn_missing_media_tools() -> None:
+    """非生产链路缺 ffmpeg/ffprobe 时显式告警（生产链路在上面的就绪检查里硬失败）。
+
+    素材探测、缩略图与音频时长校验都依赖 ffmpeg 运行时；此前本地/测试链路静默
+    降级，问题要等到用户上传素材才暴露成 503。
+    """
+    logger = logging.getLogger(__name__)
+    for tool in ("ffmpeg", "ffprobe"):
+        try:
+            resolve_media_binary(tool)
+        except MediaToolUnavailable:
+            logger.warning(
+                "Media runtime is missing %s: material probing, thumbnails and audio "
+                "duration checks will fail until %s points at an ffmpeg build.",
+                tool,
+                FFMPEG_DIR_ENV,
+            )
+
+
 def _run_runtime_bootstrap() -> None:
     """CW-025: 全环境 PG-only bootstrap。
 
@@ -641,11 +665,12 @@ def _run_runtime_bootstrap() -> None:
     # PG runtime: warm the pool and verify the server round-trip. Alembic
     # migrations against PG are executed by deploy/postgres/migrate.sh;
     # the ready check itself is the API bootstrap contract for the PG lane.
-    ready = (
-        check_customer_production_runtime_dependencies()
-        if is_customer_production()
-        else check_pg_ready()
-    )
+    ready: PgReadyInfo | None
+    if is_customer_production():
+        ready = check_customer_production_runtime_dependencies()
+    else:
+        _warn_missing_media_tools()
+        ready = check_pg_ready()
     if ready is None:  # pragma: no cover - guarded by the branch above
         raise RuntimeError("PostgreSQL readiness check returned no result")
     logging.getLogger(__name__).info(

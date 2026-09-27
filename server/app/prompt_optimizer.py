@@ -165,22 +165,23 @@ def validate_result(text: str, *, snapshot: dict[str, Any]) -> tuple[dict[str, A
     if protected is not None and "".join(str(protected).split()) != dialogue(prompt):
         issues.append(Issue(code="DIALOGUE_CHANGED", message="优化结果修改了原台词，请核对。"))
     if issues:
+        # 结构自检未通过：结果不落地。失败项随响应回传，worker 据此做一次定向
+        # 重试（见 run_prompt_task），重试仍失败才向用户报错。
         return {
             "prompt_text": prompt,
             "warnings": warnings + [i.model_dump() for i in issues],
+            "issues": [i.model_dump() for i in issues],
             "validation_status": "invalid",
         }, "FAILED"
-    if warnings:
-        return {
-            "prompt_text": prompt,
-            "warnings": warnings,
-            "validation_status": "needs_input",
-        }, "NEEDS_INPUT"
+    # warnings 是模型的假设清单：它记录「需求没写、由系统按上下文推断」的信息，
+    # 不阻断应用——用户要的是先拿到标准提示词，再在核对区逐条看一眼。
     return {
         "prompt_text": prompt,
         "warnings": warnings,
+        "assumptions": warnings,
         "validation_status": "valid",
-        "reference_bindings": context["generation_assets"],
+        "reference_plan": context["generation_assets"],
+        "needs_confirmation": context.get("needs_confirmation", []),
     }, "SUCCEEDED"
 
 
@@ -248,6 +249,63 @@ def run_prompt_task(
                 media = attach_context_media(conn, actor=actor, context=current, storage=storage)
                 sources = context_source_data(conn, current)
         if client is not None:
+            provider = client
+
+            def ask(correction: list[str] | None = None) -> str:
+                messages: list[dict[str, Any]] = [
+                    {
+                        "role": "system",
+                        "content": (RULES / "optimizer.txt").read_text(encoding="utf-8")
+                        + "\n"
+                        + mode_rules(current["mode"]),
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": json.dumps(
+                                    {
+                                        "prompt_text": snapshot["prompt_text"],
+                                        "context": current,
+                                        "sources": sources,
+                                        "protected_text": snapshot.get("protected_dialogue"),
+                                        "max_prompt_chars": 7000,
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            },
+                            *media,
+                        ],
+                    },
+                ]
+                if correction:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": (
+                                        "上一次输出未通过结构自检。只修正下列问题，"
+                                        "其余内容与用户意图保持不变，重新输出完整正文：\n- "
+                                        + "\n- ".join(correction)
+                                    ),
+                                }
+                            ],
+                        }
+                    )
+                raw, _ = provider._complete(
+                    {
+                        "model": provider.model,
+                        "temperature": 0,
+                        "max_tokens": 10000,
+                        "response_format": {"type": "json_object"},
+                        "messages": messages,
+                    }
+                )
+                return raw
+
             with connection() as conn:
                 cursor = conn.execute(
                     "UPDATE prompt_optimization_receipts SET provider_started_at=%s "
@@ -259,43 +317,19 @@ def run_prompt_task(
                 begin_source_attempt(conn, task_id)
             sent = True
             # Transport returns before semantic validation. A malformed answer still costs.
-            raw_text, _ = client._complete(
-                {
-                    "model": client.model,
-                    "temperature": 0,
-                    "max_tokens": 10000,
-                    "response_format": {"type": "json_object"},
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": (RULES / "optimizer.txt").read_text(encoding="utf-8")
-                            + "\n"
-                            + mode_rules(current["mode"]),
-                        },
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": json.dumps(
-                                        {
-                                            "prompt_text": snapshot["prompt_text"],
-                                            "context": current,
-                                            "sources": sources,
-                                            "protected_text": snapshot.get("protected_dialogue"),
-                                            "max_prompt_chars": 7000,
-                                        },
-                                        ensure_ascii=False,
-                                    ),
-                                },
-                                *media,
-                            ],
-                        },
-                    ],
-                }
-            )
+            raw_text = ask()
             received = True
             result, state = validate_result(raw_text, snapshot=snapshot)
+            failed_items = [str(item["message"]) for item in (result or {}).get("issues", [])]
+            if state == "FAILED" and failed_items:
+                # 结构自检失败只重试一次：把失败项作为纠正清单回灌，温度仍为 0。
+                # 两次调用同属一次 attempt，只计一次费；第二次仍失败才落 FAILED。
+                raw_text = ask(failed_items)
+                received = True
+                result, state = validate_result(raw_text, snapshot=snapshot)
+            if state == "FAILED" and error_code is None:
+                error_code = "PROMPT_OPTIMIZE_INVALID"
+                error_message = "生成结果未通过结构自检，原文已保留，可重新生成或手动修改。"
     except Exception as exc:
         if isinstance(exc, AnalysisProviderFailed) and exc.failure_phase == "response":
             received = sent

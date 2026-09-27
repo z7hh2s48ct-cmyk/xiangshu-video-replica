@@ -250,6 +250,15 @@ vi.mock("@tauri-apps/api/event", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   listen: tauriNative.listen,
 }));
+// 素材库上传音频要先探测时长（服务端要求音频声明用途与时长）。jsdom 没有
+// <audio> 解码与 URL.createObjectURL，因此只覆写探测函数，其余 live 实现保持真实。
+const liveMediaProbes = vi.hoisted(() => ({
+  readAudioDuration: vi.fn<() => Promise<number>>(),
+}));
+vi.mock("./live", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  ...liveMediaProbes,
+}));
 // 组件现在统一走 putMaterial。默认实现沿用旧的「传输 → 完成」两步，
 // 这样既有用例针对 uploadMaterial / completeMaterialUpload 打的桩仍然生效；
 // 需要覆盖复用路径的用例可以直接给 putMaterial 打桩（beforeEach 会复位到此实现）。
@@ -282,6 +291,7 @@ import {
   ViralPage,
   visiblePageButtons,
 } from "./ContentPages";
+import { readAudioDuration } from "./live";
 
 describe("素材分页窗口化", () => {
   it("页数不超过 7 时完整展示页码", () => {
@@ -648,6 +658,7 @@ describe("V1.4 内容与运营页面", () => {
     putMaterial.mockReset().mockImplementation(defaultPutMaterial);
     updateMaterial.mockReset();
     hideMaterial.mockReset();
+    vi.mocked(readAudioDuration).mockReset();
     downloadMaterialAsset.mockReset();
     getAssetDownloadUrl.mockReset();
     getMaterialCachedPreview
@@ -3803,6 +3814,166 @@ describe("V1.4 内容与运营页面", () => {
     await waitFor(() =>
       expect(hideMaterial).toHaveBeenCalledWith("asset:image-cloud-1"),
     );
+  });
+
+  it("素材库上传音频按探测时长声明 reference 用途与时长", async () => {
+    listMaterials.mockResolvedValue({
+      items: [],
+      page: 1,
+      page_size: 6,
+      total: 0,
+    });
+    createMaterialUploadIntent.mockResolvedValue({
+      material_id: "asset:audio-cloud-1",
+      asset_id: "audio-cloud-1",
+      storage_key: "materials/employee_1/audio-cloud-1/original.wav",
+      method: "PUT",
+      url: "https://storage.test/upload",
+      headers: { "Content-Type": "audio/wav" },
+      expires_at: "2026-09-06T10:10:00Z",
+    });
+    completeMaterialUpload.mockResolvedValue(
+      material("audio-cloud-1", {
+        title: "环境声.wav",
+        media_type: "audio",
+        content_type: "audio/wav",
+        duration_seconds: 9,
+        allowed_uses: ["reference"],
+      }),
+    );
+    vi.mocked(readAudioDuration).mockResolvedValue(9);
+    const value = studio({
+      review: false,
+      data: { ...studio().data, assets: [] },
+    });
+    useStudio.mockReturnValue(value);
+    render(<MaterialsPage />);
+
+    fireEvent.change(screen.getByLabelText("选择上传素材"), {
+      target: {
+        files: [new File([new Uint8Array(8)], "环境声.wav", { type: "" })],
+      },
+    });
+
+    await waitFor(() =>
+      expect(createMaterialUploadIntent).toHaveBeenCalledTimes(1),
+    );
+    // 缺用途的音频会 422，因此库上传必须先探测时长再声明最宽可用用途。
+    expect(createMaterialUploadIntent.mock.calls[0]?.[1]).toMatchObject({
+      title: "环境声.wav",
+      audioPurpose: "reference",
+      durationSeconds: 9,
+    });
+  });
+
+  it("素材库上传超长 MP3 按完整口播用途声明", async () => {
+    listMaterials.mockResolvedValue({
+      items: [],
+      page: 1,
+      page_size: 6,
+      total: 0,
+    });
+    createMaterialUploadIntent.mockResolvedValue({
+      material_id: "asset:audio-cloud-2",
+      asset_id: "audio-cloud-2",
+      storage_key: "materials/employee_1/audio-cloud-2/original.mp3",
+      method: "PUT",
+      url: "https://storage.test/upload",
+      headers: { "Content-Type": "audio/mpeg" },
+      expires_at: "2026-09-06T10:10:00Z",
+    });
+    completeMaterialUpload.mockResolvedValue(
+      material("audio-cloud-2", {
+        title: "口播.mp3",
+        media_type: "audio",
+        content_type: "audio/mpeg",
+        duration_seconds: 42,
+        allowed_uses: ["oral_audio"],
+      }),
+    );
+    vi.mocked(readAudioDuration).mockResolvedValue(42);
+    const value = studio({
+      review: false,
+      data: { ...studio().data, assets: [] },
+    });
+    useStudio.mockReturnValue(value);
+    render(<MaterialsPage />);
+
+    fireEvent.change(screen.getByLabelText("选择上传素材"), {
+      target: {
+        files: [
+          new File([new Uint8Array(8)], "口播.mp3", { type: "audio/mpeg" }),
+        ],
+      },
+    });
+
+    await waitFor(() =>
+      expect(createMaterialUploadIntent).toHaveBeenCalledTimes(1),
+    );
+    expect(createMaterialUploadIntent.mock.calls[0]?.[1]).toMatchObject({
+      audioPurpose: "oral_audio",
+      durationSeconds: 42,
+    });
+  });
+
+  it("素材库拒收仅声音克隆可用的音频容器并指向正确入口", async () => {
+    listMaterials.mockResolvedValue({
+      items: [],
+      page: 1,
+      page_size: 6,
+      total: 0,
+    });
+    const value = studio({
+      review: false,
+      data: { ...studio().data, assets: [] },
+    });
+    useStudio.mockReturnValue(value);
+    render(<MaterialsPage />);
+
+    fireEvent.change(screen.getByLabelText("选择上传素材"), {
+      target: {
+        files: [new File([new Uint8Array(8)], "样本.wma", { type: "" })],
+      },
+    });
+
+    expect(
+      await screen.findByText(
+        "该音频格式仅用于声音克隆样本，请在声音克隆入口上传。",
+      ),
+    ).toBeInTheDocument();
+    expect(readAudioDuration).not.toHaveBeenCalled();
+    expect(createMaterialUploadIntent).not.toHaveBeenCalled();
+  });
+
+  it("素材库上传时长越界的音频给出区间提示且不发上传请求", async () => {
+    listMaterials.mockResolvedValue({
+      items: [],
+      page: 1,
+      page_size: 6,
+      total: 0,
+    });
+    vi.mocked(readAudioDuration).mockResolvedValue(1.2);
+    const value = studio({
+      review: false,
+      data: { ...studio().data, assets: [] },
+    });
+    useStudio.mockReturnValue(value);
+    render(<MaterialsPage />);
+
+    fireEvent.change(screen.getByLabelText("选择上传素材"), {
+      target: {
+        files: [
+          new File([new Uint8Array(8)], "过短.wav", { type: "audio/wav" }),
+        ],
+      },
+    });
+
+    expect(
+      await screen.findByText(
+        "音频时长不在可用范围（参考音频须 2–15 秒，声音克隆须 5–180 秒），请更换素材后重试。",
+      ),
+    ).toBeInTheDocument();
+    expect(createMaterialUploadIntent).not.toHaveBeenCalled();
   });
 
   it("复用素材时用最新名称和分组更新已有草稿缓存", async () => {
