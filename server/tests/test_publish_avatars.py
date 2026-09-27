@@ -9,7 +9,12 @@ from datetime import UTC, datetime
 
 import pytest
 
-from app.publish_avatars import MAX_AVATAR_BYTES, avatar_object_key, rehost_avatar
+from app.publish_avatars import (
+    MAX_AVATAR_BYTES,
+    _validate_avatar_url,
+    avatar_object_key,
+    rehost_avatar,
+)
 from app.storage import StoredObject
 from app.viral_media import ViralMediaError
 
@@ -236,4 +241,35 @@ def test_internal_or_malformed_hosts_are_never_fetched(
     install_forbidden_pinned_connection(monkeypatch)
     storage = FakeStorage()
     assert rehost(storage, url) is None
+    assert storage.objects == {}
+
+
+def test_idn_hostname_is_idna_encoded_before_it_reaches_http_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """国际化域名必须先转成 punycode/ASCII，才不会在建连请求行里抛 UnicodeEncodeError。
+
+    ``_download`` 的 ``except (http.client.HTTPException, OSError)`` 抓不住
+    ``UnicodeEncodeError``（``ValueError`` 子类），所以这个保护必须提前发生在
+    ``_validate_avatar_url`` 阶段，而不是指望下游兜底。
+    """
+
+    def fake_getaddrinfo(host: object, *args: object, **kwargs: object) -> list[object]:
+        if host == "xn--r8jz45g.xn--zckzah":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+        return _REAL_GETADDRINFO(host, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("app.publish_avatars.socket.getaddrinfo", fake_getaddrinfo)
+    hostname, target, connect_ips = _validate_avatar_url("https://例え.テスト/a.png")
+    assert hostname == "xn--r8jz45g.xn--zckzah"
+    assert hostname.isascii()
+    assert target == "/a.png"
+    assert connect_ips == ("93.184.216.34",)
+
+
+def test_non_ascii_path_is_skipped_not_crashed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """path/query 含原始非 ASCII 字符时按 best-effort 跳过，绝不冒泡成 500。"""
+    install_forbidden_pinned_connection(monkeypatch)
+    storage = FakeStorage()
+    assert rehost(storage, "https://cdn/头像.png") is None
     assert storage.objects == {}

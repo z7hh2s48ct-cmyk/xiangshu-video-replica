@@ -38,8 +38,17 @@ class _UnsafeAvatarUrl(Exception):
     """头像 URL 未通过 SSRF 守卫；best-effort 语义下按“跳过”处理，不外泄原因。"""
 
 
-def _resolve_public_avatar_ips(hostname: str) -> tuple[str, ...]:
+def _resolve_public_avatar_ips(hostname: str) -> tuple[str, tuple[str, ...]]:
     """解析主机名并要求每个地址都是公网（global）IP。
+
+    返回 ``(IDNA 编码后的 hostname, 已校验公网 IP 元组)``：编码后的 hostname
+    才是能安全塞进 ``http.client`` 请求行/Host 头的 ASCII 形式，调用方必须用
+    这个返回值而不是原始 ``parsed.hostname``，否则国际化域名会在建连请求时
+    抛 ``UnicodeEncodeError``（``ValueError`` 子类，不会被 :func:`_download`
+    的 ``except (http.client.HTTPException, OSError)`` 捕获，会击穿“绝不 500”
+    的 best-effort 契约）。``first_frames.require_safe_provider_download_url``
+    用的是同一套“先就地覆盖 hostname 再返回”的写法（见其 line 1266），本 lane
+    沿用同一约定。
 
     头像复制是尽力而为的装饰动作，绝不能变成探测内网的跳板：回环、私网、
     链路本地、组播以及 RFC2544 基准（含代理合成 fake-ip）等非全局地址一律拒绝。
@@ -62,17 +71,20 @@ def _resolve_public_avatar_ips(hostname: str) -> tuple[str, ...]:
         ips.append(str(ip))
     if not ips:
         raise _UnsafeAvatarUrl("avatar host could not be resolved")
-    return tuple(dict.fromkeys(ips))
+    return encoded, tuple(dict.fromkeys(ips))
 
 
 def _validate_avatar_url(url: str) -> tuple[str, str, tuple[str, ...]]:
     """校验头像 URL 并返回 ``(hostname, target, connect_ips)``。
 
-    仅 HTTPS、无凭据、标准端口、且主机解析为公网地址。返回的 ``connect_ips``
-    会被 :func:`_download` 直接用于建连（DNS pinning），不在真正请求时再做第二
-    次 DNS 解析——否则校验时是公网、连接时被 rebinding 换成内网的 TOCTOU 窗口
-    依然存在（``first_frames.require_safe_provider_download_url`` 也是这个理由
-    才把已校验 IP 一路带到 ``_pinned_connection``，本 lane 沿用同一套约定）。
+    仅 HTTPS、无凭据、标准端口、且主机解析为公网地址。返回的 ``hostname`` 已经
+    过 IDNA 编码（ASCII/punycode 形式），``target`` 已确认是纯 ASCII，两者都能
+    直接塞进 ``http.client`` 请求行而不会抛 ``UnicodeEncodeError``。返回的
+    ``connect_ips`` 会被 :func:`_download` 直接用于建连（DNS pinning），不在真正
+    请求时再做第二次 DNS 解析——否则校验时是公网、连接时被 rebinding 换成内网的
+    TOCTOU 窗口依然存在（``first_frames.require_safe_provider_download_url``
+    也是这个理由才把已校验 IP 一路带到 ``_pinned_connection``，本 lane 沿用同一
+    套约定）。
     """
     # urlsplit 对畸形 IPv6 字面量等会抛 ValueError；best-effort 语义下这类
     # 畸形输入必须被当成“跳过”而不是让异常冒泡成 500。
@@ -93,10 +105,20 @@ def _validate_avatar_url(url: str) -> tuple[str, str, tuple[str, ...]]:
     hostname = parsed.hostname
     if not hostname:
         raise _UnsafeAvatarUrl("avatar URL host is invalid")
-    connect_ips = _resolve_public_avatar_ips(hostname)
+    # 用 IDNA 编码后的 hostname 而不是原始 parsed.hostname：非 ASCII 域名直接
+    # 塞进 http.client 请求行/Host 头会抛 UnicodeEncodeError（ValueError 子类），
+    # 不会被 _download 的 except (http.client.HTTPException, OSError) 捕获。
+    hostname, connect_ips = _resolve_public_avatar_ips(hostname)
     target = parsed.path or "/"
     if parsed.query:
         target += f"?{parsed.query}"
+    # 平台方生成的头像链接正常都是已百分号编码的纯 ASCII；出现原始非 ASCII
+    # 字符说明这条 URL 已经不符合常见 CDN 输出格式，与其冒然二次编码（可能把
+    # 已有的 %XX 再编码一遍）不如按 best-effort 语义直接跳过。
+    try:
+        target.encode("ascii")
+    except UnicodeError as exc:
+        raise _UnsafeAvatarUrl("avatar URL path is not ASCII-safe") from exc
     return hostname, target, connect_ips
 
 
