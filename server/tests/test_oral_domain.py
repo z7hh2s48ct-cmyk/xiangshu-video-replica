@@ -46,6 +46,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -70,7 +71,7 @@ from app.auth import CurrentUser, get_current_user
 from app.character_image_generation import deterministic_png
 from app.customer_fence import get_business_db
 from app.db_pg import DATABASE_URL_ENV, close_pg_pool, pg_transaction
-from app.db_portable import BusinessConnection
+from app.db_portable import BusinessConnection, IntegrityConstraintError
 from app.generation_worker import run_pg_worker_once
 from app.hifly import HiflyClient, HiflyError
 from app.internal_billing import (
@@ -87,12 +88,16 @@ from app.oral import (
     OralDomainError,
     OralResourceInUseError,
     OralResourceNotFoundError,
+    VoiceSettings,
+    apply_voice_settings_to_vendor,
+    begin_voice_settings_update,
     cancel_oral_task,
     confirm_voice_clone,
     create_oral_consent,
     create_oral_task,
     delete_avatar_clone,
     delete_voice_clone,
+    finish_voice_settings_update,
     hide_oral_task,
     list_avatars,
     list_oral_consents,
@@ -104,6 +109,8 @@ from app.oral import (
     refresh_avatar_clone,
     refresh_oral_task,
     refresh_voice_clone,
+    rename_avatar_clone,
+    rename_voice_clone,
     start_avatar_clone,
     start_voice_clone,
 )
@@ -520,6 +527,26 @@ def _confirm_voice(**kwargs: Any) -> dict[str, Any]:
         return confirm_voice_clone(BusinessConnection.postgres(raw), **kwargs)
 
 
+def _begin_voice_settings(**kwargs: Any) -> str:
+    with pg_transaction() as raw:
+        return begin_voice_settings_update(BusinessConnection.postgres(raw), **kwargs)
+
+
+def _finish_voice_settings(**kwargs: Any) -> dict[str, Any]:
+    with pg_transaction() as raw:
+        return finish_voice_settings_update(BusinessConnection.postgres(raw), **kwargs)
+
+
+def _rename_avatar(**kwargs: Any) -> dict[str, Any]:
+    with pg_transaction() as raw:
+        return rename_avatar_clone(BusinessConnection.postgres(raw), **kwargs)
+
+
+def _rename_voice(**kwargs: Any) -> dict[str, Any]:
+    with pg_transaction() as raw:
+        return rename_voice_clone(BusinessConnection.postgres(raw), **kwargs)
+
+
 def _list_avatars(**kwargs: Any) -> list[dict[str, Any]]:
     with pg_transaction() as raw:
         return list_avatars(BusinessConnection.postgres(raw), **kwargs)
@@ -838,6 +865,27 @@ def test_auditor_is_denied_from_every_oral_write_service(scene: str) -> None:
             lambda: _refresh_voice(voice_id="missing", actor=auditor, vendor=vendor),
         ),
         ("oral.voice.confirm", lambda: _confirm_voice(voice_id="missing", actor=auditor)),
+        (
+            "oral.voice.settings",
+            lambda: _begin_voice_settings(voice_id="missing", actor=auditor),
+        ),
+        (
+            "oral.avatar.rename",
+            lambda: _rename_avatar(avatar_id="missing", actor=auditor, title="x"),
+        ),
+        (
+            "oral.voice.rename",
+            lambda: _rename_voice(voice_id="missing", actor=auditor, title="x"),
+        ),
+        (
+            "oral.voice.settings",
+            lambda: _finish_voice_settings(
+                voice_id="missing",
+                actor=auditor,
+                vendor_voice_id="vendor-voice-9",
+                settings=_voice_settings("1.2", "1.0", "1.0"),
+            ),
+        ),
     ]
 
     for _expected_action, operation in operations:
@@ -3892,3 +3940,394 @@ def test_new_avatar_request_accepts_video_only() -> None:
     assert AvatarCloneRequest(**fields, source_kind="VIDEO").source_kind == "VIDEO"
     with pytest.raises(ValidationError):
         AvatarCloneRequest(**fields, source_kind="IMAGE")
+
+
+# --------------------------------------------------------------------------- #
+# 声音克隆语言与音色参数（语速 / 音量 / 音调）
+# --------------------------------------------------------------------------- #
+
+
+def _voice_settings(speech_rate: str, volume: str, pitch: str) -> VoiceSettings:
+    return VoiceSettings(
+        speech_rate=Decimal(speech_rate), volume=Decimal(volume), pitch=Decimal(pitch)
+    )
+
+
+@contextmanager
+def _voice_settings_client(current_actor: CurrentUser, vendor: HiflyClient) -> Iterator[TestClient]:
+    db_override, _holder = _make_business_db_override(current_actor)
+    app.dependency_overrides[get_current_user] = lambda: current_actor
+    app.dependency_overrides[get_business_db] = db_override
+    app.dependency_overrides[get_oral_vendor] = lambda: vendor
+    try:
+        yield TestClient(app)
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize(
+    ("language", "sent_languages"),
+    [("zh", None), ("zh_cantonese", "zh_cantonese"), ("zh_wuhanese", "zh_wuhanese")],
+)
+def test_voice_clone_language_is_persisted_and_sent_to_provider(
+    scene: str,
+    fake_source_storage: FakeSourceStorage,
+    language: str,
+    sent_languages: str | None,
+) -> None:
+    vendor, transport = make_vendor()
+    transport.on(
+        "POST",
+        "/api/v2/hifly/tool/create_upload_url",
+        envelope(
+            {
+                "upload_url": "https://up.example/lang",
+                "content_type": "audio/mpeg",
+                "file_id": "file-lang",
+            }
+        ),
+    )
+    create_bodies: list[dict[str, Any]] = []
+
+    def create_voice(body: bytes | None) -> bytes:
+        create_bodies.append(json.loads(body or b"{}"))
+        return envelope({"task_id": "vt-lang"})
+
+    transport.on("POST", "/api/v2/hifly/voice/create", create_voice)
+
+    started = _start_voice(
+        actor=actor(),
+        identity_id="ident-1",
+        title="张工声音",
+        source_asset_id="asset-audio",
+        consent_id=_consent_for(purpose="VOICE_CLONE", source_asset_id="asset-audio"),
+        idempotency_key=f"voice-lang-{language}",
+        language=language,
+    )
+    assert _run_oral_worker_step(vendor=vendor, storage=fake_source_storage) is not None
+
+    row = _fetch("SELECT language FROM oral_voices WHERE id = %s", (started.task_id,))
+    assert row["language"] == language
+    [body] = create_bodies
+    # 普通话省略字段，请求与接入语言之前逐字节一致。
+    assert body.get("languages") == sent_languages
+    assert ("languages" in body) is (sent_languages is not None)
+
+
+def test_voice_clone_language_participates_in_idempotency(scene: str) -> None:
+    consent_id = _consent_for(purpose="VOICE_CLONE", source_asset_id="asset-audio")
+    fields: dict[str, Any] = {
+        "actor": actor(),
+        "identity_id": "ident-1",
+        "title": "张工声音",
+        "source_asset_id": "asset-audio",
+        "consent_id": consent_id,
+        "idempotency_key": "voice-lang-idem",
+    }
+    first = _start_voice(**fields)
+    # 不传语言与显式普通话等价：上线前的请求重放不会被误判为冲突。
+    assert _start_voice(**fields, language="zh").replayed is True
+    assert _start_voice(**fields).task_id == first.task_id
+    with pytest.raises(OralConflictError):
+        _start_voice(**fields, language="zh_sichuanese")
+
+
+def test_voice_clone_rejects_unknown_language(scene: str) -> None:
+    # 上游支持英语，但产品只开放国内语言，必须在入口与库层都被拒绝。
+    consent_id = _consent_for(purpose="VOICE_CLONE", source_asset_id="asset-audio")
+    with pytest.raises(OralDomainError, match="不支持的声音样本语言"):
+        _start_voice(
+            actor=actor(),
+            identity_id="ident-1",
+            title="张工声音",
+            source_asset_id="asset-audio",
+            consent_id=consent_id,
+            idempotency_key="voice-lang-unknown",
+            language="en",
+        )
+    assert _count("SELECT COUNT(*) FROM oral_voices") == 0
+
+    vendor, _ = make_vendor()
+    with _voice_settings_client(actor(), vendor) as client:
+        response = client.post(
+            "/api/oral/voices",
+            json={
+                "identity_id": "ident-1",
+                "title": "张工声音",
+                "source_asset_id": "asset-audio",
+                "consent_id": consent_id,
+                "idempotency_key": "voice-lang-route",
+                "language": "en",
+            },
+        )
+        assert response.status_code == 422
+
+
+def test_voice_settings_route_updates_provider_then_row_and_audits(scene: str) -> None:
+    _, voice_id = _seed_ready_assets()
+    vendor, transport = make_vendor()
+    edit_bodies: list[dict[str, Any]] = []
+
+    def edit_voice(body: bytes | None) -> bytes:
+        edit_bodies.append(json.loads(body or b"{}"))
+        return envelope({})
+
+    transport.on("POST", "/api/v2/hifly/voice/edit", edit_voice)
+
+    with _voice_settings_client(actor(), vendor) as client:
+        response = client.put(
+            f"/api/oral/voices/{voice_id}/settings",
+            json={"speech_rate": 1.2, "volume": 0.8, "pitch": 2},
+        )
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert (payload["speech_rate"], payload["volume"], payload["pitch"]) == (1.2, 0.8, 2.0)
+        assert not any(key.startswith("vendor_") for key in payload)
+
+        listed = client.get("/api/oral/voices", params={"identity_id": "ident-1"})
+        assert listed.status_code == 200, listed.text
+        [listed_voice] = [item for item in listed.json() if item["id"] == voice_id]
+        assert listed_voice["speech_rate"] == 1.2
+
+    # 上游协议要求三个参数都以字符串提交，且数值固定一位小数。
+    assert edit_bodies == [
+        {"voice": "vendor-voice-9", "rate": "1.2", "volume": "0.8", "pitch": "2.0"}
+    ]
+    row = _fetch("SELECT speech_rate, volume, pitch FROM oral_voices WHERE id = %s", (voice_id,))
+    assert (row["speech_rate"], row["volume"], row["pitch"]) == (
+        Decimal("1.2"),
+        Decimal("0.8"),
+        Decimal("2.0"),
+    )
+    audit = _fetch(
+        "SELECT actor_user_id, metadata_json FROM audit_logs "
+        "WHERE entity_id = %s AND action = 'oral.voice.settings'",
+        (voice_id,),
+    )
+    assert audit["actor_user_id"] == "employee_1"
+    assert json.loads(str(audit["metadata_json"]))["speech_rate"] == {
+        "before": "1.0",
+        "after": "1.2",
+    }
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"speech_rate": 2.1, "volume": 1.0, "pitch": 1.0},
+        {"speech_rate": 0.4, "volume": 1.0, "pitch": 1.0},
+        {"speech_rate": 1.0, "volume": 0.0, "pitch": 1.0},
+        {"speech_rate": 1.0, "volume": 1.0, "pitch": 2.5},
+        {"speech_rate": 1.25, "volume": 1.0, "pitch": 1.0},
+        {"speech_rate": 1.0, "volume": 1.0},
+        {"speech_rate": 1.0, "volume": 1.0, "pitch": 1.0, "emotion": "happy"},
+    ],
+)
+def test_voice_settings_rejects_invalid_values_before_provider(
+    scene: str, settings: dict[str, Any]
+) -> None:
+    _, voice_id = _seed_ready_assets()
+    vendor, transport = make_vendor()
+    with _voice_settings_client(actor(), vendor) as client:
+        response = client.put(f"/api/oral/voices/{voice_id}/settings", json=settings)
+        assert response.status_code == 422, response.text
+    assert transport.calls == []
+
+
+def test_voice_settings_domain_rejects_values_the_column_would_round() -> None:
+    vendor, transport = make_vendor()
+    with pytest.raises(OralDomainError, match="语速需在 0.5–2.0 之间"):
+        apply_voice_settings_to_vendor(
+            vendor,
+            vendor_voice_id="vendor-voice-9",
+            settings=_voice_settings("1.25", "1.0", "1.0"),
+        )
+    assert transport.calls == []
+
+
+def test_voice_settings_require_ready_owned_voice(scene: str) -> None:
+    _, voice_id = _seed_ready_assets()
+    _exec("UPDATE oral_voices SET status = 'RUNNING' WHERE id = %s", (voice_id,))
+    with pytest.raises(OralDomainError, match="尚未克隆完成"):
+        _begin_voice_settings(voice_id=voice_id, actor=actor())
+    _exec("UPDATE oral_voices SET status = 'READY' WHERE id = %s", (voice_id,))
+    # 他人的声音与不存在的声音不可区分。
+    with pytest.raises(OralDomainError, match="声音克隆任务不存在"):
+        _begin_voice_settings(voice_id=voice_id, actor=actor("employee_2"))
+    assert _begin_voice_settings(voice_id=voice_id, actor=actor()) == "vendor-voice-9"
+
+
+def test_voice_settings_provider_failure_leaves_row_unchanged(scene: str) -> None:
+    _, voice_id = _seed_ready_assets()
+    vendor, transport = make_vendor()
+    transport.on(
+        "POST",
+        "/api/v2/hifly/voice/edit",
+        json.dumps({"code": 1001, "msg": "rejected"}).encode(),
+    )
+    with _voice_settings_client(actor(), vendor) as client:
+        response = client.put(
+            f"/api/oral/voices/{voice_id}/settings",
+            json={"speech_rate": 1.5, "volume": 1.0, "pitch": 1.0},
+        )
+        assert response.status_code == 503, response.text
+        assert response.json()["detail"]["code"] == "ORAL_VENDOR_UNAVAILABLE"
+    row = _fetch("SELECT speech_rate FROM oral_voices WHERE id = %s", (voice_id,))
+    assert row["speech_rate"] == Decimal("1.0")
+    assert _count("SELECT COUNT(*) FROM audit_logs WHERE action = 'oral.voice.settings'") == 0
+
+
+def test_voice_settings_conflict_when_voice_deleted_during_provider_call(scene: str) -> None:
+    _, voice_id = _seed_ready_assets()
+    vendor, transport = make_vendor()
+
+    def delete_mid_flight(_body: bytes | None) -> bytes:
+        _exec("UPDATE oral_voices SET deleted_at = CURRENT_TIMESTAMP WHERE id = %s", (voice_id,))
+        return envelope({})
+
+    transport.on("POST", "/api/v2/hifly/voice/edit", delete_mid_flight)
+    with _voice_settings_client(actor(), vendor) as client:
+        response = client.put(
+            f"/api/oral/voices/{voice_id}/settings",
+            json={"speech_rate": 1.5, "volume": 1.0, "pitch": 1.0},
+        )
+        assert response.status_code == 409, response.text
+    assert _count("SELECT COUNT(*) FROM audit_logs WHERE action = 'oral.voice.settings'") == 0
+
+
+def test_voice_settings_columns_enforce_provider_ranges_in_database(scene: str) -> None:
+    _, voice_id = _seed_ready_assets()
+    for column, value in (("speech_rate", "0.4"), ("volume", "2.1"), ("pitch", "0.0")):
+        with pytest.raises(IntegrityConstraintError):
+            _exec(f"UPDATE oral_voices SET {column} = %s WHERE id = %s", (value, voice_id))
+    with pytest.raises(IntegrityConstraintError):
+        _exec("UPDATE oral_voices SET language = 'en' WHERE id = %s", (voice_id,))
+
+
+# --------------------------------------------------------------------------- #
+# 口播分身 / 声音：按名称搜索与改名（只改本地名称）
+# --------------------------------------------------------------------------- #
+
+
+def _seed_named_clones(titles: list[tuple[str, str]]) -> None:
+    """按 (owner_user_id, title) 为 ident-1 各插入一个 READY 分身和一个 READY 声音。"""
+    avatar_consent = _consent_for(purpose="AVATAR_CLONE", source_asset_id="asset-src")
+    voice_consent = _consent_for(purpose="VOICE_CLONE", source_asset_id="asset-audio")
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        for index, (owner, title) in enumerate(titles):
+            conn.execute(
+                "INSERT INTO oral_avatars ("
+                " id, identity_id, owner_user_id, title, vendor_avatar_id,"
+                " status, source_kind, source_asset_id, consent_id"
+                ") VALUES (%s, 'ident-1', %s, %s, %s, 'READY', 'VIDEO', 'asset-src', %s)",
+                (f"avatar-{index}", owner, title, f"vendor-avatar-{index}", avatar_consent),
+            )
+            conn.execute(
+                "INSERT INTO oral_voices ("
+                " id, identity_id, owner_user_id, title, vendor_voice_id,"
+                " status, source_asset_id, consent_id, confirmed"
+                ") VALUES (%s, 'ident-1', %s, %s, %s, 'READY', 'asset-audio', %s, 1)",
+                (f"voice-{index}", owner, title, f"vendor-voice-{index}", voice_consent),
+            )
+
+
+def _list_titles(kind: str, query: str | None, user_id: str = "employee_1") -> list[str]:
+    lister = _list_avatars if kind == "avatar" else _list_voices
+    return sorted(
+        str(row["title"])
+        for row in lister(actor=actor(user_id), identity_id="ident-1", query=query)
+    )
+
+
+@pytest.mark.parametrize("kind", ["avatar", "voice"])
+def test_clone_search_matches_name_within_own_records_only(scene: str, kind: str) -> None:
+    _seed_named_clones(
+        [
+            ("employee_1", "张工讲解分身"),
+            ("employee_1", "张工户外"),
+            ("employee_1", "100%原声"),
+            ("employee_1", "a_b 测试"),
+            ("employee_2", "张工讲解（他人）"),
+        ]
+    )
+
+    assert _list_titles(kind, "讲解") == ["张工讲解分身"]
+    assert _list_titles(kind, "  张工 ") == ["张工户外", "张工讲解分身"]
+    # 用户输入的 LIKE 通配符按字面匹配，不会变成「匹配任意」。
+    assert _list_titles(kind, "%") == ["100%原声"]
+    assert _list_titles(kind, "_") == ["a_b 测试"]
+    assert _list_titles(kind, "A_B") == ["a_b 测试"]
+    assert _list_titles(kind, None) == _list_titles(kind, "   ")
+    assert len(_list_titles(kind, None)) == 4
+    assert _list_titles(kind, "讲解", user_id="employee_2") == ["张工讲解（他人）"]
+
+
+def test_clone_list_routes_accept_name_query(scene: str) -> None:
+    _seed_named_clones([("employee_1", "张工讲解分身"), ("employee_1", "张工户外")])
+    _read_actor_override()
+    try:
+        client = TestClient(app)
+        for path in ("/api/oral/avatars", "/api/oral/voices"):
+            response = client.get(path, params={"identity_id": "ident-1", "q": "户外"})
+            assert response.status_code == 200, response.text
+            assert [item["title"] for item in response.json()] == ["张工户外"]
+            too_long = client.get(path, params={"identity_id": "ident-1", "q": "长" * 61})
+            assert too_long.status_code == 422
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize(
+    ("kind", "record_id", "entity_type"),
+    [("avatar", "avatar-0", "oral_avatar"), ("voice", "voice-0", "oral_voice")],
+)
+def test_clone_rename_updates_local_title_and_audits(
+    scene: str, kind: str, record_id: str, entity_type: str
+) -> None:
+    _seed_named_clones([("employee_1", "旧名称"), ("employee_2", "他人名称")])
+    rename = _rename_avatar if kind == "avatar" else _rename_voice
+    id_field = "avatar_id" if kind == "avatar" else "voice_id"
+
+    renamed = rename(actor=actor(), title="  新名称  ", **{id_field: record_id})
+    assert renamed["title"] == "新名称"
+    vendor_column = "vendor_avatar_id" if kind == "avatar" else "vendor_voice_id"
+    # 上游没有改名接口：只改本地名称，上游标识保持不变。
+    assert renamed[vendor_column] == f"vendor-{kind}-0"
+    assert _list_titles(kind, "新名称") == ["新名称"]
+    audit = _fetch(
+        "SELECT action, metadata_json FROM audit_logs WHERE entity_id = %s", (record_id,)
+    )
+    assert audit["action"] == f"{entity_type.replace('_', '.')}.rename"
+    assert json.loads(str(audit["metadata_json"])) == {"before": "旧名称", "after": "新名称"}
+
+    # 名称未变不产生审计噪音。
+    rename(actor=actor(), title="新名称", **{id_field: record_id})
+    assert _count("SELECT COUNT(*) FROM audit_logs WHERE entity_id = %s", (record_id,)) == 1
+
+    with pytest.raises(OralDomainError, match="名称不能为空"):
+        rename(actor=actor(), title="   ", **{id_field: record_id})
+    with pytest.raises(OralDomainError, match="不能超过 60 个字"):
+        rename(actor=actor(), title="长" * 61, **{id_field: record_id})
+    # 他人的记录与不存在的记录不可区分。
+    with pytest.raises(OralDomainError, match="不存在"):
+        rename(actor=actor(), title="抢改", **{id_field: f"{kind}-1"})
+    table = "oral_avatars" if kind == "avatar" else "oral_voices"
+    _exec(f"UPDATE {table} SET deleted_at = CURRENT_TIMESTAMP WHERE id = %s", (record_id,))
+    with pytest.raises(OralDomainError, match="不存在"):
+        rename(actor=actor(), title="已删除", **{id_field: record_id})
+
+
+def test_clone_rename_routes(scene: str) -> None:
+    _seed_named_clones([("employee_1", "旧名称")])
+    vendor, transport = make_vendor()
+    with _voice_settings_client(actor(), vendor) as client:
+        for path in ("/api/oral/avatars/avatar-0", "/api/oral/voices/voice-0"):
+            response = client.patch(path, json={"title": "路由改名"})
+            assert response.status_code == 200, response.text
+            assert response.json()["title"] == "路由改名"
+            assert not any(key.startswith("vendor_") for key in response.json())
+            assert client.patch(path, json={"title": ""}).status_code == 422
+            assert client.patch(path, json={"title": "长" * 61}).status_code == 422
+            assert client.patch(path, json={"title": "x", "status": "READY"}).status_code == 422
+    assert transport.calls == []

@@ -1,6 +1,7 @@
 import type {
   CurrentUser,
   IndependentCapabilities,
+  OralVoiceLanguage,
   Project,
   SavedPromptItem,
   StudioAnalytics,
@@ -99,8 +100,13 @@ export type StudioVoice = {
     | "FAILED";
   error?: string;
   url?: string;
-  /** 试听样本资产 id，供「下载试听」复用签名下载链路。 */
+  /** 试听样本资产 id；卡片上直接播放，由它换取签名播放地址。 */
   demoAssetId?: string;
+  /** 以下为扁平字段而非嵌套对象：状态轮询按字段 === 判断是否变化。 */
+  language?: OralVoiceLanguage;
+  speechRate?: number;
+  volume?: number;
+  pitch?: number;
 };
 export type StudioPerson = {
   id: string;

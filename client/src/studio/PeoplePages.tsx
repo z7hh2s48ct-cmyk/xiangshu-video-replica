@@ -15,13 +15,26 @@ import {
   deleteOralAvatar,
   deleteOralVoice,
   deleteSimpleCharacterIdentity,
-  downloadMaterialAsset,
+  listOralAvatars,
+  listOralVoices,
+  type OralVoiceLanguage,
+  type OralVoiceSettings,
   putMaterial,
   refreshOralAvatar,
   refreshOralVoice,
+  renameOralAvatar,
+  renameOralVoice,
+  updateOralVoiceSettings,
   updateSimpleCharacterProfile,
 } from "../api";
 import { CharacterScenePanel } from "../CharacterScenePanel";
+import {
+  CloneNameSearch,
+  CloneSearchStatus,
+  DeleteIconButton,
+  InlineCloneName,
+  useCloneNameSearch,
+} from "./cloneLibraryTools";
 import { useStudio } from "./context";
 import {
   loadMorePeople,
@@ -49,6 +62,17 @@ import {
   StudioDialog,
   Tabs,
 } from "./ui";
+import {
+  DEFAULT_VOICE_LANGUAGE,
+  DEFAULT_VOICE_SETTINGS,
+  describeVoiceSetting,
+  formatVoiceSettings,
+  roundVoiceSetting,
+  VOICE_LANGUAGE_OPTIONS,
+  VOICE_SETTING_FIELDS,
+  VOICE_SETTING_STEP,
+  voiceLanguageLabel,
+} from "./voiceOptions";
 import "./people.css";
 import "./oral.css";
 
@@ -1065,6 +1089,8 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
   const [consentedSourceId, setConsentedSourceId] = useState<string>();
   const [error, setError] = useState<string>();
   const [pendingDelete, setPendingDelete] = useState<StudioAvatar>();
+  const [renamingAvatarId, setRenamingAvatarId] = useState<string>();
+  const [renameError, setRenameError] = useState<string>();
   const [uploadProgress, setUploadProgress] = useState<number>();
   const [uploadedVideo, setUploadedVideo] = useState<UploadedOralSource>();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -1072,10 +1098,20 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
   const operationRef = useRef(0);
   const mountedRef = useRef(true);
   const cloneSubmissionRef = useRef<CloneSubmission | undefined>(undefined);
+  const nameSearch = useCloneNameSearch({
+    search: (query) => listOralAvatars(person.id, query),
+    review,
+    resetKey: person.id,
+  });
   const ready = person.avatars.filter(
-    (avatar) => avatar.ready && avatar.origin === "视频制作",
+    (avatar) =>
+      avatar.ready &&
+      avatar.origin === "视频制作" &&
+      nameSearch.matches(avatar),
   );
-  const pending = person.avatars.filter((avatar) => !avatar.ready);
+  const pending = person.avatars.filter(
+    (avatar) => !avatar.ready && nameSearch.matches(avatar),
+  );
   const isCurrent = (operation: number) =>
     mountedRef.current && operation === operationRef.current;
   useLayoutEffect(() => {
@@ -1223,13 +1259,6 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
       setCreating(true);
     }
   };
-  const downloadAvatar = async (avatar: StudioAvatar) => {
-    try {
-      await downloadMaterialAsset(avatar.imageId, `${avatar.name}-源视频.mp4`);
-    } catch (cause) {
-      notify(customerVisibleErrorMessage(cause, "口播分身源视频下载失败"));
-    }
-  };
   const deleteClone = async (avatar: StudioAvatar) => {
     if (readOnly || busy) return;
     const operation = ++operationRef.current;
@@ -1266,6 +1295,59 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
       if (isCurrent(operation)) setBusy(false);
     }
   };
+  const saveAvatarName = async (title: string) => {
+    const avatarId = renamingAvatarId;
+    if (!avatarId || readOnly || busy) return;
+    setBusy(true);
+    setRenameError(undefined);
+    try {
+      const saved = review
+        ? title
+        : (await renameOralAvatar(avatarId, title)).title;
+      if (!mountedRef.current) return;
+      updateData((current) => ({
+        ...current,
+        people: current.people.map((item) =>
+          item.id !== person.id
+            ? item
+            : {
+                ...item,
+                avatars: item.avatars.map((candidate) =>
+                  candidate.id === avatarId
+                    ? { ...candidate, name: saved }
+                    : candidate,
+                ),
+              },
+        ),
+      }));
+      setRenamingAvatarId(undefined);
+      nameSearch.rerun();
+      notify("口播分身名称已更新");
+    } catch (cause) {
+      if (!mountedRef.current) return;
+      setRenameError(
+        customerVisibleErrorMessage(cause, "修改口播分身名称失败"),
+      );
+    } finally {
+      if (mountedRef.current) setBusy(false);
+    }
+  };
+  const avatarName = (avatar: StudioAvatar) => (
+    <InlineCloneName
+      name={avatar.name}
+      kindLabel="分身"
+      editing={renamingAvatarId === avatar.id}
+      busy={busy}
+      disabled={readOnly || busy}
+      error={renamingAvatarId === avatar.id ? renameError : undefined}
+      onStart={() => {
+        setRenameError(undefined);
+        setRenamingAvatarId(avatar.id);
+      }}
+      onCancel={() => setRenamingAvatarId(undefined)}
+      onSave={(title) => void saveAvatarName(title)}
+    />
+  );
   const manageVoice = () =>
     navigate("person-voices", {
       selectedPersonId: person.id,
@@ -1280,9 +1362,19 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
             <h2>
               我的口播分身 <span>{person.name}</span>
             </h2>
-            <p>上传真人视频创建分身，搭配克隆声音和文案生成口播。</p>
+            <p>上传一段本人视频创建分身，搭配克隆声音和文案生成口播。</p>
           </div>
+          <CloneNameSearch
+            label="搜索分身名称"
+            value={nameSearch.query}
+            onChange={nameSearch.setQuery}
+          />
         </header>
+        <CloneSearchStatus
+          search={nameSearch}
+          count={ready.length + pending.length}
+          noun="分身"
+        />
         <div className="oral-library-cards">
           {ready.map((avatar) => (
             <article className="oral-library-card" key={avatar.id}>
@@ -1301,7 +1393,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
                 </span>
               </div>
               <div className="oral-library-card-body">
-                <h3>{avatar.name}</h3>
+                {avatarName(avatar)}
                 <div>
                   <span className="oral-ready">
                     <Icon name="check" size={14} />
@@ -1309,7 +1401,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
                   </span>
                   <Button
                     disabled={readOnly}
-                    variant="outline"
+                    variant="primary"
                     onClick={() => {
                       patchDraft({ ipId: person.id, avatarId: avatar.id });
                       navigate("oral", {
@@ -1320,22 +1412,10 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
                   >
                     使用此分身
                   </Button>
-                  <Button
-                    variant="outline"
-                    disabled={busy}
-                    onClick={() => void downloadAvatar(avatar)}
-                  >
-                    <Icon name="download" size={16} />
-                    下载源视频
-                  </Button>
-                  <Button
-                    variant="quiet"
+                  <DeleteIconButton
                     disabled={readOnly || busy}
                     onClick={() => setPendingDelete(avatar)}
-                  >
-                    <Icon name="close" size={16} />
-                    删除
-                  </Button>
+                  />
                 </div>
               </div>
             </article>
@@ -1359,7 +1439,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
               <article className="oral-pending-card" key={avatar.id}>
                 <Icon name="clock" size={20} />
                 <div>
-                  <h3>{avatar.name}</h3>
+                  {avatarName(avatar)}
                   <p>
                     {avatar.submissionState === "SUBMISSION_UNKNOWN"
                       ? "提交结果待人工核对，禁止重复提交"
@@ -1628,6 +1708,21 @@ function VoicePanel({ person }: { person: StudioPerson }) {
   const [consentedSourceId, setConsentedSourceId] = useState<string>();
   const [error, setError] = useState<string>();
   const [pendingDelete, setPendingDelete] = useState<StudioVoice>();
+  const [language, setLanguage] = useState<OralVoiceLanguage>(
+    DEFAULT_VOICE_LANGUAGE,
+  );
+  const [tuning, setTuning] = useState<{
+    voice: StudioVoice;
+    values: OralVoiceSettings;
+  }>();
+  const [renamingVoiceId, setRenamingVoiceId] = useState<string>();
+  const [renameError, setRenameError] = useState<string>();
+  const nameSearch = useCloneNameSearch({
+    search: (query) => listOralVoices(person.id, query),
+    review,
+    resetKey: person.id,
+  });
+  const visibleVoices = person.voices.filter(nameSearch.matches);
   const [uploadProgress, setUploadProgress] = useState<number>();
   const [uploadedAudio, setUploadedAudio] = useState<UploadedOralSource>();
   const uploadInputRef = useRef<HTMLInputElement>(null);
@@ -1654,6 +1749,8 @@ function VoicePanel({ person }: { person: StudioPerson }) {
     setUploadProgress(undefined);
     setUploadedAudio(undefined);
     setConsentedSourceId(undefined);
+    setLanguage(DEFAULT_VOICE_LANGUAGE);
+    setTuning(undefined);
     cloneSubmissionRef.current = undefined;
   }, [person.id]);
   useLayoutEffect(() => {
@@ -1825,7 +1922,12 @@ function VoicePanel({ person }: { person: StudioPerson }) {
     setError(undefined);
     try {
       const cloneTitle = title.trim() || `${person.name}本人音色`;
-      const fingerprint = JSON.stringify([person.id, source.id, cloneTitle]);
+      const fingerprint = JSON.stringify([
+        person.id,
+        source.id,
+        cloneTitle,
+        language,
+      ]);
       let submission = cloneSubmissionRef.current;
       if (!submission || submission.fingerprint !== fingerprint) {
         submission = {
@@ -1849,11 +1951,13 @@ function VoicePanel({ person }: { person: StudioPerson }) {
         sourceAssetId: source.id,
         consentId: submission.consentId,
         idempotencyKey: submission.idempotencyKey,
+        language,
       });
       if (!isCurrent()) return;
       setCreating(false);
       setUploadedAudio(undefined);
       setConsentedSourceId(undefined);
+      setLanguage(DEFAULT_VOICE_LANGUAGE);
       notify("声音克隆已提交，通常在 10 分钟内完成。");
       refresh();
     } catch (cause) {
@@ -1917,15 +2021,90 @@ function VoicePanel({ person }: { person: StudioPerson }) {
       if (mountedRef.current) setBusy(false);
     }
   };
-  const downloadVoice = async (voice: StudioVoice) => {
-    if (!voice.demoAssetId) {
-      notify("试听样例尚未就绪，暂无法下载");
-      return;
-    }
+  const openTuning = (voice: StudioVoice) => {
+    setError(undefined);
+    setTuning({
+      voice,
+      values: {
+        speechRate: voice.speechRate ?? DEFAULT_VOICE_SETTINGS.speechRate,
+        volume: voice.volume ?? DEFAULT_VOICE_SETTINGS.volume,
+        pitch: voice.pitch ?? DEFAULT_VOICE_SETTINGS.pitch,
+      },
+    });
+  };
+  const saveVoiceSettings = async () => {
+    if (!tuning || readOnly || busy) return;
+    const { voice, values } = tuning;
+    setBusy(true);
+    setError(undefined);
     try {
-      await downloadMaterialAsset(voice.demoAssetId, `${voice.name}-试听.mp3`);
+      let saved: OralVoiceSettings = values;
+      if (!review) {
+        const record = await updateOralVoiceSettings(voice.id, values);
+        saved = {
+          speechRate: record.speech_rate,
+          volume: record.volume,
+          pitch: record.pitch,
+        };
+      }
+      if (!mountedRef.current) return;
+      updateData((data) => ({
+        ...data,
+        people: data.people.map((item) =>
+          item.id !== person.id
+            ? item
+            : {
+                ...item,
+                voices: item.voices.map((candidate) =>
+                  candidate.id === voice.id
+                    ? { ...candidate, ...saved }
+                    : candidate,
+                ),
+              },
+        ),
+      }));
+      setTuning(undefined);
+      notify("声音已调整，之后生成的口播都会使用新设置。");
     } catch (cause) {
-      notify(customerVisibleErrorMessage(cause, "声音试听样例下载失败"));
+      if (!mountedRef.current) return;
+      setError(customerVisibleErrorMessage(cause, "保存声音参数失败"));
+    } finally {
+      if (mountedRef.current) setBusy(false);
+    }
+  };
+  const saveVoiceName = async (title: string) => {
+    const voiceId = renamingVoiceId;
+    if (!voiceId || readOnly || busy) return;
+    setBusy(true);
+    setRenameError(undefined);
+    try {
+      const saved = review
+        ? title
+        : (await renameOralVoice(voiceId, title)).title;
+      if (!mountedRef.current) return;
+      updateData((data) => ({
+        ...data,
+        people: data.people.map((item) =>
+          item.id !== person.id
+            ? item
+            : {
+                ...item,
+                voices: item.voices.map((candidate) =>
+                  candidate.id === voiceId
+                    ? { ...candidate, name: saved }
+                    : candidate,
+                ),
+              },
+        ),
+      }));
+      setRenamingVoiceId(undefined);
+      nameSearch.rerun();
+      notify("声音名称已更新");
+    } catch (cause) {
+      if (!mountedRef.current) return;
+      setRenameError(customerVisibleErrorMessage(cause, "修改声音名称失败"));
+    } finally {
+      if (mountedRef.current) setBusy(false);
     }
   };
   const deleteClone = async (voice: StudioVoice) => {
@@ -1970,86 +2149,124 @@ function VoicePanel({ person }: { person: StudioPerson }) {
           <h2>
             我的声音 <span>{person.name}</span>
           </h2>
-          <p>克隆你的专属音色，试听确认后用于数字人口播。</p>
+          <p>克隆本人音色，试听确认后即可用于数字人口播。</p>
         </div>
-        <Button
-          variant="primary"
-          disabled={readOnly}
-          onClick={() => setCreating(true)}
-        >
-          <Icon name="plus" size={18} />
-          创建克隆声音
-        </Button>
+        <div className="oral-voice-heading__actions">
+          <CloneNameSearch
+            label="搜索声音名称"
+            value={nameSearch.query}
+            onChange={nameSearch.setQuery}
+          />
+          <Button
+            variant="primary"
+            disabled={readOnly}
+            onClick={() => setCreating(true)}
+          >
+            <Icon name="plus" size={18} />
+            克隆新声音
+          </Button>
+        </div>
       </header>
       <div className="oral-voice-grid">
         <section className="oral-voice-list">
-          {person.voices.map((voice) => (
-            <article
-              className={
-                voice.confirmed ? "voice-card is-confirmed" : "voice-card"
-              }
-              key={voice.id}
-            >
-              <div>
-                <h3>{voice.name}</h3>
-                <p>
-                  {voice.confirmed
-                    ? "已确认，可用于文案口播"
-                    : voice.submissionState === "SUBMISSION_UNKNOWN"
-                      ? "提交结果待人工核对，禁止重复提交"
-                      : voice.status === "FAILED"
-                        ? voice.error || "克隆失败，请更换样本重试"
-                        : voice.status === "PENDING" ||
-                            voice.status === "RUNNING"
-                          ? "声音克隆中，暂不可选用"
-                          : voice.status === "READY" && !voice.url
-                            ? "试听样例归档中"
-                            : "待试听确认，暂不可选用"}
-                </p>
-              </div>
-              <div className="voice-card__actions">
-                <div className="voice-card__preview">
-                  {voice.url &&
-                  (voice.confirmed || voice.status === "READY") ? (
-                    <audio
-                      controls
-                      preload="none"
-                      src={voice.url}
-                      aria-label={`${voice.name}试听`}
-                    >
-                      <track kind="captions" label="声音样本" />
-                    </audio>
-                  ) : (
-                    <Button
-                      variant="outline"
-                      disabled
-                      aria-label={`${voice.name}试听尚未就绪`}
-                    >
-                      试听准备中
-                    </Button>
-                  )}
-                </div>
-                <div className="voice-card__action">
-                  {voice.confirmed ? (
-                    <Button
-                      disabled={readOnly}
-                      variant="primary"
-                      onClick={() => {
-                        if (readOnly) return;
-                        patchDraft({ ipId: person.id, voiceId: voice.id });
-                        navigate(state.returnTo ?? "oral", {
-                          selectedPersonId: person.id,
-                          returnTo: undefined,
-                        });
-                      }}
-                    >
-                      使用此声音
-                    </Button>
+          <CloneSearchStatus
+            search={nameSearch}
+            count={visibleVoices.length}
+            noun="声音"
+          />
+          {visibleVoices.map((voice) => {
+            const ready = voice.status === "READY" || (review && !voice.status);
+            const cloning =
+              voice.status === "PENDING" || voice.status === "RUNNING";
+            return (
+              <article
+                className={
+                  voice.confirmed ? "voice-card is-confirmed" : "voice-card"
+                }
+                key={voice.id}
+              >
+                <div className="voice-card__info">
+                  <InlineCloneName
+                    name={voice.name}
+                    kindLabel="声音"
+                    editing={renamingVoiceId === voice.id}
+                    busy={busy}
+                    disabled={readOnly || busy}
+                    error={
+                      renamingVoiceId === voice.id ? renameError : undefined
+                    }
+                    onStart={() => {
+                      setRenameError(undefined);
+                      setRenamingVoiceId(voice.id);
+                    }}
+                    onCancel={() => setRenamingVoiceId(undefined)}
+                    onSave={(title) => void saveVoiceName(title)}
+                  />
+                  <p>
+                    {voice.confirmed
+                      ? "已确认，可用于文案口播"
+                      : voice.submissionState === "SUBMISSION_UNKNOWN"
+                        ? "提交结果待人工核对，禁止重复提交"
+                        : voice.status === "FAILED"
+                          ? voice.error || "克隆失败，请更换样本重试"
+                          : cloning
+                            ? "声音克隆中，暂不可选用"
+                            : voice.status === "READY" && !voice.url
+                              ? "试听样例归档中"
+                              : "待试听确认，暂不可选用"}
+                  </p>
+                  {voice.language ? (
+                    <p className="voice-card__meta">
+                      {voiceLanguageLabel(voice.language)} ·{" "}
+                      {formatVoiceSettings({
+                        speechRate:
+                          voice.speechRate ?? DEFAULT_VOICE_SETTINGS.speechRate,
+                        volume: voice.volume ?? DEFAULT_VOICE_SETTINGS.volume,
+                        pitch: voice.pitch ?? DEFAULT_VOICE_SETTINGS.pitch,
+                      })}
+                    </p>
                   ) : null}
-                  {!voice.confirmed ? (
-                    voice.submissionState ===
-                    "SUBMISSION_UNKNOWN" ? null : voice.status === "PENDING" ||
-                      voice.status === "RUNNING" ? (
+                </div>
+                <div className="voice-card__actions">
+                  <div className="voice-card__preview">
+                    {voice.url &&
+                    (voice.confirmed || voice.status === "READY") ? (
+                      <audio
+                        controls
+                        preload="none"
+                        src={voice.url}
+                        aria-label={`${voice.name}试听`}
+                      >
+                        <track kind="captions" label="声音样本" />
+                      </audio>
+                    ) : (
+                      <Button
+                        variant="outline"
+                        disabled
+                        aria-label={`${voice.name}试听尚未就绪`}
+                      >
+                        试听准备中
+                      </Button>
+                    )}
+                  </div>
+                  <div className="voice-card__action">
+                    {voice.confirmed ? (
+                      <Button
+                        disabled={readOnly}
+                        variant="primary"
+                        onClick={() => {
+                          if (readOnly) return;
+                          patchDraft({ ipId: person.id, voiceId: voice.id });
+                          navigate(state.returnTo ?? "oral", {
+                            selectedPersonId: person.id,
+                            returnTo: undefined,
+                          });
+                        }}
+                      >
+                        使用此声音
+                      </Button>
+                    ) : voice.submissionState ===
+                      "SUBMISSION_UNKNOWN" ? null : cloning ? (
                       <Button
                         variant="outline"
                         disabled={busy}
@@ -2066,71 +2283,60 @@ function VoicePanel({ person }: { person: StudioPerson }) {
                       >
                         确认使用此声音
                       </Button>
-                    ) : null
-                  ) : null}
-                  {voice.demoAssetId ? (
-                    <Button
-                      variant="outline"
-                      disabled={busy}
-                      onClick={() => void downloadVoice(voice)}
-                    >
-                      <Icon name="download" size={16} />
-                      下载试听
-                    </Button>
-                  ) : null}
-                  {voice.status === "PENDING" ||
-                  voice.status === "RUNNING" ? null : (
-                    <Button
-                      variant="quiet"
-                      disabled={readOnly || busy}
-                      onClick={() => setPendingDelete(voice)}
-                    >
-                      <Icon name="close" size={16} />
-                      删除
-                    </Button>
-                  )}
+                    ) : null}
+                    {ready ? (
+                      <Button
+                        variant="outline"
+                        disabled={readOnly || busy}
+                        aria-label={`调整${voice.name}的声音`}
+                        onClick={() => openTuning(voice)}
+                      >
+                        调整声音
+                      </Button>
+                    ) : null}
+                    {cloning ? null : (
+                      <DeleteIconButton
+                        disabled={readOnly || busy}
+                        onClick={() => setPendingDelete(voice)}
+                      />
+                    )}
+                  </div>
                 </div>
-              </div>
-            </article>
-          ))}
+              </article>
+            );
+          })}
           {person.voices.length === 0 ? (
             <Empty
               title="暂无声音档案"
-              description="上传本人或已授权的声音样本创建声音版本。"
+              description="上传一段本人的清晰录音，就能克隆出你的声音。"
             />
           ) : null}
         </section>
         <aside className="oral-voice-guide">
-          <h3>好的音色，来自清晰的样本</h3>
-          <ul className="oral-shooting-guide">
+          <h3>三步用上本人声音</h3>
+          <ol className="oral-steps-guide">
             <li>
-              <span>
-                <Icon name="audio" />
-              </span>
+              <span>1</span>
               <div>
-                <h4>清晰干声</h4>
-                <p>保持安静，避免背景音乐和其他人说话。</p>
+                <h4>上传一段清晰录音</h4>
+                <p>5 秒到 3 分钟，安静环境里本人说话即可。</p>
               </div>
             </li>
             <li>
-              <span>
-                <Icon name="clock" />
-              </span>
-              <div>
-                <h4>5–180 秒声音样本</h4>
-                <p>支持 MP3、M4A、WAV、WMA 等格式，单个文件不超过 20 MB。</p>
-              </div>
-            </li>
-            <li>
-              <span>
-                <Icon name="check" />
-              </span>
+              <span>2</span>
               <div>
                 <h4>试听后确认</h4>
-                <p>确认克隆效果符合预期，再用于口播。</p>
+                <p>听起来像本人，就点「确认使用此声音」。</p>
               </div>
             </li>
-          </ul>
+            <li>
+              <span>3</span>
+              <div>
+                <h4>按需调整声音</h4>
+                <p>觉得太快、太轻？点「调整声音」选一个档位就好。</p>
+              </div>
+            </li>
+          </ol>
           <Button
             variant="outline"
             onClick={() =>
@@ -2145,121 +2351,264 @@ function VoicePanel({ person }: { person: StudioPerson }) {
           </Button>
         </aside>
       </div>
-      {!creating && error ? (
+      {!creating && !tuning && error ? (
         <p className="oral-error" role="alert">
           {error}
         </p>
       ) : null}
       {creating ? (
         <StudioDialog
-          title="克隆声音"
+          title="克隆新声音"
           onClose={() => {
             if (uploadProgress !== undefined) cancelAudioUpload();
             setCreating(false);
           }}
         >
-          <div className="oral-upload-panel">
-            <p>
-              仅使用本人或已获授权的声音样本，建议 5–180 秒（3 分钟）清晰干声。
-            </p>
-            <Button
-              disabled={readOnly}
-              variant="outline"
-              onClick={() => {
-                if (readOnly) return;
-                patchDraft({ ipId: person.id });
-                openPicker("voice-audio");
-              }}
-            >
-              从素材选择声音样本
-            </Button>
-            {review ? null : (
-              <Field label="上传声音样本">
+          <div className="oral-upload-panel oral-clone-steps">
+            <section className="oral-clone-step">
+              <h3>
+                <span>1</span>上传录音
+              </h3>
+              {review ? null : (
+                <Field label="上传声音样本">
+                  <input
+                    ref={uploadInputRef}
+                    accept={VOICE_CLONE_ACCEPT}
+                    aria-label="选择声音样本"
+                    disabled={readOnly || busy}
+                    hidden
+                    type="file"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (file) void handleAudioUpload(file);
+                    }}
+                  />
+                </Field>
+              )}
+              <button
+                type="button"
+                className="oral-upload-zone"
+                disabled={readOnly || busy}
+                onClick={() =>
+                  review
+                    ? notify("审核模式不执行真实上传")
+                    : uploadInputRef.current?.click()
+                }
+              >
+                <span className="oral-upload-icon">
+                  <Icon name="upload" size={28} />
+                </span>
+                <strong>上传录音</strong>
+                <span>5 秒到 3 分钟 · MP3、M4A、WAV 等 · 最大 20 MB</span>
+              </button>
+              <Button
+                disabled={readOnly}
+                variant="quiet"
+                onClick={() => {
+                  if (readOnly) return;
+                  patchDraft({ ipId: person.id });
+                  openPicker("voice-audio");
+                }}
+              >
+                从素材选择声音样本
+              </Button>
+              <p className="oral-clone-source">
+                {uploadedAudio
+                  ? `已上传：${uploadedAudio.fileName}`
+                  : sourceAsset
+                    ? `已选：${sourceAsset.name}`
+                    : "请先选择声音样本。"}
+              </p>
+              {uploadProgress !== undefined ? (
+                <div className="oral-clone-progress">
+                  <span>上传中 {uploadProgress}%</span>
+                  <Button variant="quiet" onClick={cancelAudioUpload}>
+                    取消上传
+                  </Button>
+                </div>
+              ) : null}
+            </section>
+            <section className="oral-clone-step">
+              <h3>
+                <span>2</span>填写信息
+              </h3>
+              <Field label="声音名称">
                 <input
-                  ref={uploadInputRef}
-                  accept={VOICE_CLONE_ACCEPT}
-                  aria-label="选择声音样本"
                   disabled={readOnly || busy}
-                  hidden
-                  type="file"
+                  maxLength={60}
+                  value={title}
                   onChange={(event) => {
-                    const file = event.target.files?.[0];
-                    if (file) void handleAudioUpload(file);
+                    setTitle(event.target.value);
+                    cloneSubmissionRef.current = undefined;
                   }}
+                  placeholder="例如：张工本人音色 V2"
                 />
               </Field>
-            )}
-            <button
-              type="button"
-              className="oral-upload-zone"
-              disabled={readOnly || busy}
-              onClick={() =>
-                review
-                  ? notify("审核模式不执行真实上传")
-                  : uploadInputRef.current?.click()
-              }
-            >
-              <span className="oral-upload-icon">
-                <Icon name="upload" size={28} />
-              </span>
-              <strong>上传声音样本</strong>
-              <span>MP3、M4A、WAV、WMA 等 · 5–180 秒 · 最大 20 MB</span>
-            </button>
-            <Field label="声音名称">
-              <input
-                disabled={readOnly || busy}
-                maxLength={60}
-                value={title}
-                onChange={(event) => {
-                  setTitle(event.target.value);
-                  cloneSubmissionRef.current = undefined;
-                }}
-                placeholder="例如：张工本人音色 V2"
-              />
-            </Field>
-            <p>
-              {uploadedAudio
-                ? `已上传：${uploadedAudio.fileName}`
-                : sourceAsset
-                  ? `已选：${sourceAsset.name}`
-                  : "请先选择声音样本。"}
-            </p>
-            {uploadProgress !== undefined ? (
-              <p>上传中 {uploadProgress}%</p>
-            ) : null}
-            {uploadProgress !== undefined ? (
-              <Button variant="outline" onClick={cancelAudioUpload}>
-                取消上传
-              </Button>
-            ) : null}
+              <Field label="录音里说的是">
+                <select
+                  disabled={readOnly || busy}
+                  value={language}
+                  onChange={(event) =>
+                    setLanguage(event.target.value as OralVoiceLanguage)
+                  }
+                >
+                  {VOICE_LANGUAGE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <p className="oral-field-note">
+                按录音实际说的语言选，不确定就选普通话。
+              </p>
+            </section>
+            <section className="oral-clone-step">
+              <h3>
+                <span>3</span>确认授权
+              </h3>
+              <label className="oral-consent">
+                <input
+                  aria-label="确认声音克隆授权"
+                  checked={consented}
+                  disabled={review || readOnly || busy}
+                  type="checkbox"
+                  onChange={(event) => {
+                    cloneSubmissionRef.current = undefined;
+                    setConsentedSourceId(
+                      event.target.checked ? source?.id : undefined,
+                    );
+                  }}
+                />
+                这是我本人的声音，或已获得声音主人的明确授权。
+              </label>
+            </section>
             {error ? <p role="alert">{error}</p> : null}
-            <label className="oral-consent">
-              <input
-                aria-label="确认声音克隆授权"
-                checked={consented}
-                disabled={review || readOnly || busy}
-                type="checkbox"
-                onChange={(event) => {
-                  cloneSubmissionRef.current = undefined;
-                  setConsentedSourceId(
-                    event.target.checked ? source?.id : undefined,
-                  );
-                }}
-              />
-              我确认这是本人声音，或已获得用于声音克隆的明确授权。
-            </label>
             <Button
               variant="primary"
               disabled={review || readOnly || busy || !source || !consented}
               onClick={() => void startClone()}
             >
-              {busy ? "提交中…" : "开始克隆声音"}
+              {busy ? "提交中…" : "开始克隆"}
             </Button>
-            <Hint>
-              支持 MP3、M4A、WAV、WMA、AAC、FLAC、OGG、OPUS、AIFF、AMR，WMV
-              会提取音轨。 时长 5–180 秒（3 分钟），上限 20
-              MB；试听确认后即可用于口播。
-            </Hint>
+            <p className="oral-field-note oral-clone-footnote">
+              通常 10 分钟内完成，完成后在列表里直接试听。
+            </p>
+          </div>
+        </StudioDialog>
+      ) : null}
+      {tuning ? (
+        <StudioDialog
+          title="调整声音"
+          onClose={() => {
+            if (!busy) setTuning(undefined);
+          }}
+        >
+          <div className="oral-upload-panel">
+            <p className="oral-dialog-intro">
+              {tuning.voice.name} ·
+              选一个档位即可，保存后新生成的口播都会使用；已生成的视频和试听样例不会改变。
+            </p>
+            {VOICE_SETTING_FIELDS.map((field) => {
+              const inputId = `voice-setting-${field.key}`;
+              const value = tuning.values[field.key];
+              const described = describeVoiceSetting(field.key, value);
+              const setValue = (next: number) =>
+                setTuning((current) =>
+                  current
+                    ? {
+                        ...current,
+                        values: {
+                          ...current.values,
+                          [field.key]: roundVoiceSetting(next),
+                        },
+                      }
+                    : current,
+                );
+              return (
+                <fieldset className="voice-setting" key={field.key}>
+                  <legend className="voice-setting__head">
+                    <span>{field.label}</span>
+                    <output htmlFor={inputId}>
+                      {described === value.toFixed(1)
+                        ? `自定义 ${described}`
+                        : `${described} ${value.toFixed(1)}`}
+                    </output>
+                  </legend>
+                  <p className="voice-setting__hint">{field.description}</p>
+                  <div className="voice-setting__presets">
+                    {field.presets.map((preset) => {
+                      const active =
+                        roundVoiceSetting(preset.value) ===
+                        roundVoiceSetting(value);
+                      return (
+                        <button
+                          type="button"
+                          key={preset.label}
+                          className={
+                            active ? "voice-preset is-active" : "voice-preset"
+                          }
+                          aria-label={`${field.label}${preset.label}`}
+                          aria-pressed={active}
+                          disabled={readOnly || busy}
+                          onClick={() => setValue(preset.value)}
+                        >
+                          {preset.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="voice-setting__fine">
+                    <label htmlFor={inputId}>微调</label>
+                    <input
+                      id={inputId}
+                      aria-label={`${field.label}微调`}
+                      type="range"
+                      min={field.min}
+                      max={field.max}
+                      step={VOICE_SETTING_STEP}
+                      value={value}
+                      disabled={readOnly || busy}
+                      onChange={(event) => setValue(Number(event.target.value))}
+                    />
+                  </div>
+                </fieldset>
+              );
+            })}
+            {error ? (
+              <p className="oral-error" role="alert">
+                {error}
+              </p>
+            ) : null}
+            <div className="oral-dialog-actions voice-setting__actions">
+              <Button
+                variant="quiet"
+                disabled={readOnly || busy}
+                onClick={() =>
+                  setTuning((current) =>
+                    current
+                      ? { ...current, values: { ...DEFAULT_VOICE_SETTINGS } }
+                      : current,
+                  )
+                }
+              >
+                全部恢复标准
+              </Button>
+              <Button
+                variant="outline"
+                disabled={busy}
+                onClick={() => setTuning(undefined)}
+              >
+                取消
+              </Button>
+              <Button
+                variant="primary"
+                disabled={readOnly || busy}
+                onClick={() => void saveVoiceSettings()}
+              >
+                {busy ? "保存中…" : "保存"}
+              </Button>
+            </div>
           </div>
         </StudioDialog>
       ) : null}

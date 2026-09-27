@@ -91,6 +91,8 @@ import {
   reconcileUncertainTask,
   regenerateGenerationBatch,
   regenerateGenerationTask,
+  renameOralAvatar,
+  renameOralVoice,
   resolveApiBaseUrl,
   resolveViralLink,
   retryGenerationTask,
@@ -1447,6 +1449,36 @@ describe("人物 IP 口播资产 API", () => {
     );
     expect(fetchMock.mock.calls[1]?.[0]).toBe(
       "http://127.0.0.1:8000/api/oral/voices?identity_id=person%201",
+    );
+  });
+
+  it("口播分身与声音按名称搜索、改名只提交名称", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => [] });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await listOralAvatars("p1", "  张工 讲解 ");
+    await listOralVoices("p1", "   ");
+    await renameOralAvatar("avatar 1", "新分身");
+    await renameOralVoice("voice-1", "新声音");
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://127.0.0.1:8000/api/oral/avatars?identity_id=p1&q=%E5%BC%A0%E5%B7%A5%20%E8%AE%B2%E8%A7%A3",
+    );
+    // 空白搜索词等同于不搜索，URL 与原列表请求一致。
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      "http://127.0.0.1:8000/api/oral/voices?identity_id=p1",
+    );
+    expect(fetchMock.mock.calls[2]?.[0]).toBe(
+      "http://127.0.0.1:8000/api/oral/avatars/avatar%201",
+    );
+    expect(fetchMock.mock.calls[2]?.[1]?.method).toBe("PATCH");
+    expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toEqual({
+      title: "新分身",
+    });
+    expect(fetchMock.mock.calls[3]?.[0]).toBe(
+      "http://127.0.0.1:8000/api/oral/voices/voice-1",
     );
   });
 

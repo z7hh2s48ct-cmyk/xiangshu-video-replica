@@ -443,6 +443,7 @@ class HiflyClient:
         audio_url: str | None = None,
         file_id: str | None = None,
         voice_type: int = 8,
+        languages: str | None = None,
     ) -> str:
         clean_title = _require_text(title, "title")
         if len(clean_title) > _MAX_TITLE_CHARS:
@@ -454,6 +455,9 @@ class HiflyClient:
             payload["audio_url"] = audio_url
         if file_id:
             payload["file_id"] = file_id
+        # 上游不传即按普通话克隆；普通话时省略字段，让请求与既有行为逐字节一致。
+        if languages:
+            payload["languages"] = languages
         data = self._creation_request(VOICE_CREATE_PATH, payload)
         task_id = data.get("task_id")
         if not isinstance(task_id, str) or not task_id:

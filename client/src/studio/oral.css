@@ -799,6 +799,363 @@
   font-size: 12px;
   padding: 9px 12px;
 }
+.oral-voice-page .voice-card p.voice-card__meta {
+  margin: 4px 0 0;
+  color: #8f9486;
+}
+.oral-voice-page .voice-card__info {
+  min-width: 0;
+}
+.oral-voice-page .voice-card__info > p {
+  margin: 0;
+}
+
+/* 名称搜索：带清空按钮，结果数量与无结果出路统一由 CloneSearchStatus 渲染。 */
+.clone-name-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 260px;
+  height: 44px;
+  box-sizing: border-box;
+  padding: 0 6px 0 12px;
+  background: #0f100e;
+  border: 1px solid #383a30;
+  border-radius: 8px;
+  color: #8f9486;
+}
+.clone-name-search:focus-within {
+  border-color: #e5aa36;
+}
+.clone-name-search input {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  color: #ecece8;
+  background: transparent;
+  border: 0;
+  outline: none;
+}
+.clone-name-search input::-webkit-search-cancel-button {
+  display: none;
+}
+.clone-name-search__clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 6px;
+  background: #1c1e18;
+  color: #c8cabf;
+  cursor: pointer;
+}
+.clone-search-status {
+  margin: 0 0 14px;
+  font-size: 13px;
+  color: #a5a99a;
+}
+.clone-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #edb73b;
+  font: inherit;
+  cursor: pointer;
+}
+.clone-link:hover {
+  text-decoration: underline;
+}
+.clone-search-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 16px;
+  padding: 36px 20px;
+  border: 1px dashed #3a3d33;
+  border-radius: 12px;
+  color: #72776a;
+  text-align: center;
+}
+.clone-search-empty h3 {
+  margin: 0;
+  font-size: 16px;
+  color: #ecece8;
+}
+.clone-search-empty p {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: #a5a99a;
+}
+
+/* 就地改名：名称旁一个笔形图标，编辑态直接在卡片里出现输入框与保存/取消。 */
+.clone-inline-name {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.clone-inline-name h3 {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.clone-inline-name.is-editing {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.clone-inline-name__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.clone-inline-name__row input {
+  flex: 1;
+  min-width: 0;
+  height: 40px;
+  box-sizing: border-box;
+  padding: 0 12px;
+  font-size: 15px;
+  color: #ecece8;
+  background: #0f100e;
+  border: 1px solid #e5aa36;
+  border-radius: 8px;
+}
+.clone-inline-name .oral-error {
+  margin: 0;
+}
+.clone-icon-button {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: #8f9486;
+  cursor: pointer;
+}
+.clone-icon-button:hover:not(:disabled) {
+  color: #ecece8;
+  background: #1c1e18;
+}
+.clone-icon-button--danger {
+  width: 40px;
+  height: 40px;
+  border-color: #383a30;
+  background: #0d0e0d;
+}
+.clone-icon-button--danger:hover:not(:disabled) {
+  color: #f0a08a;
+  border-color: #6b3b30;
+  background: #1a1210;
+}
+
+.oral-library-heading {
+  gap: 20px;
+}
+.oral-voice-heading__actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+@media (max-width: 600px) {
+  .clone-name-search,
+  .oral-voice-heading__actions {
+    width: 100%;
+  }
+  .oral-voice-heading__actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* 三步引导（声音页右栏）。 */
+.oral-steps-guide {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  margin: 18px 0 24px;
+  padding: 0;
+  list-style: none;
+}
+.oral-steps-guide li {
+  display: flex;
+  gap: 12px;
+}
+.oral-steps-guide li > span {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #302919;
+  color: #e5aa36;
+  font-weight: 700;
+}
+.oral-steps-guide h4 {
+  margin: 0 0 4px;
+  font-size: 14px;
+}
+.oral-steps-guide p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #a5a99a;
+}
+
+/* 克隆新声音：分三步编号，按顺序完成即可。 */
+.oral-clone-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.oral-clone-step {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.oral-clone-step h3 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  font-size: 15px;
+}
+.oral-clone-step h3 > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #302919;
+  color: #e5aa36;
+  font-size: 13px;
+  font-weight: 700;
+}
+.oral-clone-step .studio-field {
+  margin: 0;
+}
+.oral-clone-step .oral-consent {
+  margin: 0;
+}
+.oral-clone-source {
+  margin: 0;
+  font-size: 13px;
+  color: #c8cabf;
+}
+.oral-clone-progress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  color: #a5a99a;
+}
+.oral-clone-footnote {
+  margin: -10px 0 0;
+  text-align: center;
+}
+
+.oral-upload-panel select {
+  width: 100%;
+  height: 44px;
+  font-size: 14px;
+  color: inherit;
+  background: #0f100e;
+  border: 1px solid #383a30;
+  border-radius: 8px;
+  padding: 0 12px;
+}
+.oral-field-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #8f9486;
+}
+
+/* 调整声音：每项先选档位，滑块只作微调。 */
+.voice-setting {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 16px 0;
+  border: 0;
+  border-top: 1px solid #2a2d24;
+  min-width: 0;
+}
+.voice-setting__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  width: 100%;
+  padding: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+.voice-setting__head output {
+  color: #e5aa36;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.voice-setting__hint {
+  margin: 0;
+  font-size: 12px;
+  color: #a5a99a;
+}
+.voice-setting__presets {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.voice-preset {
+  height: 40px;
+  border: 1px solid #383a30;
+  border-radius: 8px;
+  background: #0d0e0d;
+  color: #e8e8df;
+  font-size: 14px;
+  cursor: pointer;
+}
+.voice-preset:hover:not(:disabled) {
+  border-color: #b3842c;
+}
+.voice-preset.is-active {
+  border-color: #f2bd4c;
+  background: #302919;
+  color: #f2bd4c;
+  font-weight: 600;
+}
+.voice-setting__fine {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: #72776a;
+}
+.voice-setting__fine input[type="range"] {
+  flex: 1;
+  accent-color: #e5aa36;
+}
+.voice-setting__actions {
+  align-items: center;
+  border-top: 1px solid #2a2d24;
+  padding-top: 16px;
+}
+.voice-setting__actions > :first-child {
+  margin-right: auto;
+}
 @media (max-width: 1000px) {
   .oral-voice-grid {
     grid-template-columns: 1fr;

@@ -28,6 +28,11 @@ const api = vi.hoisted(() => ({
   downloadMaterialAsset: vi.fn(),
   refreshOralAvatar: vi.fn(),
   refreshOralVoice: vi.fn(),
+  updateOralVoiceSettings: vi.fn(),
+  listOralAvatars: vi.fn(),
+  listOralVoices: vi.fn(),
+  renameOralAvatar: vi.fn(),
+  renameOralVoice: vi.fn(),
   deleteSimpleCharacterIdentity: vi.fn(),
   updateSimpleCharacterProfile: vi.fn(),
   uploadMaterial: vi.fn(),
@@ -100,6 +105,30 @@ function voicePollingData() {
       ],
     },
     { ...data.people[1], id: "p2" },
+  ];
+  return data;
+}
+
+function tunableVoiceData(speechRate = 1) {
+  const data = createReviewData();
+  data.people = [
+    {
+      ...data.people[0],
+      id: "p1",
+      voices: [
+        {
+          id: "voice-tune",
+          name: "可调音色",
+          status: "READY",
+          confirmed: true,
+          url: "/tune.mp3",
+          language: "zh_sichuanese",
+          speechRate,
+          volume: 1,
+          pitch: 1,
+        },
+      ],
+    },
   ];
   return data;
 }
@@ -729,11 +758,9 @@ describe("PeoplePages", () => {
       voiceSourceUses = allowedUses;
       draft = { ipId: "p1", audioId: "voice-source" };
       render(<PersonPage />);
-      fireEvent.click(screen.getByRole("button", { name: "创建克隆声音" }));
+      fireEvent.click(screen.getByRole("button", { name: "克隆新声音" }));
       expect(screen.getByText("请先选择声音样本。")).toBeInTheDocument();
-      expect(
-        screen.getByRole("button", { name: "开始克隆声音" }),
-      ).toBeDisabled();
+      expect(screen.getByRole("button", { name: "开始克隆" })).toBeDisabled();
       expect(api.createOralConsent).not.toHaveBeenCalled();
     },
   );
@@ -752,13 +779,11 @@ describe("PeoplePages", () => {
     fireEvent.click(
       screen.getByRole("button", {
         name:
-          currentPage === "person-avatars"
-            ? "上传视频创建分身"
-            : "创建克隆声音",
+          currentPage === "person-avatars" ? "上传视频创建分身" : "克隆新声音",
       }),
     );
     screen.getByRole("checkbox", { name: "确认声音克隆授权" }).click();
-    screen.getByRole("button", { name: "开始克隆声音" }).click();
+    screen.getByRole("button", { name: "开始克隆" }).click();
 
     expect(api.createOralConsent).toHaveBeenCalledWith({
       identityId: "p1",
@@ -772,9 +797,243 @@ describe("PeoplePages", () => {
         sourceAssetId: "voice-source",
         consentId: "consent-voice",
         idempotencyKey: expect.any(String),
+        language: "zh",
       }),
     );
     await vi.waitFor(() => expect(refresh).toHaveBeenCalled());
+  });
+
+  it("按所选方言提交声音克隆", async () => {
+    currentPage = "person-voices";
+    review = false;
+    draft = { ipId: "p1", audioId: "voice-source" };
+    api.createOralVoiceClone.mockResolvedValue({
+      id: "voice-new",
+      status: "RUNNING",
+    });
+    api.createOralConsent.mockResolvedValue({ id: "consent-voice" });
+
+    render(<PersonPage />);
+    fireEvent.click(screen.getByRole("button", { name: "克隆新声音" }));
+    const select = screen.getByLabelText("录音里说的是") as HTMLSelectElement;
+    expect(select.value).toBe("zh");
+    expect(
+      within(select)
+        .getAllByRole("option")
+        .map((option) => option.textContent),
+    ).toEqual(
+      expect.arrayContaining(["普通话", "粤语", "四川话", "上海话", "武汉话"]),
+    );
+    fireEvent.change(select, { target: { value: "zh_cantonese" } });
+    screen.getByRole("checkbox", { name: "确认声音克隆授权" }).click();
+    screen.getByRole("button", { name: "开始克隆" }).click();
+
+    await vi.waitFor(() =>
+      expect(api.createOralVoiceClone).toHaveBeenCalledWith(
+        expect.objectContaining({ language: "zh_cantonese" }),
+      ),
+    );
+  });
+
+  it("调整声音：档位一键选择，滑块微调，保存后卡片用档位名回显", async () => {
+    currentPage = "person-voices";
+    review = false;
+    api.updateOralVoiceSettings.mockResolvedValue({
+      speech_rate: 1.3,
+      volume: 0.8,
+      pitch: 1,
+    });
+
+    render(<VoiceStateHarness initialData={tunableVoiceData()} />);
+    expect(
+      screen.getByText("四川话 · 语速 标准 · 音量 标准 · 音调 标准"),
+    ).toBeInTheDocument();
+    // 试听直接在卡片上播放，不再提供下载。
+    expect(screen.getByLabelText("可调音色试听")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /下载/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "调整可调音色的声音" }));
+    expect(screen.getByText(/说话的快慢/)).toBeInTheDocument();
+    expect(screen.getByText(/声音的大小/)).toBeInTheDocument();
+    expect(screen.getByText(/声音的高低/)).toBeInTheDocument();
+
+    const quiet = screen.getByRole("button", { name: "音量较轻" });
+    expect(quiet).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(quiet);
+    expect(quiet).toHaveAttribute("aria-pressed", "true");
+    fireEvent.change(screen.getByLabelText("语速微调"), {
+      target: { value: "1.3" },
+    });
+    expect(screen.getByText("自定义 1.3")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await vi.waitFor(() =>
+      expect(api.updateOralVoiceSettings).toHaveBeenCalledWith("voice-tune", {
+        speechRate: 1.3,
+        volume: 0.8,
+        pitch: 1,
+      }),
+    );
+    expect(
+      await screen.findByText("四川话 · 语速 1.3 · 音量 较轻 · 音调 标准"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "保存" })).toBeNull();
+  });
+
+  it("声音档案按名称走服务端搜索，只显示命中的声音", async () => {
+    currentPage = "person-voices";
+    review = false;
+    api.listOralVoices.mockResolvedValue([{ id: "voice-pending" }]);
+
+    render(<PersonPage />);
+    expect(screen.getByText("克隆中音色")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("搜索声音名称"), {
+      target: { value: "  待确认 " },
+    });
+
+    await vi.waitFor(() =>
+      expect(api.listOralVoices).toHaveBeenCalledWith("p1", "待确认"),
+    );
+    await vi.waitFor(() =>
+      expect(screen.queryByText("克隆中音色")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText("待确认音色")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        (_, element) =>
+          element?.textContent === "「待确认」找到 1 个声音 · 清空搜索",
+      ),
+    ).toBeInTheDocument();
+
+    api.listOralVoices.mockResolvedValue([]);
+    fireEvent.change(screen.getByLabelText("搜索声音名称"), {
+      target: { value: "不存在" },
+    });
+    expect(
+      await screen.findByText("没有找到名称包含「不存在」的声音"),
+    ).toBeInTheDocument();
+
+    // 无结果时直接给出「清空搜索」出路，点一下回到完整列表。
+    fireEvent.click(screen.getByRole("button", { name: "清空搜索" }));
+    expect(await screen.findByText("克隆中音色")).toBeInTheDocument();
+    expect(
+      (screen.getByLabelText("搜索声音名称") as HTMLInputElement).value,
+    ).toBe("");
+  });
+
+  it("声音改名：提交服务端并回显新名称", async () => {
+    currentPage = "person-voices";
+    review = false;
+    api.renameOralVoice.mockResolvedValue({ title: "四川话主播" });
+
+    render(<VoiceStateHarness initialData={tunableVoiceData()} />);
+    fireEvent.click(screen.getByRole("button", { name: "修改可调音色的名称" }));
+    const input = screen.getByLabelText("声音名称") as HTMLInputElement;
+    expect(input.value).toBe("可调音色");
+    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+    fireEvent.change(input, { target: { value: "  四川话主播 " } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await vi.waitFor(() =>
+      expect(api.renameOralVoice).toHaveBeenCalledWith(
+        "voice-tune",
+        "四川话主播",
+      ),
+    );
+    expect(await screen.findByText("四川话主播")).toBeInTheDocument();
+    expect(screen.queryByLabelText("声音名称")).toBeNull();
+  });
+
+  it("口播分身按名称搜索，审核模式在本地过滤", async () => {
+    currentPage = "person-avatars";
+    review = true;
+
+    render(<PersonPage />);
+    expect(screen.getByText("制作中分身")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("搜索分身名称"), {
+      target: { value: "测试" },
+    });
+
+    expect(screen.getByText("测试分身")).toBeInTheDocument();
+    expect(screen.queryByText("制作中分身")).not.toBeInTheDocument();
+    expect(api.listOralAvatars).not.toHaveBeenCalled();
+  });
+
+  it("口播分身正式模式按名称走服务端搜索并可改名", async () => {
+    currentPage = "person-avatars";
+    review = false;
+    api.listOralAvatars.mockResolvedValue([{ id: "avatar-pending" }]);
+    api.renameOralAvatar.mockResolvedValue({ title: "庭院讲解分身" });
+
+    render(<PersonPage />);
+    fireEvent.change(screen.getByLabelText("搜索分身名称"), {
+      target: { value: "制作中" },
+    });
+    await vi.waitFor(() =>
+      expect(api.listOralAvatars).toHaveBeenCalledWith("p1", "制作中"),
+    );
+    await vi.waitFor(() =>
+      expect(screen.queryByText("测试分身")).not.toBeInTheDocument(),
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "修改制作中分身的名称" }),
+    );
+    fireEvent.change(screen.getByLabelText("分身名称"), {
+      target: { value: "庭院讲解分身" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await vi.waitFor(() =>
+      expect(api.renameOralAvatar).toHaveBeenCalledWith(
+        "avatar-pending",
+        "庭院讲解分身",
+      ),
+    );
+    await vi.waitFor(() => expect(updateData).toHaveBeenCalled());
+    await vi.waitFor(() =>
+      expect(api.listOralAvatars).toHaveBeenCalledTimes(2),
+    );
+  });
+
+  it("审核模式改名只更新本地数据，不调用服务端", async () => {
+    currentPage = "person-voices";
+    review = true;
+
+    render(<VoiceStateHarness initialData={tunableVoiceData()} />);
+    fireEvent.click(screen.getByRole("button", { name: "修改可调音色的名称" }));
+    fireEvent.change(screen.getByLabelText("声音名称"), {
+      target: { value: "演示新名" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(await screen.findByText("演示新名")).toBeInTheDocument();
+    expect(api.renameOralVoice).not.toHaveBeenCalled();
+  });
+
+  it("调整声音参数：恢复默认，保存失败时保留弹窗并提示", async () => {
+    currentPage = "person-voices";
+    review = false;
+    api.updateOralVoiceSettings.mockRejectedValue(new Error("upstream"));
+
+    render(<VoiceStateHarness initialData={tunableVoiceData(1.5)} />);
+    fireEvent.click(screen.getByRole("button", { name: "调整可调音色的声音" }));
+    fireEvent.click(screen.getByRole("button", { name: "全部恢复标准" }));
+    for (const label of ["语速", "音量", "音调"]) {
+      expect(
+        (screen.getByLabelText(`${label}微调`) as HTMLInputElement).value,
+      ).toBe("1");
+      expect(
+        screen.getByRole("button", { name: `${label}标准` }),
+      ).toHaveAttribute("aria-pressed", "true");
+    }
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "保存声音参数失败",
+    );
+    expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
+    expect(
+      screen.getByText("四川话 · 语速 1.5 · 音量 标准 · 音调 标准"),
+    ).toBeInTheDocument();
   });
 
   it("声音克隆重试复用幂等键，标题变化后生成新键", async () => {
@@ -793,13 +1052,11 @@ describe("PeoplePages", () => {
     fireEvent.click(
       screen.getByRole("button", {
         name:
-          currentPage === "person-avatars"
-            ? "上传视频创建分身"
-            : "创建克隆声音",
+          currentPage === "person-avatars" ? "上传视频创建分身" : "克隆新声音",
       }),
     );
     screen.getByRole("checkbox", { name: "确认声音克隆授权" }).click();
-    const submit = screen.getByRole("button", { name: "开始克隆声音" });
+    const submit = screen.getByRole("button", { name: "开始克隆" });
     submit.click();
     await screen.findByRole("alert");
     submit.click();
@@ -859,9 +1116,7 @@ describe("PeoplePages", () => {
     fireEvent.click(
       screen.getByRole("button", {
         name:
-          currentPage === "person-avatars"
-            ? "上传视频创建分身"
-            : "创建克隆声音",
+          currentPage === "person-avatars" ? "上传视频创建分身" : "克隆新声音",
       }),
     );
 
@@ -912,9 +1167,7 @@ describe("PeoplePages", () => {
     fireEvent.click(
       screen.getByRole("button", {
         name:
-          currentPage === "person-avatars"
-            ? "上传视频创建分身"
-            : "创建克隆声音",
+          currentPage === "person-avatars" ? "上传视频创建分身" : "克隆新声音",
       }),
     );
 
@@ -925,7 +1178,7 @@ describe("PeoplePages", () => {
     });
     await screen.findByText("已上传：voice.mp3");
     screen.getByRole("checkbox", { name: "确认声音克隆授权" }).click();
-    screen.getByRole("button", { name: "开始克隆声音" }).click();
+    screen.getByRole("button", { name: "开始克隆" }).click();
 
     expect(oralLive.uploadOralAudioMaterial).toHaveBeenCalledWith(
       expect.any(File),
@@ -952,7 +1205,7 @@ describe("PeoplePages", () => {
       new Error("unsupported codec"),
     );
     render(<PersonPage />);
-    fireEvent.click(screen.getByRole("button", { name: "创建克隆声音" }));
+    fireEvent.click(screen.getByRole("button", { name: "克隆新声音" }));
     const input = screen.getByLabelText("选择声音样本");
     expect(input).toHaveAttribute("accept", expect.stringContaining(".wmv"));
     fireEvent.change(input, {
@@ -992,9 +1245,7 @@ describe("PeoplePages", () => {
     fireEvent.click(
       screen.getByRole("button", {
         name:
-          currentPage === "person-avatars"
-            ? "上传视频创建分身"
-            : "创建克隆声音",
+          currentPage === "person-avatars" ? "上传视频创建分身" : "克隆新声音",
       }),
     );
 
@@ -1048,9 +1299,7 @@ describe("PeoplePages", () => {
     fireEvent.click(
       screen.getByRole("button", {
         name:
-          currentPage === "person-avatars"
-            ? "上传视频创建分身"
-            : "创建克隆声音",
+          currentPage === "person-avatars" ? "上传视频创建分身" : "克隆新声音",
       }),
     );
     fireEvent.change(screen.getByLabelText("选择声音样本"), {
@@ -1102,9 +1351,7 @@ describe("PeoplePages", () => {
     fireEvent.click(
       screen.getByRole("button", {
         name:
-          currentPage === "person-avatars"
-            ? "上传视频创建分身"
-            : "创建克隆声音",
+          currentPage === "person-avatars" ? "上传视频创建分身" : "克隆新声音",
       }),
     );
     fireEvent.change(screen.getByLabelText("选择声音样本"), {
@@ -1144,13 +1391,11 @@ describe("PeoplePages", () => {
     fireEvent.click(
       screen.getByRole("button", {
         name:
-          currentPage === "person-avatars"
-            ? "上传视频创建分身"
-            : "创建克隆声音",
+          currentPage === "person-avatars" ? "上传视频创建分身" : "克隆新声音",
       }),
     );
 
-    expect(screen.getByRole("button", { name: "开始克隆声音" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "开始克隆" })).toBeDisabled();
     fireEvent.change(screen.getByLabelText("选择声音样本"), {
       target: {
         files: [
@@ -1182,9 +1427,7 @@ describe("PeoplePages", () => {
     fireEvent.click(
       screen.getByRole("button", {
         name:
-          currentPage === "person-avatars"
-            ? "上传视频创建分身"
-            : "创建克隆声音",
+          currentPage === "person-avatars" ? "上传视频创建分身" : "克隆新声音",
       }),
     );
 
@@ -1269,15 +1512,12 @@ describe("PeoplePages", () => {
     fireEvent.click(
       screen.getByRole("button", {
         name:
-          currentPage === "person-avatars"
-            ? "上传视频创建分身"
-            : "创建克隆声音",
+          currentPage === "person-avatars" ? "上传视频创建分身" : "克隆新声音",
       }),
     );
 
-    expect(screen.getByText(/5–180 秒（3 分钟）清晰干声/)).toBeInTheDocument();
     expect(
-      screen.getByText(/时长 5–180 秒（3 分钟），上限 20 MB/),
+      screen.getByText("5 秒到 3 分钟 · MP3、M4A、WAV 等 · 最大 20 MB"),
     ).toBeInTheDocument();
   });
 
@@ -1288,9 +1528,7 @@ describe("PeoplePages", () => {
     fireEvent.click(
       screen.getByRole("button", {
         name:
-          currentPage === "person-avatars"
-            ? "上传视频创建分身"
-            : "创建克隆声音",
+          currentPage === "person-avatars" ? "上传视频创建分身" : "克隆新声音",
       }),
     );
     const file = new File(["ID3audio"], "oversized.mp3", {
@@ -1311,9 +1549,7 @@ describe("PeoplePages", () => {
     fireEvent.click(
       screen.getByRole("button", {
         name:
-          currentPage === "person-avatars"
-            ? "上传视频创建分身"
-            : "创建克隆声音",
+          currentPage === "person-avatars" ? "上传视频创建分身" : "克隆新声音",
       }),
     );
 
@@ -1329,9 +1565,7 @@ describe("PeoplePages", () => {
     fireEvent.click(
       screen.getByRole("button", {
         name:
-          currentPage === "person-avatars"
-            ? "上传视频创建分身"
-            : "创建克隆声音",
+          currentPage === "person-avatars" ? "上传视频创建分身" : "克隆新声音",
       }),
     );
 
@@ -1353,9 +1587,7 @@ describe("PeoplePages", () => {
     fireEvent.click(
       screen.getByRole("button", {
         name:
-          currentPage === "person-avatars"
-            ? "上传视频创建分身"
-            : "创建克隆声音",
+          currentPage === "person-avatars" ? "上传视频创建分身" : "克隆新声音",
       }),
     );
     const consent = screen.getByRole("checkbox", { name: "确认声音克隆授权" });
@@ -1366,7 +1598,7 @@ describe("PeoplePages", () => {
     view.rerender(<PersonPage />);
 
     expect(consent).not.toBeChecked();
-    expect(screen.getByRole("button", { name: "开始克隆声音" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "开始克隆" })).toBeDisabled();
   });
 
   it("正式模式自动刷新制作中分身，卸载后停止计时", async () => {
@@ -1548,7 +1780,7 @@ describe("PeoplePages", () => {
     currentPage = "person-voices";
     draft = { ipId: "p1", audioId: "voice-source" };
     view.rerender(<PersonPage />);
-    expect(screen.getByRole("button", { name: "创建克隆声音" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "克隆新声音" })).toBeDisabled();
     expect(
       screen.getByRole("button", { name: "确认使用此声音" }),
     ).toBeDisabled();
@@ -1632,21 +1864,17 @@ describe("PeoplePages", () => {
     expect(api.createOralAvatarClone).not.toHaveBeenCalled();
   });
 
-  it("口播分身卡片下载源视频走签名下载", async () => {
+  it("口播分身卡片直接播放，不再提供下载", () => {
     currentPage = "person-avatars";
     review = false;
-    api.downloadMaterialAsset.mockResolvedValue(undefined);
     render(<PersonPage />);
     const card = screen.getByText("测试分身").closest("article");
-    fireEvent.click(
-      within(card as HTMLElement).getByRole("button", { name: "下载源视频" }),
-    );
-    await waitFor(() =>
-      expect(api.downloadMaterialAsset).toHaveBeenCalledWith(
-        "avatar-image",
-        "测试分身-源视频.mp4",
-      ),
-    );
+    expect(
+      within(card as HTMLElement).queryByRole("button", { name: /下载/ }),
+    ).toBeNull();
+    expect(
+      within(card as HTMLElement).getByRole("button", { name: "使用此分身" }),
+    ).toBeEnabled();
   });
 
   it("删除口播分身需二次确认并在正式模式调用后端", async () => {
@@ -1687,21 +1915,17 @@ describe("PeoplePages", () => {
     expect(notify).toHaveBeenCalledWith("口播分身已删除");
   });
 
-  it("声音卡片下载试听样例走签名下载", async () => {
+  it("声音卡片直接试听，不再提供下载", () => {
     currentPage = "person-voices";
     review = false;
-    api.downloadMaterialAsset.mockResolvedValue(undefined);
     render(<PersonPage />);
     const card = screen.getByText("待确认音色").closest("article");
-    fireEvent.click(
-      within(card as HTMLElement).getByRole("button", { name: "下载试听" }),
-    );
-    await waitFor(() =>
-      expect(api.downloadMaterialAsset).toHaveBeenCalledWith(
-        "voice-demo",
-        "待确认音色-试听.mp3",
-      ),
-    );
+    expect(
+      within(card as HTMLElement).getByLabelText("待确认音色试听"),
+    ).toHaveAttribute("src", "/voice-preview.mp3");
+    expect(
+      within(card as HTMLElement).queryByRole("button", { name: /下载/ }),
+    ).toBeNull();
   });
 
   it("删除声音需二次确认并在正式模式调用后端", async () => {
@@ -1737,17 +1961,16 @@ describe("PeoplePages", () => {
     ).toBeNull();
   });
 
-  it("审计员可见下载但删除按钮禁用", () => {
+  it("审计员只能查看：使用、改名与删除都禁用", () => {
     currentRole = "auditor";
     review = false;
     currentPage = "person-avatars";
     render(<PersonPage />);
     const card = screen.getByText("测试分身").closest("article");
-    expect(
-      within(card as HTMLElement).getByRole("button", { name: "下载源视频" }),
-    ).not.toBeDisabled();
-    expect(
-      within(card as HTMLElement).getByRole("button", { name: "删除" }),
-    ).toBeDisabled();
+    for (const name of ["使用此分身", "修改测试分身的名称", "删除"]) {
+      expect(
+        within(card as HTMLElement).getByRole("button", { name }),
+      ).toBeDisabled();
+    }
   });
 });

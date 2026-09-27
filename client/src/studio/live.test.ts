@@ -2131,6 +2131,10 @@ describe("单个克隆声音状态", () => {
       demo_asset_id: "demo-mp3",
       confirmed: true,
       error_message: null,
+      language: "zh_cantonese",
+      speech_rate: 1.2,
+      volume: 1,
+      pitch: 0.9,
       created_at: "",
       updated_at: "",
     };
@@ -2142,6 +2146,10 @@ describe("单个克隆声音状态", () => {
       status: "READY",
       confirmed: true,
       url: "/demo.mp3",
+      language: "zh_cantonese",
+      speechRate: 1.2,
+      volume: 1,
+      pitch: 0.9,
     });
     expect(api.getAssetDownloadUrl).toHaveBeenCalledExactlyOnceWith("demo-mp3");
     expect(api.listOralVoices).not.toHaveBeenCalled();

@@ -1050,8 +1050,31 @@ export type OralVoiceRecord = {
   demo_asset_id: string | null;
   confirmed: number | boolean;
   error_message: string | null;
+  language: OralVoiceLanguage;
+  /** 语速 0.5–2.0，默认 1.0。 */
+  speech_rate: number;
+  /** 音量 0.1–2.0，默认 1.0。 */
+  volume: number;
+  /** 音调 0.1–2.0，默认 1.0。 */
+  pitch: number;
   created_at: string;
   updated_at: string;
+};
+
+/** 声音克隆样本语言：普通话与国内方言，键与服务端一致。 */
+export type OralVoiceLanguage =
+  | "zh"
+  | "zh_cantonese"
+  | "zh_sichuanese"
+  | "zh_shanghainese"
+  | "zh_tianjinese"
+  | "zh_zhengzhounese"
+  | "zh_wuhanese";
+
+export type OralVoiceSettings = {
+  speechRate: number;
+  volume: number;
+  pitch: number;
 };
 
 export type OralCloneCreated = { id: string; status: string };
@@ -1078,22 +1101,63 @@ export async function createOralConsent(input: {
 }
 
 /** 读取指定人物的口播分身。 */
+function oralCloneListQuery(identityId: string, nameQuery?: string): string {
+  const trimmed = nameQuery?.trim();
+  const search = trimmed ? `&q=${encodeURIComponent(trimmed)}` : "";
+  return `identity_id=${encodeURIComponent(identityId)}${search}`;
+}
+
+/** 读取指定人物下、当前账号创建的口播分身；传入名称时按名称模糊搜索。 */
 export async function listOralAvatars(
   identityId: string,
+  nameQuery?: string,
 ): Promise<OralAvatarRecord[]> {
   return requestApiJson<OralAvatarRecord[]>(
-    `/api/oral/avatars?identity_id=${encodeURIComponent(identityId)}`,
+    `/api/oral/avatars?${oralCloneListQuery(identityId, nameQuery)}`,
     "读取口播分身失败",
   );
 }
 
-/** 读取指定人物的声音档案。 */
+/** 读取指定人物下、当前账号创建的声音档案；传入名称时按名称模糊搜索。 */
 export async function listOralVoices(
   identityId: string,
+  nameQuery?: string,
 ): Promise<OralVoiceRecord[]> {
   return requestApiJson<OralVoiceRecord[]>(
-    `/api/oral/voices?identity_id=${encodeURIComponent(identityId)}`,
+    `/api/oral/voices?${oralCloneListQuery(identityId, nameQuery)}`,
     "读取声音档案失败",
+  );
+}
+
+/** 只改本系统内的显示名称，最多 60 个字。 */
+export async function renameOralAvatar(
+  avatarId: string,
+  title: string,
+): Promise<OralAvatarRecord> {
+  return requestApiJson<OralAvatarRecord>(
+    `/api/oral/avatars/${encodeURIComponent(avatarId)}`,
+    "修改口播分身名称失败",
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    },
+  );
+}
+
+/** 只改本系统内的显示名称，最多 60 个字。 */
+export async function renameOralVoice(
+  voiceId: string,
+  title: string,
+): Promise<OralVoiceRecord> {
+  return requestApiJson<OralVoiceRecord>(
+    `/api/oral/voices/${encodeURIComponent(voiceId)}`,
+    "修改声音名称失败",
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    },
   );
 }
 
@@ -1129,6 +1193,8 @@ export async function createOralVoiceClone(input: {
   sourceAssetId: string;
   consentId: string;
   idempotencyKey: string;
+  /** 不传时服务端按普通话克隆。 */
+  language?: OralVoiceLanguage;
 }): Promise<OralCloneCreated> {
   return requestApiJson<OralCloneCreated>(
     "/api/oral/voices",
@@ -1142,6 +1208,30 @@ export async function createOralVoiceClone(input: {
         source_asset_id: input.sourceAssetId,
         consent_id: input.consentId,
         idempotency_key: input.idempotencyKey,
+        ...(input.language ? { language: input.language } : {}),
+      }),
+    },
+  );
+}
+
+/**
+ * 整体覆盖声音的语速/音量/音调。参数保存在声音上，之后用它生成的口播都按新参数
+ * 合成；已生成的视频与克隆时的试听样例不会改变。
+ */
+export async function updateOralVoiceSettings(
+  voiceId: string,
+  settings: OralVoiceSettings,
+): Promise<OralVoiceRecord> {
+  return requestApiJson<OralVoiceRecord>(
+    `/api/oral/voices/${encodeURIComponent(voiceId)}/settings`,
+    "保存声音参数失败",
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        speech_rate: settings.speechRate,
+        volume: settings.volume,
+        pitch: settings.pitch,
       }),
     },
   );

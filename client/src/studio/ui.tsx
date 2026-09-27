@@ -57,6 +57,7 @@ export function Icon({ name, size = 22 }: { name: string; size?: number }) {
     settings:
       "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm0-6 2 1 .5 2.2 2 .8 2-1 2 2-1 2 .8 2 2.2.5 1 2-1 2-2.2.5-.8 2 1 2-2-1-2 .8-2.2-1-1-2 1-2.2-.8-2-2-2 1-2-.8-2-2.2-.5-1Z",
     save: "M3 3h15l3 3v15H3V3Zm4 0v6h10V3M7 21v-7h10v7",
+    trash: "M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14M10 11v6m4-6v6",
   };
   return (
     <svg
