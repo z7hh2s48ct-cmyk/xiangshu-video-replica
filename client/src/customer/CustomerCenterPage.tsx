@@ -1548,7 +1548,7 @@ export function CustomerCenterPage({
                   />
                   <p>
                     用户名 {profile?.username ?? user.username} ·
-                    昵称用于软件内展示
+                    建议填写公司名称，管理后台按公司名称识别您的账号
                     <span className="uc-count">
                       {displayName.length}/{NAME_MAX_LENGTH}
                     </span>

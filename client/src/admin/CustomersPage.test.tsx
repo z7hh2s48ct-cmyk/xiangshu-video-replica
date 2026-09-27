@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   act,
   fireEvent,
@@ -110,6 +112,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       {
         user_id: "user-1",
         username: "customer-1",
+        display_name: "乡墅装饰有限公司",
         created_at: "2026-08-24T10:00:00Z",
         activation_code: "ABC-123",
         status: "active",
@@ -123,6 +126,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       {
         user_id: "user-2",
         username: "customer-2",
+        display_name: "合家美宅建材商行",
         created_at: "2026-08-24T11:00:00Z",
         activation_code: "DEF-456",
         status: "active",
@@ -150,6 +154,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       .map((cell) => cell.textContent);
     expect(headers).toEqual([
       "用户名",
+      "公司名称",
       "客户 ID",
       "注册时间",
       "状态",
@@ -171,6 +176,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
         .map((cell) => cell.textContent?.replace(/\s+/g, " ").trim()),
     ).toEqual([
       "customer-1",
+      "乡墅装饰有限公司",
       "user-1",
       // 与 formatDateTime 的展示契约一致：固定 Asia/Shanghai，
       // 否则期望值随 runner 时区漂移（CI 为 UTC，本地为 +8）。
@@ -184,6 +190,101 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       "成功 5 / 8 失败 1 · 进行中 1",
       "展开详情",
     ]);
+  });
+
+  it("公司名称未填写时显式占位，不拿用户名顶替", async () => {
+    // display_name 在契约里可选（激活/注册默认写用户名，客户可在个人中心改）。
+    // 缺失时若回退成用户名，既与相邻的「用户名」列重复，又掩盖了"这个账号还没填
+    // 公司名"这一运营信号 —— 而该信号的用处正是提醒运营去催客户补填。
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [
+        {
+          user_id: "user-1",
+          username: "customer-1",
+          created_at: "2026-08-24T10:00:00Z",
+          activation_code: "ABC-123",
+          status: "active",
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+
+    render(<CustomersPage />);
+
+    const row = await screen.findByRole("row", { name: /customer-1/ });
+    const cells = within(row)
+      .getAllByRole("cell")
+      .map((cell) => cell.textContent?.replace(/\s+/g, " ").trim());
+    // 「用户名」列有值、与「公司名称」列内容不同，才说明没有静默顶替。
+    expect(cells[0]).toBe("customer-1");
+    expect(cells[1]).toBe("未填写");
+
+    // 详情页与列表同口径（原先详情页在这里回退成用户名，两处显示不同值）。
+    fireEvent.click(screen.getByRole("button", { name: "展开详情" }));
+    await waitFor(() => {
+      expect(screen.getAllByText("未填写").length).toBeGreaterThan(0);
+    });
+  });
+
+  it("筛选框说明关键字同时覆盖用户名与公司名称", async () => {
+    // 列有了公司名、筛选却只认用户名，运营照样找不到目标公司 —— 文案与
+    // placeholder 一起锁定这条识别路径。
+    render(<CustomersPage />);
+
+    expect(await screen.findByText("用户名 / 公司名称")).toBeVisible();
+    expect(screen.getByPlaceholderText("按用户名或公司名称筛选")).toBeVisible();
+  });
+
+  it("表格列数与该表 fixed 布局的列宽规则数一致", async () => {
+    // 回归守卫：.customers-table 是 table-layout: fixed，宽度按 nth-child 位置
+    // 生效。新增「公司名称」列时漏改样式，宽度就从插入点起整体错位、末列拿不到
+    // 宽度 —— 渲染层测不出这类问题，所以在这里把列数与规则数钉在一起。
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [
+        {
+          user_id: "user-1",
+          username: "customer-1",
+          display_name: "乡墅装饰有限公司",
+          created_at: "2026-08-24T10:00:00Z",
+          activation_code: "ABC-123",
+          status: "active",
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+
+    render(<CustomersPage />);
+
+    const columns = within(
+      await screen.findByRole("table", { name: "客户列表" }),
+    ).getAllByRole("columnheader").length;
+
+    // Vitest 对 CSS 导入返回空串（css: false），所以读源码文件本身。路径以
+    // client/ 为根（`npm run test --workspace client` 的 cwd）；读不到就直接
+    // 失败，避免守卫静默失效。
+    const css = readFileSync(
+      resolve(process.cwd(), "src/admin/admin-customer-detail.css"),
+      "utf8",
+    );
+    const desktop = /@media \(min-width: 761px\) \{([\s\S]*?)\n\}/.exec(
+      css,
+    )?.[1];
+    expect(desktop).toBeDefined();
+    const rules = [
+      ...(desktop as string).matchAll(
+        /\.customers-table th:nth-child\((\d+)\)\s*\{\s*width:\s*(\d+)%/g,
+      ),
+    ];
+
+    // 编号必须 1..N 无缺口无重复，且宽度合计 100%（fixed 布局下多出的列分不到宽度）。
+    expect(rules.map((rule) => Number(rule[1]))).toEqual(
+      Array.from({ length: columns }, (_, index) => index + 1),
+    );
+    expect(rules.reduce((sum, rule) => sum + Number(rule[2]), 0)).toBe(100);
   });
 
   it("shows loading state while fetching customers", () => {
@@ -249,7 +350,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
 
     render(<CustomersPage />);
 
-    const filterInput = screen.getByPlaceholderText("按用户名筛选");
+    const filterInput = screen.getByPlaceholderText("按用户名或公司名称筛选");
     fireEvent.change(filterInput, { target: { value: "customer-1" } });
     fireEvent.click(screen.getByRole("button", { name: "筛选" }));
 
@@ -324,7 +425,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     fireEvent.change(screen.getByLabelText("客户状态"), {
       target: { value: "active" },
     });
-    fireEvent.change(screen.getByPlaceholderText("按用户名筛选"), {
+    fireEvent.change(screen.getByPlaceholderText("按用户名或公司名称筛选"), {
       target: { value: "customer-1" },
     });
     fireEvent.click(screen.getByRole("button", { name: "筛选" }));
@@ -377,6 +478,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
         {
           user_id: "user-1",
           username: "customer-1",
+          display_name: "乡墅装饰有限公司",
           created_at: "2026-08-24T10:00:00Z",
           activation_code: "ABC-123",
           status: "active",
@@ -395,9 +497,12 @@ describe("CustomersPage (ADM-02 / T33)", () => {
 
     render(<CustomersPage />);
 
-    fireEvent.change(await screen.findByPlaceholderText("按用户名筛选"), {
-      target: { value: "customer-1" },
-    });
+    fireEvent.change(
+      await screen.findByPlaceholderText("按用户名或公司名称筛选"),
+      {
+        target: { value: "customer-1" },
+      },
+    );
     fireEvent.click(screen.getByRole("button", { name: "筛选" }));
     await waitFor(() => {
       expect(adminApi.listCustomers).toHaveBeenLastCalledWith(
@@ -414,6 +519,9 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       .getByRole("heading", { name: "customer-1" })
       .closest("div");
     expect(detailPanel).not.toBeNull();
+    // 详情页带出公司名（display_name），让管理员确认账号与公司的一一对应
+    expect(screen.getByText(/公司名称/)).toBeInTheDocument();
+    expect(screen.getByText("乡墅装饰有限公司")).toBeInTheDocument();
     expect(
       screen.getByRole("region", { name: "客户核心指标" }),
     ).toBeInTheDocument();
@@ -468,7 +576,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     expect(
       await screen.findByRole("table", { name: "客户列表" }),
     ).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("按用户名筛选")).toHaveValue(
+    expect(screen.getByPlaceholderText("按用户名或公司名称筛选")).toHaveValue(
       "customer-1",
     );
   });
@@ -1066,7 +1174,9 @@ describe("CustomersPage (ADM-02 / T33)", () => {
           /后台加款与赠送积分在客户详情内完成.*赠送积分.*区块/,
         ),
       ).toBeInTheDocument();
-      expect(screen.getByPlaceholderText("按用户名筛选")).toHaveFocus();
+      expect(
+        screen.getByPlaceholderText("按用户名或公司名称筛选"),
+      ).toHaveFocus();
 
       fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
       expect(
@@ -1098,7 +1208,9 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       expect(
         screen.queryByText(/激活码发放与查询不在客户管理页/),
       ).not.toBeInTheDocument();
-      expect(screen.getByPlaceholderText("按用户名筛选")).not.toHaveFocus();
+      expect(
+        screen.getByPlaceholderText("按用户名或公司名称筛选"),
+      ).not.toHaveFocus();
     });
   });
 });

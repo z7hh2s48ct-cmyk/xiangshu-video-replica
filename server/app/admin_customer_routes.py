@@ -981,6 +981,9 @@ def list_customers(
     code status. The identity fields live on users / activation_codes; the
     data model has no customer email, so the T33 contract uses username.
 
+    ``username`` 是「关键字」筛选而非严格用户名筛选：它同时匹配
+    ``users.display_name``（客户可填公司名），见下方子句注释。
+
     A5（2026-09-02 评估）: the page/page_size + ``{customers,…}`` shape is
     retired for the management-wide ``limit/offset`` + ``{items,total,…}``
     envelope, so every admin list paginates the same way.
@@ -995,10 +998,14 @@ def list_customers(
     ]
     params: list[object] = []
     if username.strip():
-        clauses.append("u.username ILIKE %s")
-        # Escape LIKE wildcards so a username containing % or _ is matched
+        # 同一个输入同时匹配用户名与公司名称：运营的识别诉求是「这家公司是哪个
+        # 账号」，而公司名存在 users.display_name（激活/注册默认写用户名，客户在
+        # 个人中心改成公司名）。只匹配 u.username 会让按公司名搜索必然零结果。
+        clauses.append("(u.username ILIKE %s OR u.display_name ILIKE %s)")
+        # Escape LIKE wildcards so a value containing % or _ is matched
         # literally (PostgreSQL LIKE treats backslash as the default escape).
         literal = username.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        params.append(f"%{literal}%")
         params.append(f"%{literal}%")
     if status.strip():
         clauses.append(
@@ -1135,7 +1142,9 @@ def export_customers_csv(
 
     Replaces the console's client-side "current page only" export: the whole
     (filtered) list leaves through one audited dump with the same columns the
-    operator saw in the table.
+    operator saw in the table — 含公司名称（``display_name``），否则按公司名
+    识别出的客户在导出件里又失去对应关系。``username`` 与列表端点同为关键字，
+    同时匹配用户名与公司名称。
     """
     import csv as csv_mod
     import hashlib as hashlib_mod
@@ -1169,10 +1178,13 @@ def export_customers_csv(
             ]
             params: list[object] = []
             if username.strip():
+                # 与列表端点同口径：关键字同时匹配用户名与公司名称，否则
+                # 「按公司名筛出客户再导出」会得到只有表头的空 CSV。
                 literal = (
                     username.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
                 )
-                clauses.append("u.username ILIKE %s")
+                clauses.append("(u.username ILIKE %s OR u.display_name ILIKE %s)")
+                params.append(f"%{literal}%")
                 params.append(f"%{literal}%")
             # PR #85 review P2: the UI dropdown sends lowercase status values
             # while the database enum is uppercase — normalize server-side so
@@ -1200,7 +1212,8 @@ def export_customers_csv(
                 params.append(max(0, balance_max))
             where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
             rows = conn.execute(
-                "SELECT u.username, COALESCE(ac.masked_code, '账号注册'), aca.activated_at, "
+                "SELECT u.username, u.display_name, "
+                "COALESCE(ac.masked_code, '账号注册'), aca.activated_at, "
                 "COALESCE(ac.status, CASE WHEN u.is_active = 1 THEN 'ACTIVE' ELSE 'SUSPENDED' END) "
                 + CUSTOMER_ACCOUNT_FROM
                 + f"{where} ORDER BY aca.activated_at DESC, aca.id DESC LIMIT %s",
@@ -1238,7 +1251,7 @@ def export_customers_csv(
 
     buffer = io_mod.StringIO()
     writer = csv_mod.writer(buffer)
-    writer.writerow(["username", "masked_code", "activated_at", "status"])
+    writer.writerow(["username", "display_name", "masked_code", "activated_at", "status"])
     for row in rows:
         writer.writerow([spreadsheet_safe_cell(str(value)) for value in row])
     payload = buffer.getvalue().encode("utf-8")
