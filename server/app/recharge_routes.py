@@ -4,6 +4,7 @@ import base64
 import csv
 import io
 import json
+import logging
 import sqlite3
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
@@ -87,6 +88,8 @@ from app.wechat_native_client import (
 )
 from app.zpay import generate_merchant_order_no
 from app.zpay_payments import read_recharge_order, serialize_recharge_order
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["recharge"])
 # 导出 CSV 的列：与文档字符串一致，且**不含**内部 actor_user_id（操作人给显示名）。
@@ -270,9 +273,18 @@ def _stage_recharge_preconditions(
         merchant = provider.load_merchant_config(conn)
         deployment = provider.load_deployment_config()
     except ValueError as exc:
+        # 红线：供应商名称既不得出现在对外响应文案里，也不得出现在日志里
+        # （AGENTS.md 三者并列：API 响应 / 界面文案 / 日志）。上游 ValueError
+        # 的消息文本本身可能带供应商名，因此这里只记异常类型，不记 str(exc)。
+        logger.warning(
+            "Recharge precondition failed on payment provider config: %s", type(exc).__name__
+        )
         raise HTTPException(
             status_code=503,
-            detail={"code": "ZPAY_CONFIGURATION_INVALID", "message": str(exc)},
+            detail={
+                "code": "PAYMENT_CHANNEL_UNAVAILABLE",
+                "message": "在线充值通道暂时不可用，请稍后再试或联系客服。",
+            },
         ) from exc
     return billing, merchant, deployment
 

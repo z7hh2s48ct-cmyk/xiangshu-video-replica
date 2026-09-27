@@ -239,9 +239,16 @@ def sync_recharge_order_with_zpay(
     try:
         deployment = provider.load_deployment_config()
     except ValueError as exc:
+        # 红线：供应商名称既不得出现在对外响应文案里，也不得出现在日志里
+        # （AGENTS.md 三者并列：API 响应 / 界面文案 / 日志）。上游 ValueError
+        # 的消息文本本身可能带供应商名，因此这里只记异常类型，不记 str(exc)。
+        logger.warning("Recharge order sync failed on deployment config: %s", type(exc).__name__)
         raise HTTPException(
             status_code=503,
-            detail={"code": "ZPAY_CONFIGURATION_INVALID", "message": str(exc)},
+            detail={
+                "code": "PAYMENT_CHANNEL_UNAVAILABLE",
+                "message": "支付通道配置不完整，暂时无法同步订单状态。",
+            },
         ) from exc
     try:
         remote_order = provider.query_order(
@@ -253,8 +260,8 @@ def sync_recharge_order_with_zpay(
         raise HTTPException(
             status_code=exc.status_code,
             detail={
-                "code": "ZPAY_QUERY_FAILED",
-                "message": "ZPay order status could not be confirmed.",
+                "code": "PAYMENT_QUERY_FAILED",
+                "message": "支付通道订单状态暂时无法确认。",
             },
         ) from exc
 
@@ -266,11 +273,13 @@ def sync_recharge_order_with_zpay(
         or remote_order.amount_fen is None
         or remote_order.channel is None
     ):
+        # 与同函数内 PAYMENT_QUERY_FAILED 口径一致：控制面响应同样不得出现
+        # 供应商名称（红线覆盖 API 响应/界面文案/日志，不区分客户面还是管理面）。
         raise HTTPException(
             status_code=502,
             detail={
-                "code": "ZPAY_QUERY_RESPONSE_INVALID",
-                "message": "ZPay paid order response is incomplete.",
+                "code": "PAYMENT_QUERY_RESPONSE_INVALID",
+                "message": "支付通道返回的订单数据不完整，暂时无法确认。",
             },
         )
 
@@ -308,9 +317,16 @@ def _load_merchant_config(
     try:
         return provider.load_merchant_config(conn)
     except ValueError as exc:
+        # 红线：供应商名称既不得出现在对外响应文案里，也不得出现在日志里
+        # （AGENTS.md 三者并列：API 响应 / 界面文案 / 日志）。上游 ValueError
+        # 的消息文本本身可能带供应商名，因此这里只记异常类型，不记 str(exc)。
+        logger.warning("Payment provider merchant config invalid: %s", type(exc).__name__)
         raise HTTPException(
             status_code=503,
-            detail={"code": "ZPAY_CONFIGURATION_INVALID", "message": str(exc)},
+            detail={
+                "code": "PAYMENT_CHANNEL_UNAVAILABLE",
+                "message": "支付通道配置不完整，暂时无法处理该操作。",
+            },
         ) from exc
 
 
