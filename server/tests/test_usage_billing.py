@@ -1469,6 +1469,96 @@ def test_actual_tikhub_transport_is_attributed_to_user_or_platform(client, route
         assert raw.execute("SELECT count(*) FROM wallet_transactions").fetchone()[0] == 0
 
 
+def test_douyin_refresh_records_metered_provider_call(client, route_state):
+    """刷新走统一请求层：留下 api_type=douyin_search 的供应商调用记录.
+
+    修复前 douyin_refresh 手工拼请求、绕过 meter_call，这条记录是空缺的。
+    """
+    from test_viral_tikhub import FakeTransport, _douyin_search_payload
+
+    from app.billing_meter import billing_context
+    from app.viral_tikhub import ViralSourceClient
+
+    _, uid = account(client)
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        raw.execute(
+            "INSERT INTO billing_tariffs(service,unit_cost_fen) VALUES('viral_data',0.0125)"
+        )
+        operation = accept_operation(
+            conn, user_id=uid, service="viral_data", source_id="refresh-metered", units=1
+        )
+    transport = FakeTransport([_douyin_search_payload("777")])
+    source = ViralSourceClient(api_key="test-key", transport=transport)
+
+    with billing_context("refresh-metered"):
+        videos = source.douyin_refresh(platform="douyin", video_id="777")
+
+    assert [video.video_id for video in videos] == ["777"]
+    with psycopg.connect(route_state) as raw:
+        rows = raw.execute(
+            "SELECT o.api_metadata->>'api_type' AS api_type, a.usage, a.cost_fen "
+            "FROM billing_attempts a JOIN billing_operations o ON o.id=a.operation_id "
+            "WHERE o.id=%s",
+            (operation,),
+        ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        ("douyin_search", Decimal(1), Decimal("0.0125")),
+    ]
+
+
+def test_failover_charges_customer_only_for_the_successful_channel(client, route_state):
+    """主通道失败自动切备用：客户侧只认成功那一次，失败尝试不产生客户用量.
+
+    供应商侧另算：物理外呼拿到了响应（哪怕是失败信封）就据实确认供应商成本，
+    与 429/5xx 原地重试的口径一致（每次物理外呼独立过一次计量）。
+    """
+    from test_viral_tikhub import FakeTransport, _douyin_search_payload
+
+    from app.billing_meter import collection_billing_context
+    from app.viral_collection_billing import create_collection_batch
+    from app.viral_tikhub import ViralSourceClient, _reset_channel_cooldowns
+
+    # 冷却表按"入口+凭据"指纹跨用例共享：同进程里前面的失败用例会把主通道
+    # 打进 120s 冷却，本轮就会只剩备用通道可试（失效的不是本用例要测的择优）。
+    _reset_channel_cooldowns()
+    _, uid = account(client)
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        raw.execute("INSERT INTO billing_tariffs(service,unit_cost_fen) VALUES('viral_data',0.5)")
+        batch = create_collection_batch(conn, platform="douyin", config={}, user_ids=[uid])
+    transport = FakeTransport([{"code": 502}, _douyin_search_payload("777")])
+    source = ViralSourceClient(
+        api_key="test-key", transport=transport, backup_base_url="https://backup.source.test"
+    )
+
+    with collection_billing_context(batch):
+        videos = source.douyin_search(keyword="乡墅")
+
+    assert [video.video_id for video in videos] == ["777"]
+    assert len(transport.requests) == 2
+    with psycopg.connect(route_state) as raw:
+        rows = raw.execute(
+            "SELECT o.state AS operation_state, o.actual_units, a.usage, a.cost_fen "
+            "FROM billing_operations o JOIN billing_attempts a ON a.operation_id=o.id "
+            "WHERE o.collection_batch_id=%s",
+            (batch,),
+        ).fetchall()
+    attempts = {str(row[0]): row for row in rows}
+    assert set(attempts) == {"FAILED", "SUCCEEDED"}
+    failed = attempts["FAILED"]
+    # 客户侧：失败尝试 0 单位（预留全额释放）。
+    assert failed[1] == Decimal(0)
+    # 供应商侧：主通道确实回了一个失败信封，按物理外呼据实计入平台成本。
+    assert (failed[2], failed[3]) == (Decimal(1), Decimal("0.5"))
+    succeeded = attempts["SUCCEEDED"]
+    assert (succeeded[2], succeeded[3], succeeded[1]) == (
+        Decimal(1),
+        Decimal("0.5"),
+        Decimal(1),
+    )
+
+
 @pytest.mark.parametrize("status", ["REQUEST_SENT", "FAILED_SAFE", "UNCERTAIN"])
 def test_undelivered_link_receipts_recover_reserved_credits(client, route_state, status):
     from app.usage_billing import begin_source_attempt, reconcile_operations

@@ -20,6 +20,7 @@ import {
   getAdminCsrfToken,
   notifyAdminSessionExpired,
   resolveApiBaseUrl,
+  resolveManagedMediaUrl,
   setAdminCsrfToken,
 } from "./api";
 
@@ -1844,17 +1845,24 @@ export type CollectedViralVideo = {
   statistics_retry_at?: string | null;
   cover_required?: boolean;
   cover_key?: string | null;
+  /** 服务端下发的站内封面代理地址（已归档副本才有）；绝对化后再交给 <img>。 */
+  cover_url?: string | null;
   platform: "douyin" | "wechat_channels";
   video_id: string;
   category: string;
   title: string;
   author: string;
+  author_avatar?: string | null;
+  verified?: boolean;
+  tags?: string[];
   duration_ms: number;
   likes: number;
   comments: number | null;
   shares: number | null;
   collects: number | null;
   published_at: number | null;
+  published_display?: string | null;
+  like_display?: string | null;
   created_at: string;
   homepage_featured: boolean;
   collection_published: boolean;
@@ -1866,8 +1874,23 @@ export type CollectedViralVideo = {
   availability?: "AVAILABLE" | "HIDDEN" | "UNAVAILABLE";
 };
 
+/** 列表状态分段：与后端 `status` 查询参数一一对应，服务端过滤后再分页。 */
+export type CollectedViralStatus = "ready" | "pending" | "failed" | "featured";
+
+/**
+ * 封面地址绝对化：服务端只给站内代理路径 `/api/viral/covers/...`（源站签名
+ * 链接会过期且带 Referer 限制），管理端可能部署在与 API 不同的域名下，
+ * 相对路径会打到前端自身而渲染成空图。在响应边界统一处理，页面直接用。
+ */
+function withManagedCover<T extends { cover_url?: string | null }>(item: T): T {
+  return item.cover_url
+    ? { ...item, cover_url: resolveManagedMediaUrl(item.cover_url) }
+    : item;
+}
+
 export async function listCollectedViralVideos(options: {
   platform?: string;
+  status?: CollectedViralStatus;
   query?: string;
   offset?: number;
 }): Promise<{ items: CollectedViralVideo[]; total: number }> {
@@ -1876,6 +1899,7 @@ export async function listCollectedViralVideos(options: {
     offset: String(options.offset ?? 0),
   });
   if (options.platform) query.set("platform", options.platform);
+  if (options.status) query.set("status", options.status);
   if (options.query) query.set("query", options.query);
   const response = await requestControl(
     `/api/control/viral/videos?${query}`,
@@ -1883,7 +1907,11 @@ export async function listCollectedViralVideos(options: {
   );
   if (!response.ok)
     throw await parseActivationError(response, "读取采集视频失败");
-  return response.json();
+  const result = (await response.json()) as {
+    items: CollectedViralVideo[];
+    total: number;
+  };
+  return { ...result, items: result.items.map(withManagedCover) };
 }
 
 export function archiveCollectedViralVideo(
@@ -1915,6 +1943,69 @@ export function curateViralVideo(
     idempotencyKey,
     "PATCH",
   );
+}
+
+export type ViralBatchCurationResult = {
+  action: "feature" | "unfeature" | "delete";
+  count: number;
+  items: {
+    platform: string;
+    video_id: string;
+    homepage_featured: boolean;
+    deleted: boolean;
+  }[];
+};
+
+/**
+ * 批量策展：一次请求对多条视频做同一动作。服务端整批同事务，任何一条不
+ * 满足条件就整批取消（不会出现「删了一半」），审计按条落账。
+ */
+export function curateViralVideosBatch(
+  items: Pick<CollectedViralVideo, "platform" | "video_id">[],
+  action: "feature" | "unfeature" | "delete",
+  reason: string,
+  idempotencyKey: string,
+): Promise<ViralBatchCurationResult> {
+  return adminWrite<ViralBatchCurationResult>(
+    "/api/control/viral/videos/curation:batch",
+    {
+      action,
+      items: items.map((item) => ({
+        platform: item.platform,
+        video_id: item.video_id,
+      })),
+    },
+    reason,
+    "批量操作爆款视频失败",
+    idempotencyKey,
+    "POST",
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 爆款视频库概览（管理端）：数字卡与采集计划
+// ---------------------------------------------------------------------------
+
+export type ViralLibraryOverview = {
+  content_total: number;
+  archive_ready: number;
+  homepage_featured: number;
+  pending_archive: number;
+  archive_failed: number;
+  added_today: number;
+  last_created_at: string | null;
+  collection_enabled: boolean;
+  keyword_count: { douyin: number; wechat_channels: number };
+  next_collection_at: string | null;
+  collection_interval_days: number;
+  last_fetched_at: string | null;
+};
+
+export async function viralLibraryOverview(): Promise<ViralLibraryOverview> {
+  const response = await requestControl("/api/control/viral/overview", {});
+  if (!response.ok)
+    throw await parseActivationError(response, "读取爆款视频概览失败");
+  return response.json();
 }
 
 export function refreshCollectedVideoStatistics(
@@ -1974,7 +2065,7 @@ export type AdminViralSearchResult = {
  * upsert 进内容池，但**不扣任何客户积分**（供应商成本记平台账）。响应行
  * 与爆款视频库同构，可继续转存 / 展示到首页。
  */
-export function adminSearchViralVideos(
+export async function adminSearchViralVideos(
   payload: {
     keyword: string;
     platform: "douyin" | "wechat_channels";
@@ -1984,7 +2075,7 @@ export function adminSearchViralVideos(
   reason: string,
   idempotencyKey: string,
 ): Promise<AdminViralSearchResult> {
-  return adminWrite<AdminViralSearchResult>(
+  const result = await adminWrite<AdminViralSearchResult>(
     "/api/control/viral/search",
     payload,
     reason,
@@ -1994,6 +2085,8 @@ export function adminSearchViralVideos(
     // 与客户侧搜索同量级：上游检索 + 并发归档封面，远慢于普通管理读。
     240_000,
   );
+  // 命中行与爆款视频库同构，封面同样是站内代理地址，必须一并绝对化后再 `<img>`。
+  return { ...result, items: result.items.map(withManagedCover) };
 }
 
 // ---------------------------------------------------------------------------

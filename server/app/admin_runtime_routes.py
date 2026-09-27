@@ -22,13 +22,16 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from datetime import UTC, datetime, time
 from typing import Annotated, Literal
+from urllib.parse import quote
 
 import psycopg
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_dates import SHANGHAI, utc_timestamp_sql
 from app.admin_write_contract import (
     AdminWriteContract,
     http_error,
@@ -427,10 +430,13 @@ class ViralCurationRequest(AdminWriteContract):
 
 
 # 视频库与管理端搜索共用的行投影：viral_videos 左联云端媒体准备与单条转存
-# 任务，给出前端「转存 / 上首页」按钮需要的全部状态。
+# 任务，给出前端「转存 / 上首页」按钮需要的全部状态，以及列表要直接上屏的
+# 头像 / 认证 / 发布时间 / 点赞显示值 / 话题标签（运营不必逐行展开才看到）。
 _COLLECTED_VIRAL_ROW_SELECT = """
-    SELECT v.platform,v.video_id,v.category,v.title,v.author,v.duration_ms,
+    SELECT v.platform,v.video_id,v.category,v.title,v.author,v.author_avatar,
+        v.verified,v.duration_ms,
         v.likes,v.comments,v.shares,v.collects,v.published_at,v.created_at,
+        v.published_display,v.like_display,v.tags_json,
         v.homepage_featured,v.collection_published,v.homepage_rank,v.cover_key,
         v.native_json::jsonb->>'_statistics_checked_at' AS statistics_checked_at,
         v.native_json::jsonb->>'_statistics_retry_at' AS statistics_retry_at,
@@ -447,6 +453,39 @@ _COLLECTED_VIRAL_ROW_SELECT = """
         ON vis.platform=v.platform AND vis.video_id=v.video_id
 """
 
+# 列表状态分段的服务端口径：与前端 archiveLabel 同一套判定，避免两处漂移。
+_COLLECTED_STATUS_FILTERS = {
+    "ready": (
+        "EXISTS (SELECT 1 FROM viral_media_preparations m2"
+        " WHERE m2.platform=v.platform AND m2.video_id=v.video_id"
+        " AND m2.media_kind='video' AND m2.status='SUCCEEDED' AND m2.storage_uri IS NOT NULL)"
+    ),
+    "pending": (
+        "NOT EXISTS (SELECT 1 FROM viral_media_preparations m2"
+        " WHERE m2.platform=v.platform AND m2.video_id=v.video_id"
+        " AND m2.media_kind='video' AND m2.status='SUCCEEDED' AND m2.storage_uri IS NOT NULL)"
+        " AND NOT EXISTS (SELECT 1 FROM viral_media_preparations m2"
+        " WHERE m2.platform=v.platform AND m2.video_id=v.video_id"
+        " AND m2.media_kind='video' AND m2.status='FAILED')"
+        " AND NOT EXISTS (SELECT 1 FROM viral_refresh_tasks r2"
+        " WHERE r2.platform=v.platform AND r2.sort='latest'"
+        " AND r2.collection_config_json::jsonb->>'kind'='single_archive'"
+        " AND r2.collection_config_json::jsonb->>'video_id'=v.video_id"
+        " AND r2.status='FAILED')"
+    ),
+    "failed": (
+        "EXISTS (SELECT 1 FROM viral_media_preparations m2"
+        " WHERE m2.platform=v.platform AND m2.video_id=v.video_id"
+        " AND m2.media_kind='video' AND m2.status='FAILED')"
+        " OR EXISTS (SELECT 1 FROM viral_refresh_tasks r2"
+        " WHERE r2.platform=v.platform AND r2.sort='latest'"
+        " AND r2.collection_config_json::jsonb->>'kind'='single_archive'"
+        " AND r2.collection_config_json::jsonb->>'video_id'=v.video_id"
+        " AND r2.status='FAILED')"
+    ),
+    "featured": "v.homepage_featured=1",
+}
+
 
 def _collected_video_payload(row: dict[str, object]) -> dict[str, object]:
     """行 → 响应：只保留视频库行字段，布尔列还原为 bool，时间戳转 ISO.
@@ -454,14 +493,34 @@ def _collected_video_payload(row: dict[str, object]) -> dict[str, object]:
     明细视图会把分组列与视频列混在一行里，这里按白名单挑列，避免把
     ``discoveries``/``total`` 这类分组字段漏进 video 对象；ISO 化是因为
     幂等快照层用 ``json.dumps`` 落响应，datetime 不能直接序列化。
+    ``tags_json`` 是库内原始形态，不进响应：解析成数组后由 ``tags`` 承载。
     """
     item = {key: row[key] for key in _COLLECTED_VIDEO_COLUMNS if key in row}
     item["homepage_featured"] = bool(item["homepage_featured"])
     item["collection_published"] = bool(item["collection_published"])
+    item["verified"] = bool(item.get("verified"))
+    item["tags"] = _collected_tags(item.pop("tags_json", None))
+    # 封面只下发站内代理地址（源站签名链接会过期，且代理路由不受 Referer 限制）；
+    # 未归档封面副本时留空，前端渲染占位而不是加载一个必坏的外链。
+    item["cover_url"] = (
+        f"/api/viral/covers/{item['platform']}/{quote(str(item['video_id']), safe='')}"
+        if item.get("cover_key")
+        else None
+    )
     created_at = item.get("created_at")
     if created_at is not None and hasattr(created_at, "isoformat"):
         item["created_at"] = created_at.isoformat()
     return item
+
+
+def _collected_tags(raw: object) -> list[str]:
+    if not isinstance(raw, str) or not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    return [str(tag) for tag in parsed] if isinstance(parsed, list) else []
 
 
 # 行投影里响应侧的列名（与 _COLLECTED_VIRAL_ROW_SELECT 的别名一一对应）。
@@ -471,6 +530,8 @@ _COLLECTED_VIDEO_COLUMNS = (
     "category",
     "title",
     "author",
+    "author_avatar",
+    "verified",
     "duration_ms",
     "likes",
     "comments",
@@ -478,6 +539,9 @@ _COLLECTED_VIDEO_COLUMNS = (
     "collects",
     "published_at",
     "created_at",
+    "published_display",
+    "like_display",
+    "tags_json",
     "homepage_featured",
     "collection_published",
     "homepage_rank",
@@ -497,6 +561,7 @@ _COLLECTED_VIDEO_COLUMNS = (
 def read_collected_viral_videos(
     _actor: AdminReader,
     platform: Literal["douyin", "wechat_channels"] | None = None,
+    status: Literal["ready", "pending", "failed", "featured"] | None = None,
     query: Annotated[str, Query(max_length=100)] = "",
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=50)] = 25,
@@ -506,6 +571,9 @@ def read_collected_viral_videos(
     if platform:
         filters += " AND v.platform=%s"
         params.append(platform)
+    if status:
+        # 状态分段在服务端过滤：只筛当前页会给出「这页里没有」的错觉。
+        filters += f" AND ({_COLLECTED_STATUS_FILTERS[status]})"
     if query.strip():
         filters += " AND (v.title ILIKE %s OR v.author ILIKE %s OR v.video_id ILIKE %s)"
         params.extend([f"%{query.strip()}%"] * 3)
@@ -631,8 +699,10 @@ def read_viral_discovery_details(
         )
         SELECT g.keyword, g.platform, g.video_id, g.discoveries, g.users,
                g.last_searched_at, g.total,
-               v.title, v.author, v.category, v.duration_ms, v.likes, v.comments,
+               v.title, v.author, v.author_avatar, v.verified, v.category,
+               v.duration_ms, v.likes, v.comments,
                v.shares, v.collects, v.published_at, v.created_at,
+               v.published_display, v.like_display, v.tags_json,
                v.homepage_featured, v.collection_published, v.cover_key,
                v.native_json::jsonb->>'_statistics_checked_at' AS statistics_checked_at,
                v.native_json::jsonb->>'_statistics_retry_at' AS statistics_retry_at,
@@ -1058,21 +1128,32 @@ def curate_collected_viral_video(
     actor: AdminWriter,
 ) -> dict[str, object]:
     require_write_contract(request, payload)
+    from app.viral_store import LINK_IMPORT_CATEGORY
+
     prepared_cover = (
         _prepare_feature_cover(platform, video_id) if payload.action == "feature" else None
     )
 
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         row = conn.execute(
-            "SELECT cover_url,cover_key,homepage_featured,homepage_rank FROM viral_videos "
+            "SELECT cover_url,cover_key,homepage_featured,category FROM viral_videos "
             "WHERE platform=%s AND video_id=%s AND deleted_at IS NULL FOR UPDATE",
             (platform, video_id),
         ).fetchone()
         if row is None:
             raise http_error(404, "VIRAL_VIDEO_NOT_FOUND", "视频不存在或已删除。")
-        if payload.action in ("pin", "unpin") and not row[2]:
+        cover_url, cover_key, homepage_featured, category = row
+        if payload.action in ("pin", "unpin") and not homepage_featured:
             raise http_error(409, "VIRAL_VIDEO_NOT_FEATURED", "只有已展示到首页的视频才能置顶。")
         if payload.action == "feature":
+            if str(category or "") == LINK_IMPORT_CATEGORY:
+                # 链接导入是用户自己的项目素材，不进首页内容池；否则它会绕过采集
+                # 侧的质量门槛直接出现在所有客户的爆款网格里。
+                raise http_error(
+                    409,
+                    "VIRAL_LINK_IMPORT_NOT_CURATABLE",
+                    "链接导入的素材不进首页，请先由后台采集同主题内容。",
+                )
             ready = conn.execute(
                 "SELECT 1 FROM viral_media_preparations WHERE platform=%s AND video_id=%s "
                 "AND media_kind='video' AND status='SUCCEEDED' AND storage_uri IS NOT NULL",
@@ -1082,8 +1163,8 @@ def curate_collected_viral_video(
                 raise http_error(
                     409, "VIRAL_MEDIA_NOT_READY", "视频和封面归档完成后才能展示到首页。"
                 )
-            if row[0] and not row[1]:
-                if prepared_cover is None or prepared_cover[0] != row[0]:
+            if cover_url and not cover_key:
+                if prepared_cover is None or prepared_cover[0] != cover_url:
                     raise http_error(
                         409, "VIRAL_COVER_NOT_READY", "视频已归档，但封面暂时无法获取，请稍后重试。"
                     )
@@ -1117,7 +1198,7 @@ def curate_collected_viral_video(
         featured_value = (
             1
             if payload.action == "feature"
-            else int(row[2])
+            else int(homepage_featured)
             if payload.action in ("pin", "unpin")
             else 0
         )
@@ -1171,6 +1252,240 @@ def curate_collected_viral_video(
         unavailable_code=RUNTIME_SETTINGS_SERVICE_UNAVAILABLE,
         unavailable_message=RUNTIME_SETTINGS_SERVICE_UNAVAILABLE_MESSAGE,
     )
+
+
+class ViralBatchTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    platform: Literal["douyin", "wechat_channels"]
+    video_id: str = Field(min_length=1, max_length=512)
+
+
+class ViralBatchCurationRequest(AdminWriteContract):
+    """批量策展：一次请求对多条视频做同一动作（单事务 + 一条幂等键）.
+
+    语义与单条完全一致（同样的归档与封面门槛），只是把 N 次点击合成一次
+    审计动作；批量里任何一条不满足条件就整批取消，避免「删了一半」这种
+    说不清的状态。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["feature", "unfeature", "delete"]
+    items: list[ViralBatchTarget] = Field(min_length=1, max_length=20)
+
+    @model_validator(mode="after")
+    def unique_items(self) -> ViralBatchCurationRequest:
+        identities = [(item.platform, item.video_id) for item in self.items]
+        if len(identities) != len(set(identities)):
+            raise ValueError("批量条目不能重复")
+        return self
+
+
+@router.post("/viral/videos/curation:batch")
+def curate_collected_viral_videos_batch(
+    payload: ViralBatchCurationRequest,
+    request: Request,
+    response: Response,
+    actor: AdminWriter,
+) -> dict[str, object]:
+    require_write_contract(request, payload)
+    from app.viral_store import LINK_IMPORT_CATEGORY
+
+    prepared_covers: dict[tuple[str, str], tuple[str, str]] = {}
+    if payload.action == "feature":
+        # 封面补齐全走事务外（下载 + 独立连接），事务内只做校验与写库：
+        # 与单条路径同一套 CoverEnricher，但不在长事务里做网络 IO。
+        for target in payload.items:
+            prepared = _prepare_feature_cover(target.platform, target.video_id)
+            if prepared is not None:
+                prepared_covers[(target.platform, target.video_id)] = prepared
+
+    def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
+        updated: list[dict[str, object]] = []
+        for target in payload.items:
+            row = conn.execute(
+                "SELECT title,cover_url,cover_key,category FROM viral_videos "
+                "WHERE platform=%s AND video_id=%s AND deleted_at IS NULL FOR UPDATE",
+                (target.platform, target.video_id),
+            ).fetchone()
+            if row is None:
+                raise http_error(
+                    404, "VIRAL_VIDEO_NOT_FOUND", "批量中有视频已被删除，请刷新后重试。"
+                )
+            title = str(row[0])
+            if payload.action == "feature":
+                if str(row[3] or "") == LINK_IMPORT_CATEGORY:
+                    raise http_error(
+                        409,
+                        "VIRAL_LINK_IMPORT_NOT_CURATABLE",
+                        f"「{title}」是链接导入的素材，不进首页，批量操作未执行。",
+                    )
+                ready = conn.execute(
+                    "SELECT 1 FROM viral_media_preparations WHERE platform=%s AND video_id=%s "
+                    "AND media_kind='video' AND status='SUCCEEDED' AND storage_uri IS NOT NULL",
+                    (target.platform, target.video_id),
+                ).fetchone()
+                if ready is None:
+                    raise http_error(
+                        409,
+                        "VIRAL_MEDIA_NOT_READY",
+                        f"「{title}」尚未归档完成，批量操作未执行。",
+                    )
+                if row[1] and not row[2]:
+                    prepared = prepared_covers.get((target.platform, target.video_id))
+                    if prepared is None or prepared[0] != row[1]:
+                        raise http_error(
+                            409,
+                            "VIRAL_COVER_NOT_READY",
+                            f"「{title}」的封面暂时无法获取，批量操作未执行。",
+                        )
+                    conn.execute(
+                        "UPDATE viral_videos SET cover_key=%s WHERE platform=%s AND video_id=%s",
+                        (prepared[1], target.platform, target.video_id),
+                    )
+                hidden = conn.execute(
+                    "SELECT 1 FROM viral_video_visibility WHERE platform=%s AND video_id=%s "
+                    "AND status!='AVAILABLE'",
+                    (target.platform, target.video_id),
+                ).fetchone()
+                if hidden:
+                    raise http_error(
+                        409,
+                        "VIRAL_VIDEO_UNAVAILABLE",
+                        f"「{title}」已下架或隐藏，批量操作未执行。",
+                    )
+            conn.execute(
+                """UPDATE viral_videos SET homepage_featured=%s,
+                    collection_published=CASE WHEN %s THEN 1 ELSE collection_published END,
+                    deleted_at=CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE deleted_at END
+                WHERE platform=%s AND video_id=%s""",
+                (
+                    int(payload.action == "feature"),
+                    payload.action == "feature",
+                    payload.action == "delete",
+                    target.platform,
+                    target.video_id,
+                ),
+            )
+            entity_id = f"{target.platform}:{target.video_id}"
+            conn.execute(
+                """INSERT INTO audit_logs(
+                    id,actor_user_id,action,entity_type,entity_id,metadata_json
+                ) VALUES(%s,%s,'viral_video.curation','viral_video',%s,%s)""",
+                (
+                    str(uuid.uuid4()),
+                    actor.user_id,
+                    entity_id,
+                    json.dumps(
+                        {
+                            "action": payload.action,
+                            "reason": payload.reason.strip(),
+                            "request_id": request_id,
+                            "batch": True,
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+            updated.append(
+                {
+                    "platform": target.platform,
+                    "video_id": target.video_id,
+                    "homepage_featured": payload.action == "feature",
+                    "deleted": payload.action == "delete",
+                }
+            )
+        return {"action": payload.action, "count": len(updated), "items": updated}
+
+    return write_with_idempotency(
+        request,
+        response,
+        actor,
+        payload,
+        business,
+        success_status=200,
+        unavailable_code=RUNTIME_SETTINGS_SERVICE_UNAVAILABLE,
+        unavailable_message=RUNTIME_SETTINGS_SERVICE_UNAVAILABLE_MESSAGE,
+    )
+
+
+@router.get("/viral/overview")
+def read_viral_library_overview(_actor: AdminReader) -> dict[str, object]:
+    """爆款视频库概览（只读）：数字卡与采集计划所需的计数与时间.
+
+    与列表端同口径（``deleted_at IS NULL`` + 平台白名单），避免「概览说
+    有 1200 条、列表翻不到」这类对不上的数。今日新增按上海日历归属。
+    """
+    # created_at 是文本列（双方言惯例），按上海零点换算成 UTC 下界比较。
+    day_start = (
+        datetime.combine(datetime.now(SHANGHAI).date(), time.min, SHANGHAI)
+        .astimezone(UTC)
+        .isoformat()
+    )
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        controls = conn.execute(
+            "SELECT collection_enabled, keywords_json, next_collection_at, "
+            "collection_interval_days FROM viral_runtime_controls WHERE id = 1"
+        ).fetchone()
+        base = "v.deleted_at IS NULL AND v.platform IN ('douyin','wechat_channels')"
+        ready = (
+            "EXISTS (SELECT 1 FROM viral_media_preparations m2"
+            " WHERE m2.platform=v.platform AND m2.video_id=v.video_id"
+            " AND m2.media_kind='video' AND m2.status='SUCCEEDED'"
+            " AND m2.storage_uri IS NOT NULL)"
+        )
+        counts = conn.execute(
+            f"""
+            SELECT count(*) AS total,
+                   count(*) FILTER (WHERE {ready}) AS archive_ready,
+                   count(*) FILTER (WHERE v.homepage_featured=1) AS featured,
+                   count(*) FILTER (WHERE ({_COLLECTED_STATUS_FILTERS["failed"]})) AS failed,
+                   count(*) FILTER (WHERE ({_COLLECTED_STATUS_FILTERS["pending"]})) AS pending,
+                   count(*) FILTER (
+                       WHERE {utc_timestamp_sql("v.created_at")} >= %s::timestamptz
+                   ) AS added_today,
+                   max(v.created_at) AS last_created_at
+            FROM viral_videos v WHERE {base}
+            """,
+            (day_start,),
+        ).fetchone()
+        last_fetched = conn.execute(
+            "SELECT max(fetched_at) FROM viral_fetch_state"
+            " WHERE platform IN ('douyin','wechat_channels')"
+        ).fetchone()
+    keywords = json.loads(str(controls[1])) if controls is not None else []
+    by_platform: dict[str, int] = {"douyin": 0, "wechat_channels": 0}
+    for item in keywords:
+        platform = str(item.get("platform", ""))
+        if platform in by_platform:
+            by_platform[platform] += 1
+    mapping = dict(counts) if counts is not None else {}
+    last_created = mapping.get("last_created_at")
+    return {
+        "content_total": int(mapping.get("total") or 0),
+        "archive_ready": int(mapping.get("archive_ready") or 0),
+        "homepage_featured": int(mapping.get("featured") or 0),
+        "pending_archive": int(mapping.get("pending") or 0),
+        "archive_failed": int(mapping.get("failed") or 0),
+        "added_today": int(mapping.get("added_today") or 0),
+        "last_created_at": str(last_created) if last_created is not None else None,
+        "collection_enabled": bool(controls[0]) if controls is not None else False,
+        "keyword_count": {
+            "douyin": by_platform["douyin"],
+            "wechat_channels": by_platform["wechat_channels"],
+        },
+        "next_collection_at": (
+            str(controls[2]) if controls is not None and controls[2] is not None else None
+        ),
+        "collection_interval_days": int(controls[3]) if controls is not None else 7,
+        "last_fetched_at": (
+            str(last_fetched[0])
+            if last_fetched is not None and last_fetched[0] is not None
+            else None
+        ),
+    }
 
 
 @router.get("/settings/queue-mode", response_model=QueueModeResponse)

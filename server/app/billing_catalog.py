@@ -38,6 +38,12 @@ SERVICES: dict[str, Service] = {
     "viral_search": Service("爆款视频搜索", "call", "tikhub", "viral"),
     "viral_search_refresh": Service("爆款视频刷新", "call", "tikhub", "viral"),
     "viral_statistics": Service("爆款视频互动统计", "call", "tikhub", "viral"),
+    # 详情查看是零售科目：读的是已归档内容，没有按次供应商成本，所以 provider
+    # 记 platform（不会出现在供应商成本报表里），也不产生 billing_attempts。
+    "viral_detail": Service("爆款视频详情", "call", "platform", "viral"),
+    # 文案获取同样是零售科目：文案已在共享缓存里，复用别人的转写结果没有按次
+    # 供应商成本，只有生产那一次付过转写费，所以 provider 记 platform。
+    "viral_copy": Service("爆款视频文案", "call", "platform", "viral"),
     "link_resolution": Service("链接解析", "call", "douyidou", "workbench"),
     "prompt_optimize": Service("提示词 AI 优化", "call", "apilio", "workbench"),
     "avatar_clone": Service("口播分身创建", "call", "hifly", "people"),
@@ -92,6 +98,8 @@ SERVICE_INTERFACE: dict[str, str] = {
     "viral_search": "viral_extract",
     "viral_search_refresh": "viral_extract",  # Refresh uses same discount interface
     "viral_statistics": "viral_extract",
+    "viral_detail": "viral_extract",
+    "viral_copy": "viral_extract",
     "link_resolution": "link_resolution",
     "prompt_optimize": "prompt_optimize",
     "avatar_clone": "oral",

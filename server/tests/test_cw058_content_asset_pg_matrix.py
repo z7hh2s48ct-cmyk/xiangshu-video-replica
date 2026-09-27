@@ -129,24 +129,66 @@ def test_only_voice_clone_may_defer_client_duration_probe() -> None:
         assert raised.value.detail["code"] == "MATERIAL_AUDIO_DURATION_REQUIRED"
 
 
-def test_non_mp3_audio_formats_stay_scoped_to_voice_clone(bus: BusinessConnection) -> None:
-    from app.materials import MaterialUploadIntentRequest, create_material_upload_intent
+@pytest.mark.parametrize(
+    ("filename", "content_type", "safe_suffix"),
+    [
+        ("narration.mp3", "audio/mpeg", ".mp3"),
+        ("narration.wav", "audio/wav", ".wav"),
+        ("narration.m4a", "audio/mp4", ".m4a"),
+        ("narration.aac", "audio/aac", ".aac"),
+        ("narration.flac", "audio/flac", ".flac"),
+        ("narration.ogg", "audio/ogg", ".ogg"),
+        ("narration.opus", "audio/ogg", ".opus"),
+    ],
+)
+def test_reference_audio_accepts_common_containers(
+    filename: str, content_type: str, safe_suffix: str
+) -> None:
+    from app.materials import validate_audio_purpose_suffix, validate_upload_request
 
-    storage = FakeStorageAdapter(provider="fake", bucket="cw058-tests")
+    media_type, suffix = validate_upload_request(
+        filename=filename,
+        content_type=content_type,
+        size_bytes=1024,
+    )
+    validate_audio_purpose_suffix(audio_purpose="reference", safe_suffix=suffix)
+    assert (media_type, suffix) == ("audio", safe_suffix)
+
+
+def test_oral_audio_and_reference_share_no_wider_container_set() -> None:
+    from app.materials import validate_audio_purpose_suffix
+
+    validate_audio_purpose_suffix(audio_purpose="oral_audio", safe_suffix=".mp3")
     with pytest.raises(HTTPException) as raised:
-        create_material_upload_intent(
-            bus,
-            actor=actor("employee_1", "employee"),
-            storage=storage,
-            request=MaterialUploadIntentRequest(
-                filename="narration.wav",
-                content_type="audio/wav",
-                size_bytes=1024,
-                audio_purpose="oral_audio",
-                duration_seconds=6,
-            ),
-        )
+        validate_audio_purpose_suffix(audio_purpose="oral_audio", safe_suffix=".wav")
     assert raised.value.detail["code"] == "MATERIAL_TYPE_UNSUPPORTED"
+
+    for suffix in (".wma", ".wmv", ".aiff", ".aif", ".amr"):
+        with pytest.raises(HTTPException) as raised:
+            validate_audio_purpose_suffix(audio_purpose="reference", safe_suffix=suffix)
+        assert raised.value.detail["code"] == "MATERIAL_TYPE_UNSUPPORTED"
+        # 声音克隆不在白名单表内，仍沿用 ALLOWED_UPLOADS 全集。
+        validate_audio_purpose_suffix(audio_purpose="voice_clone", safe_suffix=suffix)
+
+
+@pytest.mark.parametrize("duration", [2.0, 8.0, 15.0])
+def test_reference_audio_duration_accepts_two_to_fifteen_seconds(duration: float) -> None:
+    from app.materials import validate_audio_contract
+
+    validate_audio_contract(
+        media_type="audio", audio_purpose="reference", duration_seconds=duration
+    )
+
+
+@pytest.mark.parametrize("duration", [0.5, 1.9, 15.1, 20.0])
+def test_reference_audio_duration_rejects_out_of_range_values(duration: float) -> None:
+    from app.materials import validate_audio_contract
+
+    with pytest.raises(HTTPException) as raised:
+        validate_audio_contract(
+            media_type="audio", audio_purpose="reference", duration_seconds=duration
+        )
+    assert raised.value.detail["code"] == "MATERIAL_AUDIO_DURATION_INVALID"
 
 
 def test_voice_clone_upload_intent_rejects_files_over_twenty_megabytes(
@@ -350,7 +392,7 @@ def test_non_clone_audio_keeps_lightweight_duration_probe(
         audio_purpose="oral_audio",
         requested_duration_seconds=6,
     )
-    monkeypatch.setattr(materials, "probe_audio_duration", lambda _content: 6.0)
+    monkeypatch.setattr(materials, "probe_audio_duration", lambda *_args: 6.0)
     monkeypatch.setattr(
         materials,
         "inspect_media_bytes",
@@ -360,6 +402,65 @@ def test_non_clone_audio_keeps_lightweight_duration_probe(
     probed = materials.probe_material_upload(prepared, storage=storage)
 
     assert probed.duration_seconds == 6.0
+
+
+def test_audio_probe_surfaces_missing_ffprobe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """缺 ffprobe 是环境问题：必须上抛给调用方映射 503，而不是伪装成文件损坏。"""
+    from app import materials
+    from app.media_tools import MediaToolUnavailable
+
+    def _missing(_tool: str) -> str:
+        raise MediaToolUnavailable("missing")
+
+    monkeypatch.setattr(materials, "resolve_media_binary", _missing)
+
+    with pytest.raises(MediaToolUnavailable):
+        materials.probe_audio_duration(b"ID3-legacy-audio", ".mp3")
+
+
+def test_reference_server_probe_enforces_two_second_floor(tmp_path: Any) -> None:
+    from app.materials import PreparedMaterialUpload, probe_material_upload
+    from app.media_tools import resolve_media_binary
+
+    media_path = tmp_path / "too-short-reference.wav"
+    subprocess.run(
+        [
+            resolve_media_binary("ffmpeg"),
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=16000",
+            "-t",
+            "1",
+            "-c:a",
+            "pcm_s16le",
+            str(media_path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    content = media_path.read_bytes()
+    storage = FakeStorageAdapter(provider="fake", bucket="cw058-tests")
+    stored = storage.put_object("uploads/short-reference.wav", content, content_type="audio/wav")
+    prepared = PreparedMaterialUpload(
+        asset_id="short-reference-wave",
+        owner_user_id="employee_1",
+        storage_uri=stored.uri,
+        storage_key="uploads/short-reference.wav",
+        media_type="audio",
+        content_type="audio/wav",
+        requested_size_bytes=len(content),
+        expected_sha256=None,
+        audio_purpose="reference",
+        requested_duration_seconds=1,
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        probe_material_upload(prepared, storage=storage)
+
+    assert raised.value.detail["code"] == "MATERIAL_AUDIO_DURATION_INVALID"
 
 
 def test_voice_clone_server_probe_enforces_minimum_duration(tmp_path: Any) -> None:

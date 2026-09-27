@@ -10,14 +10,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_rollout_uses_installed_topology_before_fetching_new_release() -> None:
-    script = (REPO_ROOT / "deploy/customer-git-rollout.sh").read_text()
+    script = (REPO_ROOT / "deploy/customer-git-rollout.sh").read_text(encoding="utf-8")
     assert 'COMPOSE="${CUSTOMER_COMPOSE:-$SCRIPT_DIR/customer/compose.yaml}"' in script
     assert 'COMPOSE_ENV="${CUSTOMER_COMPOSE_ENV:-/etc/video-replica/compose.env}"' in script
     assert "text.replace(old, new)" not in script
 
 
 def test_image_override_changes_parameterized_images_without_touching_topology(tmp_path) -> None:
-    script = (REPO_ROOT / "deploy/customer-git-rollout.sh").read_text()
+    script = (REPO_ROOT / "deploy/customer-git-rollout.sh").read_text(encoding="utf-8")
     start = script.index("write_image_override() {")
     function = script[start : script.index("\n}\n", start) + 3]
     target = tmp_path / "image.json"
@@ -43,7 +43,7 @@ def test_image_override_changes_parameterized_images_without_touching_topology(t
 
 
 def test_bootstrap_records_the_database_head_required_by_first_upgrade() -> None:
-    script = (REPO_ROOT / "deploy/customer/bootstrap-base-image.sh").read_text()
+    script = (REPO_ROOT / "deploy/customer/bootstrap-base-image.sh").read_text(encoding="utf-8")
     assert "video-replica.database-head=$EXPECTED_DB_HEAD" in script
     assert "org.opencontainers.image.revision=$RELEASE_SHA" in script
 
@@ -53,7 +53,7 @@ def test_bootstrap_records_the_database_head_required_by_first_upgrade() -> None
 def test_rollout_restores_image_selection_and_checks_recovery(
     tmp_path, has_previous: bool, recovery_ready: bool
 ) -> None:
-    script = (REPO_ROOT / "deploy/customer-git-rollout.sh").read_text()
+    script = (REPO_ROOT / "deploy/customer-git-rollout.sh").read_text(encoding="utf-8")
     start = script.index("rollback() {")
     function = script[start : script.index("\n}\n", start) + 3]
     (tmp_path / "backup").mkdir()

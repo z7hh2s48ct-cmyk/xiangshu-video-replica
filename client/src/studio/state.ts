@@ -175,6 +175,7 @@ export function createDraft(): StudioDraft {
     },
     scriptEdited: false,
     prompt: "",
+    referencePrompt: "",
     promptEdited: false,
     referenceIds: [],
     resolution: "768P",
@@ -284,9 +285,17 @@ export function patchStudioDraft(
     (patch.referenceIds !== undefined &&
       JSON.stringify(patch.referenceIds) !==
         JSON.stringify(draft.referenceIds));
-  if (bindingChanged && /<(Picture|Video|Audio)\s+\d+>|@\d+/.test(draft.prompt))
+  if (
+    bindingChanged &&
+    (/<(Picture|Video|Audio)\s+\d+>|@\d+/.test(draft.prompt) ||
+      /<(Picture|Video|Audio)\s+\d+>|@\d+/.test(draft.referencePrompt ?? ""))
+  )
     next.promptBindingsStale = true;
-  if (Object.hasOwn(patch, "prompt") && patch.promptBindingsStale === undefined)
+  if (
+    (Object.hasOwn(patch, "prompt") ||
+      Object.hasOwn(patch, "referencePrompt")) &&
+    patch.promptBindingsStale === undefined
+  )
     next.promptBindingsStale = false;
   if (
     sourceChanged ||
@@ -324,6 +333,7 @@ export function patchStudioDraft(
     // 终稿指纹属于上一个项目/来源，换项目后必然对不上，留着只会随草稿一起复活。
     if (!Object.hasOwn(patch, "finalSnapshot")) next.finalSnapshot = undefined;
     if (!Object.hasOwn(patch, "prompt")) next.prompt = "";
+    if (!Object.hasOwn(patch, "referencePrompt")) next.referencePrompt = "";
     if (!Object.hasOwn(patch, "promptEdited")) next.promptEdited = false;
     if (!patch.script) next.script = blank.script;
     if (!Object.hasOwn(patch, "scriptEdited")) next.scriptEdited = false;
@@ -435,7 +445,9 @@ export const DEFAULT_MAX_REFERENCE_IMAGES = 8;
 export const DEFAULT_MAX_REFERENCE_VIDEOS = 3;
 export const DEFAULT_MAX_REFERENCE_AUDIOS = 3;
 
-/** R2V 参考视频/音频时长上限（秒）：上传前前端探测拦截，选取时对已知时长拦截。 */
+/** R2V 参考视频/音频时长上下限（秒）：上传前前端探测拦截，选取时对已知时长拦截。
+ *  下限与生成端 independent.py 的 2–15 秒门禁对齐，避免提交时才被 422 拦下。 */
+export const MIN_REFERENCE_MEDIA_SECONDS = 2;
 export const MAX_REFERENCE_MEDIA_SECONDS = 15;
 export const MAX_REFERENCE_FILES = 12;
 
@@ -470,6 +482,7 @@ export function validateReferences(
   const videos: StudioAsset[] = [];
   const audios: StudioAsset[] = [];
   const overDurationMedia: StudioAsset[] = [];
+  const underDurationMedia: StudioAsset[] = [];
   let invalidCount = 0;
   let duplicateCount = 0;
 
@@ -488,13 +501,13 @@ export function validateReferences(
     if (asset.kind === "image") images.push(asset);
     else if (asset.kind === "video") videos.push(asset);
     else audios.push(asset);
-    // 视频/音频参考时长超过上限即视为问题素材；时长未知（undefined）放行。
-    if (
-      asset.kind !== "image" &&
-      asset.durationSeconds !== undefined &&
-      asset.durationSeconds > MAX_REFERENCE_MEDIA_SECONDS
-    ) {
-      overDurationMedia.push(asset);
+    // 视频/音频参考时长越界即视为问题素材；时长未知（undefined）放行。
+    if (asset.kind !== "image" && asset.durationSeconds !== undefined) {
+      if (asset.durationSeconds > MAX_REFERENCE_MEDIA_SECONDS) {
+        overDurationMedia.push(asset);
+      } else if (asset.durationSeconds < MIN_REFERENCE_MEDIA_SECONDS) {
+        underDurationMedia.push(asset);
+      }
     }
   }
 
@@ -544,6 +557,11 @@ export function validateReferences(
     issues.push(
       `参考视频/音频时长不能超过 ${MAX_REFERENCE_MEDIA_SECONDS} 秒，旧草稿中有 ${overDurationCount} 项超时素材。`,
     );
+  const underDurationCount = underDurationMedia.length;
+  if (underDurationCount > 0)
+    issues.push(
+      `参考视频/音频时长不能短于 ${MIN_REFERENCE_MEDIA_SECONDS} 秒，旧草稿中有 ${underDurationCount} 项过短素材。`,
+    );
   for (const [label, media] of [
     ["视频", videos],
     ["音频", audios],
@@ -558,8 +576,10 @@ export function validateReferences(
       );
   }
 
-  // 整理：按选择顺序保留，每类裁剪到各自上限；超时素材一并移除。
-  const overDurationIds = new Set(overDurationMedia.map((asset) => asset.id));
+  // 整理：按选择顺序保留，每类裁剪到各自上限；时长越界素材一并移除。
+  const overDurationIds = new Set(
+    [...overDurationMedia, ...underDurationMedia].map((asset) => asset.id),
+  );
   let keptImages = 0;
   let keptVideos = 0;
   let keptAudios = 0;
@@ -613,6 +633,7 @@ export function validateReferences(
     duplicateCount,
     overLimitCount,
     overDurationCount,
+    underDurationCount,
     issues,
     repairIds,
   };

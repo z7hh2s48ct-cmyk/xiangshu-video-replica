@@ -471,10 +471,11 @@ def test_dashboard_and_statistics_share_settled_financial_facts(
     assert payload["today"]["recharge_fen"] == 10000  # Never added to consumption income.
     assert payload["today"]["output_seconds"] == 15.08
     assert payload["today"]["margin_pct"] == 93
-    # Zero cost is configured, NULL is not。计数含本分支新增的三个爆款科目
-    # （viral_search / viral_search_refresh / viral_statistics，均未配置费率 = NULL），
-    # 故为 15。
-    assert payload["todos"]["unconfigured_rates"] == 15
+    # Zero cost is configured, NULL is not。本用例只为 analysis 配了成本单价，故计数 =
+    # 全部对客收费科目 - analysis。其中含五个爆款科目（viral_search /
+    # viral_search_refresh / viral_statistics / viral_detail / viral_copy，均未配置
+    # 费率 = NULL），所以是 17。
+    assert payload["todos"]["unconfigured_rates"] == 17
 
     with psycopg.connect(dashboard_pg_dsn) as raw:
         _billing_fact(raw, when=lower, revenue=None, costs=("1",))

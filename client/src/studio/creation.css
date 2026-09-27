@@ -1408,7 +1408,7 @@
   min-height: 300px;
 }
 /* 参考素材行（视频工作区）：缩略图居左、@编号文案居中、移除居右，用途输入独占
-   次行整宽；行内不再做多列小卡片，素材区整体落在合并上传区下方。 */
+   次行整宽、用途快捷项再占一行；行内不再做多列小卡片，素材区整体落在合并上传区下方。 */
 .creation-video-workspace .creation-reference-list {
   max-height: none;
   overflow: visible;
@@ -1418,7 +1418,8 @@
   grid-template-columns: 132px minmax(0, 1fr) 32px;
   grid-template-areas:
     "preview copy remove"
-    "purpose purpose purpose";
+    "purpose purpose purpose"
+    "chips chips chips";
   gap: 8px 12px;
   margin: 0;
   padding: 10px;
@@ -1440,10 +1441,65 @@
 .creation-video-workspace .creation-reference-remove {
   grid-area: remove;
 }
-.creation-video-workspace .creation-reference-row > input {
+/* 用途输入：音频行留空时挂「用途待确认」角标，提示系统会按默认值生成 */
+.creation-purpose-field {
   grid-area: purpose;
+  position: relative;
   min-width: 0;
+}
+.creation-purpose-field > input {
   width: 100%;
+  min-width: 0;
+  padding-right: 92px;
+}
+.creation-purpose-badge {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 1px 8px;
+  border: 1px solid #665025;
+  border-radius: 999px;
+  color: var(--studio-gold);
+  background: #1a1810;
+  font-size: 11px;
+  pointer-events: none;
+}
+.creation-purpose-chips {
+  grid-area: chips;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.creation-purpose-chips button {
+  padding: 3px 10px;
+  border: 1px solid #34362f;
+  border-radius: 999px;
+  background: transparent;
+  color: #b9b6ad;
+  font-size: 11px;
+  cursor: pointer;
+}
+.creation-purpose-chips button:hover {
+  border-color: #665025;
+  color: var(--studio-gold);
+}
+.creation-purpose-chips button.is-on {
+  border-color: var(--studio-gold);
+  color: var(--studio-gold);
+  background: #1a1810;
+}
+.creation-purpose-chips button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.creation-purpose-note {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--studio-muted);
+  font-size: 11px;
+  line-height: 1.6;
 }
 .creation-video-workspace .creation-reference-preview-button {
   --image-preview-height: 74px;

@@ -86,6 +86,7 @@ import {
   referencePreviewView,
   releaseReferencePreviews,
 } from "./referenceMaterialPreview";
+import { hasRef2vaStructure } from "./referencePrompt";
 import {
   clearScriptRewriteIdempotencyKey,
   resolvePendingRewrite,
@@ -99,13 +100,16 @@ import {
   DEFAULT_MAX_REFERENCE_IMAGES,
   DEFAULT_MAX_REFERENCE_VIDEOS,
   hasCopyResult,
+  MAX_REFERENCE_FILES,
   MAX_REFERENCE_MEDIA_SECONDS,
+  MIN_REFERENCE_MEDIA_SECONDS,
   mergeStudioAssets,
   resolveSubmittedRatio,
   resolveVideoMode,
   validateReferences,
 } from "./state";
 import type {
+  AssetKind,
   StudioAsset,
   StudioDraft,
   StudioPerson,
@@ -3806,11 +3810,24 @@ function ShotTableImporter({
 
 type UploadKind = "image" | "video" | "audio";
 
-const UPLOAD_ACCEPT: Record<UploadKind, string[]> = {
-  image: ["image/png", "image/jpeg"],
-  video: ["video/mp4", "video/quicktime"],
-  audio: ["audio/mpeg"],
+/** 与后端 ALLOWED_UPLOADS 及参考音频白名单对齐；accept 与匹配都按扩展名，
+ *  因为 WebView 给出的 MIME 会漂移（.m4a→audio/x-m4a、.opus→audio/ogg 等），
+ *  按 MIME 精确比对会把合法文件挡在门外。 */
+const UPLOAD_EXTENSIONS: Record<UploadKind, string[]> = {
+  image: [".png", ".jpg", ".jpeg"],
+  video: [".mp4", ".mov"],
+  audio: [".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus"],
 };
+
+function uploadKindForFile(
+  file: File,
+  acceptKinds: UploadKind[],
+): UploadKind | undefined {
+  const name = file.name.toLowerCase();
+  return acceptKinds.find((item) =>
+    UPLOAD_EXTENSIONS[item].some((extension) => name.endsWith(extension)),
+  );
+}
 
 function VideoMaterialUpload({
   disabled = false,
@@ -3848,13 +3865,11 @@ function VideoMaterialUpload({
 
   const upload = async (file: File) => {
     if (readOnly || disabled || uploadingRef.current) return;
-    const kind = acceptKinds.find((item) =>
-      UPLOAD_ACCEPT[item].includes(file.type),
-    );
+    const kind = uploadKindForFile(file, acceptKinds);
     if (!kind) {
       notify(
         acceptsMedia
-          ? "仅支持 PNG、JPEG 图片，MP4、MOV 视频或 MP3 音频。"
+          ? "仅支持 PNG、JPEG 图片，MP4、MOV 视频，或 MP3、WAV、M4A、AAC、FLAC、OGG、OPUS 音频。"
           : "仅支持 PNG 或 JPEG 图片。",
       );
       return;
@@ -3870,17 +3885,42 @@ function VideoMaterialUpload({
       if (kind === "image") {
         asset = await uploadVideoMaterial(file, group, setProgress);
       } else {
-        // 视频/音频参考上传前先探测时长，超过 15 秒直接拦截、不发上传请求。
-        const duration =
-          kind === "video"
-            ? await readVideoDuration(file)
-            : await readAudioDuration(file);
+        // 视频/音频参考上传前先探测时长，超出 2–15 秒直接拦截、不发上传请求。
+        // 探测失败的报错本身可操作（换格式/裁剪），单独成支透出，不再落到
+        // 下面的「上传失败，请稍后重试」通用分支。
+        let duration: number;
+        try {
+          duration =
+            kind === "video"
+              ? await readVideoDuration(file)
+              : await readAudioDuration(file);
+        } catch (error) {
+          if (mountedRef.current) {
+            notify(
+              error instanceof Error && error.message
+                ? error.message
+                : kind === "video"
+                  ? "无法读取视频时长，请改用 MP4 或 MOV 文件后重试。"
+                  : "无法读取音频时长，请改用 MP3、WAV、M4A 等常见格式后重试。",
+            );
+          }
+          return;
+        }
+        if (duration < MIN_REFERENCE_MEDIA_SECONDS) {
+          if (mountedRef.current)
+            notify(
+              kind === "video"
+                ? `参考视频时长不能短于 ${MIN_REFERENCE_MEDIA_SECONDS} 秒，请更换素材或裁剪后上传。`
+                : `参考音频时长不能短于 ${MIN_REFERENCE_MEDIA_SECONDS} 秒，请更换素材或裁剪后上传。`,
+            );
+          return;
+        }
         if (duration > MAX_REFERENCE_MEDIA_SECONDS) {
           if (mountedRef.current)
             notify(
               kind === "video"
-                ? "参考视频时长不能超过 15 秒，请裁剪后再上传。"
-                : "参考音频时长不能超过 15 秒，请裁剪后再上传。",
+                ? `参考视频时长不能超过 ${MAX_REFERENCE_MEDIA_SECONDS} 秒，请裁剪后再上传。`
+                : `参考音频时长不能超过 ${MAX_REFERENCE_MEDIA_SECONDS} 秒，请裁剪后再上传。`,
             );
           return;
         }
@@ -3953,7 +3993,9 @@ function VideoMaterialUpload({
         {dropzone && <small>点击或拖拽添加</small>}
       </button>
       <input
-        accept={acceptKinds.flatMap((item) => UPLOAD_ACCEPT[item]).join(",")}
+        accept={acceptKinds
+          .flatMap((item) => UPLOAD_EXTENSIONS[item])
+          .join(",")}
         aria-label={`上传${label}`}
         disabled={readOnly || disabled}
         hidden
@@ -3967,7 +4009,9 @@ function VideoMaterialUpload({
       />
       {acceptsMedia && (
         <small className="creation-upload-hint">
-          视频、音频各累计 ≤15 秒；参考合计 ≤12 项
+          视频、音频单条 2–
+          {MAX_REFERENCE_MEDIA_SECONDS} 秒且各累计 ≤
+          {MAX_REFERENCE_MEDIA_SECONDS} 秒；参考合计 ≤{MAX_REFERENCE_FILES} 项
         </small>
       )}
     </>
@@ -4148,6 +4192,29 @@ const PROMPT_MODE_LABELS: Record<H3Mode, string> = {
 
 function promptModeLabel(mode: H3Mode | undefined): string {
   return mode ? `${PROMPT_MODE_LABELS[mode]}（${mode}）` : "未记录";
+}
+
+/** 用途是自由文本，但快捷项按顿号/逗号拼装，两者共用同一套切分口径。 */
+function purposeTerms(value?: string): string[] {
+  return (value ?? "")
+    .split(/[、,，]/)
+    .map((term) => term.trim())
+    .filter(Boolean);
+}
+
+function selectPurposeTerm(
+  kind: AssetKind,
+  selected: string[],
+  term: string,
+): string {
+  // 音频用途是单选：「音色参考」与「不用它的声音」互斥，多选会让提示词自相矛盾。
+  if (kind === "audio")
+    return selected.includes(term) && selected.length === 1 ? "" : term;
+  return (
+    selected.includes(term)
+      ? selected.filter((item) => item !== term)
+      : [...selected, term]
+  ).join("、");
 }
 
 export function VideoPage() {
@@ -4445,8 +4512,13 @@ export function VideoPage() {
     referenceAssetsPending ||
     referenceAssetsError ||
     referenceAtLimit;
+  // 参考生视频（六段式）与文/图生视频（集成描述）是两套提示词实现：正文分仓，
+  // 切页签不会互相覆盖，提交时按当前模式取对应那份。
+  const videoPrompt = referenceMode
+    ? (state.draft.referencePrompt ?? "")
+    : state.draft.prompt;
   const ready =
-    Boolean(state.draft.prompt.trim()) &&
+    Boolean(videoPrompt.trim()) &&
     !state.draft.replicaPreparationPending &&
     (referenceMode
       ? references.length > 0 &&
@@ -4465,17 +4537,28 @@ export function VideoPage() {
   // 忽略直接提交；readAppliedOptimization 命中已优化收据时返回 source="ai"。
   const promptOptimizationScope = `${user.id}:${state.page}`;
   const promptAlreadyOptimized =
-    readAppliedOptimization(promptOptimizationScope, state.draft.prompt)
-      .source === "ai";
+    readAppliedOptimization(promptOptimizationScope, videoPrompt).source ===
+    "ai";
   const suggestOptimizePrompt =
     !referenceMode &&
     currentPromptMode === "T2VA" &&
     !readOnly &&
-    Boolean(state.draft.prompt.trim()) &&
+    Boolean(videoPrompt.trim()) &&
     !promptAlreadyOptimized;
+  // 参考生视频的两个状态位：已是六段式 → 按钮只做优化；否则按钮负责从需求生成。
+  // 生成中禁用「生成视频」——半成品提示词提交会被服务端结构门禁拒绝，不如在入口拦住。
+  const referenceStructured = referenceMode && hasRef2vaStructure(videoPrompt);
+  const [promptBusy, setPromptBusy] = useState(false);
+  const [regenerateSignal, setRegenerateSignal] = useState(0);
   const videoTask = state.draft.videoBatchId
     ? data.tasks.find((task) => task.id === state.draft.videoBatchId)
     : undefined;
+  const patchVideoPrompt = (text: string, extra: Partial<StudioDraft> = {}) =>
+    patchDraft(
+      referenceMode
+        ? { referencePrompt: text, ...extra }
+        : { prompt: text, ...extra },
+    );
 
   const appendMaterial = (asset: StudioAsset) => {
     updateData((previous) => ({
@@ -4538,7 +4621,7 @@ export function VideoPage() {
       </Button>
       <Button
         variant="primary"
-        disabled={readOnly || !ready}
+        disabled={readOnly || !ready || promptBusy}
         onClick={() => requestGeneration("视频生成")}
       >
         <Icon name="play" />
@@ -4729,23 +4812,88 @@ export function VideoPage() {
                               </button>
                             ) : null}
                           </span>
-                          <input
-                            aria-label={`${asset.name}的参考用途`}
-                            placeholder="参考用途，如人物、服装、场景"
-                            disabled={readOnly}
-                            value={
+                          <span className="creation-purpose-field">
+                            <input
+                              aria-label={`${asset.name}的参考用途`}
+                              placeholder={
+                                asset.kind === "audio"
+                                  ? "参考用途，如音色参考、节奏参考（可留空）"
+                                  : "参考用途，如人物、服装、场景"
+                              }
+                              disabled={readOnly}
+                              value={
+                                state.draft.referencePurposes?.[asset.id] ?? ""
+                              }
+                              maxLength={200}
+                              onChange={(event) =>
+                                patchDraft({
+                                  referencePurposes: {
+                                    ...state.draft.referencePurposes,
+                                    [asset.id]: event.target.value,
+                                  },
+                                })
+                              }
+                            />
+                            {/* 留空不是错误：服务端会按默认用途生成并在核对区提示待确认。
+                                角标只说明「这一项还没定」，避免用户以为必须填完才能生成。 */}
+                            {asset.kind === "audio" &&
+                            !(
                               state.draft.referencePurposes?.[asset.id] ?? ""
-                            }
-                            maxLength={200}
-                            onChange={(event) =>
-                              patchDraft({
-                                referencePurposes: {
-                                  ...state.draft.referencePurposes,
-                                  [asset.id]: event.target.value,
-                                },
-                              })
-                            }
-                          />
+                            ).trim() ? (
+                              <span className="creation-purpose-badge">
+                                用途待确认
+                              </span>
+                            ) : null}
+                          </span>
+                          <div className="creation-purpose-chips">
+                            {(
+                              {
+                                image: ["人物", "服装", "场景", "风格", "构图"],
+                                video: ["运镜", "动作", "节奏", "构图"],
+                                audio: [
+                                  "音色参考",
+                                  "节奏参考",
+                                  "环境音参考",
+                                  "不用它的声音",
+                                ],
+                              } as const
+                            )[asset.kind].map((term) => {
+                              const selected = purposeTerms(
+                                state.draft.referencePurposes?.[asset.id],
+                              );
+                              return (
+                                <button
+                                  type="button"
+                                  key={term}
+                                  className={
+                                    selected.includes(term)
+                                      ? "is-on"
+                                      : undefined
+                                  }
+                                  disabled={readOnly}
+                                  onClick={() =>
+                                    patchDraft({
+                                      referencePurposes: {
+                                        ...state.draft.referencePurposes,
+                                        [asset.id]: selectPurposeTerm(
+                                          asset.kind,
+                                          selected,
+                                          term,
+                                        ),
+                                      },
+                                    })
+                                  }
+                                >
+                                  {term}
+                                </button>
+                              );
+                            })}
+                            {asset.kind === "audio" ? (
+                              <small className="creation-purpose-note">
+                                系统不会分析音轨内容，用途只按你的说明生效；留空时按「音色参考」生成并在核对区提示待确认。
+                              </small>
+                            ) : null}
+                          </div>
                           <Button
                             aria-label={`移除 ${asset.name}`}
                             className="creation-reference-remove"
@@ -4776,7 +4924,7 @@ export function VideoPage() {
                 <small data-state={referenceAtLimit ? "limited" : undefined}>
                   {referenceAtLimit
                     ? "已达参考素材上限，需移除后才能继续添加。"
-                    : `视频、音频各累计 ≤${MAX_REFERENCE_MEDIA_SECONDS} 秒`}
+                    : `视频、音频单条 ${MIN_REFERENCE_MEDIA_SECONDS}–${MAX_REFERENCE_MEDIA_SECONDS} 秒，各累计 ≤${MAX_REFERENCE_MEDIA_SECONDS} 秒`}
                 </small>
               </p>
               {referencePreviewDialogAsset ? (
@@ -4890,8 +5038,7 @@ export function VideoPage() {
                 <SavedPromptImporter
                   onImport={(promptText, context) => {
                     setShotTableImported(false);
-                    patchDraft({
-                      prompt: promptText,
+                    patchVideoPrompt(promptText, {
                       importedPromptContext: context,
                       promptBindingsStale:
                         /<(Picture|Video|Audio)\s+\d+>|@\d+/.test(promptText),
@@ -4903,8 +5050,7 @@ export function VideoPage() {
                     disabled={readOnly}
                     onImport={(promptText) => {
                       setShotTableImported(true);
-                      patchDraft({
-                        prompt: promptText,
+                      patchVideoPrompt(promptText, {
                         promptEdited: true,
                         importedPromptContext: undefined,
                         promptBindingsStale: false,
@@ -4914,16 +5060,56 @@ export function VideoPage() {
                 ) : null}
               </>
             }
-            value={state.draft.prompt}
+            value={videoPrompt}
             readOnly={readOnly}
             optimizationDisabled={review}
             optimizationActionLabel={
               importedModeMismatch
                 ? "按当前素材 AI 转换"
-                : shotTableImported
-                  ? "AI 优化"
-                  : undefined
+                : referenceMode
+                  ? referenceStructured
+                    ? "AI 优化"
+                    : "生成标准提示词"
+                  : shotTableImported
+                    ? "AI 优化"
+                    : undefined
             }
+            formatStatus={
+              referenceMode
+                ? {
+                    label: "六段式（H3 Ref2VA）",
+                    title: "参考生视频（H3 Ref2VA）官方六段式结构",
+                    ready: referenceStructured,
+                    hint: promptBusy
+                      ? "AI 正在按参考素材生成六段式提示词…通常 10–30 秒，生成完成前不建议提交。"
+                      : promptAlreadyOptimized
+                        ? "格式已就绪，请核对下方核对区再提交。"
+                        : referenceStructured
+                          ? "已识别为六段式（你手写或从提示词库导入）；AI 优化只改文风与措辞，不改结构、编号与引用规则。"
+                          : "直接用一句话写需求即可：六段结构、素材编号（<Picture 1>/<Video 1>/<Audio 1>）与排除规则由系统生成。",
+                  }
+                : undefined
+            }
+            assetNames={Object.fromEntries(
+              references.map((asset) => [
+                asset.assetId ?? asset.id,
+                asset.name,
+              ]),
+            )}
+            onPurposeChange={(assetId, purpose) => {
+              const asset = references.find(
+                (item) => (item.assetId ?? item.id) === assetId,
+              );
+              if (asset)
+                patchDraft({
+                  referencePurposes: {
+                    ...state.draft.referencePurposes,
+                    [asset.id]: purpose,
+                  },
+                });
+            }}
+            onOptimizationBusyChange={setPromptBusy}
+            runSignal={regenerateSignal}
             scope={`${user.id}:${state.page}`}
             onChange={(text) => {
               if (
@@ -4932,8 +5118,7 @@ export function VideoPage() {
                 )
               )
                 setShotTableImported(false);
-              patchDraft({
-                prompt: text,
+              patchVideoPrompt(text, {
                 promptEdited: true,
                 importedPromptContext: undefined,
               });
@@ -4961,11 +5146,24 @@ export function VideoPage() {
             }}
           />
           {state.draft.promptBindingsStale && (
-            <div role="alert">
+            <div role="alert" className="h3-prompt-stale">
               {importedModeMismatch
                 ? "导入模板与当前生成模式不同，请点击上方“按当前素材 AI 转换”；转换完成后会自动更新素材引用。"
                 : "参考素材已变化，请核对提示词的素材编号。"}
+              {/* 素材一变，提示词里的编号就可能是旧的。与其让用户自己找按钮，
+                  直接把生成入口放到告警条上；生成结果仍可撤销。 */}
+              {referenceMode && !importedModeMismatch ? (
+                <Button
+                  variant="outline"
+                  disabled={readOnly || promptBusy || !videoPrompt.trim()}
+                  onClick={() => setRegenerateSignal((value) => value + 1)}
+                >
+                  <Icon name="sparkles" size={16} />
+                  重新生成标准提示词
+                </Button>
+              ) : null}
               <Button
+                variant="quiet"
                 onClick={() => patchDraft({ promptBindingsStale: false })}
                 disabled={readOnly}
               >

@@ -526,6 +526,25 @@ describe("R2V 参考素材统一混合列表校验", () => {
     // 整理时移除超时素材，保留合规与时长未知（放行）的素材
     expect(result.repairIds).toEqual(["vid-ok", "aud-unknown"]);
   });
+
+  it("视频/音频参考时长不足 2 秒计为问题并在整理时移除", () => {
+    const available = [
+      { ...referenceFixture("vid-ok", "video"), durationSeconds: 2 },
+      { ...referenceFixture("vid-short", "video"), durationSeconds: 1.4 },
+      { ...referenceFixture("aud-short", "audio"), durationSeconds: 0.8 },
+      referenceFixture("aud-unknown", "audio"),
+    ];
+    const result = validateReferences(
+      ["vid-ok", "vid-short", "aud-short", "aud-unknown"],
+      available,
+    );
+    expect(result.underDurationCount).toBe(2);
+    expect(result.issues.some((issue) => issue.includes("不能短于 2 秒"))).toBe(
+      true,
+    );
+    // 生成端同样按 2–15 秒门禁，过短素材必须一起整理掉
+    expect(result.repairIds).toEqual(["vid-ok", "aud-unknown"]);
+  });
 });
 
 describe("参考素材累计时长", () => {

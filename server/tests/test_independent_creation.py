@@ -303,6 +303,23 @@ def _create(request: IndependentVideoRequest, actor: CurrentUser) -> BatchResult
         return create_independent_batch(conn, actor=actor, request=request)
 
 
+def _ref2va_prompt(body: str) -> str:
+    """最小合法 Ref2VA 六段式外壳。
+
+    R2V 提交端做完整结构门禁（参考生视频提示词只有六段式一种合法形态），
+    因此「验证别的东西」的用例也必须给出结构合法的提示词。外壳刻意不引用
+    任何素材标签：标签绑定由 ``body`` 决定，各用例自己断言。
+    """
+    return (
+        "subject_definitions:\n素材按用户选择的顺序绑定主体。\n"
+        "summary:\nreference generation\n"
+        "retention_analysis:\n参考视频保留动作与运镜，其余属性不复制。\n"
+        f"detailed_description:\n[Shot 1] {body}\n"
+        "overall_soundscape:\n环境音，无人声对白。\n"
+        "non_diegetic_music:\nN/A"
+    )
+
+
 def _list_batches(actor: CurrentUser) -> GenerationBatchListPage:
     with pg_transaction() as raw:
         conn = BusinessConnection.postgres(raw)
@@ -568,7 +585,7 @@ def test_extended_modes_submit_without_any_flag(scene: str) -> None:
     r2v = _create(
         IndependentVideoRequest(
             mode="r2v",
-            prompt_text="按照参考图生成别墅外观",
+            prompt_text=_ref2va_prompt("按照参考图生成别墅外观"),
             reference_asset_ids=["frame-owned"],
             output_duration_seconds=6,
             quantity=1,
@@ -1080,7 +1097,7 @@ def test_t2v_and_r2v_tasks_run_through_worker_with_protocol_payload(scene: str) 
     _create(
         IndependentVideoRequest(
             mode="r2v",
-            prompt_text="按照参考图生成别墅外观",
+            prompt_text=_ref2va_prompt("按照参考图生成别墅外观"),
             reference_asset_ids=["frame-owned"],
             output_duration_seconds=6,
             quantity=1,
@@ -1127,7 +1144,9 @@ def test_r2v_reference_video_and_audio_flow_through_worker_payload(
     _create(
         IndependentVideoRequest(
             mode="r2v",
-            prompt_text="视频@1的人物用图片@2替换，音色参考@3，保留user@1.example。",
+            prompt_text=_ref2va_prompt(
+                "视频@1的人物用图片@2替换，音色参考@3，保留user@1.example。"
+            ),
             reference_asset_ids=["material-video-owned", "frame-owned", "material-audio-owned"],
             output_duration_seconds=6,
             quantity=1,
@@ -1153,8 +1172,11 @@ def test_r2v_reference_video_and_audio_flow_through_worker_payload(
         "fake://generation-results/ref-audio.mp3"
     ]
     request_payload = json.loads(str(row["provider_request_json"]))
-    assert request_payload["content"][0]["text"] == (
-        "视频<Video 1>的人物用图片<Picture 1>替换，音色参考<Audio 1>，保留user@1.example。"
+    # @N 按混合素材排列 → 供应商标签按媒体类型独立编号；正文里不再是自由文本，
+    # 而是六段式正文中的一句，故断言替换结果落在正文内。
+    assert (
+        "视频<Video 1>的人物用图片<Picture 1>替换，音色参考<Audio 1>，"
+        "保留user@1.example。" in request_payload["content"][0]["text"]
     )
     assert snapshot["reference_labels"] == {"1": "<Video 1>", "2": "<Picture 1>", "3": "<Audio 1>"}
     roles = [item.get("role") for item in request_payload["content"][1:]]
@@ -1212,10 +1234,47 @@ def test_r2v_rejects_replica_source_video_as_reference(scene: str) -> None:
     assert exc.value.detail["code"] == "INDEPENDENT_ASSET_KIND_UNSUPPORTED"
 
 
+@pytest.mark.parametrize(
+    ("prompt_text", "code"),
+    [
+        (
+            "For the target video, at 0.00 seconds into the target video, "
+            "<Picture 1> (from [Shot 1]) is fully referenced.\n\n"
+            "integrated_multimodal_description: [Shot 1]\n主讲人绑定：<Picture 1> 中的主体",
+            "PROMPT_REPLICA_DRAFT_NOT_ALLOWED",
+        ),
+        ("按照参考图生成别墅外观", "H3_STRUCTURE_INVALID"),
+    ],
+)
+def test_r2v_rejects_replica_draft_and_freeform_prompt_before_reserve(
+    scene: str, prompt_text: str, code: str
+) -> None:
+    """参考生视频只接受六段式：复刻稿与随手短句都在建批前拦下，不扣费。
+
+    复刻稿把首帧当主讲人锚点，与 R2V「一张参考图」语义不同，串用会让主体错位；
+    结构不全的内容供应商会直接拒收。两者都要在 RESERVE 之前失败。
+    """
+    balance = _wallet(EMPLOYEE_1.id)
+    with pytest.raises(HTTPException) as exc:
+        _create(
+            IndependentVideoRequest(
+                mode="r2v",
+                prompt_text=prompt_text,
+                reference_asset_ids=["frame-owned"],
+                output_duration_seconds=6,
+                quantity=1,
+                idempotency_key=f"r2v-structure-{code}",
+            ),
+            EMPLOYEE_1,
+        )
+    assert exc.value.status_code == 422
+    assert exc.value.detail["code"] == code
+    assert _wallet(EMPLOYEE_1.id) == balance
+    assert _ledger_count("RESERVE") == 0
+
+
 def test_video_task_route_creates_batch_through_fenced_write_on_pg(scene: str) -> None:
     """Restore the ``POST /api/independent/video-tasks`` fenced-write HTTP contract.
-
-    origin/main drove this through ``client.post``; the migration kept only the
     service call. The real ``get_business_db`` fence refuses the dev header on PG
     (401 SESSION_TOKEN_REQUIRED), so the ``_PgBusinessDb`` double mirrors the
     production ``BusinessDb.write()`` on a *real* ``pg_transaction``: the 201
@@ -1315,7 +1374,7 @@ def test_r2v_allows_fifteen_seconds_per_media_type(scene: str) -> None:
     result = _create(
         IndependentVideoRequest(
             mode="r2v",
-            prompt_text="分别引用视频和声音",
+            prompt_text=_ref2va_prompt("分别引用视频和声音"),
             reference_asset_ids=["material-video-owned", "material-audio-owned"],
             output_duration_seconds=4,
             quantity=1,

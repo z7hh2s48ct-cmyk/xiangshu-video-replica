@@ -427,7 +427,12 @@ export function WorkbenchPage() {
       });
       refresh();
       if (purpose === "copy") {
-        extractScriptFromUpload(task.projectId, task.sourceAssetId);
+        // 爆款链路带上视频身份：转写完成后凭它回「获取文案」取正文（交付与计费点），
+        // 与爆款列表入口（ContentPages goExtract）同口径。
+        extractScriptFromUpload(task.projectId, task.sourceAssetId, undefined, {
+          platformKey: video.platformKey,
+          nativeId: video.nativeId,
+        });
       } else {
         navigate("replica", {
           selectedVideoId: video.id,

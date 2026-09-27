@@ -7,31 +7,55 @@ import {
   type PromptGenerationContext,
   type PromptOptimizeInput,
   type PromptOptimizeResult,
+  type PromptReferencePlanItem,
+  type PromptReviewNote,
 } from "../api";
 import { constrainReferenceVideoPrompt } from "./referencePrompt";
 
+/** 生成结果核对区数据；只在当前正文正是这次生成的结果时可用。 */
+export type OptimizationReview = {
+  assumptions: PromptReviewNote[];
+  referencePlan: PromptReferencePlanItem[];
+  needsConfirmation: PromptReviewNote[];
+};
 type AppliedOptimization = {
   context: PromptGenerationContext;
   text: string;
   optimization_task_id: string;
   context_hash: string;
+  review?: OptimizationReview;
 };
 const applied = new Map<string, AppliedOptimization>();
+const APPLIED_OPTIMIZED_MESSAGE = "已按 H3 格式优化";
+const APPLIED_GENERATED_MESSAGE = "已按 H3 格式生成";
+const APPLIED_MESSAGES = [APPLIED_OPTIMIZED_MESSAGE, APPLIED_GENERATED_MESSAGE];
+function readReceipt(scope: string): AppliedOptimization | null {
+  const cached = applied.get(scope);
+  if (cached) return cached;
+  try {
+    return JSON.parse(localStorage.getItem(`h3.applied:${scope}`) || "null");
+  } catch {
+    /* unavailable storage */
+  }
+  return null;
+}
+function saveReceipt(scope: string, receipt: AppliedOptimization | null) {
+  if (receipt) applied.set(scope, receipt);
+  else applied.delete(scope);
+  try {
+    if (receipt)
+      localStorage.setItem(`h3.applied:${scope}`, JSON.stringify(receipt));
+    else localStorage.removeItem(`h3.applied:${scope}`);
+  } catch {
+    /* memory fallback */
+  }
+}
 export function readAppliedOptimization(
   scope: string,
   text: string,
   source?: { script_version_id?: string; shot_card_version_id?: string },
 ) {
-  let receipt = applied.get(scope);
-  if (!receipt) {
-    try {
-      receipt = JSON.parse(
-        localStorage.getItem(`h3.applied:${scope}`) || "null",
-      );
-    } catch {
-      /* unavailable storage */
-    }
-  }
+  const receipt = readReceipt(scope);
   if (
     source &&
     Object.entries(source).some(
@@ -50,6 +74,15 @@ export function readAppliedOptimization(
         context_hash: receipt.context_hash,
       }
     : {};
+}
+
+/** 核对区数据与正文绑定的口径和 readAppliedOptimization 一致：正文一改就不再展示。 */
+export function readOptimizationReview(
+  scope: string,
+  text: string,
+): OptimizationReview | null {
+  const receipt = readReceipt(scope);
+  return receipt?.text === text && receipt.review ? receipt.review : null;
 }
 
 export function usePromptOptimization(
@@ -95,6 +128,9 @@ export function usePromptOptimization(
     after: string;
     key: string;
     sessionCurrent: () => boolean;
+    // 撤销一次「重新生成」要把上一版回执一起还原：正文退回去了，核对区却换成
+    // 「结构自检」，会把机器生成的稿子说成用户手写或导入的。
+    previousReceipt: AppliedOptimization | null;
   } | null>(null);
   useEffect(() => {
     mounted.current = true;
@@ -122,21 +158,25 @@ export function usePromptOptimization(
   }, [storageKey]);
 
   const apply = (text: string, receipt: AppliedOptimization) => {
-    applied.set(scope, receipt);
-    try {
-      localStorage.setItem(`h3.applied:${scope}`, JSON.stringify(receipt));
-    } catch {
-      /* memory fallback */
-    }
+    const cached = readReceipt(scope);
+    const previousReceipt =
+      cached?.text === latest.current.value ? cached : null;
+    saveReceipt(scope, receipt);
     setUndo({
       before: latest.current.value,
       after: text,
       key: latest.current.key,
       sessionCurrent: capturePromptSession(),
+      previousReceipt,
     });
     latest.current.onChange(text);
     setPending(null);
-    setMessage("已按 H3 格式优化");
+    // 参考生视频是从一句话需求「生成」，其余模式是「优化」已有正文。
+    setMessage(
+      context.route === "reference"
+        ? APPLIED_GENERATED_MESSAGE
+        : APPLIED_OPTIMIZED_MESSAGE,
+    );
   };
   const run = async () => {
     if (active.current || !value.trim()) return;
@@ -220,6 +260,12 @@ export function usePromptOptimization(
         text: optimizedText,
         optimization_task_id: result.task_id,
         context_hash: result.context_hash,
+        review: {
+          assumptions:
+            result.result.assumptions ?? result.result.warnings ?? [],
+          referencePlan: result.result.reference_plan ?? [],
+          needsConfirmation: result.result.needs_confirmation ?? [],
+        },
       };
       if (
         latest.current.revision !== started.revision ||
@@ -258,10 +304,11 @@ export function usePromptOptimization(
   return {
     busy,
     message:
-      message === "已按 H3 格式优化" && undo?.after !== value
+      APPLIED_MESSAGES.includes(message) && undo?.after !== value
         ? "已编辑，请核对当前内容。"
         : message,
     run,
+    review: readOptimizationReview(scope, value),
     pending: pending?.key === key && pending.sessionCurrent() ? pending : null,
     applyPending: () => {
       if (pending?.key === latest.current.key && pending.sessionCurrent())
@@ -280,6 +327,7 @@ export function usePromptOptimization(
         undo.sessionCurrent()
       ) {
         latest.current.onChange(undo.before);
+        saveReceipt(scope, undo.previousReceipt);
         setUndo(null);
         setMessage("");
       }

@@ -116,6 +116,8 @@ const LEDGER_TYPE_LABEL: Record<WalletTransaction["type"], string> = {
   RESERVE: "任务预扣",
   SETTLE: "任务消费",
   RELEASE: "积分退回",
+  // 管理端审计调账的反向记账（20260923T1200_admin_refund_adjustment）。
+  REFUND: "退款调账",
 };
 
 /** P1-7：折叠后的计费周期按最终态命名，而不是最后写入的那一笔。 */

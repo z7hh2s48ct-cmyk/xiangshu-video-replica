@@ -1,7 +1,11 @@
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useRef, useState } from "react";
-import { fetchViralVideoSource, type ViralPlatform } from "../api";
+import {
+  fetchViralCacheReclaim,
+  fetchViralVideoMedia,
+  type ViralPlatform,
+} from "../api";
 
 /**
  * 爆款视频本地缓存（P2）的桌面端桥接。
@@ -10,10 +14,24 @@ import { fetchViralVideoSource, type ViralPlatform } from "../api";
  * - §6.2 索引即文件系统，缓存状态由 Rust 侧按文件系统回答，这里不缓存业务字段。
  * - §13-2 Web 端降级：非桌面端不做缓存/播放，直接静默跳过（不能报错，否则
  *   Web 端浏览爆款列表会一路弹错）。
+ * - 缓存数据源统一为**云端归档**（`/videos/media`）：源站直链会过期，链接导入
+ *   与采集条目都靠归档才能稳定缓存，且该端点不计费。
  * - 进度事件驱动、不轮询。
  */
 
-export type ViralCacheState = "queued" | "downloading" | "cached" | "failed";
+/**
+ * 缓存条目在界面上的状态。
+ *
+ * 前四种与 Rust `CacheState` 一一对应；`unready` 是**前端专属**状态，用于
+ * 「云端归档尚未就绪」这类还没轮到下载队列就先失败的条目——如实说明，不谎报
+ * 「缓存失败」。
+ */
+export type ViralCacheState =
+  | "queued"
+  | "downloading"
+  | "cached"
+  | "failed"
+  | "unready";
 
 export type ViralCacheProgress = {
   platform: string;
@@ -59,6 +77,7 @@ export const CACHE_BADGE_LABELS: Record<ViralCacheState, string> = {
   downloading: "缓存中",
   cached: "已缓存",
   failed: "缓存失败（可重试）",
+  unready: "素材未就绪",
 };
 
 /** 只有桌面端有本地缓存能力（§13-2）。 */
@@ -206,25 +225,58 @@ export async function viralCacheLocalUrl(
   return path ? convertFileSrc(path) : null;
 }
 
+/** 归档素材未就绪（服务端仍在校验/转存，或存储后端临时不可用）。 */
+export function isViralMaterialUnready(error: unknown): boolean {
+  const code =
+    error && typeof error === "object" && "code" in error
+      ? (error as { code?: unknown }).code
+      : undefined;
+  return (
+    code === "VIRAL_MEDIA_PREPARATION_BUSY" ||
+    code === "STORAGE_BACKEND_UNAVAILABLE" ||
+    code === "VIRAL_MEDIA_URL_UNSUPPORTED"
+  );
+}
+
 /**
- * 按需缓存：先向服务端取直链，再入队下载。
+ * 按需缓存：取**云端归档**素材地址，再入队下载。
  *
- * 视频号没有随列表下发的直链，只有走这里才能缓存——所以这是「视频号缓存到本地」
- * 的唯一入口。取直链的端点**按次计费**，因此只能在用户明确动作（播放、提取文案、
- * 点缓存）时调用，绝不能放进列表渲染路径。
+ * 归档件是平台自己的对象（采集与链接导入在入库时就已转存），因此：
+ * - 不再依赖会过期的源站直链，链接导入与采集条目走同一条缓存路径；
+ * - 视频号在入云前就完成了解密，这里不需要 `decodeKey`；
+ * - `/videos/media` 不计费，翻页自动缓存不会产生「查看详情」以外的费用。
+ *
+ * 归档尚未就绪时服务端返回 503，调用方用 `isViralMaterialUnready` 区分。
  */
-export async function ensureViralSourceCache(
+export async function ensureViralArchiveCache(
   platform: ViralPlatform,
   videoId: string,
 ): Promise<void> {
   if (!cacheAvailable()) return;
-  const source = await fetchViralVideoSource(platform, videoId);
-  await ensureViralCache({
+  const media = await fetchViralVideoMedia(platform, videoId, "video");
+  await ensureViralCache({ platform, videoId, url: media.url });
+}
+
+/** 合成一条前端口径的失败状态：仅用于归档未就绪/取地址失败时的角标。 */
+export function fallbackCacheProgress(
+  platform: string,
+  videoId: string,
+  error: unknown,
+): ViralCacheProgress {
+  const unready = isViralMaterialUnready(error);
+  return {
     platform,
     videoId,
-    url: source.fullUrl,
-    decodeKey: source.decodeKey,
-  });
+    state: unready ? "unready" : "failed",
+    downloadedBytes: 0,
+    totalBytes: null,
+    speedBytesPerSecond: 0,
+    error: unready
+      ? "云端素材尚未就绪，稍后会自动重试"
+      : error instanceof Error
+        ? error.message
+        : "缓存失败，请重试",
+  };
 }
 
 /** 缓存占用的人类可读文本（面板用）。1 位小数足够，别在界面上堆精度。 */
@@ -262,66 +314,118 @@ export async function enforceViralCacheLimit(
 /**
  * 按需缓存指定视频（用户点播放/提取文案时的统一入口）。
  *
- * 抖音的直链随列表下发，直接入队；视频号没有直链，必须先取一次**计费**的
- * `/videos/source`。两者都不满足时静默返回，不抛错——调用方通常已经在给用户
- * 展示「尚未缓存」的说明，再弹一个错只会造成噪音。
+ * 与自动缓存共用归档数据源；缺少平台标识时静默返回、不抛错——调用方通常已经在
+ * 给用户展示「尚未缓存」的说明，再弹一个错只会造成噪音。
  */
 export async function ensureViralCacheForVideo(video: {
   platformKey?: string;
   nativeId?: string;
-  playUrl?: string | null;
 }): Promise<void> {
   if (!cacheAvailable()) return;
-  const { platformKey, nativeId, playUrl } = video;
+  const { platformKey, nativeId } = video;
   if (!platformKey || !nativeId) return;
-  if (playUrl) {
-    await ensureViralCache({
-      platform: platformKey,
-      videoId: nativeId,
-      url: playUrl,
-    });
-    return;
-  }
-  if (platformKey === "wechat_channels") {
-    await ensureViralSourceCache(platformKey, nativeId);
+  await ensureViralArchiveCache(platformKey as ViralPlatform, nativeId);
+}
+
+/** 与服务端单批上限一致（`ViralCacheReclaimRequest` 的 200 条）。 */
+const VIRAL_CACHE_RECLAIM_BATCH = 200;
+
+/**
+ * 回收「本地有、服务端却已不再下发」的条目（D5：删除与下架都要连带清本地缓存）。
+ *
+ * 判据必须问服务端：客户端的列表是分页的，只按「本次下发的条目」判断会把仍然有效
+ * 的缓存误删。`retain` 传客户端已知还需要保留的条目（本次下发的、收藏、素材等
+ * 非首页条目），服务端再叠加它自己的收藏与可见性判断，返回的才是可安全回收的集合。
+ *
+ * 返回真正被回收的 videoId；失败一律静默——回收是尽力而为，下次刷新会再试一次，
+ * 为此弹错只会打断浏览。
+ */
+export async function reclaimViralCache(
+  platform: string,
+  retain: ViralCacheKeyInput[] = [],
+): Promise<string[]> {
+  if (!cacheAvailable()) return [];
+  try {
+    const local = await listViralCache();
+    const retained = new Set(retain.map((item) => item.videoId));
+    const candidates = local
+      .filter(
+        (item) => item.platform === platform && !retained.has(item.videoId),
+      )
+      .map((item) => item.videoId);
+    const reclaimed: string[] = [];
+    for (
+      let start = 0;
+      start < candidates.length;
+      start += VIRAL_CACHE_RECLAIM_BATCH
+    ) {
+      const response = await fetchViralCacheReclaim(
+        platform as ViralPlatform,
+        candidates.slice(start, start + VIRAL_CACHE_RECLAIM_BATCH),
+      );
+      await Promise.all(
+        response.reclaim.map((videoId) => deleteViralCache(platform, videoId)),
+      );
+      reclaimed.push(...response.reclaim);
+    }
+    return reclaimed;
+  } catch {
+    return [];
   }
 }
 
-/** 自动缓存只关心这三个字段，因此不绑死到具体的视频类型上。 */
+/** 自动缓存只关心这两个字段，因此不绑死到具体的视频类型上。 */
 export type ViralCacheCandidate = {
   platformKey?: string;
   nativeId?: string;
-  playUrl?: string | null;
 };
 
 /**
- * 把「已经拿到直链」的视频自动入队缓存（§6.2 翻页即缓存），重复渲染不会重复入队。
+ * 把当前页的全部条目按「翻页即缓存」（§6.2）自动入队，重复渲染不会重复入队。
  *
- * **刻意只缓存已知直链的条目。** 抖音的 `playUrl` 随搜索结果一起下发，自动缓存
- * 不产生额外计费；而视频号没有直链，必须为每条单独调一次**计费的**
- * `/videos/source`。若照 §6.2 字面把「该页全部结果」都自动缓存，视频号翻几页
- * 就是几十次计费调用。因此视频号改为按需触发（用户点播放或提取文案时再取直链
- * 并缓存）——这是与设计稿字面的一处偏离，需要产品确认。
+ * 数据源是云端归档且不计费，因此不必再像过去那样只挑「已知直链」的条目缓存；
+ * 归档未就绪的条目返回一条合成的失败状态（`unready`），由界面如实提示。
  */
-export function useViralAutoCache(videos: ViralCacheCandidate[]): void {
+export function useViralAutoCache(
+  videos: ViralCacheCandidate[],
+): Map<string, ViralCacheProgress> {
   const queued = useRef(new Set<string>());
+  const [fallback, setFallback] = useState<Map<string, ViralCacheProgress>>(
+    () => new Map(),
+  );
   useEffect(() => {
     if (!cacheAvailable()) return;
     for (const video of videos) {
       const platform = video.platformKey;
       const videoId = video.nativeId;
-      const url = video.playUrl;
-      if (!platform || !videoId || !url) continue;
+      if (!platform || !videoId) continue;
       const key = viralCacheKey(platform, videoId);
       if (queued.current.has(key)) continue;
       queued.current.add(key);
-      void ensureViralCache({ platform, videoId, url }).catch(() => {
-        // 单条缓存失败不能打断浏览（角标会显示失败供重试）。
-        // 从集合里移除，让下次进入页面还能再试。
-        queued.current.delete(key);
-      });
+      void ensureViralArchiveCache(platform as ViralPlatform, videoId)
+        .then(() => {
+          // 重试成功后清掉上一次的合成状态，让位于真实的下载进度。
+          setFallback((previous) => {
+            if (!previous.has(key)) return previous;
+            const next = new Map(previous);
+            next.delete(key);
+            return next;
+          });
+        })
+        .catch((error: unknown) => {
+          // 单条取地址失败不能打断浏览（角标会显示失败供重试）。
+          // 从集合里移除，让下次进入页面还能再试。
+          queued.current.delete(key);
+          setFallback((previous) =>
+            new Map(previous).set(
+              key,
+              fallbackCacheProgress(platform, videoId, error),
+            ),
+          );
+        });
     }
   }, [videos]);
+  return fallback;
 }
 
 /**

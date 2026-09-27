@@ -130,11 +130,17 @@ class Provider:
     calls = 0
     failure: Exception | None = None
     text = json.dumps({"prompt_text": GOOD_TEXT, "warnings": []})
+    # 依次返回的响应；用尽后回落到 text。payloads 记录每次请求，供断言纠正清单。
+    texts: list[str] = []
+    payloads: list[dict[str, Any]] = []
 
     def _complete(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         self.calls += 1
+        self.payloads.append(payload)
         if self.failure:
             raise self.failure
+        if self.texts:
+            return self.texts.pop(0), {}
         return self.text, {}
 
 
@@ -595,12 +601,80 @@ def test_failure_preserves_cost_and_never_resubmits(
     assert result["status"] == ("SUBMISSION_UNCERTAIN" if bad == "network" else "FAILED"), result
     client.post(OPTIMIZE_PATH, headers=headers, json=request_body())
     assert not run_one(route_state, tmp_path)
-    assert provider.calls == 1
+    # 结构自检失败允许一次纠正重试（同一 attempt、同一次计费）；网络与解析失败不重试。
+    assert provider.calls == (2 if bad == "structure" else 1)
     with psycopg.connect(route_state) as conn:
         assert conn.execute(
             "SELECT available_credits,reserved_credits FROM wallets WHERE user_id=%s",
             (user["user_id"],),
         ).fetchone() == (10, 0)
+
+
+def test_assumptions_apply_without_blocking(
+    client: TestClient, route_state: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """warnings 是假设清单：只记录推断、不阻断应用，随结果回传给核对区。"""
+    user, headers = _customer(client, route_state, credits=10)
+    provider = Provider()
+    provider.text = json.dumps(
+        {
+            "prompt_text": GOOD_TEXT,
+            "warnings": [{"code": "ASSUMED_SCENE", "message": "已按需求推断为室内客厅"}],
+        }
+    )
+    monkeypatch.setattr(
+        "app.prompt_optimizer_routes.get_prompt_optimizer_provider", lambda conn: provider
+    )
+    task = client.post(OPTIMIZE_PATH, headers=headers, json=request_body()).json()
+    assert run_one(route_state, tmp_path)
+    result = client.get(OPTIMIZE_PATH + "/" + task["task_id"], headers=headers).json()
+    assert result["status"] == "SUCCEEDED", result
+    assert result["result"]["validation_status"] == "valid"
+    assert result["result"]["assumptions"] == [
+        {"code": "ASSUMED_SCENE", "message": "已按需求推断为室内客厅"}
+    ]
+    assert result["result"]["needs_confirmation"] == []
+    assert result["result"]["reference_plan"] == []
+    assert provider.calls == 1
+    with psycopg.connect(route_state) as conn:
+        assert (
+            conn.execute(
+                "SELECT available_credits FROM wallets WHERE user_id=%s", (user["user_id"],)
+            ).fetchone()[0]
+            == 7
+        )
+
+
+def test_structural_failure_retries_once_with_correction_items(
+    client: TestClient, route_state: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """结构自检失败先纠正重试一次：第二次带上失败项，成功照常落地计费。"""
+    user, headers = _customer(client, route_state, credits=10)
+    provider = Provider()
+    provider.payloads = []
+    provider.texts = [
+        json.dumps({"prompt_text": GOOD_TEXT.replace("[Shot 1]", "[Shot 2]"), "warnings": []}),
+        json.dumps({"prompt_text": GOOD_TEXT, "warnings": []}),
+    ]
+    monkeypatch.setattr(
+        "app.prompt_optimizer_routes.get_prompt_optimizer_provider", lambda conn: provider
+    )
+    task = client.post(OPTIMIZE_PATH, headers=headers, json=request_body()).json()
+    assert run_one(route_state, tmp_path)
+    result = client.get(OPTIMIZE_PATH + "/" + task["task_id"], headers=headers).json()
+    assert result["status"] == "SUCCEEDED", result
+    assert result["result"]["prompt_text"] == GOOD_TEXT
+    assert provider.calls == 2
+    correction = provider.payloads[1]["messages"][-1]
+    assert correction["role"] == "user"
+    assert "镜头编号应连续" in correction["content"][0]["text"]
+    with psycopg.connect(route_state) as conn:
+        assert (
+            conn.execute(
+                "SELECT available_credits FROM wallets WHERE user_id=%s", (user["user_id"],)
+            ).fetchone()[0]
+            == 7
+        )
 
 
 def test_ownership_and_missing_assets(client: TestClient, route_state: str, tmp_path: Any) -> None:
@@ -622,6 +696,67 @@ def test_ownership_and_missing_assets(client: TestClient, route_state: str, tmp_
         json={**request_body("foreign"), "first_frame_asset_id": "not-owned"},
     )
     assert response.status_code == 404
+
+
+def test_reference_purpose_defaults_are_flagged_for_confirmation(
+    client: TestClient, route_state: str
+) -> None:
+    """用途留空不再让整单失败：音频给默认用途、图片交给模型看图判断，都进待确认。
+
+    旧行为（REFERENCE_PURPOSE_REQUIRED / AUDIO_DESCRIPTION_REQUIRED）会整单失败——
+    用户只是没填用途，AI 却什么都不做。图片不按顺序臆造用途：模型看得到画面，
+    场景图被标成「人物」会直接写错 subject_definitions。
+    """
+    from app.auth import CurrentUser
+    from app.h3_prompts import GenerationContext, Reference
+    from app.prompt_context import DEFAULT_AUDIO_PURPOSE, resolve_context
+
+    user, _ = _customer(client, route_state)
+    actor = CurrentUser(id=user["user_id"], username="alice", display_name="alice", role="customer")
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        for asset_id, kind, mime in (
+            ("ctx-image-1", "material_image", "image/png"),
+            ("ctx-image-2", "material_image", "image/png"),
+            ("ctx-audio", "material_audio", "audio/mpeg"),
+            ("ctx-image-named", "material_image", "image/png"),
+        ):
+            conn.execute(
+                "INSERT INTO assets(id,kind,storage_uri,sha256,size_bytes,content_type,"
+                "created_by_user_id) VALUES(%s,%s,%s,'hash',10,%s,%s)",
+                (asset_id, kind, f"local://test/{asset_id}", mime, actor.id),
+            )
+        raw.commit()
+        context = resolve_context(
+            conn,
+            actor=actor,
+            request=GenerationContext(
+                route="reference",
+                references=[
+                    Reference(asset_id="ctx-image-1", purpose="unspecified"),
+                    Reference(asset_id="ctx-image-2", purpose="unspecified"),
+                    Reference(asset_id="ctx-audio", purpose="unspecified"),
+                    Reference(asset_id="ctx-image-named", purpose="人物、服装"),
+                ],
+            ),
+        )
+
+    assert [asset["purpose"] for asset in context["generation_assets"]] == [
+        "unspecified",
+        "unspecified",
+        DEFAULT_AUDIO_PURPOSE,
+        "人物、服装",
+    ]
+    assert [item["code"] for item in context["needs_confirmation"]] == [
+        "REFERENCE_PURPOSE_UNDECLARED",
+        "REFERENCE_PURPOSE_UNDECLARED",
+        "AUDIO_PURPOSE_INFERRED",
+    ]
+    assert [item["alias"] for item in context["needs_confirmation"]] == ["@1", "@2", "@3"]
+    assert context["needs_confirmation"][2]["purpose"] == DEFAULT_AUDIO_PURPOSE
+    # 图片的待确认项不带 purpose：系统没有替用户定用途，正文里的角色由模型看图判断。
+    assert context["needs_confirmation"][0].get("purpose") is None
+    assert context["issues"] == []
 
 
 @pytest.mark.parametrize("sent", [False, True])

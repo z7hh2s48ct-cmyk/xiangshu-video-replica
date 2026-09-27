@@ -62,6 +62,7 @@ import { LiveWorkspacePanel } from "./LiveWorkspacePanel";
 import {
   awaitScriptFromAudioTask,
   type CloudDraftRestore,
+  claimExtractedViralCopy,
   discardCloudDraft,
   extractScriptFromUpload as extractScriptFromUploadLive,
   loadCloudDraft,
@@ -100,6 +101,7 @@ import {
   hasCopyResult,
   isReferenceAsset,
   MAX_REFERENCE_MEDIA_SECONDS,
+  MIN_REFERENCE_MEDIA_SECONDS,
   mergeStudioAssets,
   navigateStudioState,
   pageTitles,
@@ -1120,7 +1122,7 @@ export function StudioWorkspace({
         mode,
         prompt_text:
           mode === "r2v"
-            ? constrainReferenceVideoPrompt(draft.prompt)
+            ? constrainReferenceVideoPrompt(draft.referencePrompt ?? "")
             : draft.prompt,
         first_frame_asset_id:
           mode === "i2v" ? (draft.firstFrameId ?? null) : null,
@@ -1465,32 +1467,79 @@ export function StudioWorkspace({
           timer = window.setTimeout(() => void restore(), 2_000);
           return;
         }
-        if (task.status === "SUCCEEDED" && task.result?.text.trim()) {
+        if (task.status === "SUCCEEDED") {
           extractingRef.current = false;
-          const text = task.result.text;
-          const restored = patchStudioDraft(current, {
-            sourceId: extractionAssetId,
-            projectId: extractionProjectId,
-            sourceAssetId: extractionAssetId,
-            script: {
-              ...current.script,
-              original: text,
-              text: hasCopyResult(current.script) ? current.script.text : "",
-              resultKind: hasCopyResult(current.script)
-                ? "manual"
-                : "extracted",
-              confirmed: false,
-            },
-            scriptEdited: true,
-          });
-          draftTouchedRef.current = true;
-          latestDraftRef.current = restored;
-          setState((previous) => ({ ...previous, draft: restored }));
-          notify(
-            current.script.text.trim()
-              ? "文案提取已完成，已保留你的编辑并补回来源原文。"
-              : "文案提取已完成，已恢复到当前草稿。",
-          );
+          // 普通任务正文随任务接口下发；爆款任务正文为 null，凭任务里带的视频身份
+          // 回「获取文案」取一次——恢复查看也是交付，谁拿到文案谁付费（复看免费）。
+          const text = task.result?.text ?? "";
+          const viralSource = task.copyClaimRequired
+            ? task.viralSource
+            : undefined;
+          if (!text.trim() && viralSource) {
+            try {
+              const claimed = await claimExtractedViralCopy(
+                viralSource.platform,
+                viralSource.videoId,
+              );
+              if (!active) return;
+              if (claimed) {
+                const restored = patchStudioDraft(current, {
+                  sourceId: extractionAssetId,
+                  projectId: extractionProjectId,
+                  sourceAssetId: extractionAssetId,
+                  script: {
+                    ...current.script,
+                    original: claimed,
+                    text: hasCopyResult(current.script)
+                      ? current.script.text
+                      : "",
+                    resultKind: hasCopyResult(current.script)
+                      ? "manual"
+                      : "extracted",
+                    confirmed: false,
+                  },
+                  scriptEdited: true,
+                });
+                draftTouchedRef.current = true;
+                latestDraftRef.current = restored;
+                setState((previous) => ({ ...previous, draft: restored }));
+                setWalletRevision((value) => value + 1);
+                notify("文案提取已完成，已恢复到当前草稿。");
+                return;
+              }
+            } catch {
+              // 获取失败不吞掉任务状态，走下方提示让用户手动补齐。
+            }
+            notify(
+              "上次提取的文案还未完成「获取」结算，请点击「提取文案」补齐。",
+            );
+            return;
+          }
+          if (text.trim()) {
+            const restored = patchStudioDraft(current, {
+              sourceId: extractionAssetId,
+              projectId: extractionProjectId,
+              sourceAssetId: extractionAssetId,
+              script: {
+                ...current.script,
+                original: text,
+                text: hasCopyResult(current.script) ? current.script.text : "",
+                resultKind: hasCopyResult(current.script)
+                  ? "manual"
+                  : "extracted",
+                confirmed: false,
+              },
+              scriptEdited: true,
+            });
+            draftTouchedRef.current = true;
+            latestDraftRef.current = restored;
+            setState((previous) => ({ ...previous, draft: restored }));
+            notify(
+              current.script.text.trim()
+                ? "文案提取已完成，已保留你的编辑并补回来源原文。"
+                : "文案提取已完成，已恢复到当前草稿。",
+            );
+          }
           return;
         }
         if (
@@ -1629,7 +1678,12 @@ export function StudioWorkspace({
           Boolean(state.draft.firstFrameId),
           Boolean(state.draft.tailFrameId),
         );
-        if (!state.draft.prompt.trim()) {
+        // 参考生视频用六段式正文（referencePrompt），文/图生视频用集成描述（prompt）。
+        const promptText =
+          mode === "r2v"
+            ? (state.draft.referencePrompt ?? "")
+            : state.draft.prompt;
+        if (!promptText.trim()) {
           throw new Error("请先填写提示词");
         }
         if (!state.draft.videoName?.trim()) {
@@ -1697,6 +1751,7 @@ export function StudioWorkspace({
     if (
       !state.draft.script.text.trim() &&
       !state.draft.prompt.trim() &&
+      !state.draft.referencePrompt?.trim() &&
       !state.draft.sourceId
     ) {
       notify("请先填写创作内容。");
@@ -1837,6 +1892,9 @@ export function StudioWorkspace({
     importedProjectId?: string,
     importedAssetId?: string,
     preparedTaskId?: string,
+    // 爆款链路的文案归属：转写只是把结果写进共享缓存，正文还要凭它回获取接口取一次
+    // （那里才是交付与计费点，见 live.claimExtractedViralCopy）。
+    copyClaim?: { platformKey: string; nativeId: string },
   ) => {
     if (review) {
       notify("审核示例不调用真实接口。");
@@ -1888,7 +1946,28 @@ export function StudioWorkspace({
         ? awaitScriptFromAudioTask(preparedTaskId)
         : extractScriptFromUploadLive(projectId, assetId)
     )
-      .then(({ text }) => {
+      .then(async ({ text: taskText }) => {
+        // 爆款链路：转写完成只代表结果进了共享缓存，交付与计费要走「获取文案」那一步
+        // （首提取者同样付费，已拍板口径）。正文也只在 claim 回执里——服务端任务接口
+        // 对爆款任务不下发正文，这里没有「取不到就退回任务结果」的旁路；欠下的交付
+        // 与计费由下次「提取文案」补齐（桌面端 claim-first 秒回，不再走转写）。
+        let text = taskText;
+        let copyBillingMissing = false;
+        if (copyClaim) {
+          try {
+            const claimed = await claimExtractedViralCopy(
+              copyClaim.platformKey,
+              copyClaim.nativeId,
+            );
+            if (claimed) {
+              text = claimed;
+            } else {
+              copyBillingMissing = true;
+            }
+          } catch {
+            copyBillingMissing = true;
+          }
+        }
         extractingRef.current = false;
         endCopyExtractionProgress();
         if (
@@ -1912,6 +1991,17 @@ export function StudioWorkspace({
             ))
         )
           return;
+        if (!text) {
+          // claim 未完成（未命中 / 失败）：正文拿不到就不能把空文案写进草稿，
+          // 也不能假装交付已完成——如实提示，让用户主动补齐这一次获取。
+          navigate("copy", { returnTo: "workbench" });
+          notify(
+            copyBillingMissing
+              ? "文案已提取，但「获取文案」未完成，暂未交付正文；请重新提取补齐（不会重扣转写费）。"
+              : "文案提取完成但未取到正文，请重新提取。",
+          );
+          return;
+        }
         const sameSource =
           currentDraft.projectId === projectId &&
           (currentDraft.sourceAssetId ?? currentDraft.sourceId) === assetId;
@@ -1952,8 +2042,8 @@ export function StudioWorkspace({
   /**
    * 爆款文案提取：桌面端走「本地抽音轨 → 上传 → 转写」，平台不再需要留存原片。
    *
-   * 只由桌面端调用——Web 端没有本地缓存，仍走既有的服务端拉取链路（设计把 Web 降级
-   * 列为允许的少量例外，那条降级路径尚未落地）。
+   * 只由桌面端调用——Web 端没有本地缓存，走服务端导入链路（导入 → 转写 → 凭视频
+   * 身份获取文案），正文同样只按 claim 回执交付，计费口径与桌面端一致。
    */
   const extractViralCopy = (video: {
     platformKey?: string;
@@ -1977,6 +2067,9 @@ export function StudioWorkspace({
       notify("该视频缺少可导入的平台标识");
       return;
     }
+    // 收窄后的常量：回调里再读 video 的属性，TS 不再保证非空。
+    const platformKey = video.platformKey;
+    const nativeId = video.nativeId;
     const permissionGeneration = permissionGenerationRef.current;
     const extractionAccount = currentUser.id;
     // 结果回来时草稿可能已经换过来源：命中缓存的回填没有 projectId/assetId 可核对，
@@ -1993,18 +2086,19 @@ export function StudioWorkspace({
     beginCopyExtractionProgress("正在准备本地音轨…");
     navigate("copy", { returnTo: "workbench" });
     void startViralCopyExtraction({
-      platformKey: video.platformKey,
-      nativeId: video.nativeId,
-      playUrl: video.playUrl,
+      platformKey,
+      nativeId,
     })
       .then((receipt) => {
         if (receipt.kind === "task") {
           // 未命中共享缓存：服务端已建好任务，交给与上传链路完全相同的轮询与回填通道。
+          // 带上这条视频的身份，转写完成后回来取文案（首提取者的交付与计费点）。
           extractingRef.current = false;
           extractScriptFromUpload(
             receipt.projectId,
             receipt.sourceAssetId,
             receipt.taskId,
+            { platformKey, nativeId },
           );
           return;
         }
@@ -2036,7 +2130,19 @@ export function StudioWorkspace({
           },
         });
         navigate("copy", { returnTo: "workbench" });
-        notify("已命中共享文案缓存，文案已填入，请核对后选择二创方式。");
+        // 命中共享缓存同样计费（已购则复用）：扣了分就刷新钱包徽标，别让余额看起来没动。
+        if (receipt.billing.charged > 0) {
+          setWalletRevision((value) => value + 1);
+        }
+        const billed =
+          receipt.billing.charged > 0
+            ? `本次获取扣除 ${receipt.billing.charged} 积分`
+            : receipt.billing.deduped
+              ? "此前已购买过这条文案，本次未扣费"
+              : "本次未计费";
+        notify(
+          `已命中共享文案缓存，${billed}，文案已填入，请核对后选择二创方式。`,
+        );
       })
       .catch((cause: unknown) => {
         extractingRef.current = false;
@@ -3070,12 +3176,14 @@ function StudioPicker({
                         if (
                           asset.kind !== "image" &&
                           asset.durationSeconds !== undefined &&
-                          asset.durationSeconds > MAX_REFERENCE_MEDIA_SECONDS
+                          (asset.durationSeconds >
+                            MAX_REFERENCE_MEDIA_SECONDS ||
+                            asset.durationSeconds < MIN_REFERENCE_MEDIA_SECONDS)
                         ) {
                           notify(
                             asset.kind === "video"
-                              ? "参考视频时长不能超过 15 秒，请裁剪后再选取。"
-                              : "参考音频时长不能超过 15 秒，请裁剪后再选取。",
+                              ? `参考视频须为 ${MIN_REFERENCE_MEDIA_SECONDS}–${MAX_REFERENCE_MEDIA_SECONDS} 秒，请裁剪后再选取。`
+                              : `参考音频须为 ${MIN_REFERENCE_MEDIA_SECONDS}–${MAX_REFERENCE_MEDIA_SECONDS} 秒，请裁剪后再选取。`,
                           );
                           return;
                         }

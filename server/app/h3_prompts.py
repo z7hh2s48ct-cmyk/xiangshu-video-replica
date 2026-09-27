@@ -53,6 +53,22 @@ def enforce_reference_video_exclusions(text: str) -> str:
     return f"{text[: soundscape.start()].rstrip()}\n{block}\n{text[soundscape.start() :]}"
 
 
+# 复刻流交付稿的指纹：这些写法只由 compile_replica_final_text 产生。复刻流与
+# 参考生视频是两套提示词实现——复刻稿把首帧当 <Picture 1> 主讲人锚点，R2V 里
+# <Picture 1> 只是用户选的一张参考图，两者混用会让成片主体错位，故提交端拒绝。
+_REPLICA_DRAFT_MARKERS = (
+    re.compile(r"(?m)^\s*integrated_multimodal_description\s*:"),
+    re.compile(r"主讲人绑定"),
+    re.compile(r"源视频排除"),
+    re.compile(r"\(S1\)\s*says:"),
+    re.compile(r"首帧中的主讲人"),
+)
+
+
+def is_replica_draft(text: str) -> bool:
+    return any(marker.search(text) for marker in _REPLICA_DRAFT_MARKERS)
+
+
 def _anchor_presenter_to_first_frame(value: object) -> str:
     """Remove source-presenter identity labels from retained shot descriptions.
 

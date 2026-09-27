@@ -13,6 +13,11 @@ import {
   PromptEditor,
   ReplicaFinalPromptControls,
 } from "./PromptEditor";
+import {
+  constrainReferenceVideoPrompt,
+  hasRef2vaStructure,
+  REFERENCE_VIDEO_VISUAL_ONLY_RULE,
+} from "./referencePrompt";
 import { readAppliedOptimization } from "./usePromptOptimization";
 
 const api = vi.hoisted(() => ({
@@ -37,10 +42,20 @@ function Harness({
   scope = "user:project",
   rows,
   optimizationActionLabel,
+  formatStatus,
+  onPurposeChange,
+  onOptimizationBusyChange,
+  route = "text_image",
+  runSignal,
 }: {
   scope?: string;
   rows?: number;
   optimizationActionLabel?: string;
+  formatStatus?: { label: string; hint: string; ready: boolean };
+  onPurposeChange?: (assetId: string, purpose: string) => void;
+  onOptimizationBusyChange?: (busy: boolean) => void;
+  route?: "text_image" | "reference" | "replica";
+  runSignal?: number;
 }) {
   const [text, setText] = useState("原始提示词");
   return (
@@ -48,9 +63,14 @@ function Harness({
       value={text}
       onChange={setText}
       scope={scope}
-      context={{ route: "text_image", duration_seconds: 8 }}
+      context={{ route, duration_seconds: 8 }}
       rows={rows}
       optimizationActionLabel={optimizationActionLabel}
+      formatStatus={formatStatus}
+      assetNames={{ "asset-audio": "设计师音色样本.mp3" }}
+      onPurposeChange={onPurposeChange}
+      onOptimizationBusyChange={onOptimizationBusyChange}
+      runSignal={runSignal}
     />
   );
 }
@@ -62,6 +82,69 @@ const success: PromptOptimizeResult = {
   context_hash: "hash",
   formatter_version: "v1",
   result: { prompt_text: "优化结果", warnings: [], validation_status: "valid" },
+};
+const REF2VA_PROMPT = [
+  "subject_definitions: <Subject 1> 主讲人；<Picture 1> 外观参考。",
+  "summary: 一句话概述。",
+  "retention_analysis: 保留镜头推进与节奏。",
+  "detailed_description: [Shot 1] At 00:00.000 开场。",
+  "overall_soundscape: 自然环境音。",
+  "non_diegetic_music: 无。",
+].join("\n");
+const ASSUMPTIONS = [{ code: "ASSUMED_DURATION", message: "按 12 秒生成" }];
+const REFERENCE_PLAN = [
+  {
+    asset_id: "asset-audio",
+    alias: "@2",
+    label: "<Audio 1>",
+    role: "reference",
+    kind: "audio",
+    purpose: "音色参考",
+  },
+  // 图片用途留空：服务端不替用户定用途，正文里的角色由模型看图判断。
+  {
+    asset_id: "asset-picture",
+    alias: "@1",
+    label: "<Picture 1>",
+    role: "reference",
+    kind: "picture",
+    purpose: "unspecified",
+  },
+];
+const NEEDS_CONFIRMATION = [
+  {
+    code: "AUDIO_PURPOSE_INFERRED",
+    message: "音频@2未填写用途，已按「音色参考」生成；",
+    alias: "@2",
+    label: "<Audio 1>",
+    purpose: "音色参考",
+  },
+  {
+    code: "REFERENCE_PURPOSE_UNDECLARED",
+    message: "参考图片@1未填写用途，系统按画面内容判断，请核对。",
+    alias: "@1",
+    label: "<Picture 1>",
+  },
+];
+function ref2vaResult(promptText: string) {
+  return {
+    prompt_text: promptText,
+    warnings: ASSUMPTIONS,
+    validation_status: "valid",
+    assumptions: ASSUMPTIONS,
+    reference_plan: REFERENCE_PLAN,
+    needs_confirmation: NEEDS_CONFIRMATION,
+  };
+}
+const reviewSuccess: PromptOptimizeResult = {
+  ...success,
+  mode: "Ref2VA",
+  result: ref2vaResult(REF2VA_PROMPT),
+};
+const SECOND_PROMPT = `${REF2VA_PROMPT}\n[Shot 2] At 00:04.000 收尾。`;
+const regeneratedResult: PromptOptimizeResult = {
+  ...reviewSuccess,
+  result: ref2vaResult(SECOND_PROMPT),
 };
 
 it("doubles the requested prompt editing rows", () => {
@@ -463,5 +546,165 @@ describe("PromptEditor", () => {
       expect(screen.getByLabelText("提示词")).toHaveValue("优化结果"),
     );
     expect(api.create.mock.calls[1][0]).toEqual(input);
+  });
+});
+
+describe("参考生视频生成后核对区", () => {
+  const ready = {
+    label: "六段式（H3 Ref2VA）",
+    hint: "格式已就绪，请核对下方核对区再提交。",
+    ready: true,
+  };
+  beforeEach(() => {
+    localStorage.clear();
+    vi.clearAllMocks();
+    api.session.mockReturnValue(true);
+    api.create.mockResolvedValue(reviewSuccess);
+  });
+  async function generate(props: Parameters<typeof Harness>[0] = {}) {
+    const view = render(
+      <Harness
+        scope="ref-review:project"
+        route="reference"
+        formatStatus={ready}
+        {...props}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "AI 优化提示词" }));
+    const review = await screen.findByRole("region", { name: "生成结果核对" });
+    return { view, review };
+  }
+
+  it("落进正文的是补过排除规则的六段式，核对区摊开素材对齐与假设清单", async () => {
+    const { review } = await generate({ onPurposeChange: vi.fn() });
+
+    // 参考流先补客户端排除规则再落正文：结果既要过结构自检，也要带上两条硬规则。
+    const textarea = screen.getByLabelText("提示词") as HTMLTextAreaElement;
+    expect(textarea.value).toContain(REFERENCE_VIDEO_VISUAL_ONLY_RULE);
+    expect(hasRef2vaStructure(textarea.value)).toBe(true);
+    expect(review).toHaveTextContent(
+      "✓ 结构自检通过 · 六段齐全 · 标签已绑定 · 1 个镜头",
+    );
+    expect(review).toHaveTextContent("素材对齐（2）");
+    expect(review).toHaveTextContent("@2 → <Audio 1>");
+    expect(review).toHaveTextContent("设计师音色样本.mp3");
+    expect(review).toHaveTextContent(
+      /用途「音色参考」.*系统未分析音轨，待你确认/,
+    );
+    expect(review).toHaveTextContent("@1 → <Picture 1>");
+    expect(review).toHaveTextContent(/用途未填 · 系统按画面内容判断/);
+    expect(review).not.toHaveTextContent("用途「unspecified」");
+    expect(review).toHaveTextContent("假设清单（1）");
+    expect(review).toHaveTextContent("按 12 秒生成");
+    expect(review).toHaveTextContent("音频用途待确认");
+    expect(screen.getByRole("button", { name: "音色参考" })).toHaveClass(
+      "is-on",
+    );
+    for (const term of ["节奏参考", "环境音参考", "不用它的声音"])
+      expect(screen.getByRole("button", { name: term })).toBeInTheDocument();
+  });
+
+  it("改选音频用途写回草稿，正文与核对区都不动", async () => {
+    const onPurposeChange = vi.fn();
+    await generate({ onPurposeChange });
+    const textarea = screen.getByLabelText("提示词") as HTMLTextAreaElement;
+    const generated = textarea.value;
+
+    fireEvent.click(screen.getByRole("button", { name: "节奏参考" }));
+    expect(onPurposeChange).toHaveBeenCalledWith("asset-audio", "节奏参考");
+    expect(textarea.value).toBe(generated);
+    expect(
+      screen.getByRole("region", { name: "生成结果核对" }),
+    ).toBeInTheDocument();
+  });
+
+  it("重新生成直接再发一次任务，撤销连上一版核对区一起还原", async () => {
+    api.create
+      .mockResolvedValueOnce(reviewSuccess)
+      .mockResolvedValueOnce(regeneratedResult);
+    await generate();
+    const first = constrainReferenceVideoPrompt(REF2VA_PROMPT);
+    expect(screen.getByLabelText("提示词")).toHaveValue(first);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "重新生成（覆盖，可撤销）" }),
+    );
+    await waitFor(() => expect(api.create).toHaveBeenCalledTimes(2));
+    expect(api.create.mock.calls[1][0]).toMatchObject({ route: "reference" });
+    expect(screen.getByLabelText("提示词")).toHaveValue(
+      constrainReferenceVideoPrompt(SECOND_PROMPT),
+    );
+
+    // 撤销回到上一版正文时，核对区也要跟着回来：否则同一段机器生成的稿子
+    // 会被「结构自检」说成用户手写或从提示词库导入的。
+    fireEvent.click(screen.getByRole("button", { name: "撤销" }));
+    expect(screen.getByLabelText("提示词")).toHaveValue(first);
+    expect(
+      screen.getByRole("region", { name: "生成结果核对" }),
+    ).toBeInTheDocument();
+  });
+
+  it("已是六段式但没有生成回执时只显示结构自检", () => {
+    render(
+      <Harness
+        scope="ref-plain:project"
+        route="reference"
+        formatStatus={ready}
+      />,
+    );
+    expect(screen.getByText("六段式（H3 Ref2VA）")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "结构自检" })).toHaveTextContent(
+      "✓ 已识别为六段式",
+    );
+    expect(screen.queryByRole("region", { name: "生成结果核对" })).toBeNull();
+  });
+
+  it("生成期间把忙碌态报给父组件，结束后复位", async () => {
+    let release: ((value: PromptOptimizeResult) => void) | undefined;
+    api.create.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+    const onOptimizationBusyChange = vi.fn();
+    render(
+      <Harness
+        scope="ref-busy:project"
+        route="reference"
+        formatStatus={ready}
+        onOptimizationBusyChange={onOptimizationBusyChange}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "AI 优化提示词" }));
+    await waitFor(() =>
+      expect(onOptimizationBusyChange).toHaveBeenLastCalledWith(true),
+    );
+
+    await act(async () => release?.(reviewSuccess));
+    await waitFor(() =>
+      expect(onOptimizationBusyChange).toHaveBeenLastCalledWith(false),
+    );
+  });
+
+  it("父组件递增信号时直接发起生成，供素材变化后的直达入口复用", async () => {
+    const view = render(
+      <Harness
+        scope="ref-signal:project"
+        route="reference"
+        formatStatus={ready}
+        runSignal={0}
+      />,
+    );
+    expect(api.create).not.toHaveBeenCalled();
+
+    view.rerender(
+      <Harness
+        scope="ref-signal:project"
+        route="reference"
+        formatStatus={ready}
+        runSignal={1}
+      />,
+    );
+    await waitFor(() => expect(api.create).toHaveBeenCalledOnce());
   });
 });

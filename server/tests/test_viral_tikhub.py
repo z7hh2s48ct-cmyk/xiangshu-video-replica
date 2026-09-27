@@ -12,6 +12,7 @@ import json
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
 from typing import Any
@@ -22,13 +23,16 @@ import pytest
 from app.viral_tikhub import (
     DOUYIN_GENERAL_SEARCH_PATH,
     MAX_TAGS,
+    TIKHUB_BASE_URL,
     WECHAT_SEARCH_VIDEOS_PATH,
+    WECHAT_VIDEO_DETAIL_PATH,
     UrllibViralHttpTransport,
     ViralSourceClient,
     ViralSourceError,
     ViralSourceHttpStatusError,
     ViralSourceUnavailable,
     _pick_image_url,
+    _reset_channel_cooldowns,
     _reset_wechat_detail_cache,
     extract_wechat_tags,
     is_irrelevant_viral_video,
@@ -43,7 +47,7 @@ from app.viral_tikhub import (
 
 
 class FakeTransport:
-    """可编程传输层：按队列返回响应并记录请求体."""
+    """可编程传输层：按队列返回响应并记录请求（含请求头）."""
 
     def __init__(self, payloads: list[dict[str, Any]]) -> None:
         self.payloads = payloads
@@ -51,7 +55,9 @@ class FakeTransport:
 
     def request(self, method: str, url: str, *, headers, body=None) -> bytes:
         assert method == "POST"
-        self.requests.append({"url": url, "body": json.loads(body or b"{}")})
+        self.requests.append(
+            {"url": url, "body": json.loads(body or b"{}"), "headers": dict(headers)}
+        )
         payload = self.payloads.pop(0)
         return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
@@ -814,6 +820,313 @@ def test_play_url_prefers_h264_over_smaller_bytevc2():
         ],
     }
     assert pick_douyin_play_url(block) == "https://cdn.test/h264.mp4"
+
+
+# ---------------------------------------------------------------------------
+# 备用通道：主入口失效自动切换
+# ---------------------------------------------------------------------------
+
+_BACKUP_BASE_URL = "https://backup.source.test"
+
+
+def _douyin_search_payload(video_id: str) -> dict[str, Any]:
+    """最小可解析的抖音综合搜索响应（一条 type=1 卡片）."""
+    return {
+        "code": 200,
+        "data": {
+            "business_data": [
+                {
+                    "type": 1,
+                    "data": {
+                        "aweme_info": {
+                            "aweme_id": video_id,
+                            "desc": "视频",
+                            "video": {"cover": {"url_list": ["https://cdn/c.webp"]}},
+                        }
+                    },
+                }
+            ]
+        },
+    }
+
+
+def _backup_client(
+    payloads: list[dict[str, Any]],
+    *,
+    backup_api_key: str | None = "backup-key",
+) -> tuple[ViralSourceClient, FakeTransport]:
+    _reset_wechat_detail_cache()
+    _reset_channel_cooldowns()
+    transport = FakeTransport(list(payloads))
+    client = ViralSourceClient(
+        api_key="primary-key",
+        transport=transport,
+        detail_transport=transport,
+        backup_base_url=_BACKUP_BASE_URL,
+        backup_api_key=backup_api_key,
+    )
+    return client, transport
+
+
+@pytest.mark.parametrize(
+    "node",
+    ["douyin_search", "wechat_search_page", "wechat_video_detail"],
+)
+def test_every_charged_node_switches_to_the_backup_entry(node: str) -> None:
+    """三个收费节点共用同一条备用通道：主入口失败时都要落到备用入口."""
+    path = {
+        "douyin_search": DOUYIN_GENERAL_SEARCH_PATH,
+        "wechat_search_page": WECHAT_SEARCH_VIDEOS_PATH,
+        "wechat_video_detail": WECHAT_VIDEO_DETAIL_PATH,
+    }[node]
+    client, transport = _backup_client([{"code": 503}, {"code": 200, "data": {}}])
+
+    if node == "douyin_search":
+        client.douyin_search(keyword="乡墅")
+    elif node == "wechat_search_page":
+        client.wechat_search_page(keyword="乡墅")
+    else:
+        client.wechat_video_detail(export_id="export/e1")
+
+    assert [request["url"] for request in transport.requests] == [
+        f"{TIKHUB_BASE_URL}{path}",
+        f"{_BACKUP_BASE_URL}{path}",
+    ]
+
+
+def test_primary_failure_falls_back_to_backup_entry_and_key() -> None:
+    client, transport = _backup_client([{"code": 502}, _douyin_search_payload("v-1")])
+
+    videos = client.douyin_search(keyword="乡墅", category="庭院案例")
+
+    assert [video.video_id for video in videos] == ["v-1"]
+    assert videos[0].category == "庭院案例"
+    primary, backup = transport.requests
+    assert primary["headers"]["Authorization"] == "Bearer primary-key"
+    assert backup["headers"]["Authorization"] == "Bearer backup-key"
+
+
+def test_backup_entry_without_key_reuses_primary_credential() -> None:
+    client, transport = _backup_client(
+        [{"code": 502}, _douyin_search_payload("v-1")], backup_api_key=None
+    )
+
+    client.douyin_search(keyword="乡墅")
+
+    assert transport.requests[1]["headers"]["Authorization"] == "Bearer primary-key"
+
+
+def test_backup_call_needs_gunzip_and_parse_like_primary() -> None:
+    """备用通道拿到的是同样的 gzip 响应体，解压/校验路径不能分叉."""
+
+    class RawTransport:
+        """按序返回原始字节的传输桩（主通道先给错码，备用通道给 gzip 体）."""
+
+        def __init__(self, raw: list[bytes]) -> None:
+            self.raw = raw
+
+        def request(self, method: str, url: str, *, headers, body=None) -> bytes:
+            return self.raw.pop(0)
+
+    transport = RawTransport(
+        [
+            json.dumps({"code": 502}).encode("utf-8"),
+            gzip.compress(json.dumps(_douyin_search_payload("v-2")).encode("utf-8")),
+        ]
+    )
+    _reset_wechat_detail_cache()
+    _reset_channel_cooldowns()
+    client = ViralSourceClient(
+        api_key="primary-key",
+        transport=transport,
+        base_url=TIKHUB_BASE_URL,
+        backup_base_url=_BACKUP_BASE_URL,
+    )
+
+    videos = client.douyin_search(keyword="乡墅")
+
+    assert [video.video_id for video in videos] == ["v-2"]
+
+
+def test_without_backup_entry_failure_has_no_channel_to_fail_over() -> None:
+    """单通道且不可重试的失败：既没有第二条通道，也不会原地打转."""
+    _reset_wechat_detail_cache()
+    _reset_channel_cooldowns()
+    transport = FakeTransport([{"code": 400}])
+    client = ViralSourceClient(api_key="primary-key", transport=transport)
+
+    with pytest.raises(ViralSourceError):
+        client.douyin_search(keyword="乡墅")
+
+    assert len(transport.requests) == 1
+
+
+def test_backup_entry_equal_to_primary_is_not_configured() -> None:
+    _reset_wechat_detail_cache()
+    _reset_channel_cooldowns()
+    transport = FakeTransport([{"code": 400}])
+    client = ViralSourceClient(
+        api_key="primary-key",
+        transport=transport,
+        backup_base_url=f"{TIKHUB_BASE_URL}/",
+    )
+
+    with pytest.raises(ViralSourceError):
+        client.douyin_search(keyword="乡墅")
+
+    assert len(transport.requests) == 1
+
+
+def test_backup_key_without_entry_is_ignored() -> None:
+    """只有备用密钥（没有备用入口）不构成通道：同入口换凭据与节点切换无关."""
+    _reset_wechat_detail_cache()
+    _reset_channel_cooldowns()
+    transport = FakeTransport([_douyin_search_payload("v-1")])
+    client = ViralSourceClient(
+        api_key="primary-key", transport=transport, backup_api_key="backup-key"
+    )
+
+    client.douyin_search(keyword="乡墅")
+
+    assert transport.requests[0]["headers"]["Authorization"] == "Bearer primary-key"
+
+
+def test_all_channels_failed_surfaces_neutral_error_after_both_attempts() -> None:
+    client, transport = _backup_client([{"code": 502}, {"code": 429}])
+
+    with pytest.raises(ViralSourceError) as exc_info:
+        client.douyin_search(keyword="乡墅")
+
+    assert len(transport.requests) == 2
+    assert "backup.source.test" not in str(exc_info.value)
+
+
+def test_failed_channel_enters_cooldown_and_next_call_prefers_backup() -> None:
+    client, transport = _backup_client([{"code": 502}, _douyin_search_payload("v-1")])
+    client.douyin_search(keyword="乡墅")
+
+    transport.payloads.append(_douyin_search_payload("v-2"))
+    videos = client.douyin_search(keyword="乡墅")
+
+    assert [video.video_id for video in videos] == ["v-2"]
+    # 第三次请求直接落在备用通道：冷却期内不再白等主通道的一次超时。
+    assert len(transport.requests) == 3
+    assert transport.requests[2]["url"].startswith(_BACKUP_BASE_URL)
+
+
+def test_channel_cooldown_expires_and_primary_is_tried_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.viral_tikhub._CHANNEL_COOLDOWN_SECONDS", 0.0)
+    client, transport = _backup_client(
+        [{"code": 502}, _douyin_search_payload("v-1"), {"code": 502}, _douyin_search_payload("v-2")]
+    )
+    client.douyin_search(keyword="乡墅")
+
+    videos = client.douyin_search(keyword="乡墅")
+
+    # 冷却期一过主通道重新参与尝试：第二次调用依旧是"先主后备"的两跳。
+    assert [video.video_id for video in videos] == ["v-2"]
+    assert len(transport.requests) == 4
+    assert transport.requests[2]["url"].startswith(TIKHUB_BASE_URL)
+    assert transport.requests[3]["url"].startswith(_BACKUP_BASE_URL)
+
+
+def test_failed_attempt_meters_zero_usage_and_backup_success_meters_units(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """客户侧只记成功那一次：失败尝试记 0 单位，成功尝试记 1 个单位.
+
+    供应商侧用量另算：主通道拿到了响应（哪怕是失败信封）就确认供应商成本，
+    这是 request 层 record_usage 的职责，与这里的客户侧结果分开。
+    """
+    import app.billing_meter as billing_meter
+
+    recorded: list[dict[str, Any]] = []
+    real_meter_call = billing_meter.meter_call
+
+    @contextmanager
+    def recording_meter_call(service: str, *, units: float | int = 1):
+        entry: dict[str, Any] = {
+            "service": service,
+            "api_type": billing_meter._api_type.get(),  # noqa: SLF001
+            "succeeded": False,
+        }
+        recorded.append(entry)
+        with real_meter_call(service, units=units) as metered_call:
+            yield metered_call
+        entry["succeeded"] = True
+
+    monkeypatch.setattr(billing_meter, "meter_call", recording_meter_call)
+    client, _ = _backup_client([{"code": 502}, _douyin_search_payload("v-1")])
+
+    client.douyin_search(keyword="乡墅")
+
+    assert [(entry["api_type"], entry["succeeded"]) for entry in recorded] == [
+        ("douyin_search", False),
+        ("douyin_search", True),
+    ]
+
+
+def test_failover_log_names_channels_without_credentials(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING, logger="app.viral_tikhub")
+    client, _ = _backup_client([{"code": 502}, _douyin_search_payload("v-1")])
+
+    client.douyin_search(keyword="乡墅")
+
+    assert "primary" in caplog.text and "backup" in caplog.text
+    assert "primary-key" not in caplog.text
+    assert "backup-key" not in caplog.text
+    assert "backup.source.test" not in caplog.text
+
+
+def test_douyin_refresh_shares_metered_request_layer() -> None:
+    """刷新复用统一请求层：gzip 响应可解析，主通道失败能切备用."""
+    client, transport = _backup_client([{"code": 502}, _douyin_search_payload("777")])
+
+    videos = client.douyin_refresh(platform="douyin", video_id="777")
+
+    assert [video.video_id for video in videos] == ["777"]
+    assert transport.requests[0]["body"]["keyword"] == "#777"
+    assert transport.requests[1]["headers"]["Accept-Encoding"] == "gzip"
+
+
+def test_client_from_config_wires_backup_channel_fields() -> None:
+    client = viral_source_client_from_config(
+        {
+            "api_key": "k",
+            "backup_base_url": f"{_BACKUP_BASE_URL}/",
+            "backup_api_key": "bk",
+        }
+    )
+    channels = client._channels  # noqa: SLF001
+    assert [(channel.name, channel.base_url, channel.api_key) for channel in channels] == [
+        ("primary", TIKHUB_BASE_URL, "k"),
+        ("backup", _BACKUP_BASE_URL, "bk"),
+    ]
+
+    single = viral_source_client_from_config({"api_key": "k"})
+    assert [channel.name for channel in single._channels] == ["primary"]  # noqa: SLF001
+
+
+def test_backup_channel_config_validation_rejects_misconfiguration() -> None:
+    from app.settings import validate_provider_config
+
+    validate_provider_config("tikhub", {"api_key": "k", "backup_base_url": "https://b.source.test"})
+    validate_provider_config("tikhub", {"api_key": "k"})
+    with pytest.raises(ValueError):
+        validate_provider_config("tikhub", {"api_key": "k", "backup_base_url": "b.source.test"})
+    with pytest.raises(ValueError):
+        validate_provider_config("tikhub", {"api_key": "k", "backup_api_key": "bk"})
+
+
+def test_backup_key_is_masked_like_other_credentials() -> None:
+    from app.settings import is_secret_field, mask_secret
+
+    assert is_secret_field("backup_api_key") is True
+    assert mask_secret("backup-secret-value") == "********alue"
 
 
 # ---------------------------------------------------------------------------

@@ -43,3 +43,171 @@
   border-radius: 6px;
   font-size: var(--font-caption, 13px);
 }
+
+/* 格式状态行：模式徽标 + 一行说明。参考生视频的两套提示词实现（复刻稿 / 六段式）
+   在界面上必须一眼可辨，用户才知道按钮会重写还是微调。 */
+.h3-prompt-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 2px 0 6px;
+  color: var(--studio-muted);
+  font-size: var(--font-caption);
+  line-height: 1.6;
+}
+.h3-prompt-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid #3a3527;
+  border-radius: 999px;
+  color: #cbbf9c;
+  background: #16150f;
+  font-size: var(--font-caption);
+  white-space: nowrap;
+}
+.h3-prompt-mode i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #6b6a63;
+}
+.h3-prompt-mode i.is-ready {
+  background: #79dda9;
+}
+
+/* 生成结果核对区 */
+.h3-prompt-review {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 14px 16px;
+  border: 1px solid #33402f;
+  border-radius: 10px;
+  background: #0d120e;
+}
+.h3-prompt-review.is-plain {
+  border-color: #2b2d29;
+  background: #0e0f0e;
+}
+.h3-review-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.h3-review-head > strong {
+  font-size: var(--font-body);
+}
+.h3-review-status {
+  font-size: var(--font-caption);
+  color: #79dda9;
+}
+.h3-review-head .studio-button {
+  margin-left: auto;
+}
+.h3-review-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+@media (max-width: 1180px) {
+  .h3-review-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.h3-review-block {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.h3-review-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--studio-text);
+  font-size: var(--font-label);
+}
+.h3-review-title small {
+  color: var(--studio-muted);
+  font-size: var(--font-caption);
+  font-weight: 400;
+}
+/* 待确认的用途要显眼到用户愿意看一眼，但不能红成错误——留空本身不是错。 */
+.h3-review-title.is-warn {
+  color: var(--studio-gold);
+}
+.h3-review-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--font-caption);
+  color: #c9c7c0;
+}
+.h3-review-list li {
+  display: grid;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #14170f;
+  line-height: 1.6;
+}
+.h3-review-list code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--studio-gold);
+}
+.h3-review-list em {
+  color: var(--studio-muted);
+  font-style: normal;
+}
+.h3-review-audio {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid #665025;
+  border-radius: 8px;
+  background: #17140c;
+  font-size: var(--font-caption);
+}
+.h3-review-audio p {
+  margin: 0;
+  line-height: 1.7;
+  color: #d9d5c8;
+}
+.h3-review-note {
+  margin: 0;
+  color: var(--studio-muted);
+  font-size: var(--font-caption);
+  line-height: 1.7;
+}
+.h3-review-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.h3-review-tip {
+  margin-left: auto;
+  color: var(--studio-muted);
+  font-size: var(--font-caption);
+}
+
+/* 素材变化告警条：在原有 role=alert 上补一条直达「重新生成」的路径 */
+.h3-prompt-stale {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid #665025;
+  border-radius: 8px;
+  color: #ffd79a;
+  background: #1c1710;
+  font-size: var(--font-label);
+}

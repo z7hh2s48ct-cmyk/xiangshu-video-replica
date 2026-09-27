@@ -42,6 +42,24 @@ DOUYIN_GENERAL_SEARCH_PATH = "/api/v1/douyin/search/fetch_general_search_v2"
 WECHAT_SEARCH_VIDEOS_PATH = "/api/v1/wechat_search/v2/fetch_search_videos"
 WECHAT_VIDEO_DETAIL_PATH = "/api/v1/wechat_channels/v2/fetch_video_detail"
 
+# 路径 → 计费元数据 api_type（后台成本报表按节点归集）。
+_API_TYPE_BY_PATH = {
+    DOUYIN_GENERAL_SEARCH_PATH: "douyin_search",
+    WECHAT_SEARCH_VIDEOS_PATH: "wechat_search_page",
+    WECHAT_VIDEO_DETAIL_PATH: "wechat_video_detail",
+}
+
+# 备用通道配置字段（加密供应商配置存储）。备用入口是主形态（同协议兼容域名），
+# 备用密钥用于备用入口属于另一个账号时；两者都缺省即单通道运行。
+BACKUP_BASE_URL_FIELD = "backup_base_url"
+BACKUP_API_KEY_FIELD = "backup_api_key"
+
+# 通道故障冷却：详情节点要求 ≥30s 超时、搜索响应也是大体积 JSON，主通道刚失败
+# 就立刻重试等于白等一次超时。冷却期内优先走备用通道，冷却结束自动恢复尝试。
+_CHANNEL_COOLDOWN_SECONDS = 120.0
+_CHANNEL_COOLDOWNS: dict[str, float] = {}
+_CHANNEL_COOLDOWNS_LOCK = threading.Lock()
+
 PLATFORM_DOUYIN = "douyin"
 PLATFORM_XIAOHONGSHU = "xiaohongshu"
 PLATFORM_WECHAT = "wechat_channels"
@@ -620,8 +638,71 @@ def _maybe_gunzip(payload: bytes) -> bytes:
     return payload
 
 
+def _parse_viral_envelope(content: bytes) -> dict[str, Any]:
+    """解压并校验响应信封，返回 ``data`` 段；任何异常响应统一抛 ViralSourceError.
+
+    除 JSON 解码失败外还兜住 ``UnicodeDecodeError``（非 UTF-8 的网关错误页）：
+    这两类响应都代表"这次调用没拿到数据"，需要能被上层判定为可切换的失败。
+    可重试状态（429/5xx）带状态码抛出，供请求层决定"原地重试还是换通道"。
+    """
+    try:
+        envelope = json.loads(_maybe_gunzip(content))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ViralSourceError("爆款数据源返回了无法解析的响应") from exc
+    if not isinstance(envelope, dict):
+        raise ViralSourceError("爆款数据源响应结构异常")
+    code = envelope.get("code")
+    if isinstance(code, int) and not isinstance(code, bool) and code != 200:
+        if _is_retryable_status(code):
+            raise ViralSourceHttpStatusError(code)
+        raise ViralSourceError("爆款数据源暂时不可用，请稍后重试")
+    data = envelope.get("data")
+    if not isinstance(data, dict):
+        raise ViralSourceError("爆款数据源响应缺少数据")
+    if data.get("ret") not in (None, 0) or data.get("error"):
+        raise ViralSourceError("爆款内容暂时无法获取，请稍后重试")
+    return data
+
+
+@dataclass(frozen=True)
+class _SourceChannel:
+    """数据源的一个物理通道：入口 + 凭据（主/备结构相同，只是优先级不同）."""
+
+    name: str
+    base_url: str
+    api_key: str
+
+    @property
+    def fingerprint(self) -> str:
+        """通道指纹：兼作冷却表键，顺手避开"换凭据后仍被冷却"的旧状态."""
+        digest = hashlib.sha256(f"{self.base_url}\x00{self.api_key}".encode())
+        return digest.hexdigest()
+
+
+def _channel_is_cooling_down(channel: _SourceChannel, *, now: float) -> bool:
+    with _CHANNEL_COOLDOWNS_LOCK:
+        deadline = _CHANNEL_COOLDOWNS.get(channel.fingerprint)
+    return deadline is not None and now < deadline
+
+
+def _mark_channel_failed(channel: _SourceChannel, *, now: float) -> None:
+    with _CHANNEL_COOLDOWNS_LOCK:
+        _CHANNEL_COOLDOWNS[channel.fingerprint] = now + _CHANNEL_COOLDOWN_SECONDS
+
+
+def _clear_channel_cooldown(channel: _SourceChannel) -> None:
+    with _CHANNEL_COOLDOWNS_LOCK:
+        _CHANNEL_COOLDOWNS.pop(channel.fingerprint, None)
+
+
+def _reset_channel_cooldowns() -> None:
+    """清空通道冷却表（冷却表是进程级状态，测试之间必须隔离）."""
+    with _CHANNEL_COOLDOWNS_LOCK:
+        _CHANNEL_COOLDOWNS.clear()
+
+
 class ViralSourceClient:
-    """统一爆款数据源客户端（一次实例对应一个已配置的 api_key）."""
+    """统一爆款数据源客户端（一个实例 = 一组主/备通道 + 两个传输层）."""
 
     def __init__(
         self,
@@ -630,6 +711,8 @@ class ViralSourceClient:
         transport: ViralHttpTransport | None = None,
         base_url: str = TIKHUB_BASE_URL,
         detail_transport: ViralHttpTransport | None = None,
+        backup_api_key: str | None = None,
+        backup_base_url: str | None = None,
     ) -> None:
         self.api_key = api_key
         self._transport = transport or UrllibViralHttpTransport()
@@ -638,6 +721,39 @@ class ViralSourceClient:
             timeout_seconds=_WECHAT_DETAIL_TIMEOUT_SECONDS
         )
         self._base_url = base_url.rstrip("/")
+        self._backup_base_url = (backup_base_url or "").strip().rstrip("/")
+        self._backup_api_key = (backup_api_key or "").strip()
+        self._channels = self._build_channels()
+
+    def _build_channels(self) -> tuple[_SourceChannel, ...]:
+        """主通道恒在；备用入口非空时追加备用通道（备用密钥缺省沿用主密钥）.
+
+        备用密钥单配（没有备用入口）不构成通道：那只是同一入口换凭据，与"节点
+        失效自动切换"无关；配置层已拒绝这种组合。
+        """
+        channels = [_SourceChannel(name="primary", base_url=self._base_url, api_key=self.api_key)]
+        if not self._backup_base_url:
+            return tuple(channels)
+        backup = _SourceChannel(
+            name="backup",
+            base_url=self._backup_base_url,
+            api_key=self._backup_api_key or self.api_key,
+        )
+        # 备用入口被原样填成主入口时不产生无意义的重试。
+        if (backup.base_url, backup.api_key) != (channels[0].base_url, channels[0].api_key):
+            channels.append(backup)
+        return tuple(channels)
+
+    def _candidate_channels(self) -> tuple[_SourceChannel, ...]:
+        """本轮尝试的通道顺序：处于冷却期的通道只在别无选择时使用."""
+        if len(self._channels) == 1:
+            return self._channels
+        now = time.monotonic()
+        available = tuple(
+            channel for channel in self._channels if not _channel_is_cooling_down(channel, now=now)
+        )
+        # 全部处于冷却期时放弃择优：可用性优先于省一次超时。
+        return available or self._channels
 
     def _request(
         self,
@@ -647,10 +763,50 @@ class ViralSourceClient:
         *,
         billing_units: int = 1,
     ) -> dict[str, Any]:
-        url = f"{self._base_url}{path}"
+        """按主→备顺序请求；单次失败自动切下一通道，成功立即返回.
+
+        每次物理请求独立计量：客户侧只对真正取到数据的那一次调用计费；供应商侧
+        按每次拿到响应独立确认用量，平台成本因此可能高于客户计费。
+        """
+        channels = self._candidate_channels()
+        last_error: ViralSourceError | None = None
+        for index, channel in enumerate(channels):
+            try:
+                data = self._request_once(
+                    transport, path, payload, channel=channel, billing_units=billing_units
+                )
+            except ViralSourceError as exc:
+                last_error = exc
+                _mark_channel_failed(channel, now=time.monotonic())
+                if index + 1 < len(channels):
+                    logger.warning(
+                        "Viral source %s channel failed (%s), falling back to %s channel",
+                        channel.name,
+                        type(exc).__name__,
+                        channels[index + 1].name,
+                    )
+                elif len(channels) > 1:
+                    logger.warning("Viral source request failed on every configured channel")
+                continue
+            _clear_channel_cooldown(channel)
+            return data
+        if last_error is None:  # 通道列表恒非空，仅为类型收窄保留
+            raise ViralSourceError("爆款数据源暂时不可用，请稍后重试")
+        raise last_error
+
+    def _request_once(
+        self,
+        transport: ViralHttpTransport,
+        path: str,
+        payload: Mapping[str, Any],
+        *,
+        channel: _SourceChannel,
+        billing_units: int,
+    ) -> dict[str, Any]:
+        url = f"{channel.base_url}{path}"
         body = json.dumps(dict(payload), ensure_ascii=False).encode("utf-8")
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {channel.api_key}",
             "Accept": "application/json",
             # 服务器与数据源之间是跨境链路、带宽有限，而搜索响应是大体积
             # JSON（数 MB）。开启 gzip 后传输体积通常缩到一个量级以下，
@@ -660,44 +816,22 @@ class ViralSourceClient:
         }
         from app.billing_meter import meter_call, set_api_type
 
-        # Map path to API type for billing metadata
-        api_type_mapping = {
-            DOUYIN_GENERAL_SEARCH_PATH: "douyin_search",
-            WECHAT_SEARCH_VIDEOS_PATH: "wechat_search_page",
-            WECHAT_VIDEO_DETAIL_PATH: "wechat_video_detail",
-        }
-        api_type = api_type_mapping.get(path)
-
+        api_type = _API_TYPE_BY_PATH.get(path)
+        # 没有备用通道时"原地重试"是唯一的韧性手段；有备用通道时换节点优先——
+        # 刚失败的节点立刻重试等于白等一次超时（见 _CHANNEL_COOLDOWN_SECONDS 的取舍）。
+        max_attempts = _VIRAL_SOURCE_MAX_ATTEMPTS if len(self._channels) == 1 else 1
         # 搜索是只读查询，HTTP 状态或业务包中的 429/5xx 可安全重试。超时/网络
         # 错误的结果不可知且重试会放大计费成本，不做重试。每次物理外呼都独立
-        # 计量；供应商已返回响应时先确认供应商用量，业务成功后才确认客户侧结果。
+        # 计量：供应商已返回响应即确认供应商用量，客户侧成功与否由整段计量圈定。
         with set_api_type(api_type) if api_type else nullcontext():
-            for attempt in range(1, _VIRAL_SOURCE_MAX_ATTEMPTS + 1):
+            for attempt in range(1, max_attempts + 1):
                 try:
                     with meter_call("viral_data", units=billing_units) as metered_call:
                         content = transport.request("POST", url, headers=headers, body=body)
                         metered_call.record_usage()
-                        try:
-                            envelope = json.loads(_maybe_gunzip(content))
-                        except json.JSONDecodeError as exc:
-                            raise ViralSourceError("爆款数据源返回了无法解析的响应") from exc
-                        if not isinstance(envelope, dict):
-                            raise ViralSourceError("爆款数据源响应结构异常")
-                        code = envelope.get("code")
-                        if isinstance(code, int) and not isinstance(code, bool) and code != 200:
-                            if _is_retryable_status(code):
-                                raise ViralSourceHttpStatusError(code)
-                            raise ViralSourceError("爆款数据源暂时不可用，请稍后重试")
-                        data = envelope.get("data")
-                        if not isinstance(data, dict):
-                            raise ViralSourceError("爆款数据源响应缺少数据")
-                        if data.get("ret") not in (None, 0) or data.get("error"):
-                            raise ViralSourceError("爆款内容暂时无法获取，请稍后重试")
-                    return data
+                        return _parse_viral_envelope(content)
                 except ViralSourceHttpStatusError as exc:
-                    if attempt >= _VIRAL_SOURCE_MAX_ATTEMPTS or not _is_retryable_status(
-                        exc.status
-                    ):
+                    if attempt >= max_attempts or not _is_retryable_status(exc.status):
                         raise
                     delay = _retry_backoff_delay(attempt, exc.retry_after)
                     logger.warning(
@@ -705,7 +839,7 @@ class ViralSourceClient:
                         exc.status,
                         delay,
                         attempt,
-                        _VIRAL_SOURCE_MAX_ATTEMPTS - 1,
+                        max_attempts - 1,
                     )
                     time.sleep(delay)
         raise AssertionError("数据源重试循环必须返回或抛出异常")
@@ -755,12 +889,13 @@ class ViralSourceClient:
         data = self._request(self._transport, DOUYIN_GENERAL_SEARCH_PATH, payload)
         next_cursor, has_more = _douyin_next_page_state(data)
         return DouyinSearchPage(
-            videos=self._douyin_search_videos(data, category),
+            videos=self._douyin_videos_from_data(data, category),
             cursor=next_cursor,
             has_more=has_more,
         )
 
-    def _douyin_search_videos(self, data: Mapping[str, Any], category: str) -> list[ViralVideo]:
+    def _douyin_videos_from_data(self, data: Mapping[str, Any], category: str) -> list[ViralVideo]:
+        """把综合搜索响应的 ``business_data`` 卡片解析成 DTO（搜索与刷新共用）."""
         cards = data.get("business_data")
         videos: list[ViralVideo] = []
         if isinstance(cards, list):
@@ -784,46 +919,24 @@ class ViralSourceClient:
         platform: str,
         video_id: str,
     ) -> list[ViralVideo]:
-        """刷新单条视频信息（刷新封面/播放地址等资源）."""
+        """刷新单条视频信息（刷新封面/播放地址等资源）.
 
-        # 由于 TikTokHub 没有单独的 refresh 接口，我们使用搜索 API 模拟刷新
-        url = f"{self._base_url}{DOUYIN_GENERAL_SEARCH_PATH}"
-        payload = json.dumps(
+        上游没有单条刷新接口：把视频 ID 当关键词走综合搜索，命中结果由调用方
+        按 ID 认领。统一走 :meth:`_request`，因此同样带 gzip、计量与主备切换
+        （此前手工拼请求绕过了这三点）。
+        """
+        data = self._request(
+            self._transport,
+            DOUYIN_GENERAL_SEARCH_PATH,
             {
-                "keyword": f"#{video_id}",  # 假装用 ID 作为关键词搜索
+                "keyword": f"#{video_id}",
                 "sort_type": "1",
                 "publish_time": "7",
                 "filter_duration": "0",
                 "content_type": "1",
             },
-            ensure_ascii=False,
-        ).encode("utf-8")
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        }
-        content = self._transport.request("POST", url, headers=headers, body=payload)
-        envelope = json.loads(content)
-        if envelope.get("code") != 200:
-            raise ViralSourceError("爆款数据源暂时不可用，请稍后重试")
-        data = envelope.get("data", {})
-        cards = data.get("business_data")
-        videos: list[ViralVideo] = []
-        if isinstance(cards, list):
-            for card in cards:
-                if not isinstance(card, Mapping) or card.get("type") != 1:
-                    continue
-                card_data = card.get("data")
-                if not isinstance(card_data, Mapping):
-                    continue
-                aweme = card_data.get("aweme_info")
-                if not isinstance(aweme, Mapping):
-                    continue
-                normalized = normalize_douyin_aweme(aweme, "")
-                if normalized and not is_irrelevant_viral_video(normalized.title):
-                    videos.append(normalized)
-        return videos
+        )
+        return self._douyin_videos_from_data(data, "")
 
     # -- 视频号 ---------------------------------------------------------------
 
@@ -908,7 +1021,9 @@ class ViralSourceClient:
         object_id: str | None = None,
     ) -> WechatVideoDetail:
         cache_key: _WechatDetailCacheKey = (
-            hashlib.sha256(self.api_key.encode("utf-8")).digest(),
+            hashlib.sha256(
+                "\x00".join(channel.fingerprint for channel in self._channels).encode("utf-8")
+            ).digest(),
             self._base_url,
             export_id,
             object_nonce_id or "",
@@ -980,7 +1095,11 @@ def viral_source_client_from_config(config: Mapping[str, str]) -> ViralSourceCli
     api_key = (config.get("api_key") or "").strip()
     if not api_key:
         raise ViralSourceUnavailable("爆款视频数据源未配置，请联系管理员")
-    return ViralSourceClient(api_key=api_key)
+    return ViralSourceClient(
+        api_key=api_key,
+        backup_base_url=(config.get(BACKUP_BASE_URL_FIELD) or "").strip() or None,
+        backup_api_key=(config.get(BACKUP_API_KEY_FIELD) or "").strip() or None,
+    )
 
 
 def viral_source_client_from_settings(conn: BusinessConnection) -> ViralSourceClient:

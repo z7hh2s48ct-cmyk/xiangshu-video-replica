@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.asr import AsrProviderError, max_inline_audio_bytes, max_inline_audio_seconds
 from app.auth import AuthenticatedUser, Database
+from app.billing_catalog import SERVICES
 from app.customer_fence import BusinessDbDep
 from app.db_portable import BusinessConnection
 from app.media import (
@@ -72,8 +73,18 @@ from app.viral_media import (
     ViralMediaPipeline,
 )
 from app.viral_media_preparation import ViralMediaBusy
-from app.viral_routes import ViralVideoItem
-from app.viral_store import get_viral_video, upsert_viral_videos, viral_video_availability
+from app.viral_routes import (
+    VIRAL_COPY_SERVICE,
+    ViralCopyBilling,
+    ViralVideoItem,
+    charge_viral_copy,
+)
+from app.viral_store import (
+    LINK_IMPORT_CATEGORY,
+    get_viral_video,
+    upsert_viral_videos,
+    viral_video_availability,
+)
 from app.viral_tikhub import ViralSourceError, ViralVideo
 
 router = APIRouter(prefix="/api/viral", tags=["viral"])
@@ -249,24 +260,27 @@ def _record_link_failure(
 
 
 def _resolved_video(resolved: ResolvedViralLink) -> ViralVideo:
+    # 链接导入只保证媒体本身可复刻；互动字段随解析上游给的走，缺的留空（`likes`
+    # 无「未知」取值，只能写 0），管理端按「字段待补全」提示，不拿 0 当真实互动。
+    metadata = resolved.metadata
     return ViralVideo(
         platform=resolved.platform,
         video_id=resolved.video_id,
-        category="链接导入",
+        category=LINK_IMPORT_CATEGORY,
         title=resolved.title,
         author=resolved.author,
-        author_avatar=None,
-        verified=False,
+        author_avatar=metadata.author_avatar,
+        verified=metadata.verified,
         cover_url=resolved.cover_url,
         duration_ms=resolved.duration_ms,
-        likes=0,
-        comments=None,
-        shares=None,
-        collects=None,
-        published_at=None,
+        likes=metadata.likes or 0,
+        comments=metadata.comments,
+        shares=metadata.shares,
+        collects=metadata.collects,
+        published_at=metadata.published_at,
         published_display=None,
         like_display=None,
-        tags=[],
+        tags=list(metadata.tags),
         play_url=resolved.video_url,
         audio_url=resolved.audio_url,
         native={
@@ -602,9 +616,10 @@ _COPY_ASR_SERVICE = "asr"
 class ViralCopyExtractionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    # 共享缓存命中：直接带文案，秒回且免费（决策 #18），此时没有任务可轮询。
+    # 共享缓存命中：直接带文案，不必让用户白等一次上传，但配送同样计费（已购则复用）。
     text: str | None = None
     updated_at: str | None = Field(default=None, alias="updatedAt")
+    billing: ViralCopyBilling | None = None
     # 未命中：客户端按 taskId 轮询转写；projectId/sourceAssetId 供文案工坊续接草稿。
     project_id: str | None = Field(default=None, alias="projectId")
     source_asset_id: str | None = Field(default=None, alias="sourceAssetId")
@@ -790,8 +805,9 @@ async def extract_viral_video_copy(
     自己从**本地缓存的原视频**里抽出的单声道 m4a，服务端只做校验、登记与转写编排。
 
     计费与工作台上传链路同一科目（``asr`` 按秒）：预留写在任务入队事务里，结算与
-    清理都交给既有 Worker。共享文案缓存命中时直接返回文案——不建任务、不预留、
-    不计费（决策 #18）。
+    清理都交给既有 Worker。共享文案缓存命中时直接返回文案——不建任务、不预留转写费，
+    但交付本身照样扣一次「获取文案」费（``viral_copy``，同账号同视频只扣一次），
+    否则这条秒回就成了绕开 ``/videos/copy/claim`` 的免费旁路。
 
     入库走既有 ``script_from_audio_tasks`` 租约体系（用户 2026-09-23 拍板方案 a）：
     断点续跑、``SUBMISSION_UNCERTAIN`` 不确定态、按秒预留结算与 ``viral_script_cache``
@@ -823,11 +839,23 @@ async def extract_viral_video_copy(
         # （提取文案原本就走导入链路），暂停时不该只剩这条路还能用。
         require_viral_import_enabled(conn)
         video = _require_available_viral_video(conn, platform=platform, video_id=video_id)
-        # 共享缓存先于一切计费动作（决策 #18）：命中就不必让用户白等一次上传。
+        # 共享缓存命中：不必让用户白等一次上传，但「秒回」不等于免费——这条文案的
+        # 交付同样要扣一次「获取文案」费（本账号已购则复用）。未命中才走上传转写。
         hit = cached_transcript(conn, platform=platform, video_id=video_id)
         if hit is not None:
+            charged, deduped = charge_viral_copy(
+                conn, actor=actor, platform=platform, video_id=video_id
+            )
             response.status_code = status.HTTP_200_OK
-            return ViralCopyExtractionResponse(text=hit.result.text, updatedAt=hit.updated_at)
+            return ViralCopyExtractionResponse(
+                text=hit.result.text,
+                updatedAt=hit.updated_at,
+                billing=ViralCopyBilling(
+                    charged=charged,
+                    unit=SERVICES[VIRAL_COPY_SERVICE].unit,
+                    deduped=deduped,
+                ),
+            )
         storage = get_media_storage(conn)
         inline_max_bytes, inline_max_seconds = _inline_audio_limits(conn, storage)
         owner_user_id = actor.id

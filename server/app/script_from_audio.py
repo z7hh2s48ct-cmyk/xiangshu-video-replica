@@ -66,9 +66,21 @@ class ScriptFromAudioRequest(BaseModel):
 class ScriptFromAudioResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    text: str
+    # 爆款链路的正文不在任务接口下发（copy_claim_required=True 时恒为 null）：
+    # 交付与计费统一走「获取文案」claim 回执，堵住「读任务即免费用文案」的旁路
+    # （设计 §5.4-1）。普通上传任务不受影响，text 始终有值。
+    text: str | None = None
     duration_sec: float | None = None
     language: str | None = None
+
+
+class ScriptFromAudioViralSource(BaseModel):
+    """任务关联的爆款视频身份；客户端凭它回「获取文案」接口取正文."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    platform: str
+    video_id: str
 
 
 class ScriptFromAudioTaskResponse(BaseModel):
@@ -80,6 +92,10 @@ class ScriptFromAudioTaskResponse(BaseModel):
     status: str
     attempt: int
     result: ScriptFromAudioResult | None
+    viral_source: ScriptFromAudioViralSource | None = None
+    # True = 正文只按 claim 回执下发，客户端在任务成功后调
+    # POST /api/viral/videos/copy/claim（首次扣「获取文案」费，复看免费）。
+    copy_claim_required: bool = False
     error_code: str | None
     error_message: str | None
     retryable: bool
@@ -89,13 +105,26 @@ class ScriptFromAudioTaskResponse(BaseModel):
     completed_at: str | None
 
 
+def _row_viral_source(row: sqlite3.Row) -> tuple[str, str] | None:
+    """任务入队时服务端核验并写入的爆款身份；客户端自报的元数据不算数."""
+    try:
+        payload = json.loads(str(row["request_json"] or "{}"))
+    except (ValueError, TypeError):
+        return None
+    source = payload.get("viral_source")
+    if isinstance(source, (list, tuple)) and len(source) == 2:
+        return str(source[0]), str(source[1])
+    return None
+
+
 def script_from_audio_task_response(row: sqlite3.Row) -> ScriptFromAudioTaskResponse:
+    viral_source = _row_viral_source(row)
     result_json = row["result_json"]
     result: ScriptFromAudioResult | None = None
     if result_json is not None:
         payload = json.loads(str(result_json))
         result = ScriptFromAudioResult(
-            text=str(payload.get("text", "")),
+            text=None if viral_source is not None else str(payload.get("text", "")),
             duration_sec=(
                 None if payload.get("duration_sec") is None else float(payload["duration_sec"])
             ),
@@ -108,6 +137,12 @@ def script_from_audio_task_response(row: sqlite3.Row) -> ScriptFromAudioTaskResp
         status=str(row["status"]),
         attempt=int(row["attempt"]),
         result=result,
+        viral_source=(
+            None
+            if viral_source is None
+            else ScriptFromAudioViralSource(platform=viral_source[0], video_id=viral_source[1])
+        ),
+        copy_claim_required=viral_source is not None,
         error_code=None if row["error_code"] is None else str(row["error_code"]),
         error_message=(
             None if row["error_message_redacted"] is None else str(row["error_message_redacted"])

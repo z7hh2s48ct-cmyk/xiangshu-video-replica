@@ -131,6 +131,43 @@ def test_bootstrap_accepts_valid_pg_all_environments(env_label: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 非生产链路的媒体运行时自检（缺 ffmpeg/ffprobe 只告警，生产链路硬失败）
+# ---------------------------------------------------------------------------
+
+
+def test_missing_media_tools_warn_on_non_production_bootstrap(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from app import bootstrap as bootstrap_module
+    from app.media_tools import MediaToolUnavailable
+
+    def _missing(tool: str) -> str:
+        raise MediaToolUnavailable(tool)
+
+    with (
+        caplog.at_level("WARNING", logger="app.bootstrap"),
+        patch.object(bootstrap_module, "resolve_media_binary", _missing),
+    ):
+        bootstrap_module._warn_missing_media_tools()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("ffmpeg" in message for message in messages)
+    assert any("ffprobe" in message for message in messages)
+
+
+def test_present_media_tools_stay_quiet(caplog: pytest.LogCaptureFixture) -> None:
+    from app import bootstrap as bootstrap_module
+
+    with (
+        caplog.at_level("WARNING", logger="app.bootstrap"),
+        patch.object(bootstrap_module, "resolve_media_binary", lambda tool: tool),
+    ):
+        bootstrap_module._warn_missing_media_tools()
+
+    assert not caplog.records
+
+
+# ---------------------------------------------------------------------------
 # generation_worker.main() 全环境拒绝矩阵
 # ---------------------------------------------------------------------------
 

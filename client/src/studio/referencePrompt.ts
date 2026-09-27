@@ -18,3 +18,27 @@ export function constrainReferenceVideoPrompt(prompt: string): string {
   }
   return `${prompt.slice(0, soundscape.index).trimEnd()}\n${block}\n${prompt.slice(soundscape.index)}`;
 }
+
+// 与服务端 prompt_issues(strict=True) 的 Ref2VA 分支同源：六段齐全、顺序正确、
+// 有镜头标记、不带代码围栏。客户端据此区分「一句需求待生成」与「已是成品」，
+// 决定按钮文案与是否显示结构自检——服务端仍是唯一裁判。
+const REF2VA_SECTIONS = [
+  "subject_definitions",
+  "summary",
+  "retention_analysis",
+  "detailed_description",
+  "overall_soundscape",
+  "non_diegetic_music",
+] as const;
+
+export function hasRef2vaStructure(prompt: string): boolean {
+  if (!prompt.trim() || prompt.includes("```") || !prompt.includes("[Shot 1]"))
+    return false;
+  let cursor = -1;
+  for (const section of REF2VA_SECTIONS) {
+    const match = new RegExp(`^\\s*${section}\\s*:`, "m").exec(prompt);
+    if (!match || match.index <= cursor) return false;
+    cursor = match.index;
+  }
+  return true;
+}

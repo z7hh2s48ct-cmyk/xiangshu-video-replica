@@ -1,13 +1,17 @@
-import { renderHook } from "@testing-library/react";
+import { renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   awaitViralCacheReady,
   CACHE_BADGE_LABELS,
   cacheAvailable,
   cacheProgressRatio,
+  ensureViralArchiveCache,
   ensureViralCache,
   formatCacheBytes,
+  isViralMaterialUnready,
   listViralCache,
+  reclaimViralCache,
+  useViralAutoCache,
   useViralCacheProgress,
   viralCacheKey,
 } from "./viralCache";
@@ -23,6 +27,20 @@ const core = vi.hoisted(() => ({
 vi.mock("@tauri-apps/api/core", () => ({
   ...core,
   convertFileSrc: (path: string) => `asset://localhost/${path}`,
+}));
+
+// 只桩掉取归档地址这一个调用：入队与轮询走真实实现，才能验证「归档 -> 下载队列」的接线。
+const api = vi.hoisted(() => ({
+  fetchViralVideoMedia:
+    vi.fn<
+      (platform: string, videoId: string, kind?: string) => Promise<unknown>
+    >(),
+  fetchViralCacheReclaim:
+    vi.fn<(platform: string, videoIds: string[]) => Promise<unknown>>(),
+}));
+vi.mock("../api", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  ...api,
 }));
 
 function cacheProgress(state: string, error: string | null = null) {
@@ -86,14 +104,34 @@ describe("viralCache 桥接", () => {
   });
 
   describe("角标文案", () => {
-    it("覆盖决策 #16 的四个状态", () => {
+    it("覆盖决策 #16 的四个状态，外加前端专属的「素材未就绪」", () => {
       expect(Object.keys(CACHE_BADGE_LABELS).sort()).toEqual([
         "cached",
         "downloading",
         "failed",
         "queued",
+        "unready",
       ]);
       expect(CACHE_BADGE_LABELS.failed).toContain("可重试");
+      // 归档未就绪不是失败：文案不能带「失败」，否则又回到用户看到
+      // 「缓存失败（可重试）」的那条老路上。
+      expect(CACHE_BADGE_LABELS.unready).not.toContain("失败");
+    });
+  });
+
+  describe("isViralMaterialUnready", () => {
+    it("归档未就绪与存储不可用算「未就绪」，其余错误照旧算失败", () => {
+      expect(
+        isViralMaterialUnready({ code: "VIRAL_MEDIA_PREPARATION_BUSY" }),
+      ).toBe(true);
+      expect(
+        isViralMaterialUnready({ code: "STORAGE_BACKEND_UNAVAILABLE" }),
+      ).toBe(true);
+      expect(isViralMaterialUnready({ code: "VIRAL_MEDIA_FORBIDDEN" })).toBe(
+        false,
+      );
+      expect(isViralMaterialUnready(new Error("网络中断"))).toBe(false);
+      expect(isViralMaterialUnready(undefined)).toBe(false);
     });
   });
 
@@ -187,5 +225,233 @@ describe("awaitViralCacheReady", () => {
       "需要桌面端",
     );
     expect(core.invoke).not.toHaveBeenCalled();
+  });
+});
+
+describe("归档数据源（缓存不再依赖会过期的源站直链）", () => {
+  beforeEach(() => {
+    core.invoke.mockReset();
+    core.invoke.mockResolvedValue(undefined);
+    api.fetchViralVideoMedia.mockReset();
+    api.fetchViralVideoMedia.mockResolvedValue({
+      kind: "video",
+      url: "https://archive.test/viral/douyin/native-1.mp4?sign=abc",
+      contentType: "video/mp4",
+      cacheHit: true,
+    });
+    core.isTauri.mockReturnValue(true);
+  });
+  afterEach(() => {
+    core.isTauri.mockReturnValue(false);
+  });
+
+  it("先取归档地址再入队，视频号同样走归档（无需密钥、无需计费直链）", async () => {
+    await ensureViralArchiveCache("wechat_channels", "wx/1");
+    // 只有 kind=video 的归档件是播放/抽音轨要用的原件。
+    expect(api.fetchViralVideoMedia).toHaveBeenCalledWith(
+      "wechat_channels",
+      "wx/1",
+      "video",
+    );
+    // 归档件在入云前就完成了解密，因此这里不能带 decodeKey（带了反而会被误解为加密流）。
+    expect(core.invoke).toHaveBeenCalledWith("viral_cache_ensure", {
+      platform: "wechat_channels",
+      videoId: "wx/1",
+      url: "https://archive.test/viral/douyin/native-1.mp4?sign=abc",
+      decodeKey: null,
+    });
+  });
+
+  it("归档未就绪时把服务端错误原样抛出，交给上层判定是否「未就绪」", async () => {
+    api.fetchViralVideoMedia.mockRejectedValue({
+      code: "VIRAL_MEDIA_PREPARATION_BUSY",
+    });
+    await expect(
+      ensureViralArchiveCache("douyin", "native-1"),
+    ).rejects.toMatchObject({ code: "VIRAL_MEDIA_PREPARATION_BUSY" });
+    expect(core.invoke).not.toHaveBeenCalled();
+  });
+
+  it("非桌面端一次外呼都不发（Web 端只浏览）", async () => {
+    core.isTauri.mockReturnValue(false);
+    await ensureViralArchiveCache("douyin", "native-1");
+    expect(api.fetchViralVideoMedia).not.toHaveBeenCalled();
+    expect(core.invoke).not.toHaveBeenCalled();
+  });
+});
+
+describe("useViralAutoCache（翻页即缓存）", () => {
+  beforeEach(() => {
+    core.invoke.mockReset();
+    core.invoke.mockResolvedValue(undefined);
+    api.fetchViralVideoMedia.mockReset();
+    core.isTauri.mockReturnValue(true);
+  });
+  afterEach(() => {
+    core.isTauri.mockReturnValue(false);
+  });
+
+  it("本页每个条目都按归档入队，视频号不再因为「没有直链」被跳过", async () => {
+    api.fetchViralVideoMedia.mockImplementation(async (platform, videoId) => ({
+      kind: "video",
+      url: `https://archive.test/${platform}/${videoId}.mp4`,
+      contentType: "video/mp4",
+      cacheHit: true,
+    }));
+    const { result } = renderHook(() =>
+      useViralAutoCache([
+        { platformKey: "douyin", nativeId: "native-1" },
+        { platformKey: "wechat_channels", nativeId: "wx-1" },
+      ]),
+    );
+    await waitFor(() =>
+      expect(api.fetchViralVideoMedia).toHaveBeenCalledTimes(2),
+    );
+    expect(result.current.size).toBe(0);
+    expect(core.invoke).toHaveBeenCalledWith("viral_cache_ensure", {
+      platform: "wechat_channels",
+      videoId: "wx-1",
+      url: "https://archive.test/wechat_channels/wx-1.mp4",
+      decodeKey: null,
+    });
+  });
+
+  it("归档未就绪时给出「素材未就绪」而不是「缓存失败」，并允许下次重试", async () => {
+    api.fetchViralVideoMedia
+      .mockRejectedValueOnce({ code: "VIRAL_MEDIA_PREPARATION_BUSY" })
+      .mockResolvedValueOnce({
+        kind: "video",
+        url: "https://archive.test/douyin/native-1.mp4",
+        contentType: "video/mp4",
+        cacheHit: true,
+      });
+    const videos = [{ platformKey: "douyin", nativeId: "native-1" }];
+    const { result, rerender } = renderHook(
+      ({ items }) => useViralAutoCache(items),
+      { initialProps: { items: videos } },
+    );
+    await waitFor(() =>
+      expect(result.current.get("douyin:native-1")?.state).toBe("unready"),
+    );
+    expect(result.current.get("douyin:native-1")?.error).toContain("尚未就绪");
+
+    // 再进一次页面（列表引用变化）会用新地址重试，成功后合成状态让位给真实进度。
+    rerender({ items: [...videos] });
+    await waitFor(() =>
+      expect(result.current.has("douyin:native-1")).toBe(false),
+    );
+  });
+
+  it("取地址失败但仍算失败时照旧标「缓存失败（可重试）」", async () => {
+    api.fetchViralVideoMedia.mockRejectedValue({
+      code: "VIRAL_MEDIA_FORBIDDEN",
+    });
+    const { result } = renderHook(() =>
+      useViralAutoCache([{ platformKey: "douyin", nativeId: "native-1" }]),
+    );
+    await waitFor(() =>
+      expect(result.current.get("douyin:native-1")?.state).toBe("failed"),
+    );
+  });
+});
+
+describe("reclaimViralCache（删除 / 下架的条目连带清本地缓存）", () => {
+  function cacheItem(platform: string, videoId: string) {
+    return { platform, videoId, bytes: 1024 };
+  }
+
+  beforeEach(() => {
+    core.isTauri.mockReturnValue(true);
+    core.invoke.mockReset();
+    core.invoke.mockResolvedValue(undefined);
+    api.fetchViralVideoMedia.mockReset();
+    api.fetchViralCacheReclaim.mockReset();
+    api.fetchViralCacheReclaim.mockResolvedValue({
+      platform: "douyin",
+      reclaim: [],
+    });
+  });
+
+  afterEach(() => {
+    core.isTauri.mockReturnValue(false);
+  });
+
+  function listReturns(items: unknown[]) {
+    // invoke 的桩签名是 (...args: unknown[])，这里按实参取命令名，避免窄化形参。
+    core.invoke.mockImplementation(async (...args: unknown[]) =>
+      args[0] === "viral_cache_list" ? items : undefined,
+    );
+  }
+
+  it("只上报不在保留集里的条目，并按服务端判定删掉本地文件", async () => {
+    listReturns([
+      cacheItem("douyin", "keep"),
+      cacheItem("douyin", "gone"),
+      // 别的平台不参与本次回收：平台之间 ID 各自编号，混着报会误删。
+      cacheItem("wechat_channels", "other-platform"),
+    ]);
+    api.fetchViralCacheReclaim.mockResolvedValue({
+      platform: "douyin",
+      reclaim: ["gone"],
+    });
+    const reclaimed = await reclaimViralCache("douyin", [
+      { platform: "douyin", videoId: "keep" },
+    ]);
+    expect(api.fetchViralCacheReclaim).toHaveBeenCalledWith("douyin", ["gone"]);
+    expect(reclaimed).toEqual(["gone"]);
+    expect(
+      core.invoke.mock.calls.filter(
+        ([command]) => command === "viral_cache_delete",
+      ),
+    ).toEqual([
+      ["viral_cache_delete", { platform: "douyin", videoId: "gone" }],
+    ]);
+  });
+
+  it("服务端判为保留的条目不删（判据在服务端，客户端不自行决定）", async () => {
+    listReturns([cacheItem("douyin", "still-live")]);
+    api.fetchViralCacheReclaim.mockResolvedValue({
+      platform: "douyin",
+      reclaim: [],
+    });
+    await expect(reclaimViralCache("douyin")).resolves.toEqual([]);
+    expect(
+      core.invoke.mock.calls.filter(
+        ([command]) => command === "viral_cache_delete",
+      ),
+    ).toEqual([]);
+  });
+
+  it("没有候选条目时不发请求（空列表刷新是常态）", async () => {
+    listReturns([]);
+    await expect(reclaimViralCache("douyin", [])).resolves.toEqual([]);
+    expect(api.fetchViralCacheReclaim).not.toHaveBeenCalled();
+  });
+
+  it("超过服务端单批上限时自行分批，不把超长请求打过去", async () => {
+    listReturns(
+      Array.from({ length: 201 }, (_, index) =>
+        cacheItem("douyin", `v-${index}`),
+      ),
+    );
+    await reclaimViralCache("douyin");
+    expect(api.fetchViralCacheReclaim).toHaveBeenCalledTimes(2);
+    expect(api.fetchViralCacheReclaim.mock.calls[0][1]).toHaveLength(200);
+    expect(api.fetchViralCacheReclaim.mock.calls[1][1]).toHaveLength(1);
+  });
+
+  it("回收失败与本地清单读取失败都静默：清理不该打断浏览", async () => {
+    listReturns([cacheItem("douyin", "gone")]);
+    api.fetchViralCacheReclaim.mockRejectedValue(new Error("网络中断"));
+    await expect(reclaimViralCache("douyin")).resolves.toEqual([]);
+    core.invoke.mockRejectedValue(new Error("缓存目录不可读"));
+    await expect(reclaimViralCache("douyin")).resolves.toEqual([]);
+  });
+
+  it("非桌面端一次外呼都不发（Web 端没有本地缓存）", async () => {
+    core.isTauri.mockReturnValue(false);
+    await expect(reclaimViralCache("douyin")).resolves.toEqual([]);
+    expect(core.invoke).not.toHaveBeenCalled();
+    expect(api.fetchViralCacheReclaim).not.toHaveBeenCalled();
   });
 });

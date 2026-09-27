@@ -71,8 +71,16 @@ MaterialOrientation = Literal["portrait", "landscape", "square"]
 
 IMAGE_UPLOAD_LIMIT = 10 * 1024 * 1024
 VOICE_CLONE_UPLOAD_LIMIT = 20 * 1024 * 1024
-# R2V 参考音频时长上限：与参考视频一致（前端拦截 + 后端音频探测双保险）。
+# R2V 参考音频时长上下限：与参考视频同口径，生成端也按 2–15 秒校验
+# （前端拦截 + 后端音频探测双保险）。
+MIN_REFERENCE_AUDIO_SECONDS = 2.0
 MAX_REFERENCE_AUDIO_SECONDS = 15.0
+# 音频格式白名单按用途收窄：口播只认 MP3；参考放开到常见容器；声音克隆不在表内，
+# 沿用 ALLOWED_UPLOADS 全集（含 WMA/WMV 等仅克隆可解码的容器）。
+AUDIO_SUFFIXES_BY_PURPOSE: dict[AudioPurpose, frozenset[str]] = {
+    "oral_audio": frozenset({".mp3"}),
+    "reference": frozenset({".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus"}),
+}
 ALLOWED_UPLOADS: dict[tuple[str, str], tuple[MaterialMediaType, str]] = {
     (".jpg", "image/jpeg"): ("image", ".jpg"),
     (".jpeg", "image/jpeg"): ("image", ".jpg"),
@@ -446,24 +454,44 @@ def validate_audio_contract(
             "MATERIAL_AUDIO_DURATION_INVALID",
             "声音克隆样本时长必须为 5–180 秒。",
         )
-    if audio_purpose == "reference" and duration_seconds > MAX_REFERENCE_AUDIO_SECONDS:
+    if audio_purpose == "reference" and not (
+        MIN_REFERENCE_AUDIO_SECONDS <= duration_seconds <= MAX_REFERENCE_AUDIO_SECONDS
+    ):
         raise material_error(
             422,
             "MATERIAL_AUDIO_DURATION_INVALID",
-            "参考音频时长不能超过 15 秒。",
+            "参考音频时长须为 2–15 秒。",
         )
 
 
-def probe_audio_duration(content: bytes) -> float | None:
-    """Probe legacy MP3 upload duration without adding a full decode pass."""
+def validate_audio_purpose_suffix(*, audio_purpose: AudioPurpose | None, safe_suffix: str) -> None:
+    """按用途收窄可用的音频容器；声音克隆不在表内，沿用 ALLOWED_UPLOADS 全集。"""
+    if audio_purpose is None:
+        return
+    allowed_suffixes = AUDIO_SUFFIXES_BY_PURPOSE.get(audio_purpose)
+    if allowed_suffixes is not None and safe_suffix not in allowed_suffixes:
+        raise material_error(
+            415,
+            "MATERIAL_TYPE_UNSUPPORTED",
+            "完整口播音频仅支持 MP3；参考音频支持 MP3、WAV、M4A、AAC、FLAC、OGG、OPUS。",
+        )
+
+
+def probe_audio_duration(content: bytes, suffix: str = ".mp3") -> float | None:
+    """Probe口播/参考音频时长，不做整段解码。
+
+    ``MediaToolUnavailable`` 按调用方语义上抛（→503），其余探测失败返回
+    ``None``，由调用方给出 422：缺 ffprobe 是环境问题，不该伪装成文件损坏。
+    """
+    safe_suffix = suffix if suffix.startswith(".") and suffix[1:].isalnum() else ".mp3"
+    ffprobe = resolve_media_binary("ffprobe")
     try:
-        ffprobe = resolve_media_binary("ffprobe")
         # Windows does not let ffprobe reopen an active delete-on-close handle.
         with tempfile.TemporaryDirectory(prefix="material-audio-") as directory:
-            audio_path = Path(directory) / "source.mp3"
+            audio_path = Path(directory) / f"source{safe_suffix}"
             audio_path.write_bytes(content)
             return probe_duration_seconds(ffprobe, audio_path)
-    except (OSError, RuntimeError):
+    except OSError:
         return None
 
 
@@ -894,7 +922,9 @@ def material_item(row: Any) -> MaterialItem:
             if purpose == "voice_clone" and duration is not None:
                 duration_valid = 5 <= duration <= 180
             elif purpose == "reference" and duration is not None:
-                duration_valid = 0 < duration <= MAX_REFERENCE_AUDIO_SECONDS
+                duration_valid = (
+                    MIN_REFERENCE_AUDIO_SECONDS <= duration <= MAX_REFERENCE_AUDIO_SECONDS
+                )
             if (
                 purpose in {"oral_audio", "voice_clone", "reference"}
                 and duration_valid
@@ -1181,6 +1211,7 @@ def _reuse_registered_material(
     storage: StorageAdapter,
     request: MaterialUploadIntentRequest,
     media_type: MaterialMediaType,
+    safe_suffix: str,
 ) -> MaterialUploadIntentResponse | None:
     """Reuse bytes this owner already registered, skipping the transfer entirely.
 
@@ -1230,6 +1261,15 @@ def _reuse_registered_material(
             media_type=media_type,
             audio_purpose=request.audio_purpose,
             duration_seconds=duration,
+        )
+        # 复用是不上传的「秒传」：容器来自源素材，按源文件名判定用途是否可用，
+        # 否则同名不同容器的重命名上传会绕过用途白名单。
+        validate_audio_purpose_suffix(
+            audio_purpose=request.audio_purpose,
+            safe_suffix=(
+                Path(str(source_metadata.get("original_filename") or "")).suffix.lower()
+                or safe_suffix
+            ),
         )
     content = retain_existing_content_object(conn, existing.id)
     asset_id = str(uuid4())
@@ -1333,12 +1373,8 @@ def create_material_upload_intent(
         audio_purpose=request.audio_purpose,
         duration_seconds=request.duration_seconds,
     )
-    if media_type == "audio" and safe_suffix != ".mp3" and request.audio_purpose != "voice_clone":
-        raise material_error(
-            415,
-            "MATERIAL_TYPE_UNSUPPORTED",
-            "该音频格式仅用于声音克隆。",
-        )
+    if media_type == "audio":
+        validate_audio_purpose_suffix(audio_purpose=request.audio_purpose, safe_suffix=safe_suffix)
     if request.audio_purpose == "voice_clone" and request.size_bytes > VOICE_CLONE_UPLOAD_LIMIT:
         raise material_error(413, "MATERIAL_TOO_LARGE", "声音克隆样本不能超过 20MB。")
     reuse = _reuse_registered_material(
@@ -1347,6 +1383,7 @@ def create_material_upload_intent(
         storage=storage,
         request=request,
         media_type=media_type,
+        safe_suffix=safe_suffix,
     )
     if reuse is not None:
         return reuse
@@ -1570,9 +1607,24 @@ def probe_material_upload(
                     "音频校验服务暂不可用，请稍后重试。",
                 ) from exc
         else:
-            duration_seconds = probe_audio_duration(content)
+            try:
+                duration_seconds = probe_audio_duration(content, suffix)
+            except MediaToolUnavailable as exc:
+                raise material_error(
+                    503,
+                    "MATERIAL_AUDIO_PROBE_UNAVAILABLE",
+                    "音频校验服务暂不可用，请稍后重试。",
+                ) from exc
         if duration_seconds is None:
             raise material_error(422, "MATERIAL_AUDIO_INVALID", "无法读取音频时长。")
+        if prepared.audio_purpose == "reference" and not (
+            MIN_REFERENCE_AUDIO_SECONDS <= duration_seconds <= MAX_REFERENCE_AUDIO_SECONDS
+        ):
+            raise material_error(
+                422,
+                "MATERIAL_AUDIO_DURATION_INVALID",
+                "参考音频时长须为 2–15 秒。",
+            )
         requested_duration = prepared.requested_duration_seconds
         if requested_duration is not None and abs(duration_seconds - requested_duration) > 1:
             raise material_error(

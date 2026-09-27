@@ -3,6 +3,7 @@ import {
   type CurrentUser,
   cancelGenerationBatch,
   cancelOralTask,
+  claimViralCopy,
   completeVideoUpload,
   createGenerationBatch,
   createGenerationResultPreviewUrl,
@@ -21,7 +22,6 @@ import {
   deletePublishAccount,
   deleteStudioDraft,
   downloadMaterialAsset,
-  fetchViralCopy,
   type GenerationBatch,
   type GenerationBatchInput,
   type GenerationBatchListItem,
@@ -66,6 +66,7 @@ import {
   saveStudioDraft,
   saveStudioSavedScript,
   uploadReferenceVideo,
+  type ViralCopyBilling,
   type ViralPlatform,
   type ViralVideoItem,
   verifyPublishAccount,
@@ -77,6 +78,7 @@ import {
   restoreOrCreateIdempotencyRecord,
 } from "../useGenerationDrafts";
 import { updateCopyExtractionProgress } from "./copyExtractionProgress";
+import { hasRef2vaStructure } from "./referencePrompt";
 import { createDraft } from "./state";
 import type {
   StudioAsset,
@@ -1161,6 +1163,7 @@ export function studioVideoFromViral(item: ViralVideoItem): StudioVideo {
     homepageRank: item.homepageRank ?? null,
     hasPlayableAudio: item.hasPlayableAudio,
     hasCopy: item.hasCopy === true,
+    detailCharged: item.detailCharged === true,
     playUrl: item.playUrl,
   };
 }
@@ -1447,6 +1450,20 @@ function draftFromPayload(payload: unknown): StudioDraft | null {
       ? payload.rewriteWordCount
       : undefined;
   merged.style = "standard";
+  // 分仓迁移：升级前参考生视频的六段式正文就存在 prompt 里，分仓后参考页会看起来
+  // 被清空。只搬结构明确的六段式——文/图模式的集成描述不含段名，不会被误搬；
+  // 搬完 prompt 是空的，promptEdited 也要跟着复位，否则文图页会挡着不肯写新稿。
+  // 判据用 payload 有没有 referencePrompt 键：线上老草稿没有这个键，new 客户端
+  // 即使留空也会写上（createDraft 的默认值会掩盖「键不存在」这一点）。
+  if (
+    !Object.hasOwn(payload, "referencePrompt") &&
+    typeof merged.prompt === "string" &&
+    hasRef2vaStructure(merged.prompt)
+  ) {
+    merged.referencePrompt = merged.prompt;
+    merged.prompt = "";
+    merged.promptEdited = false;
+  }
   return merged;
 }
 
@@ -1670,11 +1687,13 @@ export async function loadPersonAssets(
 }
 
 /** 提取文案管线（script-from-audio）：提交任务 → 每 2 秒轮询 → 终态返回。
- * 成功返回转写全文；失败抛出带服务端文案的 Error（含 SUBMISSION_UNCERTAIN）。 */
+ * 成功返回转写结果；爆款任务的正文为 null——服务端任务接口不下发正文，调用方要凭
+ * 任务的 viral_source 回「获取文案」claim 取（那里才是交付与计费点）。失败抛出带
+ * 服务端文案的 Error（含 SUBMISSION_UNCERTAIN）。 */
 export async function extractScriptFromUpload(
   projectId: string,
   assetId: string,
-): Promise<{ text: string; taskId: string }> {
+): Promise<{ text: string | null; taskId: string }> {
   const submitted = await createScriptFromAudioTask(
     projectId,
     assetId,
@@ -1683,16 +1702,17 @@ export async function extractScriptFromUpload(
   return awaitScriptFromAudioTask(submitted.id);
 }
 
-/** 轮询既有提取任务直到终态（2s × 150 = 5 分钟上限，长音频异步转写兜底）。 */
+/** 轮询既有提取任务直到终态（2s × 150 = 5 分钟上限，长音频异步转写兜底）。
+ * 爆款任务成功时 text 为 null（正文按 claim 回执下发），见 extractScriptFromUpload。 */
 export async function awaitScriptFromAudioTask(
   taskId: string,
-): Promise<{ text: string; taskId: string }> {
+): Promise<{ text: string | null; taskId: string }> {
   const maxAttempts = 150;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     await new Promise((resolve) => window.setTimeout(resolve, 2000));
     const task = await getScriptFromAudioTask(taskId);
     if (task.status === "SUCCEEDED" && task.result) {
-      return { text: task.result.text, taskId: task.id };
+      return { text: task.result.text ?? null, taskId: task.id };
     }
     if (task.status === "FAILED" || task.status === "SUBMISSION_UNCERTAIN") {
       throw new Error(task.error_message || "文案提取失败，请稍后重试。");
@@ -1707,12 +1727,16 @@ export async function awaitScriptFromAudioTask(
 
 /** 文案提取的受理结果：命中共享缓存时直接带文案，否则带待轮询的任务与草稿归属。 */
 export type ViralCopyReceipt =
-  | { kind: "cache"; text: string }
+  | { kind: "cache"; text: string; billing: ViralCopyBilling }
   | { kind: "task"; projectId: string; sourceAssetId: string; taskId: string };
 
 /**
- * 桌面端爆款文案提取：先查共享缓存（命中即回填，不下载不上传不计费），未命中才
+ * 桌面端爆款文案提取：先取共享文案（命中即扣一次「获取文案」费并秒回），未命中才
  * 本地抽音轨上传。
+ *
+ * 「秒回」不等于免费：文案是零售内容，谁拿到手里谁付这次交付的钱，同一条视频对同一
+ * 个付费账号只扣一次（服务端台账去重）。未命中时本次分文不扣——没有交付就没有收费
+ * ——再按归档数据源补齐本地缓存、抽音轨上传，转写费由 ASR 科目另计。
  *
  * 与工作台上传链路的区别只有「素材从哪来」：这里上传的是客户端自己从**本地缓存的
  * 原视频**里抽出的单声道音轨，平台因此不必再为文案留存原片（设计 §5.3 / §8）。
@@ -1723,15 +1747,14 @@ export type ViralCopyReceipt =
 export async function startViralCopyExtraction(video: {
   platformKey: string;
   nativeId: string;
-  playUrl?: string | null;
 }): Promise<ViralCopyReceipt> {
   const { platformKey, nativeId } = video;
-  // 读缓存失败不该拦住提取（未命中或读不到都只是少一次秒回），所以这里吞掉异常。
-  const cached = await fetchViralCopy(
-    platformKey as ViralPlatform,
-    nativeId,
-  ).catch(() => null);
-  if (cached?.text) return { kind: "cache", text: cached.text };
+  // 计费点前移到这里：取文案就是付费动作，读不到计费口径就不该往下走（继续下去
+  // 会白花一次转写费）。失败照实抛出，由调用方提示用户。
+  const claimed = await claimViralCopy(platformKey as ViralPlatform, nativeId);
+  if (claimed.text) {
+    return { kind: "cache", text: claimed.text, billing: claimed.billing };
+  }
   await ensureViralCacheForVideo(video);
   await awaitViralCacheReady(platformKey, nativeId);
   const audio = await extractViralAudio(platformKey, nativeId);
@@ -1740,8 +1763,19 @@ export async function startViralCopyExtraction(video: {
     nativeId,
     audio,
   );
-  // 与缓存检查之间的竞态：别的用户刚好写入了结果，服务端直接带文案回来。
-  if (accepted.text) return { kind: "cache", text: accepted.text };
+  // 与获取之间的竞态：别的用户刚好写入了结果，服务端扣费后直接带文案回来。
+  if (accepted.text) {
+    return {
+      kind: "cache",
+      text: accepted.text,
+      billing: accepted.billing ?? {
+        charged: 0,
+        unit: "call",
+        deduped: false,
+        billable: true,
+      },
+    };
+  }
   if (!accepted.projectId || !accepted.sourceAssetId || !accepted.taskId) {
     throw new Error("文案提取任务缺少项目或素材结果");
   }
@@ -1753,6 +1787,21 @@ export async function startViralCopyExtraction(video: {
   };
 }
 
+/**
+ * 转写完成后取回文案：这里才是首提取者的交付与计费点.
+ *
+ * 他已为这次转写付过 ASR 按秒费用，但拿到手的文案本身同样要付一次「获取文案」费
+ * （已拍板口径：谁拿到文案谁付费，没有双重标准）。未命中缓存或获取失败返回 null——
+ * 服务端任务接口不再兜底下发正文，调用方提示用户重新提取补齐。
+ */
+export async function claimExtractedViralCopy(
+  platformKey: string,
+  nativeId: string,
+): Promise<string | null> {
+  const claimed = await claimViralCopy(platformKey as ViralPlatform, nativeId);
+  return claimed.text;
+}
+
 export async function loadLatestScriptFromUpload(projectId: string) {
   const task = await getLatestScriptFromAudioTask(projectId);
   return task
@@ -1762,6 +1811,14 @@ export async function loadLatestScriptFromUpload(projectId: string) {
         result: task.result,
         errorMessage: task.error_message ?? undefined,
         sourceAssetId: task.source_asset_id ?? undefined,
+        // 爆款任务正文按 claim 下发：恢复轮询要凭这份身份回「获取文案」取正文。
+        viralSource: task.viral_source
+          ? {
+              platform: task.viral_source.platform,
+              videoId: task.viral_source.video_id,
+            }
+          : undefined,
+        copyClaimRequired: task.copy_claim_required ?? false,
       }
     : null;
 }

@@ -15,6 +15,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from app.db_portable import BusinessConnection
 from app.settings import SettingsRepository, SettingsUnavailableError
+from app.viral_tikhub import MAX_TAGS, parse_compact_count
 
 DOUYIDOU_BASE_URL = "https://gateway.diadi.cn"
 DOUYIDOU_TIMEOUT_SECONDS = 25.0
@@ -125,6 +126,24 @@ class UrllibDouyidouHttpTransport(DouyidouHttpTransport):
 
 
 @dataclass(frozen=True)
+class ResolvedViralMetadata:
+    """链接解析顺带拿到的可选互动字段；上游没给的一律为 None.
+
+    这些字段用于管理端展示内容质量（头像 / 互动 / 发布时间 / 标签）。解析接口
+    并不承诺返回它们，缺失时管理端标注「字段待补全」，绝不填默认值冒充真实数据。
+    """
+
+    author_avatar: str | None = None
+    verified: bool = False
+    likes: int | None = None
+    comments: int | None = None
+    shares: int | None = None
+    collects: int | None = None
+    published_at: int | None = None
+    tags: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ResolvedViralLink:
     platform: Literal["douyin", "xiaohongshu"]
     video_id: str
@@ -135,6 +154,7 @@ class ResolvedViralLink:
     audio_url: str | None
     duration_ms: int
     source_description: str
+    metadata: ResolvedViralMetadata = ResolvedViralMetadata()
 
 
 def normalize_supported_link(raw: str) -> str:
@@ -349,6 +369,95 @@ def _duration_ms(payload: dict[str, Any]) -> int:
     return 0
 
 
+# 解析上游的字段命名沿用平台侧通用键名；同义键按优先级取第一个可解析值。
+_AVATAR_KEYS = ("avatar", "avatar_url", "avatar_thumb", "avatar_medium", "avatar_larger")
+_STATISTIC_KEYS = {
+    "likes": ("digg_count", "like_count", "likes"),
+    "comments": ("comment_count", "comments_count", "comments"),
+    "shares": ("share_count", "shares_count", "shares"),
+    "collects": ("collect_count", "collects_count", "collects"),
+}
+_PUBLISHED_AT_KEYS = ("create_time", "createTime", "publish_time", "pub_time")
+
+
+def _image_url(value: object) -> str | None:
+    """头像 / 封面字段可能是字符串、地址数组或多地址对象，只认 http(s) 字符串。"""
+    if isinstance(value, str):
+        return value if value.startswith(("https://", "http://")) else None
+    if isinstance(value, Mapping):
+        return _image_url(value.get("url_list")) or _image_url(value.get("url"))
+    if isinstance(value, list):
+        for item in value:
+            resolved = _image_url(item)
+            if resolved:
+                return resolved
+    return None
+
+
+def _count(value: object) -> int | None:
+    """计数只认非负整数与可解析的计数文本；其余（含 bool）一律视为未提供。"""
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
+    parsed = value if isinstance(value, int) else parse_compact_count(value)
+    return parsed if parsed is not None and parsed >= 0 else None
+
+
+def _hashtags(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    tags: list[str] = []
+
+    def add(raw: object) -> None:
+        tag = str(raw or "").strip()
+        if tag and tag not in tags and len(tags) < MAX_TAGS:
+            tags.append(tag)
+
+    for key in ("text_extra", "hashtag_list", "tags"):
+        entries = payload.get(key)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, Mapping):
+                add(entry.get("hashtag_name") or entry.get("keyword") or entry.get("name"))
+            else:
+                add(entry)
+    return tuple(tags)
+
+
+def _optional_metadata(payload: Mapping[str, Any]) -> ResolvedViralMetadata:
+    """上游带上互动数据就取用，缺失一律留空.
+
+    链接导入的价值是媒体本身，互动字段是加分项。这里只做只读提取，取不到就留
+    None，绝不按默认值编造——管理端据此显示「字段待补全」，运营不会把 0 当成
+    真实互动去判断内容质量。
+    """
+    author = payload.get("author")
+    author_block = author if isinstance(author, Mapping) else {}
+    statistics = payload.get("statistics")
+    # 计数可能在 statistics 子对象里，也可能平铺在顶层；其余字段一律只看顶层。
+    stats = statistics if isinstance(statistics, Mapping) else payload
+
+    def first(source: Mapping[str, Any], keys: tuple[str, ...]) -> int | None:
+        parsed = (_count(source.get(key)) for key in keys)
+        return next((value for value in parsed if value is not None), None)
+
+    return ResolvedViralMetadata(
+        author_avatar=next(
+            (
+                resolved
+                for key in _AVATAR_KEYS
+                if (resolved := _image_url(author_block.get(key) or payload.get(key)))
+            ),
+            None,
+        ),
+        verified=bool(author_block.get("is_verified") or payload.get("is_verified")),
+        likes=first(stats, _STATISTIC_KEYS["likes"]),
+        comments=first(stats, _STATISTIC_KEYS["comments"]),
+        shares=first(stats, _STATISTIC_KEYS["shares"]),
+        collects=first(stats, _STATISTIC_KEYS["collects"]),
+        published_at=first(payload, _PUBLISHED_AT_KEYS),
+        tags=_hashtags(payload),
+    )
+
+
 class DouyidouLinkClient:
     def __init__(
         self,
@@ -459,6 +568,7 @@ class DouyidouLinkClient:
         text = str(payload.get("text") or "").strip()
         title = str(payload.get("title") or "").strip() or text[:40] or "链接视频"
         cover = payload.get("cover")
+        metadata = _optional_metadata(payload)
         return ResolvedViralLink(
             platform=platform,
             video_id=video_id,
@@ -469,6 +579,7 @@ class DouyidouLinkClient:
             audio_url=audio_url,
             duration_ms=_duration_ms(payload),
             source_description=text[:2000],
+            metadata=metadata,
         )
 
 
