@@ -273,8 +273,12 @@ def _stage_recharge_preconditions(
         merchant = provider.load_merchant_config(conn)
         deployment = provider.load_deployment_config()
     except ValueError as exc:
-        # 红线：对外响应文案不得出现供应商名称，配置细节只进服务端日志。
-        logger.warning("Recharge precondition failed on payment provider config: %s", exc)
+        # 红线：供应商名称既不得出现在对外响应文案里，也不得出现在日志里
+        # （AGENTS.md 三者并列：API 响应 / 界面文案 / 日志）。上游 ValueError
+        # 的消息文本本身可能带供应商名，因此这里只记异常类型，不记 str(exc)。
+        logger.warning(
+            "Recharge precondition failed on payment provider config: %s", type(exc).__name__
+        )
         raise HTTPException(
             status_code=503,
             detail={
