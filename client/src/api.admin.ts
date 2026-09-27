@@ -1708,6 +1708,130 @@ export async function createCustomerAdjustment(
 }
 
 // ---------------------------------------------------------------------------
+// 客户权益：代客开通套餐（线下已付款）与手工折扣
+// ---------------------------------------------------------------------------
+
+export interface PackageGrantInput {
+  packageId: string;
+  /** 操作员确认时看到的套餐版本；服务端版本不同即 409，避免按改过的套餐开通。 */
+  packageVersion: number;
+  /** 线下收款凭证号（转账流水号等）。 */
+  sourceDocumentRef: string;
+}
+
+export interface PackageGrantResult {
+  adjustment_id: string;
+  order_id: string;
+  package_id: string;
+  package_name: string;
+  amount_fen: number;
+  credits: number;
+  /** 无权益套餐为 null。 */
+  discount_id: string | null;
+  discount_rate: string | null;
+  discount_interfaces: string[];
+  pricing_scope: string;
+  wallet_balance_after: number;
+  source_document_type: string;
+  source_document_ref: string;
+  request_id: string;
+}
+
+/** POST /api/control/customers/{user_id}/package-grants */
+export function grantCustomerPackage(
+  userId: string,
+  input: PackageGrantInput,
+  reason: string,
+  idempotencyKey?: string,
+): Promise<PackageGrantResult> {
+  return adminWrite<PackageGrantResult>(
+    `/api/control/customers/${encodeURIComponent(userId)}/package-grants`,
+    {
+      package_id: input.packageId,
+      package_version: input.packageVersion,
+      source_document_ref: input.sourceDocumentRef,
+    },
+    reason,
+    "开通套餐失败",
+    idempotencyKey,
+  );
+}
+
+export interface CustomerDiscount {
+  id: string;
+  /** 4 位小数字符串，如 "0.9000"。 */
+  discount_rate: string;
+  /** 空数组 = 全部消耗。 */
+  applicable_interfaces: string[];
+  priority: number;
+  is_active: boolean;
+  valid_from: string;
+  valid_until: string | null;
+  source: "manual" | "recharge_package";
+  source_recharge_order_id: string | null;
+  package_name: string | null;
+  created_at: string;
+}
+
+/** GET /api/control/customers/{user_id}/discounts（生效在前、新建在前）。 */
+export async function listCustomerDiscounts(
+  userId: string,
+): Promise<CustomerDiscount[]> {
+  const body = await adminRead<{ items: CustomerDiscount[] }>(
+    `/api/control/customers/${encodeURIComponent(userId)}/discounts`,
+    "读取客户折扣失败",
+  );
+  return body.items;
+}
+
+export interface ManualDiscountInput {
+  discountRate: string;
+  applicableInterfaces: string[];
+  /** ISO 时间；null = 永久有效。 */
+  validUntil: string | null;
+}
+
+/** POST /api/control/customers/{user_id}/discounts（替换该客户当前的专项折扣）。 */
+export function createCustomerDiscount(
+  userId: string,
+  input: ManualDiscountInput,
+  reason: string,
+  idempotencyKey?: string,
+): Promise<{
+  discount: CustomerDiscount;
+  replaced_discount_ids: string[];
+  request_id: string;
+}> {
+  return adminWrite(
+    `/api/control/customers/${encodeURIComponent(userId)}/discounts`,
+    {
+      discount_rate: input.discountRate,
+      applicable_interfaces: input.applicableInterfaces,
+      valid_until: input.validUntil,
+    },
+    reason,
+    "设置专项折扣失败",
+    idempotencyKey,
+  );
+}
+
+/** POST /api/control/customers/{user_id}/discounts/{discount_id}/deactivate */
+export function deactivateCustomerDiscount(
+  userId: string,
+  discountId: string,
+  reason: string,
+  idempotencyKey?: string,
+): Promise<{ discount_id: string; was_active: boolean; request_id: string }> {
+  return adminWrite(
+    `/api/control/customers/${encodeURIComponent(userId)}/discounts/${encodeURIComponent(discountId)}/deactivate`,
+    {},
+    reason,
+    "停用专项折扣失败",
+    idempotencyKey,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Queue-mode switch (M4/M5 review M2 follow-up, PR #68 Codex P1): the
 // production control-plane read/write for the fair-queue rollout switch.
 // ---------------------------------------------------------------------------

@@ -435,6 +435,17 @@
   background: transparent;
 }
 
+/* 权益区横跨整行：表格与两张表单都需要宽度，放进两列设置网格会挤成窄条。 */
+.customer-benefits h4 {
+  margin: 16px 0 8px;
+}
+.customer-focused-detail .customer-benefits__scope {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+
 @media (max-width: 760px) {
   .customer-list-filters.admin-toolbar {
     grid-template-columns: repeat(2, minmax(0, 1fr));

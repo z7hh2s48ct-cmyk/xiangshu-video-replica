@@ -31,8 +31,8 @@ from app.billing_catalog import INTERFACE_KEYS
 from app.db_portable import BusinessConnection
 from app.discount_service import validate_discount_rate
 
-# 套餐权益的折扣优先级：高于常见手工折扣配置（0–99），但管理员仍可用更高优先级手工折扣
-# 覆盖单用户个案（get_active_discounts 按 priority DESC 取优）。
+# 套餐权益的折扣优先级：管理端手工折扣固定用更高的 customer_benefits.MANUAL_DISCOUNT_PRIORITY，
+# 单客户个案定价因此始终压过套餐权益（get_active_discounts 按 priority DESC 取优）。
 PACKAGE_DISCOUNT_PRIORITY = 100
 
 # 金额/积分为 PG Integer，值域 1 .. 2147483647（与迁移 CHECK 一致）。

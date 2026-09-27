@@ -17,6 +17,7 @@ from app.activation_code_routes import router as customer_activation_router
 from app.admin_activation_routes import router as admin_activation_router
 from app.admin_audit_routes import router as admin_audit_router
 from app.admin_auth_routes import router as admin_auth_router
+from app.admin_customer_benefit_routes import router as admin_customer_benefit_router
 from app.admin_customer_routes import router as admin_customer_router
 from app.admin_dashboard_routes import router as admin_dashboard_router
 from app.admin_device_routes import router as admin_device_router
@@ -383,6 +384,7 @@ app.include_router(control_router)
 app.include_router(admin_auth_router)
 app.include_router(admin_dashboard_router)
 app.include_router(admin_customer_router)
+app.include_router(admin_customer_benefit_router)
 app.include_router(admin_session_router)
 app.include_router(admin_first_frame_router)
 app.include_router(customer_pricing_router)

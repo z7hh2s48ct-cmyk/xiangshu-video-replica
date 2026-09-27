@@ -115,6 +115,7 @@ export function AdjustmentsPage({ userId }: { userId?: string }) {
               <option value="LEDGER_CORRECTION">账本修正</option>
               <option value="FREE_GRANT">积分赠送</option>
               <option value="CREDIT_COMPENSATION">积分补偿</option>
+              <option value="OFFLINE_PAYMENT">线下收款开通套餐</option>
             </select>
           </label>
           <button type="submit">查询</button>

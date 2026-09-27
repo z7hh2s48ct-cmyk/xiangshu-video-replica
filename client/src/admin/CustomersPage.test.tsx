@@ -67,6 +67,11 @@ vi.mock("../api", () => ({
   downloadCustomersCsv: vi.fn().mockResolvedValue(undefined),
 }));
 
+// 权益区有独立测试（CustomerBenefitsSection.test.tsx）；这里只验证客户页自身。
+vi.mock("./CustomerBenefitsSection", () => ({
+  CustomerBenefitsSection: () => null,
+}));
+
 describe("CustomersPage (ADM-02 / T33)", () => {
   beforeEach(() => {
     vi.clearAllMocks();

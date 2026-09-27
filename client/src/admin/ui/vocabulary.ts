@@ -64,6 +64,7 @@ export const ADJUSTMENT_SOURCE_LABELS: LabelMap = {
   LEDGER_CORRECTION: "账本更正",
   FREE_GRANT: "积分赠送",
   CREDIT_COMPENSATION: "积分补偿",
+  OFFLINE_PAYMENT: "线下收款开通套餐",
 };
 
 export const PLATFORM_LABELS: LabelMap = {
