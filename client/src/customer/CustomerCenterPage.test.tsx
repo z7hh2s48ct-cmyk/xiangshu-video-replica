@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => ({
   exportCsv: vi.fn(),
   history: vi.fn(),
   passwordState: vi.fn(),
+  emailState: vi.fn(),
 }));
 vi.mock("../studio/context", () => ({
   useStudio: () => ({
@@ -56,6 +57,8 @@ vi.mock("../api", async (original) => ({
   customerListLoginHistory: mocks.history,
   // 账号设置里的「账号登录」卡片会读密码状态；不 mock 就会打真实网络。
   customerPasswordState: mocks.passwordState,
+  // 账号设置里的「绑定邮箱」卡片同理会读绑定状态。
+  customerEmailState: mocks.emailState,
   getStudioNotificationPreferences: async () => ({ enabled: true }),
 }));
 
@@ -141,6 +144,12 @@ function setup(
     user_id: "alice-id",
     username: "alice",
     has_password: true,
+  });
+  mocks.emailState.mockResolvedValue({
+    email: null,
+    verified_at: null,
+    can_bind: true,
+    service_available: true,
   });
   const account = {
     profile:
@@ -935,6 +944,24 @@ test("security card offers the three self-rescue levers and the login history", 
   expect(screen.getByRole("button", { name: "修改密码" })).toBeVisible();
   expect(screen.getByRole("button", { name: "退出所有设备" })).toBeVisible();
   expect(screen.getByRole("button", { name: "撤销全部 Token" })).toBeVisible();
+});
+
+test("账号设置里的绑定邮箱卡片展示服务端状态并进入换绑表单", async () => {
+  const account = setup();
+  mocks.emailState.mockResolvedValue({
+    email: "alice@example.com",
+    verified_at: "2026-09-28T04:00:00Z",
+    can_bind: true,
+    service_available: true,
+  });
+  render(<CustomerCenterPage account={account} />);
+  await screen.findByText("125");
+  fireEvent.click(screen.getByRole("tab", { name: "账号设置" }));
+
+  expect(await screen.findByText("alice@example.com")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "更换邮箱" }));
+  // 换绑表单预填现有地址：不改的话，用户得先把地址再打一遍。
+  expect(screen.getByLabelText("邮箱地址")).toHaveValue("alice@example.com");
 });
 
 test("撤销全部 Token needs the acknowledgement and then reports the count", async () => {

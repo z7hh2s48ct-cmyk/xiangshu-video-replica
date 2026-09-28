@@ -179,6 +179,18 @@
   font-size: 12px;
   line-height: 1.6;
 }
+/* 「忘记密码？」：登录表单里的次一级动作，右对齐在记住密码下方。 */
+.account-forgot-row {
+  text-align: right;
+  margin: -6px 0 6px;
+}
+.account-forgot {
+  border: 0;
+  background: transparent;
+  color: #bfc0c5;
+  font-size: var(--font-label);
+  padding: 6px;
+}
 
 .account-submit {
   display: block;
@@ -283,6 +295,7 @@
 
 .account-access .account-switch button:hover,
 .account-access .account-password-toggle:hover,
+.account-access .account-forgot:hover,
 .account-access .account-access-home:hover {
   background: transparent;
   color: #ffe09a;

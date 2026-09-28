@@ -36,7 +36,7 @@ WALLET_TX_TABLE = "wallet_transactions"
 # 及其后的 REFUND 调账、1800 部署垫片、20260924T0000 交易号唯一索引、
 # 20260924T0100 口播提交时刻列、20260924T0200 口播隐藏偏好表、
 # 20260926T0000 爆款首页策展排行与 20260925T1400 计费触发器追加修复。
-_HEAD_REVISION = "20260927T0000_oral_voice_language_settings"
+_HEAD_REVISION = "20260928T1200_customer_email_password_reset"
 # 1200 adds the sub-account columns; 1300 adds the wallet actor column;
 # 1500 + the 20260921T0000 merge revision sit on top of 1300, with the
 # BILLING-OBS revisions (failure diagnostic, request id, attempt history)

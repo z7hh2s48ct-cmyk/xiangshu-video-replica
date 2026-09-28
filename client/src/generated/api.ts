@@ -1240,6 +1240,24 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/oral/avatars/{avatar_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    /** Delete Avatar */
+    delete: operations["delete_avatar_api_oral_avatars__avatar_id__delete"];
+    options?: never;
+    head?: never;
+    /** Rename Avatar */
+    patch: operations["rename_avatar_api_oral_avatars__avatar_id__patch"];
+    trace?: never;
+  };
   "/api/oral/avatars/{avatar_id}/refresh": {
     parameters: {
       query?: never;
@@ -1273,6 +1291,24 @@ export interface paths {
     options?: never;
     head?: never;
     patch?: never;
+    trace?: never;
+  };
+  "/api/oral/voices/{voice_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    /** Delete Voice */
+    delete: operations["delete_voice_api_oral_voices__voice_id__delete"];
+    options?: never;
+    head?: never;
+    /** Rename Voice */
+    patch: operations["rename_voice_api_oral_voices__voice_id__patch"];
     trace?: never;
   };
   "/api/oral/voices/{voice_id}/refresh": {
@@ -1309,7 +1345,7 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  "/api/oral/avatars/{avatar_id}": {
+  "/api/oral/voices/{voice_id}/settings": {
     parameters: {
       query?: never;
       header?: never;
@@ -1317,27 +1353,13 @@ export interface paths {
       cookie?: never;
     };
     get?: never;
-    put?: never;
+    /**
+     * Update Voice Settings
+     * @description 整体覆盖声音的语速/音量/音调；PUT 语义，重复提交同一组值是幂等的。
+     */
+    put: operations["update_voice_settings_api_oral_voices__voice_id__settings_put"];
     post?: never;
-    /** Delete Avatar */
-    delete: operations["delete_avatar_api_oral_avatars__avatar_id__delete"];
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/oral/voices/{voice_id}": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get?: never;
-    put?: never;
-    post?: never;
-    /** Delete Voice */
-    delete: operations["delete_voice_api_oral_voices__voice_id__delete"];
+    delete?: never;
     options?: never;
     head?: never;
     patch?: never;
@@ -2231,6 +2253,9 @@ export interface paths {
      *     code status. The identity fields live on users / activation_codes; the
      *     data model has no customer email, so the T33 contract uses username.
      *
+     *     ``username`` 是「关键字」筛选而非严格用户名筛选：它同时匹配
+     *     ``users.display_name``（客户可填公司名），见下方子句注释。
+     *
      *     A5（2026-09-02 评估）: the page/page_size + ``{customers,…}`` shape is
      *     retired for the management-wide ``limit/offset`` + ``{items,total,…}``
      *     envelope, so every admin list paginates the same way.
@@ -2257,11 +2282,65 @@ export interface paths {
      *
      *     Replaces the console's client-side "current page only" export: the whole
      *     (filtered) list leaves through one audited dump with the same columns the
-     *     operator saw in the table.
+     *     operator saw in the table — 含公司名称（``display_name``），否则按公司名
+     *     识别出的客户在导出件里又失去对应关系。``username`` 与列表端点同为关键字，
+     *     同时匹配用户名与公司名称。
      */
     get: operations["export_customers_csv_api_control_customers_csv_get"];
     put?: never;
     post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/customers/{user_id}/package-grants": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Grant Customer Package */
+    post: operations["grant_customer_package_api_control_customers__user_id__package_grants_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/customers/{user_id}/discounts": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Customer Discounts */
+    get: operations["read_customer_discounts_api_control_customers__user_id__discounts_get"];
+    put?: never;
+    /** Create Customer Discount */
+    post: operations["create_customer_discount_api_control_customers__user_id__discounts_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/customers/{user_id}/discounts/{discount_id}/deactivate": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Deactivate Customer Discount */
+    post: operations["deactivate_customer_discount_api_control_customers__user_id__discounts__discount_id__deactivate_post"];
     delete?: never;
     options?: never;
     head?: never;
@@ -3798,6 +3877,91 @@ export interface paths {
     get: operations["session_history_api_customer_sessions_history_get"];
     put?: never;
     post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/account/email": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Email State */
+    get: operations["read_email_state_api_customer_account_email_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/account/email/send-code": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Send Bind Code */
+    post: operations["send_bind_code_api_customer_account_email_send_code_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/account/email/verify": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Verify Bind Code */
+    post: operations["verify_bind_code_api_customer_account_email_verify_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/password/forgot": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Forgot Password */
+    post: operations["forgot_password_api_customer_password_forgot_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/password/reset": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Reset Password */
+    post: operations["reset_password_api_customer_password_reset_post"];
     delete?: never;
     options?: never;
     head?: never;
@@ -7674,6 +7838,20 @@ export interface components {
         [key: string]: string;
       };
     };
+    /** CloneRenameRequest */
+    CloneRenameRequest: {
+      /** Title */
+      title: string;
+    };
+    /** CodeSentResponse */
+    CodeSentResponse: {
+      /** Sent */
+      sent: boolean;
+      /** Expires In Minutes */
+      expires_in_minutes: number;
+      /** Resend After Seconds */
+      resend_after_seconds: number;
+    };
     /**
      * CollectionBatchApiUsage
      * @description API usage statistics for one collection batch.
@@ -8589,6 +8767,17 @@ export interface components {
       /** Items */
       items: components["schemas"]["DownloadUrlItem"][];
     };
+    /** EmailStateResponse */
+    EmailStateResponse: {
+      /** Email */
+      email: string | null;
+      /** Verified At */
+      verified_at: string | null;
+      /** Can Bind */
+      can_bind: boolean;
+      /** Service Available */
+      service_available: boolean;
+    };
     /** EnqueueFirstFramesRequest */
     EnqueueFirstFramesRequest: {
       /**
@@ -8752,6 +8941,20 @@ export interface components {
       started_at: string | null;
       /** Completed At */
       completed_at: string | null;
+    };
+    /** ForgotPasswordRequest */
+    ForgotPasswordRequest: {
+      /** Account */
+      account: string;
+    };
+    /** ForgotPasswordResponse */
+    ForgotPasswordResponse: {
+      /** Accepted */
+      accepted: boolean;
+      /** Message */
+      message: string;
+      /** Resend After Seconds */
+      resend_after_seconds: number;
     };
     /** GenerateFirstFramesRequest */
     GenerateFirstFramesRequest: {
@@ -9241,6 +9444,25 @@ export interface components {
       /** Request Id */
       request_id: string;
     };
+    /** ManualDiscountRequest */
+    ManualDiscountRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /** Discount Rate */
+      discount_rate: number | string;
+      /** Applicable Interfaces */
+      applicable_interfaces?: string[];
+      /** Valid Until */
+      valid_until?: string | null;
+    };
     /** MaskedProviderSettings */
     MaskedProviderSettings: {
       /**
@@ -9255,7 +9477,8 @@ export interface components {
         | "hifly"
         | "tikhub"
         | "dashscope"
-        | "douyidou";
+        | "douyidou"
+        | "ses";
       /** Configured */
       configured: boolean;
       /** Config */
@@ -9647,6 +9870,25 @@ export interface components {
       created_at: string;
       /** Updated At */
       updated_at: string;
+    };
+    /** PackageGrantRequest */
+    PackageGrantRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /** Package Id */
+      package_id: string;
+      /** Package Version */
+      package_version: number;
+      /** Source Document Ref */
+      source_document_ref: string;
     };
     /** PaidRegenerationRequest */
     PaidRegenerationRequest: {
@@ -10552,6 +10794,22 @@ export interface components {
       /** Replace Device Id */
       replace_device_id: string;
     };
+    /** ResetPasswordRequest */
+    ResetPasswordRequest: {
+      /** Account */
+      account: string;
+      /** Code */
+      code: string;
+      /** New Password */
+      new_password: string;
+    };
+    /** ResetPasswordResponse */
+    ResetPasswordResponse: {
+      /** Reset */
+      reset: boolean;
+      /** Sessions Revoked */
+      sessions_revoked: number;
+    };
     /** RuntimeSettingsRequest */
     RuntimeSettingsRequest: {
       /** Max Generation Count Per Batch */
@@ -10872,6 +11130,11 @@ export interface components {
       character_version_id: string;
       /** Selected Asset Ids */
       selected_asset_ids?: string[] | null;
+    };
+    /** SendBindCodeRequest */
+    SendBindCodeRequest: {
+      /** Email */
+      email: string;
     };
     /** SessionEventItem */
     SessionEventItem: {
@@ -11670,6 +11933,13 @@ export interface components {
       /** Context */
       ctx?: Record<string, never>;
     };
+    /** VerifyBindCodeRequest */
+    VerifyBindCodeRequest: {
+      /** Email */
+      email: string;
+      /** Code */
+      code: string;
+    };
     /** VersionResponse */
     VersionResponse: {
       /** Id */
@@ -12399,6 +12669,28 @@ export interface components {
       consent_id: string;
       /** Idempotency Key */
       idempotency_key: string;
+      /**
+       * Language
+       * @default zh
+       * @enum {string}
+       */
+      language:
+        | "zh"
+        | "zh_cantonese"
+        | "zh_sichuanese"
+        | "zh_shanghainese"
+        | "zh_tianjinese"
+        | "zh_zhengzhounese"
+        | "zh_wuhanese";
+    };
+    /** VoiceSettingsRequest */
+    VoiceSettingsRequest: {
+      /** Speech Rate */
+      speech_rate: number | string;
+      /** Volume */
+      volume: number | string;
+      /** Pitch */
+      pitch: number | string;
     };
     /** WalletResponse */
     WalletResponse: {
@@ -15319,6 +15611,7 @@ export interface operations {
     parameters: {
       query: {
         identity_id: string;
+        q?: string | null;
       };
       header?: {
         "X-Dev-User-Id"?: string | null;
@@ -15386,6 +15679,76 @@ export interface operations {
       };
     };
   };
+  delete_avatar_api_oral_avatars__avatar_id__delete: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        avatar_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  rename_avatar_api_oral_avatars__avatar_id__patch: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        avatar_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["CloneRenameRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   refresh_avatar_api_oral_avatars__avatar_id__refresh_post: {
     parameters: {
       query?: never;
@@ -15426,6 +15789,7 @@ export interface operations {
     parameters: {
       query: {
         identity_id: string;
+        q?: string | null;
       };
       header?: {
         "X-Dev-User-Id"?: string | null;
@@ -15473,6 +15837,76 @@ export interface operations {
     responses: {
       /** @description Successful Response */
       202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  delete_voice_api_oral_voices__voice_id__delete: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        voice_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  rename_voice_api_oral_voices__voice_id__patch: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        voice_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["CloneRenameRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
         headers: {
           [name: string]: unknown;
         };
@@ -15562,40 +15996,7 @@ export interface operations {
       };
     };
   };
-  delete_avatar_api_oral_avatars__avatar_id__delete: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        avatar_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            [key: string]: unknown;
-          };
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  delete_voice_api_oral_voices__voice_id__delete: {
+  update_voice_settings_api_oral_voices__voice_id__settings_put: {
     parameters: {
       query?: never;
       header?: never;
@@ -15604,7 +16005,11 @@ export interface operations {
       };
       cookie?: never;
     };
-    requestBody?: never;
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["VoiceSettingsRequest"];
+      };
+    };
     responses: {
       /** @description Successful Response */
       200: {
@@ -17463,6 +17868,151 @@ export interface operations {
         };
         content: {
           "application/json": unknown;
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  grant_customer_package_api_control_customers__user_id__package_grants_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        user_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["PackageGrantRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_customer_discounts_api_control_customers__user_id__discounts_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        user_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  create_customer_discount_api_control_customers__user_id__discounts_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        user_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ManualDiscountRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  deactivate_customer_discount_api_control_customers__user_id__discounts__discount_id__deactivate_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        user_id: string;
+        discount_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AdminWriteContract"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
         };
       };
       /** @description Validation Error */
@@ -20120,6 +20670,158 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["SessionHistoryResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_email_state_api_customer_account_email_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["EmailStateResponse"];
+        };
+      };
+    };
+  };
+  send_bind_code_api_customer_account_email_send_code_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["SendBindCodeRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CodeSentResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  verify_bind_code_api_customer_account_email_verify_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["VerifyBindCodeRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["EmailStateResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  forgot_password_api_customer_password_forgot_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ForgotPasswordRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ForgotPasswordResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  reset_password_api_customer_password_reset_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ResetPasswordRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ResetPasswordResponse"];
         };
       };
       /** @description Validation Error */

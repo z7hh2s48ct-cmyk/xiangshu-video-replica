@@ -529,4 +529,41 @@ describe("RootApp", () => {
       screen.getByRole("button", { name: "重新登录" }),
     ).toBeInTheDocument();
   });
+
+  it("deep-links /forgot to the email recovery screen and returns to login", async () => {
+    vi.stubGlobal("fetch", stubCustomerWorkspaceFetch());
+    window.history.replaceState(null, "", "/forgot");
+
+    render(<RootApp />);
+
+    expect(
+      await screen.findByRole("heading", { name: "找回密码" }),
+    ).toBeInTheDocument();
+    // 门禁屏内的找回视图，不是内部访问令牌壳。
+    expect(screen.queryByLabelText("内部访问令牌（云端模式）")).toBeNull();
+
+    // 「返回登录」在页内出现两处（右上角与表单下方），点任意一处都回登录屏。
+    fireEvent.click(screen.getAllByRole("button", { name: "返回登录" })[0]);
+    expect(
+      await screen.findByRole("heading", { name: "登录账号" }),
+    ).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/login");
+  });
+
+  it("opens the recovery screen from the login form entry and keeps the URL in sync", async () => {
+    vi.stubGlobal("fetch", stubCustomerWorkspaceFetch());
+
+    render(<RootApp path="/customer" />);
+    await screen.findByRole("heading", { name: "工作台" });
+    fireEvent.click(screen.getByRole("button", { name: "用户档案" }));
+    await screen.findByRole("heading", { name: "登录账号" });
+
+    fireEvent.click(screen.getByRole("button", { name: "忘记密码？" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "找回密码" }),
+    ).toBeInTheDocument();
+    // 地址栏跟着视图走：刷新 /forgot 仍落在找回屏。
+    expect(window.location.pathname).toBe("/forgot");
+  });
 });
