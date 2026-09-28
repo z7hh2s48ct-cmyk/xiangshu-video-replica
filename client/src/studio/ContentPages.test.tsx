@@ -415,7 +415,12 @@ function studio(
     discardSavedDraft: vi.fn(),
     confirmFinalDraft: vi.fn(),
     extractScriptFromUpload: vi.fn(),
-    extractViralCopy: vi.fn(),
+    extractViralCopy: vi.fn(
+      (_video: unknown, options?: { onCacheMiss?: () => void }) => {
+        // 默认模拟「共享缓存未命中」：回落导入 → 转写链路，与既有用例预期一致。
+        options?.onCacheMiss?.();
+      },
+    ),
     refresh: vi.fn(),
     ...overrides,
   };
@@ -6276,7 +6281,7 @@ describe("V1.4 内容与运营页面", () => {
     expect(value.notify).toHaveBeenCalledWith("已加入定时发布队列 · 抖音");
   });
 
-  it("小红书账号只能保存草稿与前往官方发布，不提交自动发布", async () => {
+  it("小红书自动发布暂缓：选择时弹出正在开发中且不切换平台", async () => {
     createPublishRecord.mockReset();
     const base = studio();
     const value = studio({
@@ -6319,11 +6324,18 @@ describe("V1.4 内容与运营页面", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "保存草稿" })).toBeEnabled(),
     );
-    fireEvent.click(screen.getByRole("button", { name: /小红书/ }));
-    const select = await screen.findByLabelText("选择发布账号");
-    fireEvent.change(select, { target: { value: "cloud-xhs" } });
-    expect(screen.getByText(/小红书自动发布即将上线/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "立即发布" })).toBeDisabled();
+    const xhsButton = screen.getByRole("button", { name: "小红书" });
+    fireEvent.click(xhsButton);
+    expect(value.notify).toHaveBeenCalledWith(
+      "小红书自动发布正在开发中，敬请期待。",
+    );
+    // 平台停留在抖音：小红书按钮未激活，也不渲染小红书账号，不发起提交。
+    expect(xhsButton).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "抖音" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.queryByText("小红书号")).toBeNull();
     expect(createPublishRecord).not.toHaveBeenCalled();
   });
 

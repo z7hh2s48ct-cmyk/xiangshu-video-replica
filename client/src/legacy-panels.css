@@ -3106,6 +3106,65 @@
   border-color: color-mix(in srgb, var(--gold) 70%, transparent);
   color: var(--gold);
 }
+/* 角色版本工作流（创建版本→五视角生成→逐图审核→发布）：复用灯箱壳与候选
+   网格，此处只补版本状态条、候选操作行与发布区三类布局。 */
+.character-version-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #2c2c34;
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: #14141c;
+}
+.character-version-meta strong {
+  color: var(--text);
+  font-size: var(--font-label);
+}
+.character-version-meta p {
+  flex: 1 1 220px;
+  margin: 0;
+  color: #8f8a81;
+  font-size: var(--font-caption);
+}
+.character-version-candidate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 10px;
+}
+.character-version-candidate-actions button {
+  padding: 4px 10px;
+  font-size: var(--font-caption);
+}
+.character-version-select {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px 10px;
+  color: #aaa297;
+  font-size: var(--font-caption);
+}
+.character-version-publish {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid #2c2c34;
+  border-radius: 10px;
+  padding: 14px;
+  background: #14141c;
+}
+.character-version-publish--ready {
+  border-color: color-mix(in srgb, var(--gold) 55%, transparent);
+}
+.character-version-publish p {
+  flex: 1 1 240px;
+  margin: 0;
+  color: #8f8a81;
+  font-size: var(--font-caption);
+}
 @media (max-width: 720px) {
   .first-frame-selection {
     padding: 16px;

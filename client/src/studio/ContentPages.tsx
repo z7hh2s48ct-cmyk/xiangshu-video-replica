@@ -2114,7 +2114,9 @@ export function ViralDetailPage() {
       returnTo: "viral-detail",
     });
   };
-  // 桌面端：本地抽音轨上传，平台不再需要为文案留存原片；Web 端仍走服务端拉取链路。
+  // 桌面端：本地抽音轨上传，平台不再需要为文案留存原片。
+  // Web 端（无本地缓存）：claim-first——先取共享文案，命中即秒回并跳过整次导入；
+  // 未命中回落服务端导入 → 转写链路（计费口径与桌面端一致）。
   const requestExtract = () => {
     if (cacheAvailable() && video.platformKey && video.nativeId) {
       patchDraft({ sourceId: video.id });
@@ -2122,6 +2124,13 @@ export function ViralDetailPage() {
       navigate("copy", {
         selectedVideoId: video.id,
         returnTo: "viral-detail",
+      });
+      return;
+    }
+    if (video.platformKey && video.nativeId) {
+      // 未命中时留在本页等导入进度，不提前跳转：导入完成后由 goExtract 导航。
+      extractViralCopy(video, {
+        onCacheMiss: () => void start(video, "copy", goExtract),
       });
       return;
     }
@@ -4582,7 +4591,10 @@ function MaterialsPageContent() {
                   <Button
                     variant="outline"
                     disabled={usagesLoading}
-                    onClick={() => void loadUsages(selected.materialId!)}
+                    onClick={() => {
+                      if (selected.materialId)
+                        void loadUsages(selected.materialId);
+                    }}
                   >
                     {usagesLoading ? "读取中…" : "查看使用记录"}
                   </Button>
@@ -5208,7 +5220,7 @@ export function PublishPage() {
       return;
     }
     if (!platformDeliverable) {
-      setActionError("小红书自动发布即将上线，请先前往官方页面发布。");
+      setActionError("小红书自动发布正在开发中，请先前往官方页面发布。");
       return;
     }
     await perform(async () => {
@@ -5471,7 +5483,17 @@ export function PublishPage() {
                     disabled={actionBusy || cloudRevision === null}
                     aria-pressed={form.platform === platform}
                     key={platform}
-                    onClick={() => updateForm({ platform, account: "" })}
+                    onClick={() => {
+                      // 小红书协议发布器尚未开发（自动发布暂缓）：选择时只提示进度，
+                      // 不切换平台，避免用户停留在无法提交发布的状态。
+                      if (platform === "小红书") {
+                        notifyRef.current(
+                          "小红书自动发布正在开发中，敬请期待。",
+                        );
+                        return;
+                      }
+                      updateForm({ platform, account: "" });
+                    }}
                     variant={form.platform === platform ? "primary" : "outline"}
                   >
                     <PlatformLogo platform={platform} /> {platform}
@@ -5530,7 +5552,7 @@ export function PublishPage() {
               )}
               {!platformDeliverable && (
                 <p role="status">
-                  小红书自动发布即将上线；现在可保存草稿、复制文案后前往官方页面发布。
+                  小红书自动发布正在开发中；现在可保存草稿、复制文案后前往官方页面发布。
                 </p>
               )}
             </Field>

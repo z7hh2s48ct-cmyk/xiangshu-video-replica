@@ -111,6 +111,8 @@ vi.mock("./live", async (importOriginal) => ({
 // 视频生成（C2）：只覆盖新引入的四个 api 出口，其余保持原模块行为，
 // 避免既有用例（不触发这些函数）受 mock 影响。
 const api = vi.hoisted(() => ({
+  // Web 端 claim-first 的交付计费点：默认「未命中」，具体用例再覆盖。
+  claimViralCopy: vi.fn(),
   createViralImportTask: vi.fn(),
   completeMaterialUpload: vi.fn(),
   createMaterialUploadIntent: vi.fn(),
@@ -700,6 +702,13 @@ describe("V1.4 workspace integration", () => {
     vi.clearAllMocks();
     live.loadProjectDraft.mockReset();
     api.createViralImportTask.mockReset();
+    api.claimViralCopy.mockReset();
+    // Web claim-first 默认未命中：既有用例继续走导入 → 转写链路。
+    api.claimViralCopy.mockResolvedValue({
+      text: null,
+      updatedAt: null,
+      billing: { charged: 0, unit: "call", deduped: false, billable: true },
+    });
     live.loadViralVideos.mockResolvedValue({ videos: [], errors: [] });
     api.customerGetWallet.mockReset();
     api.getWallet.mockReset();
@@ -2303,12 +2312,101 @@ describe("V1.4 workspace integration", () => {
           "copy",
           expect.any(String),
         );
+        // Web 端 claim-first：先取共享文案，本次未命中（分文不扣）才回落导入。
+        expect(api.claimViralCopy).toHaveBeenCalledWith(
+          "douyin",
+          "fresh-native",
+        );
         expect(await screen.findByLabelText("来源原文")).toHaveValue(
           "新来源的提取结果",
         );
         expect(live.extractScriptFromUpload).toHaveBeenCalledTimes(1);
       },
     );
+
+    it("Web 端提取文案命中共享缓存：扣费回填并跳过整次导入", async () => {
+      const source = {
+        ...createReviewData().videos[0],
+        id: "cached-viral",
+        title: "已有文案的爆款",
+        homepageFeatured: true,
+        platformKey: "douyin" as const,
+        nativeId: "cached-native",
+      };
+      live.loadStudioData.mockResolvedValue({
+        ...emptyStudioData,
+        videos: [source],
+      });
+      live.loadViralVideos.mockResolvedValue({
+        videos: [source],
+        errors: [],
+      });
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      api.claimViralCopy.mockResolvedValueOnce({
+        text: "共享缓存里的文案",
+        updatedAt: "2026-09-28T10:00:00Z",
+        billing: { charged: 20, unit: "call", deduped: false, billable: true },
+      });
+      render(
+        <StudioWorkspace
+          currentUser={reviewUser}
+          initialState={createState("workbench")}
+        />,
+      );
+      fireEvent.click(
+        await screen.findByRole("button", { name: "提取文案：已有文案的爆款" }),
+      );
+      await waitFor(() =>
+        expect(api.claimViralCopy).toHaveBeenCalledWith(
+          "douyin",
+          "cached-native",
+        ),
+      );
+      // 命中即秒回：不建导入任务、不走转写。
+      expect(api.createViralImportTask).not.toHaveBeenCalled();
+      expect(live.extractScriptFromUpload).not.toHaveBeenCalled();
+      // 文案已回填并进入文案工坊。
+      expect(await screen.findByLabelText("来源原文")).toHaveValue(
+        "共享缓存里的文案",
+      );
+    });
+
+    it("Web 端读取计费口径失败：如实提示且不回落导入", async () => {
+      const source = {
+        ...createReviewData().videos[0],
+        id: "unpriced-viral",
+        title: "未定价的爆款",
+        homepageFeatured: true,
+        platformKey: "douyin" as const,
+        nativeId: "unpriced-native",
+      };
+      live.loadStudioData.mockResolvedValue({
+        ...emptyStudioData,
+        videos: [source],
+      });
+      live.loadViralVideos.mockResolvedValue({
+        videos: [source],
+        errors: [],
+      });
+      live.loadCloudDraft.mockResolvedValue(undefined);
+      api.claimViralCopy.mockRejectedValueOnce(
+        new Error("爆款文案尚未配置价格"),
+      );
+      render(
+        <StudioWorkspace
+          currentUser={reviewUser}
+          initialState={createState("workbench")}
+        />,
+      );
+      fireEvent.click(
+        await screen.findByRole("button", { name: "提取文案：未定价的爆款" }),
+      );
+      // 失败如实提示；不回落导入，避免白花一次转写费。
+      expect(
+        await screen.findByText("爆款文案尚未配置价格"),
+      ).toBeInTheDocument();
+      expect(api.createViralImportTask).not.toHaveBeenCalled();
+    });
 
     it("提取文案后往返视频复刻不会被空项目版本覆盖", async () => {
       live.loadStudioData.mockResolvedValue({
