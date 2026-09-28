@@ -27,6 +27,9 @@ vi.mock("./api", async (importOriginal) => {
     waitForCharacterSheetTask: vi.fn(),
     getCachedCharacterAssetUrl: vi.fn(),
     downloadCharacterAsset: vi.fn(),
+    listCharacterVersions: vi.fn(),
+    listCharacterGenerationTasks: vi.fn(),
+    listCharacterAssets: vi.fn(),
   };
 });
 
@@ -186,6 +189,9 @@ describe("CharacterLibrary", () => {
     vi.mocked(api.listCharacterSceneLooks).mockResolvedValue([]);
     vi.mocked(api.getLatestCharacterSheetTask).mockResolvedValue(null);
     vi.mocked(api.getLatestSceneLookTask).mockResolvedValue(null);
+    vi.mocked(api.listCharacterVersions).mockResolvedValue([]);
+    vi.mocked(api.listCharacterGenerationTasks).mockResolvedValue([]);
+    vi.mocked(api.listCharacterAssets).mockResolvedValue([]);
     vi.mocked(api.listSimpleCharacterLibraryPage).mockImplementation(
       async () => {
         const items = await api.listSimpleCharacterLibrary();
@@ -1054,5 +1060,33 @@ describe("CharacterLibrary", () => {
         name: "重新生成人物 荣哥 的五视图",
       }),
     ).toBeNull();
+  });
+
+  it("admin 可从人物卡片打开角色版本工作流", async () => {
+    vi.mocked(api.listSimpleCharacterLibrary).mockResolvedValue([entry]);
+
+    render(<CharacterLibrary userRole="admin" userId="admin_1" />);
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "打开人物 林夏 的角色版本工作流",
+      }),
+    );
+
+    expect(
+      await screen.findByRole("dialog", { name: "角色版本工作流 林夏" }),
+    ).toBeInTheDocument();
+    expect(api.listCharacterVersions).toHaveBeenCalledWith("persona-1");
+  });
+
+  it("非管理员不显示角色版本工作流入口", async () => {
+    vi.mocked(api.listSimpleCharacterLibrary).mockResolvedValue([entry]);
+
+    render(<CharacterLibrary userRole="employee" userId="employee_1" />);
+
+    expect(
+      await screen.findByRole("button", { name: "查看人物 林夏 大图" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /角色版本工作流/ })).toBeNull();
   });
 });

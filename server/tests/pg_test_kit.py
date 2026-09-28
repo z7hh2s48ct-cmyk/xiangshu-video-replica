@@ -211,6 +211,11 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
         # 幂等重放 / 审计矩阵 (test_admin_provider_paid_probe.py), migrated to
         # alembic head and truncated per test.
         "t04_provider_probe_test",
+        # CHARACTER-VIEW-APILIO 角色五视图生成链路：dedicated database for the
+        # 注册表解析 / 配置缺失回队列 / worker 全链路（任务→质检→计费）矩阵
+        # (test_character_image_provider.py), migrated to alembic head and
+        # truncated per test.
+        "character_generation_test",
     }
 )
 
