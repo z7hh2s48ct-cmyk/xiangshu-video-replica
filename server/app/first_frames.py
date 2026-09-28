@@ -366,7 +366,16 @@ class ImageProviderFailed(RuntimeError):
 
 
 class RetryableImageProviderFailed(ImageProviderFailed):
-    pass
+    """可重试的供应商侧异常。
+
+    ``rate_limited=True`` 表示上游以 429 明确拒绝且未受理本次请求——重试
+    不会产生第二笔计费；其余（超时/连接中断/5xx）结果未知，是否重试必须
+    由任务层依据回执状态裁决，不得据此标记直接重试。
+    """
+
+    def __init__(self, message: str, *, rate_limited: bool = False) -> None:
+        super().__init__(message)
+        self.rate_limited = rate_limited
 
 
 class FirstFrameQualityInspectorFailed(RuntimeError):
@@ -590,12 +599,12 @@ class UrllibApilioTransport:
             )
             response = connection.getresponse()
             if not 200 <= response.status < 300:
-                failure_type = (
-                    RetryableImageProviderFailed
-                    if response.status == 429 or response.status >= 500
-                    else ImageProviderFailed
-                )
-                raise failure_type(f"Apilio returned HTTP {response.status}")
+                if response.status == 429 or response.status >= 500:
+                    # 下载段是只读取回已生成的产出图——付费生成此时已完成并
+                    # 计费，重发提交会产生第二笔费用，因此绝不打 rate_limited
+                    # 标记（保持"结果未知"，由任务层保守处理）。
+                    raise RetryableImageProviderFailed(f"Apilio returned HTTP {response.status}")
+                raise ImageProviderFailed(f"Apilio returned HTTP {response.status}")
             content_length = response.headers.get("Content-Length")
             if content_length:
                 try:
@@ -632,12 +641,12 @@ class UrllibApilioTransport:
                 return body, dict(response.headers.items())
         except HTTPError as exc:
             logger.warning("Apilio image request failed with HTTP status %s", exc.code)
-            failure_type = (
-                RetryableImageProviderFailed
-                if exc.code == 429 or exc.code >= 500
-                else ImageProviderFailed
-            )
-            raise failure_type(f"Apilio returned HTTP {exc.code}") from exc
+            if exc.code == 429 or exc.code >= 500:
+                raise RetryableImageProviderFailed(
+                    f"Apilio returned HTTP {exc.code}",
+                    rate_limited=exc.code == 429,
+                )
+            raise ImageProviderFailed(f"Apilio returned HTTP {exc.code}") from exc
         except (TimeoutError, URLError, OSError) as exc:
             logger.warning("Apilio image request failed: %s", type(exc).__name__)
             raise RetryableImageProviderFailed("Apilio image request failed") from exc

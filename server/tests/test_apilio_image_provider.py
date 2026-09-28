@@ -6,6 +6,7 @@ import socket
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from fractions import Fraction
+from urllib.error import HTTPError
 
 import pytest
 
@@ -1189,3 +1190,78 @@ def test_size_override_replaces_the_declared_aspect_ratio_size():
     body = transport.requests[-1].body
     assert b'name="size"\r\n\r\n2560x1440' in body
     assert b"2048x1152" not in body
+
+
+@pytest.mark.parametrize("status_code", [429, 500, 503])
+def test_http_error_retryable_carries_rate_limited_flag(status_code: int):
+    """429=上游明确拒绝（未受理），带 rate_limited 标记供任务层安全重试；
+    5xx 仍是不确定结果，不带该标记。"""
+
+    from app import first_frames
+
+    class FailingOpener:
+        def open(self, *_a, **_k):
+            raise HTTPError(
+                "https://api.example/v1/images/edits",
+                status_code,
+                "error",
+                hdrs=None,
+                fp=None,
+            )
+
+    import pytest as _pytest
+
+    original = first_frames.build_opener
+    first_frames.build_opener = lambda *_a, **_k: FailingOpener()  # type: ignore[assignment]
+    try:
+        with _pytest.raises(first_frames.RetryableImageProviderFailed) as exc_info:
+            first_frames.UrllibApilioTransport().post(
+                "https://api.example/v1/images/edits",
+                headers={"Authorization": "Bearer test"},
+                body=b"",
+            )
+    finally:
+        first_frames.build_opener = original  # type: ignore[assignment]
+    assert exc_info.value.rate_limited is (status_code == 429)
+
+
+def test_w20_output_download_429_never_marks_rate_limited(monkeypatch: pytest.MonkeyPatch):
+    """P0 回归锁：下载段取回的是已计费的产出图，429 绝不能带 rate_limited
+    标记——否则任务层会重发付费提交，造成同一张图二次计费。"""
+
+    from app import first_frames
+
+    class RateLimitedOutput:
+        status = 429
+        headers = {"Content-Length": "0"}
+
+        def read(self, *_a):
+            return b""
+
+        def close(self):
+            pass
+
+    class LimitedConnection:
+        def connect(self):
+            pass
+
+        def request(self, *_a, **_k):
+            pass
+
+        def getresponse(self):
+            return RateLimitedOutput()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_a, **_k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+    )
+    monkeypatch.setattr(first_frames, "_pinned_connection", lambda *_a: LimitedConnection())
+    with pytest.raises(first_frames.RetryableImageProviderFailed) as exc_info:
+        first_frames.UrllibApilioTransport(timeout_seconds=5).get(
+            "https://cdn.example/output.png?sig=synthetic"
+        )
+    assert exc_info.value.rate_limited is False
