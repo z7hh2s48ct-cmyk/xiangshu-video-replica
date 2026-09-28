@@ -150,6 +150,19 @@ FAILURE_RUNBOOK: dict[str, str] = {
     ),
     "SCRIPT_REWRITE_SUBMISSION_UNCERTAIN": "改写提交结果待核对。等待对账结论后再重试。",
     "SCRIPT_REWRITE_TASK_FAILED": "改写任务失败。重试；检查文本内容与服务配置。",
+    # 方案 P0-9：改写服务的 detail.code 族经 fail_script_rewrite_task 的
+    # 变量路径（code = detail["code"]）写入任务行，此前没有 runbook 覆盖。
+    "DEEPSEEK_NETWORK_FAILED": (
+        "改写请求未能确认送达结果。先核对任务状态确认服务商是否已受理，再决定是否重试。"
+    ),
+    "DEEPSEEK_REQUEST_FAILED": (
+        "改写服务返回错误响应。稍后重试一次；仍失败请检查文本服务密钥与配置。"
+    ),
+    "DEEPSEEK_RESPONSE_INVALID": (
+        "改写服务返回内容无法解析。重试一次；持续出现时对照调用记录里的服务商原话排查。"
+    ),
+    "DEEPSEEK_RESPONSE_TRUNCATED": "改写结果超过输出上限被截断。缩短原文后重试，或分段改写。",
+    "DEEPSEEK_RESPONSE_EMPTY": "改写服务返回了空内容。重试一次；持续失败检查原文长度与服务配置。",
     # ---- 口播视频（管理端按任务状态映射的展示码）----
     "ORAL_TASK_FAILED": "口播视频生成失败。查看错误说明；重试或更换素材；持续失败检查服务配置。",
     "ORAL_SUBMISSION_UNCERTAIN": "口播提交结果待核对。等待系统对账，避免重复提交。",

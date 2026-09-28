@@ -23,9 +23,11 @@ import {
 } from "../api.admin";
 import { yuanInputToFen } from "../rechargePackageDisplay";
 import { AccountCreditPanel } from "./AccountCreditPanel";
+import { CustomerActivitySection } from "./CustomerActivitySection";
 import { CustomerBenefitsSection } from "./CustomerBenefitsSection";
 import { CustomerDeviceSection } from "./CustomerDeviceSection";
 import { CustomerRefundSection } from "./CustomerRefundSection";
+import { RecordCallsPanel } from "./RecordCallsPanel";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { CopyCustomerId } from "./ui/CopyCustomerId";
 import { PageBanner } from "./ui/PageBanner";
@@ -553,9 +555,21 @@ type Customer360Snapshot = {
   transactions: AdminWalletTransaction[];
 };
 
-function Customer360Data({ userId }: { userId: string }) {
+// 充值订单不进生成记录列表（它不是生成任务），但第三方调用同源落库：
+// #9 要求用订单号也能反查这张单出网调了什么，支付回调报文就在原始响应里。
+const RECHARGE_ORDER_RECORD_TYPE = "RECHARGE_ORDER";
+
+function Customer360Data({
+  userId,
+  readOnly,
+}: {
+  userId: string;
+  readOnly: boolean;
+}) {
   const [snapshot, setSnapshot] = useState<Customer360Snapshot | null>(null);
   const [error, setError] = useState("");
+  // 一次只展开一单的查单日志；再点一次收起。
+  const [openedOrderNo, setOpenedOrderNo] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -595,14 +609,44 @@ function Customer360Data({ userId }: { userId: string }) {
 
   return (
     <section aria-label="客户 360 度运营数据" className="customer-360-grid">
-      <Customer360Panel title="最近充值订单">
+      <Customer360Panel
+        className={openedOrderNo ? "customer-360-panel--wide" : undefined}
+        title="最近充值订单"
+      >
         {snapshot.orders.length ? (
           snapshot.orders.map((order) => (
-            <div className="customer-360-row" key={order.id}>
-              <code>{order.order_no}</code>
-              <span>{formatFen(order.amount_fen)}</span>
-              <OrderStatusBadge status={order.status} />
-              <small>{formatDateTime(order.paid_at ?? order.created_at)}</small>
+            <div className="customer-360-order" key={order.id}>
+              <div className="customer-360-row">
+                <code>{order.order_no}</code>
+                <span>{formatFen(order.amount_fen)}</span>
+                <OrderStatusBadge status={order.status} />
+                <small>
+                  {formatDateTime(order.paid_at ?? order.created_at)}
+                </small>
+              </div>
+              <div className="customer-360-order-tools">
+                <button
+                  aria-expanded={openedOrderNo === order.order_no}
+                  type="button"
+                  onClick={() =>
+                    setOpenedOrderNo((current) =>
+                      current === order.order_no ? null : order.order_no,
+                    )
+                  }
+                >
+                  {openedOrderNo === order.order_no
+                    ? "收起查单日志"
+                    : "查单日志"}
+                </button>
+              </div>
+              {openedOrderNo === order.order_no ? (
+                <RecordCallsPanel
+                  active
+                  readOnly={readOnly}
+                  recordId={order.order_no}
+                  recordType={RECHARGE_ORDER_RECORD_TYPE}
+                />
+              ) : null}
             </div>
           ))
         ) : (
@@ -635,12 +679,18 @@ function Customer360Data({ userId }: { userId: string }) {
 function Customer360Panel({
   title,
   children,
+  className,
 }: {
   title: string;
   children: ReactNode;
+  className?: string;
 }) {
   return (
-    <section className="customer-360-panel">
+    <section
+      className={
+        className ? `customer-360-panel ${className}` : "customer-360-panel"
+      }
+    >
       <h3>{title}</h3>
       <div>{children}</div>
     </section>
@@ -763,6 +813,7 @@ function CustomerDetailView({
       />
       <Customer360Data
         key={`ledger:${customer.user_id}:${customer.available_credits}`}
+        readOnly={readOnly}
         userId={customer.user_id}
       />
       {/* 任务书 C：设备视图（BOUND 设备 + 解绑/吊销凭据）。 */}
@@ -790,6 +841,12 @@ function CustomerDetailView({
         key={`benefits:${customer.user_id}`}
         onChanged={onChanged}
         readOnly={readOnly}
+        userId={customer.user_id}
+      />
+      {/* 方案 P0-3：客户自己的动作（建项目、读素材等）——与管理员处置共用
+          同一张审计表，这里按 scope=customer + 客户 ID 取出属于自己的部分。 */}
+      <CustomerActivitySection
+        key={`activity:${customer.user_id}`}
         userId={customer.user_id}
       />
     </div>
@@ -976,7 +1033,19 @@ function CustomerPriceEditor({
 /**
  * 赠送积分发放（FREE_GRANT，054）：为账号发放无收款积分。
  * 走 T23 审计调账闭环——账面金额为 0、钱包照增、自动单号与事由留痕。
+ *
+ * 客服工单 / 补偿审批两类补偿（服务端同为正向口径）也从这里发起：区别只在
+ * 来源单据——必须挂真实工单号 / 审批单号，事后能回溯到客服与审批流程。
  */
+const REFERENCED_GRANT_SOURCES = [
+  "CS_TICKET",
+  "COMPENSATION_APPROVAL",
+] as const;
+
+function needsSourceRef(sourceType: string): boolean {
+  return (REFERENCED_GRANT_SOURCES as readonly string[]).includes(sourceType);
+}
+
 function FreeCreditsSection({
   userId,
   onGranted,
@@ -990,6 +1059,7 @@ function FreeCreditsSection({
 }) {
   const [credits, setCredits] = useState("");
   const [sourceType, setSourceType] = useState("FREE_GRANT");
+  const [sourceRef, setSourceRef] = useState("");
   const [reason, setReason] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -1029,6 +1099,12 @@ function FreeCreditsSection({
       setDialogError("请填写事由");
       return;
     }
+    if (needsSourceRef(sourceType) && !sourceRef.trim()) {
+      setDialogError(
+        "请填写来源单号（工单号或审批单号），用于和客服与审批流程对齐",
+      );
+      return;
+    }
     const key = crypto.randomUUID();
     setPendingGrant({
       key,
@@ -1036,7 +1112,7 @@ function FreeCreditsSection({
       userId,
       credits: creditsNumber,
       sourceType,
-      sourceRef: `GRANT-${key}`,
+      sourceRef: needsSourceRef(sourceType) ? sourceRef.trim() : `GRANT-${key}`,
       reason: reason.trim(),
       uncertain: false,
       attemptId: null,
@@ -1083,6 +1159,7 @@ function FreeCreditsSection({
       );
       onGranted(result);
       setCredits("");
+      setSourceRef("");
       setReason("");
       setPendingGrant(null);
       setDialogOpen(false);
@@ -1158,6 +1235,8 @@ function FreeCreditsSection({
           >
             <option value="FREE_GRANT">积分赠送</option>
             <option value="CREDIT_COMPENSATION">无收款补偿</option>
+            <option value="CS_TICKET">客服工单补偿</option>
+            <option value="COMPENSATION_APPROVAL">补偿审批</option>
           </select>
         </label>
         <label>
@@ -1172,6 +1251,21 @@ function FreeCreditsSection({
             onChange={(event) => setCredits(event.target.value)}
           />
         </label>
+        {needsSourceRef(sourceType) ? (
+          <label>
+            来源单号
+            <input
+              disabled={dialogOpen || pendingGrant !== null}
+              placeholder={
+                sourceType === "CS_TICKET"
+                  ? "例如：TICKET-20260928-001"
+                  : "例如：COMP-20260928-001"
+              }
+              value={sourceRef}
+              onChange={(event) => setSourceRef(event.target.value)}
+            />
+          </label>
+        ) : null}
         <label>
           事由
           <input

@@ -242,12 +242,14 @@ def _run_audio_lease(
         with connection() as conn:
             work = prepare_script_from_audio_task(conn, lease=lease, storage=storage)
         submission_started = work.provider_task_id is not None
-        result = perform_script_from_audio_task(
-            work,
-            before_provider_call=before_provider_call,
-            on_submitted=checkpoint,
-            heartbeat=checkpoint,
-        )
+        # 方案 P0-9：语音转写的第三方调用归到本条任务（含轮询恢复），失败原因可查。
+        with external_call_context("SCRIPT_FROM_AUDIO", lease.id, attempt=lease.attempt):
+            result = perform_script_from_audio_task(
+                work,
+                before_provider_call=before_provider_call,
+                on_submitted=checkpoint,
+                heartbeat=checkpoint,
+            )
         with connection() as conn:
             complete_script_from_audio_task(
                 conn,
@@ -389,7 +391,10 @@ def _run_pg_source_frame_once(
                 override=quality_inspector,
                 shared_inspector=shared_inspector,
             )
-        with billing_context(lease.id), external_call_context("SOURCE_FRAME", lease.id):
+        with (
+            billing_context(lease.id),
+            external_call_context("SOURCE_FRAME", lease.id, attempt=lease.attempt),
+        ):
             stored = perform_source_frame_extraction(
                 plan,
                 storage=storage,
@@ -488,7 +493,9 @@ def _run_pg_viral_refresh(lease: ViralRefreshLease, storage: StorageAdapter) -> 
     from app.viral_collection import run_viral_collection
 
     try:
-        run_viral_collection(lease, storage)
+        # 方案 P0-9：采集过程中的数据源调用归到本条刷新任务，管理端能按任务查到。
+        with external_call_context("VIRAL_REFRESH", lease.id, attempt=lease.attempt):
+            run_viral_collection(lease, storage)
         with pg_transaction() as raw_conn:
             complete_viral_refresh_task(BusinessConnection.postgres(raw_conn), lease=lease)
     except Exception as exc:
@@ -633,7 +640,12 @@ def run_worker_once(
                     lease=script_rewrite_lease,
                 )
                 submission_started = True
-                rewrite_result = perform_script_rewrite_task(rewrite_work)
+                with external_call_context(
+                    "SCRIPT_REWRITE",
+                    script_rewrite_lease.id,
+                    attempt=script_rewrite_lease.attempt,
+                ):
+                    rewrite_result = perform_script_rewrite_task(rewrite_work)
                 complete_script_rewrite_task(
                     conn,
                     lease=script_rewrite_lease,
@@ -957,7 +969,6 @@ def _run_pg_generation_step(
                         lease=lease,
                         provider_task_id=provider_task_id,
                         provider_request=work.provider_request,
-                        request_hash=work.request_hash,
                     )
 
             work.provider.task_created_observer = persist_created_task
@@ -1031,7 +1042,6 @@ def _run_pg_generation_step(
                 lease=lease,
                 provider_task_id=result.provider_task_id,
                 provider_request=work.provider_request,
-                request_hash=work.request_hash,
                 release_lease=False,
             )
             mark_generation_task_archiving(
@@ -1346,7 +1356,7 @@ def run_pg_worker_once(
             try:
                 with (
                     billing_context(str(lease["id"])),
-                    external_call_context("VIDEO", str(lease["id"])),
+                    external_call_context("VIDEO", str(lease["id"]), attempt=lease["attempt"]),
                 ):
                     _run_pg_generation_step(
                         lease=lease,
@@ -1478,7 +1488,12 @@ def run_pg_worker_once(
                         lease=script_rewrite_lease,
                     )
                 submission_started = True
-                rewrite_result = perform_script_rewrite_task(rewrite_work)
+                with external_call_context(
+                    "SCRIPT_REWRITE",
+                    script_rewrite_lease.id,
+                    attempt=script_rewrite_lease.attempt,
+                ):
+                    rewrite_result = perform_script_rewrite_task(rewrite_work)
                 with pg_transaction() as raw_conn:
                     complete_script_rewrite_task(
                         BusinessConnection.postgres(raw_conn),
@@ -1530,7 +1545,9 @@ def run_pg_worker_once(
                     )
                 with (
                     billing_context(reconcile_lease.task_id),
-                    external_call_context("VIDEO", reconcile_lease.task_id),
+                    external_call_context(
+                        "VIDEO", reconcile_lease.task_id, attempt=reconcile_lease.attempt
+                    ),
                 ):
                     reconcile_outcome = perform_generation_reconcile_operation(
                         reconcile_work,

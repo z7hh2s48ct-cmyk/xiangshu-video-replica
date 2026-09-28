@@ -8,6 +8,7 @@ import {
   reconcileFirstFrameTask,
 } from "../api.admin";
 import { AnalysisDiagnosticPanel } from "./AnalysisDiagnosticPanel";
+import { RecordCallsPanel } from "./RecordCallsPanel";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { DataTable } from "./ui/DataTable";
 import { PageBanner } from "./ui/PageBanner";
@@ -55,6 +56,7 @@ export function GenerationRecordsPage({
   const [status, setStatus] = useState(initialStatus);
   const [recordType, setRecordType] = useState(initialRecordType);
   const [failurePhase, setFailurePhase] = useState("");
+  const [taskRef, setTaskRef] = useState("");
   const [createdFrom, setCreatedFrom] = useState("");
   const [createdTo, setCreatedTo] = useState("");
   const [filters, setFilters] = useState({
@@ -62,6 +64,7 @@ export function GenerationRecordsPage({
     status: initialStatus,
     recordType: initialRecordType,
     failurePhase: "",
+    taskRef: "",
     createdFrom: "",
     createdTo: "",
   });
@@ -74,6 +77,9 @@ export function GenerationRecordsPage({
     useState<AdminGenerationRecord | null>(null);
   const [reconcileBusy, setReconcileBusy] = useState(false);
   const [reconcileError, setReconcileError] = useState("");
+  // 展开过详情的记录行：第三方调用记录只在首次展开时懒加载，
+  // 避免为一屏记录白拉一屏接口。
+  const [openedDetails, setOpenedDetails] = useState<Set<string>>(new Set());
   const requestIdRef = useRef(0);
 
   const loadRecords = useCallback(async () => {
@@ -88,6 +94,7 @@ export function GenerationRecordsPage({
         status: filters.status || undefined,
         recordType: filters.recordType || undefined,
         failurePhase: filters.failurePhase || undefined,
+        taskRef: filters.taskRef || undefined,
         createdFrom: filters.createdFrom || undefined,
         createdTo: filters.createdTo || undefined,
       };
@@ -195,6 +202,7 @@ export function GenerationRecordsPage({
                 // 类型切走时草稿可能残留阶段值，不能让它泄漏进查询。
                 failurePhase:
                   recordType === ANALYSIS_RECORD_TYPE ? failurePhase : "",
+                taskRef,
                 createdFrom,
                 createdTo,
               });
@@ -206,6 +214,14 @@ export function GenerationRecordsPage({
                 aria-label="生成账号"
                 value={username}
                 onChange={(event) => setUsername(event.target.value)}
+              />
+            </label>
+            <label>
+              任务编号
+              <input
+                aria-label="生成任务编号"
+                value={taskRef}
+                onChange={(event) => setTaskRef(event.target.value)}
               />
             </label>
             <label>
@@ -394,7 +410,27 @@ export function GenerationRecordsPage({
                   <td>{formatProviderCost(item)}</td>
                   <td>
                     <details>
-                      <summary>
+                      {/* biome-ignore lint/a11y/noStaticElementInteractions: summary 是 details 的固有开关（原生可聚焦、可键盘切换），这里只借用它的点击做懒加载登记。 */}
+                      <summary
+                        onClick={(event) => {
+                          // 懒加载只在「即将打开」时触发：关闭动作不清空已加载内容。
+                          const container =
+                            event.currentTarget.closest("details");
+                          if (
+                            container instanceof HTMLDetailsElement &&
+                            container.open
+                          ) {
+                            return;
+                          }
+                          const key = recordKey(item);
+                          setOpenedDetails((prev) => {
+                            if (prev.has(key)) return prev;
+                            const next = new Set(prev);
+                            next.add(key);
+                            return next;
+                          });
+                        }}
+                      >
                         <span>查看详情</span>
                         <small>{formatResult(item)}</small>
                       </summary>
@@ -409,6 +445,24 @@ export function GenerationRecordsPage({
                         <dd>{item.error_code ?? "—"}</dd>
                         <dt>错误说明</dt>
                         <dd>{item.error_message ?? "—"}</dd>
+                        {item.provider_error_code ? (
+                          <>
+                            <dt>服务商错误码</dt>
+                            <dd>{item.provider_error_code}</dd>
+                          </>
+                        ) : null}
+                        {item.provider_message ? (
+                          <>
+                            <dt>服务商原话</dt>
+                            <dd>{item.provider_message}</dd>
+                          </>
+                        ) : null}
+                        {item.advice ? (
+                          <>
+                            <dt>修复建议</dt>
+                            <dd>{item.advice}</dd>
+                          </>
+                        ) : null}
                         {item.failure_phase ? (
                           <>
                             <dt>失败阶段</dt>
@@ -445,6 +499,12 @@ export function GenerationRecordsPage({
                             : "正常"}
                         </dd>
                       </dl>
+                      <RecordCallsPanel
+                        active={openedDetails.has(recordKey(item))}
+                        readOnly={readOnly}
+                        recordId={item.record_id}
+                        recordType={item.record_type}
+                      />
                       {item.record_type === ANALYSIS_RECORD_TYPE ? (
                         <button
                           className="admin-diagnostics__jump"
@@ -553,4 +613,8 @@ function formatDuration(createdAt: string, completedAt: string | null): string {
   if (!Number.isFinite(seconds)) return "—";
   const minutes = Math.floor(seconds / 60);
   return minutes > 0 ? `${minutes} 分 ${seconds % 60} 秒` : `${seconds} 秒`;
+}
+
+function recordKey(item: AdminGenerationRecord): string {
+  return `${item.record_type}-${item.record_id}`;
 }

@@ -107,7 +107,22 @@ function today() {
   }).format(new Date());
 }
 export type BillingAttention = "" | "pending" | "unknown_cost";
-const initialFilters = (attention: BillingAttention = "") => ({
+// attention 保持枚举类型而不是擦成 string：下拉值经 narrowAttention 窄化，
+// 请求参数与服务端 attention 枚举始终同口径。
+type BillingFilters = {
+  start: string;
+  end: string;
+  grain: string;
+  user_id: string;
+  service: string;
+  module: string;
+  provider: string;
+  attention: BillingAttention;
+};
+function narrowAttention(value: string): BillingAttention {
+  return value === "pending" || value === "unknown_cost" ? value : "";
+}
+const initialFilters = (attention: BillingAttention = ""): BillingFilters => ({
   // 带着总览「今日」待办进来时只看今天，条数才与待办计数一致。
   start: attention ? today() : `${today().slice(0, 7)}-01`,
   end: today(),
@@ -117,7 +132,7 @@ const initialFilters = (attention: BillingAttention = "") => ({
   module: "",
   provider: "",
   // 总览待办跳进来时预置：清单条数与待办计数同口径（服务端 attention 参数）。
-  attention: attention as string,
+  attention,
 });
 function params(filters: ReturnType<typeof initialFilters>) {
   return new URLSearchParams(
@@ -366,7 +381,10 @@ export function BillingEconomics({
           <select
             value={filters.attention}
             onChange={(event) =>
-              setFilters({ ...filters, attention: event.target.value })
+              setFilters({
+                ...filters,
+                attention: narrowAttention(event.target.value),
+              })
             }
           >
             <option value="">全部请求</option>

@@ -34,7 +34,10 @@ vi.mock("../api.admin", () => ({
   listAdminRechargeOrders: vi.fn(),
   listAdminWalletTransactions: vi.fn(),
   listDevices: vi.fn(),
+  listAuditLog: vi.fn(),
   listCustomerSessions: vi.fn(),
+  getAdminGenerationRecordCalls: vi.fn(),
+  getExternalCallResponse: vi.fn(),
   listAdminAdjustments: vi.fn().mockResolvedValue({
     items: [],
     total: 0,
@@ -109,6 +112,17 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       total: 0,
       limit: 3,
       offset: 0,
+    });
+    vi.mocked(adminApi.listAuditLog).mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 20,
+      offset: 0,
+    });
+    // 充值单查单日志面板懒加载：默认给空列表，不点「查单日志」不会打到它。
+    vi.mocked(adminApi.getAdminGenerationRecordCalls).mockResolvedValue({
+      items: [],
+      total: 0,
     });
   });
 
@@ -586,6 +600,73 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     );
   });
 
+  it("用订单号反查充值单的查单日志（RECHARGE_ORDER，P0-9 #9）", async () => {
+    // 充值单此前只写不读：运营在客户详情看得到订单，却无法知道这张单
+    // 出网调了什么、支付回调报文长什么样。订单行现在带「查单日志」，
+    // 以订单号为 record_id 打到 calls 端点。
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [
+        {
+          user_id: "user-1",
+          username: "customer-1",
+          display_name: "乡墅装饰有限公司",
+          created_at: "2026-08-24T10:00:00Z",
+          activation_code: "ABC-123",
+          status: "active",
+          generation_total: 8,
+          generation_succeeded: 5,
+          generation_failed: 1,
+          generation_in_progress: 1,
+          generation_attention: 1,
+          credits_spent: 5,
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+    vi.mocked(adminApi.listAdminRechargeOrders).mockResolvedValue({
+      items: [
+        {
+          id: "order-row-1",
+          user_id: "user-1",
+          username: "customer-1",
+          order_no: "CZ20260928001",
+          status: "PAID",
+          amount_fen: 9900,
+          credits: 100,
+          channel: "wechat_native",
+          provider: "zpay",
+          provider_trade_no: "trade-1",
+          transaction_id: null,
+          created_at: "2026-09-28T09:59:00Z",
+          paid_at: "2026-09-28T10:00:00Z",
+        },
+      ],
+      total: 1,
+      limit: 3,
+      offset: 0,
+    });
+
+    render(<CustomersPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+
+    const toggle = await screen.findByRole("button", { name: "查单日志" });
+    // 懒加载：没点之前不发请求。
+    expect(adminApi.getAdminGenerationRecordCalls).not.toHaveBeenCalled();
+
+    fireEvent.click(toggle);
+    await waitFor(() =>
+      expect(adminApi.getAdminGenerationRecordCalls).toHaveBeenCalledWith(
+        "RECHARGE_ORDER",
+        "CZ20260928001",
+      ),
+    );
+    expect(
+      await screen.findByText("该记录暂无第三方调用留痕。"),
+    ).toBeInTheDocument();
+  });
+
   it("loads and updates the customer's effective recharge price", async () => {
     vi.mocked(adminApi.listCustomers).mockResolvedValue({
       items: [
@@ -783,6 +864,74 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     expect(
       screen.getAllByRole("region", { name: "账号积分查账" }),
     ).toHaveLength(1);
+  });
+
+  it("carries a real ticket reference for a CS_TICKET compensation", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [
+        {
+          user_id: "user-1",
+          username: "customer-1",
+          created_at: "2026-08-24T10:00:00Z",
+          activation_code: "ABC-123",
+          status: "active",
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+    vi.mocked(adminApi.createCustomerAdjustment).mockResolvedValue({
+      adjustment_id: "adj-ticket-1",
+      order_id: "order-ticket-1",
+      credits: "8",
+      amount_fen: "0",
+      pricing_scope: "CUSTOMER_STANDARD",
+      wallet_balance_after: 68,
+      source_document_type: "CS_TICKET",
+      source_document_ref: "TICKET-20260928-001",
+      request_id: "request-ticket",
+    });
+
+    render(<CustomersPage operatorId="admin-ticket" />);
+    fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+
+    fireEvent.change(await screen.findByLabelText("积分来源"), {
+      target: { value: "CS_TICKET" },
+    });
+    fireEvent.change(screen.getByLabelText("发放积分"), {
+      target: { value: "8" },
+    });
+    fireEvent.change(screen.getByLabelText("事由"), {
+      target: { value: "客服工单补偿" },
+    });
+    // 工单号没填不许进入确认：补偿必须能回溯到客服工单。
+    fireEvent.click(screen.getByRole("button", { name: "发放赠送积分" }));
+    expect(await screen.findByText(/请填写来源单号/)).toBeInTheDocument();
+    expect(adminApi.createCustomerAdjustment).not.toHaveBeenCalled();
+
+    fireEvent.change(await screen.findByLabelText("来源单号"), {
+      target: { value: "TICKET-20260928-001" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发放赠送积分" }));
+    fireEvent.click(
+      within(
+        await screen.findByRole("dialog", { name: "发放赠送积分" }),
+      ).getByRole("button", { name: "确认发放" }),
+    );
+
+    await waitFor(() => {
+      expect(adminApi.createCustomerAdjustment).toHaveBeenCalledWith(
+        "user-1",
+        {
+          sourceDocumentType: "CS_TICKET",
+          sourceDocumentRef: "TICKET-20260928-001",
+          credits: 8,
+        },
+        "客服工单补偿",
+        expect.any(String),
+      );
+    });
   });
 
   it("restores an in-flight free-credit intent before its response arrives", async () => {

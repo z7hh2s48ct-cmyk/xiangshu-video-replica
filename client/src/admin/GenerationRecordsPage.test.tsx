@@ -7,6 +7,8 @@ import { GenerationRecordsPage } from "./GenerationRecordsPage";
 vi.mock("../api.admin", () => ({
   getAdminGenerationRecords: vi.fn(),
   getAdminGenerationRecordSummary: vi.fn(),
+  getAdminGenerationRecordCalls: vi.fn(),
+  getExternalCallResponse: vi.fn(),
   getAdminAnalysisDiagnostics: vi.fn(),
   reconcileFirstFrameTask: vi.fn(),
 }));
@@ -56,6 +58,11 @@ describe("GenerationRecordsPage", () => {
         { record_type: "SOURCE_FRAME_AI_SCORE", status: "SUCCEEDED", count: 1 },
       ],
       failure_reasons: [],
+    });
+    // 调用日志区块懒加载：默认给空列表，展开详情不会打到未 mock 的路径。
+    vi.mocked(adminApi.getAdminGenerationRecordCalls).mockResolvedValue({
+      items: [],
+      total: 0,
     });
     vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
       items: [
@@ -147,6 +154,48 @@ describe("GenerationRecordsPage", () => {
       screen.getByText("apilio_gemini / gemini-2.5-flash"),
     ).toBeInTheDocument();
     expect(screen.getAllByText("customer-1")).toHaveLength(3);
+  });
+
+  it("shows the calls panel total with a truncation note (P0-9 #27)", async () => {
+    // 调用日志固定最多 200 条（服务端 _CALL_LIST_LIMIT），面板必须把真实
+    // 总条数与截断说明摆出来，而不是静默只给前 200 条。
+    vi.mocked(adminApi.getAdminGenerationRecordCalls).mockResolvedValue({
+      items: [
+        {
+          call_id: "call-1",
+          created_at: "2026-09-02T11:00:00Z",
+          provider: "minimax",
+          model: "Hailuo-02",
+          endpoint: "v1/video_generation",
+          method: "POST",
+          url: "https://api.example.com/v1/video_generation",
+          attempt: 1,
+          http_status: 200,
+          latency_ms: 320,
+          outcome: "SUCCEEDED",
+          provider_task_id: "provider-task-1",
+          provider_request_id: null,
+          provider_error_code: null,
+          provider_message: null,
+          error_message: null,
+          request_summary: null,
+          response_body_bytes: 128,
+          has_response_body: true,
+        },
+      ],
+      total: 201,
+    });
+    render(<GenerationRecordsPage />);
+
+    fireEvent.click((await screen.findAllByText("查看详情"))[0]);
+    expect(
+      await screen.findByText("共 201 次调用，仅列出最早的 1 次。"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("v1/video_generation")).toBeInTheDocument();
+    expect(adminApi.getAdminGenerationRecordCalls).toHaveBeenCalledWith(
+      "VIDEO",
+      "video-1",
+    );
   });
 
   it("reloads the current page on demand", async () => {

@@ -243,6 +243,40 @@ describe("AuditEventsPage", () => {
     });
   });
 
+  it("defaults the audit scope to admin actions", async () => {
+    // P0-3：服务端默认只回管理员动作；客户端显式带上同一口径，避免
+    // 「默认值在哪一侧」的隐性依赖。
+    const fetchMock = installFetch();
+    render(<AuditEventsPage />);
+
+    await screen.findByText("管理员调账");
+    const { searchParams } = new URL(String(fetchMock.mock.calls[0]?.[0]));
+    expect(searchParams.get("scope")).toBe("admin");
+  });
+
+  it("switches to the customer scope on submit (P0-3)", async () => {
+    const fetchMock = installFetch();
+    render(<AuditEventsPage />);
+
+    await screen.findByText("管理员调账");
+    fireEvent.change(screen.getByLabelText("审计范围"), {
+      target: { value: "customer" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(([url]) => {
+          const requestUrl = new URL(String(url));
+          return (
+            requestUrl.pathname.endsWith("/api/control/audit-log") &&
+            requestUrl.searchParams.get("scope") === "customer"
+          );
+        }),
+      ).toBe(true);
+    });
+  });
+
   it("keeps dotted event filters exact and renders a known price change", async () => {
     const fetchMock = installFetch();
     render(<AuditEventsPage />);

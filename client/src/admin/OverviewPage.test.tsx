@@ -182,6 +182,7 @@ describe("OverviewPage", () => {
   });
 
   it("keeps unsettled and legacy costs unknown in cards and chart", async () => {
+    const onNavigate = vi.fn();
     installFetch({
       ...summaryPayload,
       today: {
@@ -194,8 +195,12 @@ describe("OverviewPage", () => {
         legacy_settlements: 1,
       },
       trend: [{ day: "2026-09-05", succeeded: 1, failed: 0, cost_fen: null }],
+      todos: {
+        ...summaryPayload.todos,
+        unknown_cost_records: 3,
+      },
     });
-    render(<OverviewPage />);
+    render(<OverviewPage onNavigate={onNavigate} />);
     const cost = await screen.findByRole("region", { name: "今日成本" });
     expect(cost).toHaveTextContent("待核对");
     expect(cost).not.toHaveTextContent("¥0.00");
@@ -207,5 +212,12 @@ describe("OverviewPage", () => {
     expect(
       screen.getByText(/2 条历史成本、1 条历史结算待核对/),
     ).toBeInTheDocument();
+    // P0-5 收口：KpiCard 的「待核对」不是一个终点，待办行要能一键落到
+    // 条数同口径的 attention=unknown_cost 清单（AdminApp 三层映射已就绪）。
+    const unknownCost = screen.getByText("今日成本待核对").closest("li");
+    expect(unknownCost).toHaveTextContent("3");
+    expect(unknownCost).toHaveTextContent("成本金额尚未确定");
+    fireEvent.click(within(unknownCost as HTMLElement).getByRole("button"));
+    expect(onNavigate).toHaveBeenCalledWith("unknownCost");
   });
 });

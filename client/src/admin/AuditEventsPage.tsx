@@ -43,9 +43,21 @@ const EVENT_OPTIONS = [
   ["recharge_package.update", "修改充值套餐"],
   ["payment.sync", "查单同步"],
   ["control.export", "数据导出"],
+  // P0-9：记录详情里「查看原始响应」的高敏动作，每次读取都写审计；
+  // 之前只能靠族回退标签显示成“系统操作”，运营筛不出来。
+  ["external_call.response_view", "查看接口原始响应"],
 ] as const;
 
 const EVENT_LABELS = new Map<string, string>(EVENT_OPTIONS);
+
+// 方案 P0-3：同一张表里既有管理员动作也有客户工作台动作，默认只看管理员——
+// 否则客户建项目、读素材淹没处置记录。客户维度的完整动作在客户详情的
+// 「操作记录」里看（scope=customer + target_user_id）。
+type AuditScope = "admin" | "customer" | "all";
+
+function asAuditScope(value: string): AuditScope {
+  return value === "customer" || value === "all" ? value : "admin";
+}
 
 /** 高敏动作：列表里标红，便于从一屏日志里先看到它们。 */
 const SENSITIVE_EVENTS = new Set([
@@ -56,6 +68,7 @@ const SENSITIVE_EVENTS = new Set([
   "admin.activation_code.revealed",
   "payment.wechat.update",
   "payment.provider.update",
+  "external_call.response_view",
 ]);
 
 function eventLabel(eventType: string) {
@@ -190,21 +203,31 @@ export function AuditEventsPage() {
   const [actorDraft, setActorDraft] = useState("");
   const [targetDraft, setTargetDraft] = useState("");
   const [typeDraft, setTypeDraft] = useState("");
+  const [scopeDraft, setScopeDraft] = useState<AuditScope>("admin");
   const [fromDraft, setFromDraft] = useState("");
   const [toDraft, setToDraft] = useState("");
   const [filters, setFilters] = useState<{
+    scope: AuditScope;
     actor: string;
     target: string;
     eventType: string;
     from: string;
     to: string;
-  }>({ actor: "", target: "", eventType: "", from: "", to: "" });
+  }>({
+    scope: "admin",
+    actor: "",
+    target: "",
+    eventType: "",
+    from: "",
+    to: "",
+  });
 
   const loadLog = useCallback(async () => {
     try {
       setLoading(true);
       setError("");
       const response = await listAuditLog({
+        scope: filters.scope,
         actorUsername: filters.actor || undefined,
         targetUsername: filters.target || undefined,
         eventType: filters.eventType || undefined,
@@ -235,6 +258,7 @@ export function AuditEventsPage() {
     // offset 归零与筛选词提交合入同一批次，effect 只会跑一次。
     setOffset(0);
     setFilters({
+      scope: scopeDraft,
       actor: actorDraft.trim(),
       target: targetDraft.trim(),
       eventType: typeDraft.trim(),
@@ -247,10 +271,18 @@ export function AuditEventsPage() {
     setActorDraft("");
     setTargetDraft("");
     setTypeDraft("");
+    setScopeDraft("admin");
     setFromDraft("");
     setToDraft("");
     setOffset(0);
-    setFilters({ actor: "", target: "", eventType: "", from: "", to: "" });
+    setFilters({
+      scope: "admin",
+      actor: "",
+      target: "",
+      eventType: "",
+      from: "",
+      to: "",
+    });
   }
 
   return (
@@ -261,6 +293,20 @@ export function AuditEventsPage() {
         className="admin-form admin-filter-grid audit-filter-grid"
         onSubmit={handleFilter}
       >
+        <label>
+          范围
+          <select
+            aria-label="审计范围"
+            value={scopeDraft}
+            onChange={(event) =>
+              setScopeDraft(asAuditScope(event.target.value))
+            }
+          >
+            <option value="admin">管理员操作</option>
+            <option value="customer">客户操作</option>
+            <option value="all">全部动作</option>
+          </select>
+        </label>
         <label>
           事件类型
           <select

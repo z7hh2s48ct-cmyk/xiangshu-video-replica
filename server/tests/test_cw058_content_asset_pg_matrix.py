@@ -3453,9 +3453,11 @@ def test_viral_list_reads_only_and_weekly_worker_prepares_cloud_media_on_pg(
     # A configured collection cannot occupy the generation worker pool.
     advanced: list[str] = []
     monkeypatch.setattr("app.generation_worker.claim_oral_work", lambda *args, **kwargs: None)
+    # mock 需与真实 lease 同形：worker 把 lease 的 attempt 带进调用归属
+    # 上下文（P0-9），真实行由 load_worker_task 构造、始终含 attempt。
     monkeypatch.setattr(
         "app.generation_worker.acquire_generation_continuation_lease",
-        lambda *args, **kwargs: {"id": "queued-generation"},
+        lambda *args, **kwargs: {"id": "queued-generation", "attempt": 1},
     )
     monkeypatch.setattr(
         "app.generation_worker._run_pg_generation_step",

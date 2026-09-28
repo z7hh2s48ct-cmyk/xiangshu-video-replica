@@ -70,12 +70,33 @@ TransactionType = Literal["CHARGE", "RESERVE", "SETTLE", "RELEASE", "CONVERSION"
 GenerationRecordType = Literal[
     "VIDEO",
     "ORAL_VIDEO",
+    # 口播分身与声音克隆是独立资源（oral_avatars / oral_voices），任务调用在写入侧
+    # 就按这两个类型落库；列在这里，调用日志接口才能按各自主键直接查到（方案 P0-9）。
+    "ORAL_AVATAR",
+    "ORAL_VOICE",
     "FIRST_FRAME_IMAGE",
     "CHARACTER_SHEET_IMAGE",
     "CHARACTER_VIEW_IMAGE",
     "SOURCE_FRAME_AI_SCORE",
     "SOURCE_FRAME_PROCESS",
     "ANALYSIS",
+]
+# 调用日志的读取端另接受充值查单（RECHARGE_ORDER）：zpay.py 按商户单号落任务归属，
+# 管理端用它定位一次充值到底请求了支付网关什么、对方怎么回（P0-9）。充值订单不是
+# 生成记录，不进 GenerationRecordType——生成记录列表没有对应的任务表。
+# 新增生成记录类型时，这里要同步补上，否则新类型的调用日志查不到。
+ExternalCallRecordType = Literal[
+    "VIDEO",
+    "ORAL_VIDEO",
+    "ORAL_AVATAR",
+    "ORAL_VOICE",
+    "FIRST_FRAME_IMAGE",
+    "CHARACTER_SHEET_IMAGE",
+    "CHARACTER_VIEW_IMAGE",
+    "SOURCE_FRAME_AI_SCORE",
+    "SOURCE_FRAME_PROCESS",
+    "ANALYSIS",
+    "RECHARGE_ORDER",
 ]
 ProviderCostStatus = Literal["KNOWN", "ESTIMATED", "UNAVAILABLE", "NOT_APPLICABLE"]
 RecordDataStatus = Literal["VALID", "UNAVAILABLE", "CORRUPTED"]
@@ -1375,6 +1396,7 @@ class ExternalCallSummary(BaseModel):
     call_id: str
     created_at: str
     provider: str
+    model: str | None
     endpoint: str
     method: str | None
     url: str | None
@@ -1397,6 +1419,9 @@ class ExternalCallList(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     items: list[ExternalCallSummary]
+    # 匹配该记录的全部调用条数；items 最多 _CALL_LIST_LIMIT 条，
+    # total 大于 items 长度时说明清单被截断（方案 #27）。
+    total: int
 
 
 class ExternalCallResponse(BaseModel):
@@ -1419,13 +1444,17 @@ _CALL_LIST_LIMIT = 200
 def list_generation_record_calls(
     conn: Database,
     actor: ControlUser,
-    record_type: GenerationRecordType,
+    record_type: ExternalCallRecordType,
     record_id: str,
 ) -> ExternalCallList:
-    """某条生成记录的全部第三方接口调用，按时间顺序（方案 P0-9）。"""
+    """某条生成记录（或充值订单）的全部第三方接口调用，按时间顺序（方案 P0-9）。"""
     if not conn.is_postgres:
-        return ExternalCallList(items=[])
-    # 源画面两种记录类型共用一个工作流程，调用日志统一记为 SOURCE_FRAME。
+        # 非 PG 环境下没有调用日志表：集合端点返回空清单，单体端点
+        # （read_external_call_response）对必然不存在的 id 返回 404——
+        # 两者是同一事实（这里没有调用日志）在集合/单体上的统一口径。
+        return ExternalCallList(items=[], total=0)
+    # 源画面两种记录类型共用一个工作流程，调用日志统一记为 SOURCE_FRAME；
+    # 口播分身/声音克隆的日志本就按各自主类型落库，直接匹配即可。
     call_type = (
         "SOURCE_FRAME"
         if record_type in {"SOURCE_FRAME_PROCESS", "SOURCE_FRAME_AI_SCORE"}
@@ -1433,11 +1462,12 @@ def list_generation_record_calls(
     )
     rows = conn.execute(
         """
-        SELECT id, created_at, provider, endpoint_name, method, url_redacted, attempt,
+        SELECT id, created_at, provider, model, endpoint_name, method, url_redacted, attempt,
                http_status, latency_ms, outcome, provider_task_id, provider_request_id,
                provider_error_code, provider_message, error_message_redacted,
                request_summary_json, response_body_bytes,
-               response_body IS NOT NULL AS has_response_body
+               response_body IS NOT NULL AS has_response_body,
+               count(*) OVER () AS total_count
         FROM external_call_logs
         WHERE task_type = %s AND task_id = %s
         ORDER BY created_at, id
@@ -1447,11 +1477,13 @@ def list_generation_record_calls(
     ).fetchall()
     show_summary = actor.role != "auditor"
     return ExternalCallList(
+        total=int(rows[0]["total_count"]) if rows else 0,
         items=[
             ExternalCallSummary(
                 call_id=str(row["id"]),
                 created_at=str(row["created_at"]),
                 provider=str(row["provider"]),
+                model=_optional_text(row["model"]),
                 endpoint=str(row["endpoint_name"]),
                 method=_optional_text(row["method"]),
                 url=_optional_text(row["url_redacted"]),
@@ -1471,7 +1503,7 @@ def list_generation_record_calls(
                 has_response_body=bool(row["has_response_body"]),
             )
             for row in rows
-        ]
+        ],
     )
 
 
@@ -1494,6 +1526,7 @@ def read_external_call_response(
             },
         )
     if not conn.is_postgres:
+        # 与清单端点同口径：非 PG 环境没有调用日志，清单为空、单体按 404。
         raise HTTPException(
             status_code=404,
             detail={"code": "EXTERNAL_CALL_NOT_FOUND", "message": "没有找到这次接口调用。"},
@@ -1556,13 +1589,18 @@ def summarize_generation_records(
     failure_phase: str | None = None,
     created_from: str | None = None,
     created_to: str | None = None,
+    task_ref: Annotated[str | None, Query(max_length=200)] = None,
 ) -> ControlGenerationRecordSummary:
     """与列表同筛选口径的聚合。
 
     生成记录列表是分页的，管理端无法靠自己汇总，「筛选后 3 条失败」与「聚合里
     还有 12 条」会互相打脸；因此聚合与列表共用同一批过滤器，并额外回答「拆解
     为什么失败、能不能重试」——这正是 2026-09-20 事故里完全缺失的视角。
+
+    ``task_ref`` 与列表同一口径（方案 P0-12）：给了编号就必须落到同一条记录，
+    否则列表能搜到、聚合却还算全量，两边数字又对不上。
     """
+    ref_filter = _task_ref_filter(conn, task_ref)
     video_where, video_params = _generation_record_filters(
         postgres=conn.is_postgres,
         record_types=("VIDEO",),
@@ -1571,6 +1609,7 @@ def summarize_generation_records(
         record_type=record_type,
         created_from=created_from,
         created_to=created_to,
+        task_ref=ref_filter,
     )
     oral_where, oral_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -1580,6 +1619,7 @@ def summarize_generation_records(
         record_type=record_type,
         created_from=created_from,
         created_to=created_to,
+        task_ref=ref_filter,
     )
     first_where, first_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -1589,6 +1629,7 @@ def summarize_generation_records(
         record_type=record_type,
         created_from=created_from,
         created_to=created_to,
+        task_ref=ref_filter,
     )
     sheet_where, sheet_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -1598,6 +1639,7 @@ def summarize_generation_records(
         record_type=record_type,
         created_from=created_from,
         created_to=created_to,
+        task_ref=ref_filter,
     )
     view_where, view_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -1607,6 +1649,7 @@ def summarize_generation_records(
         record_type=record_type,
         created_from=created_from,
         created_to=created_to,
+        task_ref=ref_filter,
     )
     source_where, source_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -1616,6 +1659,7 @@ def summarize_generation_records(
         record_type=record_type,
         created_from=created_from,
         created_to=created_to,
+        task_ref=ref_filter,
     )
     analysis_where, analysis_params = _analysis_record_filters(
         postgres=conn.is_postgres,
@@ -1625,6 +1669,7 @@ def summarize_generation_records(
         failure_phase=failure_phase,
         created_from=created_from,
         created_to=created_to,
+        task_ref=ref_filter,
     )
     # 源画面分支按审计留痕归类：列表里的 json_valid/json_extract 只有 SQLite 有，
     # PG 上会直接报函数不存在。列表还会按 payload 的 semantic_quality_status 兜底，
@@ -1709,6 +1754,7 @@ def summarize_generation_records(
             failure_phase=failure_phase,
             created_from=created_from,
             created_to=created_to,
+            task_ref=ref_filter,
         ),
     )
 
@@ -2352,8 +2398,9 @@ _SHORT_REF_PATTERN = re.compile(r"[0-9A-Za-z-]{6,64}")
 def _task_ref_filter(conn: BusinessConnection, task_ref: str | None) -> TaskRefFilter | None:
     """把任一编号解析成我方任务编号（方案 P0-12）。
 
-    第三方任务号与第三方请求编号先查调用日志，再查各任务表自带的第三方任务号列
-    （视频、人物视图、口播）；首帧任务没有这一列，只能靠调用日志反查。
+    第三方任务号、第三方请求编号与我方请求编号（调用日志的 request_id，与审计、
+    服务日志同源）先查调用日志，再查各任务表自带的第三方任务号列（视频、人物
+    视图、口播）；首帧任务没有这一列，只能靠调用日志反查。
     """
     ref = (task_ref or "").strip()
     if not ref:
@@ -2363,12 +2410,13 @@ def _task_ref_filter(conn: BusinessConnection, task_ref: str | None) -> TaskRefF
         rows = conn.execute(
             """
             SELECT task_id AS id FROM external_call_logs
-            WHERE task_id IS NOT NULL AND (provider_task_id = %s OR provider_request_id = %s)
+            WHERE task_id IS NOT NULL
+              AND (provider_task_id = %s OR provider_request_id = %s OR request_id = %s)
             UNION SELECT id FROM generation_tasks WHERE provider_task_id = %s
             UNION SELECT id FROM character_generation_tasks WHERE provider_task_id = %s
             UNION SELECT id FROM oral_tasks WHERE vendor_task_id = %s
             """,
-            (ref, ref, ref, ref, ref),
+            (ref, ref, ref, ref, ref, ref),
         ).fetchall()
         ids.update(str(row["id"]) for row in rows)
     # 任务编号是小写 UUID；客户端给客户看的短编号是前 8 位大写。
@@ -2523,6 +2571,7 @@ def _analysis_failure_reasons(
     failure_phase: str | None,
     created_from: str | None,
     created_to: str | None,
+    task_ref: TaskRefFilter | None = None,
 ) -> list[AnalysisFailureReason]:
     """按「为什么失败」聚合拆解失败行：错误码 × 失败阶段 × 上游原话 × 可否重试。
 
@@ -2540,6 +2589,7 @@ def _analysis_failure_reasons(
         failure_phase=failure_phase,
         created_from=created_from,
         created_to=created_to,
+        task_ref=task_ref,
     )
     reason_expr = "(task.upstream_diagnostic_json ->> 'reason')" if conn.is_postgres else "NULL"
     rows = conn.execute(

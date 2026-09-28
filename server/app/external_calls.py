@@ -102,6 +102,9 @@ class CallContext:
 
 
 _CONTEXT: ContextVar[CallContext | None] = ContextVar("external_call_context", default=None)
+# 模型名单独存一个上下文：调用方比任务层更清楚本次用哪个模型（如视频分析的主/备
+# 模型切换），与任务归属上下文互不覆盖。
+_MODEL: ContextVar[str | None] = ContextVar("external_call_model", default=None)
 
 
 @contextmanager
@@ -114,6 +117,16 @@ def external_call_context(
         yield
     finally:
         _CONTEXT.reset(token)
+
+
+@contextmanager
+def external_call_model(model: str | None) -> Iterator[None]:
+    """标注接下来的第三方调用使用的模型名（写进调用日志的 model 列）。"""
+    token = _MODEL.set(model)
+    try:
+        yield
+    finally:
+        _MODEL.reset(token)
 
 
 def current_call_context() -> CallContext | None:
@@ -324,6 +337,7 @@ class PreparedCall:
     provider_request_id: str | None
     error_code: str | None
     error_message: str | None
+    model: str | None
     context: CallContext | None
 
 
@@ -343,6 +357,7 @@ def prepare_external_call(
     provider_task_id: str | None = None,
     error_code: str | None = None,
     error_message: str | None = None,
+    model: str | None = None,
 ) -> PreparedCall:
     raw_bytes: int | None = None
     body_text: str | None = None
@@ -378,6 +393,7 @@ def prepare_external_call(
         provider_request_id=_provider_request_id(response_headers),
         error_code=error_code,
         error_message=_clean_message(error_message) if error_message else None,
+        model=model or _MODEL.get(),
         context=current_call_context(),
     )
 
@@ -404,20 +420,21 @@ def _insert(call: PreparedCall) -> None:
         conn.execute(
             """
             INSERT INTO external_call_logs (
-                id, provider, endpoint_name, method, url_redacted,
+                id, provider, model, endpoint_name, method, url_redacted,
                 request_summary_json, http_status, latency_ms, outcome,
                 response_headers_json, response_body, response_body_bytes,
                 provider_error_code, provider_message, provider_task_id,
                 provider_request_id, error_code, error_message_redacted,
                 task_type, task_id, attempt, request_id
             ) VALUES (
-                %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s::jsonb, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s::jsonb, %s, %s,
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             """,
             (
                 str(uuid4()),
                 call.provider,
+                call.model,
                 call.endpoint,
                 call.method,
                 call.url_redacted,
@@ -505,15 +522,17 @@ def recorded_urlopen(
     timeout: float,
     provider: str,
     endpoint: str,
-    binary_response: bool = False,
     opener: Any = None,
     read_limit: int | None = None,
+    model: str | None = None,
 ) -> tuple[bytes, dict[str, str], int]:
     """``urlopen`` 的记录版：返回 (响应体, 响应头, 状态码)，异常与原来一致。
 
     HTTPError 的响应体被读出来记录后，重新包进一个同样的 HTTPError 抛出，调用方
     原有的 ``exc.read()`` 依旧能读到——各服务商传输类的错误处理不用改。
     ``read_limit`` 限制最多读取的字节数，调用方据返回长度自行判断是否超限。
+    二进制响应（图片/音频/视频下载）按 Content-Type 自动识别：只记元数据，
+    不把文件内容写进日志，也不需要调用方声明。
     """
     import io
     from urllib.error import HTTPError, URLError
@@ -530,6 +549,7 @@ def recorded_urlopen(
         "method": method,
         "url": url,
         "request_summary": summary,
+        "model": model,
     }
     try:
         with open_url(request, timeout=timeout) as response:
@@ -576,7 +596,7 @@ def recorded_urlopen(
             error_message=type(exc).__name__,
         )
         raise
-    binary_response = binary_response or _is_binary_content(headers)
+    binary_response = _is_binary_content(headers)
     failed = not binary_response and _is_business_failure(body)
     record_external_call(
         **common,

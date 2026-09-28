@@ -78,6 +78,8 @@ export const PLATFORM_LABELS: LabelMap = {
 export const GENERATION_RECORD_TYPE_LABELS: LabelMap = {
   VIDEO: "视频生成",
   ORAL_VIDEO: "口播视频",
+  ORAL_AVATAR: "口播分身",
+  ORAL_VOICE: "声音克隆",
   FIRST_FRAME_IMAGE: "人物置换首帧",
   CHARACTER_SHEET_IMAGE: "人物五视图",
   CHARACTER_VIEW_IMAGE: "人物单视图",

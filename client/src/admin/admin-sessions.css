@@ -137,22 +137,6 @@
   background: transparent;
 }
 
-.admin-sessions__adjustment {
-  border-top: 1px solid #ecece8;
-  padding-top: 14px;
-}
-
-.admin-sessions__adjust-toggle {
-  background: transparent;
-  border: 0;
-  color: #5e6670;
-  padding-inline: 0;
-}
-
-.admin-sessions__adjustment .admin-form {
-  margin-top: 12px;
-}
-
 @media (max-width: 680px) {
   .admin-sessions__header,
   .admin-sessions__toolbar,

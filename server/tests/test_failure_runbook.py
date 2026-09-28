@@ -63,6 +63,13 @@ VARIABLE_PATH_CODES = (
     "ORAL_TASK_FAILED",
     "ORAL_SUBMISSION_UNCERTAIN",
     "ORAL_ARCHIVE_FAILED",
+    # 方案 P0-9：改写服务经 detail.code 变量写入任务行的码
+    # （fail_script_rewrite_task 的 ``code = detail["code"]`` 路径）。
+    "DEEPSEEK_NETWORK_FAILED",
+    "DEEPSEEK_REQUEST_FAILED",
+    "DEEPSEEK_RESPONSE_INVALID",
+    "DEEPSEEK_RESPONSE_TRUNCATED",
+    "DEEPSEEK_RESPONSE_EMPTY",
 )
 
 

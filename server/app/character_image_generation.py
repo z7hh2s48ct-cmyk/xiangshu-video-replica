@@ -4,7 +4,6 @@ import hashlib
 import logging
 import sqlite3
 import struct
-import time
 import zlib
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -556,13 +555,6 @@ def finalize_expired_character_generation_leases(conn: BusinessConnection) -> No
             """,
             (error.code, error.message_redacted, str(task["id"])),
         )
-        insert_character_call_log(
-            conn,
-            task=task,
-            latency_ms=0,
-            request_hash=str(task["request_hash"] or ""),
-            error=error,
-        )
         insert_character_worker_audit(
             conn,
             task=task,
@@ -588,8 +580,10 @@ def run_next_character_generation_task(
         task = lease
     if task is None:
         return None
-    # 本任务的图片服务调用都归到这条人物视图记录（P0-9）。
-    with external_call_context("CHARACTER_VIEW_IMAGE", str(task["id"])):
+    # 本任务的图片服务调用都归到这条人物视图记录（P0-9），重试轮次一并带上。
+    with external_call_context(
+        "CHARACTER_VIEW_IMAGE", str(task["id"]), attempt=int(task["attempt"])
+    ):
         return _run_character_generation_task(
             conn, worker_id=worker_id, storage=storage, provider=provider, task=task
         )
@@ -603,8 +597,6 @@ def _run_character_generation_task(
     provider: CharacterImageProvider | None,
     task: sqlite3.Row,
 ) -> CharacterGenerationTask | None:
-    started = time.monotonic()
-    request_hash = str(task["request_hash"] or "")
     cost_record_id = ""
     cost_completed = False
     try:
@@ -644,8 +636,6 @@ def _run_character_generation_task(
             task=task,
             worker_id=worker_id,
             error=exc,
-            latency_ms=int((time.monotonic() - started) * 1000),
-            request_hash=request_hash,
         )
     except (KeyError, OSError, StorageBackendUnavailable, ValueError) as exc:
         if not cost_completed:
@@ -660,8 +650,6 @@ def _run_character_generation_task(
                 "character source or output storage is unavailable",
                 retriable=True,
             ),
-            latency_ms=int((time.monotonic() - started) * 1000),
-            request_hash=request_hash,
         )
 
     try:
@@ -672,8 +660,6 @@ def _run_character_generation_task(
             conn,
             task=task,
             worker_id=worker_id,
-            latency_ms=int((time.monotonic() - started) * 1000),
-            request_hash=request_hash,
             provider_task_id=result.provider_task_id,
             cost_amount=result.cost_amount,
         )
@@ -683,8 +669,6 @@ def _run_character_generation_task(
             task=task,
             worker_id=worker_id,
             error=exc,
-            latency_ms=int((time.monotonic() - started) * 1000),
-            request_hash=request_hash,
             provider_task_id=result.provider_task_id,
             cost_amount=result.cost_amount,
         )
@@ -712,8 +696,6 @@ def _run_character_generation_task(
                 "character source or output storage is unavailable",
                 retriable=True,
             ),
-            latency_ms=int((time.monotonic() - started) * 1000),
-            request_hash=request_hash,
             provider_task_id=result.provider_task_id,
             cost_amount=result.cost_amount,
         )
@@ -789,14 +771,6 @@ def _run_character_generation_task(
         from app.usage_billing import finish_source
 
         finish_source(conn, str(task["id"]), units=1, succeeded=True)
-        insert_character_call_log(
-            conn,
-            task=task,
-            latency_ms=int((time.monotonic() - started) * 1000),
-            request_hash=request_hash,
-            provider_task_id=result.provider_task_id,
-            response_asset_id=core_asset_id,
-        )
         update_character_version_generation_status(
             conn,
             version_id=str(task["character_version_id"]),
@@ -815,8 +789,6 @@ def _run_character_generation_task(
             conn,
             task=task,
             worker_id=worker_id,
-            latency_ms=int((time.monotonic() - started) * 1000),
-            request_hash=request_hash,
             provider_task_id=result.provider_task_id,
             cost_amount=result.cost_amount,
         )
@@ -828,8 +800,6 @@ def _run_character_generation_task(
             task=task,
             worker_id=worker_id,
             error=exc,
-            latency_ms=int((time.monotonic() - started) * 1000),
-            request_hash=request_hash,
             provider_task_id=result.provider_task_id,
             cost_amount=result.cost_amount,
         )
@@ -960,8 +930,6 @@ def finish_character_generation_failure(
     task: sqlite3.Row,
     worker_id: str,
     error: CharacterImageProviderFailed,
-    latency_ms: int,
-    request_hash: str,
     provider_task_id: str | None = None,
     cost_amount: float | None = None,
 ) -> CharacterGenerationTask:
@@ -999,14 +967,6 @@ def finish_character_generation_failure(
                 worker_id,
                 attempt,
             ),
-        )
-        insert_character_call_log(
-            conn,
-            task=task,
-            latency_ms=latency_ms,
-            request_hash=request_hash,
-            provider_task_id=provider_task_id,
-            error=error,
         )
         if updated.rowcount != 1:
             insert_character_worker_audit(
@@ -1046,8 +1006,6 @@ def record_stale_character_generation_result(
     *,
     task: sqlite3.Row,
     worker_id: str,
-    latency_ms: int,
-    request_hash: str,
     provider_task_id: str,
     cost_amount: float,
 ) -> CharacterGenerationTask:
@@ -1057,14 +1015,6 @@ def record_stale_character_generation_result(
         retriable=False,
     )
     with conn:
-        insert_character_call_log(
-            conn,
-            task=task,
-            latency_ms=latency_ms,
-            request_hash=request_hash,
-            provider_task_id=provider_task_id,
-            error=error,
-        )
         insert_character_worker_audit(
             conn,
             task=task,
@@ -1077,42 +1027,6 @@ def record_stale_character_generation_result(
             },
         )
     return get_character_generation_task(conn, str(task["id"]))
-
-
-def insert_character_call_log(
-    conn: BusinessConnection,
-    *,
-    task: sqlite3.Row,
-    latency_ms: int,
-    request_hash: str,
-    provider_task_id: str | None = None,
-    response_asset_id: str | None = None,
-    error: CharacterImageProviderFailed | None = None,
-) -> None:
-    conn.execute(
-        """
-        INSERT INTO external_call_logs (
-            id, generation_task_id, character_generation_task_id,
-            provider, model, endpoint_name, provider_request_id,
-            http_status, latency_ms, request_hash, response_asset_id,
-            error_code, error_message_redacted
-        )
-        VALUES (%s, NULL, %s, %s, %s, 'character_image.generate_view', %s, %s, %s, %s, %s, %s, %s)
-        """,
-        (
-            str(uuid4()),
-            str(task["id"]),
-            str(task["provider"]),
-            str(task["model"]),
-            provider_task_id,
-            None if error is None else error.http_status,
-            max(0, latency_ms),
-            request_hash,
-            response_asset_id,
-            None if error is None else error.code,
-            None if error is None else error.message_redacted,
-        ),
-    )
 
 
 def insert_character_worker_audit(

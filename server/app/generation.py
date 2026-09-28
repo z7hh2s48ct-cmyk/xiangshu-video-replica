@@ -37,6 +37,7 @@ from app.db_portable import BusinessConnection
 from app.external_calls import (
     endpoint_from_url,
     external_call_context,
+    external_call_model,
     parse_provider_error,
     recorded_urlopen,
 )
@@ -489,7 +490,6 @@ class ReconcileOperationOutcome:
 class GenerationSubmissionWork:
     provider: H3Provider
     provider_request: dict[str, Any]
-    request_hash: str
 
 
 class H3Provider:
@@ -610,14 +610,16 @@ class MetasoH3Provider(H3Provider):
             raise H3ProviderFailed("H3 generation requires HTTPS media URLs")
         provider_request = _metaso_create_request(request)
         try:
-            response = self.transport.request(
-                "POST",
-                f"{METASO_BASE_URL}{METASO_CREATE_PATH}",
-                headers=self._api_headers(),
-                body=json.dumps(
-                    provider_request, ensure_ascii=True, separators=(",", ":")
-                ).encode(),
-            )
+            # 提交调用的日志带模型名（H3 只有这一个模型）。
+            with external_call_model(H3_MODEL):
+                response = self.transport.request(
+                    "POST",
+                    f"{METASO_BASE_URL}{METASO_CREATE_PATH}",
+                    headers=self._api_headers(),
+                    body=json.dumps(
+                        provider_request, ensure_ascii=True, separators=(",", ":")
+                    ).encode(),
+                )
         except H3ProviderFailed as exc:
             raise SubmissionUncertain("H3 provider submission result is unknown") from exc
 
@@ -3352,7 +3354,6 @@ def _run_leased_generation_task(
         resolution=str(lease["resolution"]),
         ratio=str(lease["ratio"]),
     )
-    request_hash = content_hash(json.dumps(provider_request, ensure_ascii=True, sort_keys=True))
     try:
         provider_result = provider.create_image_to_video(provider_request)
     except SubmissionUncertain as exc:
@@ -3382,7 +3383,6 @@ def _run_leased_generation_task(
             lease=lease,
             provider_task_id=provider_result.provider_task_id,
             provider_request=provider_request,
-            request_hash=request_hash,
             release_lease=False,
         )
         mark_generation_task_archiving(conn, lease=lease, result_url=provider_result.result_url)
@@ -5449,7 +5449,6 @@ def prepare_generation_submission(
     return GenerationSubmissionWork(
         provider=selected_provider,
         provider_request=provider_request,
-        request_hash=content_hash(json.dumps(provider_request, ensure_ascii=True, sort_keys=True)),
     )
 
 
@@ -5459,7 +5458,6 @@ def mark_generation_task_running(
     lease: dict[str, Any],
     provider_task_id: str,
     provider_request: dict[str, Any],
-    request_hash: str,
     release_lease: bool = True,
 ) -> None:
     """Durably record the paid provider id before any polling starts."""
@@ -5496,25 +5494,8 @@ def mark_generation_task_running(
         if row is not None and row["superseded_by_task_id"] is not None:
             raise GenerationTaskSupersededError(task_id)
         raise RuntimeError("generation submission lease was lost before task id persistence")
-    conn.execute(
-        """
-        INSERT INTO external_call_logs (
-            id, generation_task_id, provider, model, endpoint_name,
-            provider_request_id, http_status, request_hash
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        """,
-        (
-            str(uuid4()),
-            task_id,
-            str(lease["provider"]),
-            H3_MODEL,
-            "createImageToVideo",
-            provider_task_id,
-            200,
-            request_hash,
-        ),
-    )
+    # 调用日志由传输层统一记录（方案 P0-9），这里不再单独写行：同一次提交在日志里
+    # 只会留下一条带任务归属与实际耗时、响应的记录。
     _refresh_batch_status_in_transaction(conn, batch_id=str(lease["batch_id"]))
 
 

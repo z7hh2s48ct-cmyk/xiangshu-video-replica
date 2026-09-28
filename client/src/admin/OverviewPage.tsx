@@ -185,6 +185,18 @@ export function OverviewPage({
       hint: "当日金额尚未定稿",
     },
     {
+      // P0-5 收口：unknown_cost_records 此前只喂给「今日成本」KpiCard 的
+      // 待核对判定（yuanOrUnknown），没有任何入口能落到条数一致的清单。
+      // 服务端 billing_reports.py 承诺「成本待核对」清单与计数同口径
+      // （attention=unknown_cost），这里补上发出方。
+      key: "unknownCost",
+      label: "今日成本待核对",
+      count: todos.unknown_cost_records ?? 0,
+      tone: "warn",
+      tab: "unknownCost",
+      hint: "成本金额尚未确定",
+    },
+    {
       key: "unknownRevenue",
       label: "今日收入未确定",
       count: today.unknown_revenue_operations ?? 0,
