@@ -304,7 +304,7 @@ def create_record(
         raise _error(
             422,
             "PUBLISH_PLATFORM_NOT_READY",
-            "该平台的自动发布即将上线，请先前往官方页面发布。",
+            "该平台的自动发布正在开发中，请先前往官方页面发布。",
         )
     if str(account["status"]) != "connected":
         raise _error(409, "PUBLISH_ACCOUNT_INVALID", "发布账号登录态已失效，请重新扫码。")
