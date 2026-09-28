@@ -81,6 +81,30 @@ def test_every_scanned_literal_code_has_advice() -> None:
     assert not missing, f"落库 error_code 缺少修复建议登记: {missing}"
 
 
+# P0-10：图片任务把码先赋给局部变量 ``code = "..."`` 再写库，人物视图用
+# ``CharacterImageProviderFailed("CODE", ...)`` 构造失败——这两种写法上面的
+# ``error_code =`` 正则都扫不到，漏登记的码在管理端只剩一个英文编号。
+CODE_VARIABLE_FILES = ("image_tasks.py",)
+CODE_VARIABLE_PATTERN = re.compile(r"""\bcode\s*=\s*['"]([A-Z][A-Z0-9_]{4,})['"]""")
+CHARACTER_FAILURE_FILE = "character_image_generation.py"
+CHARACTER_FAILURE_PATTERN = re.compile(
+    r"""CharacterImageProviderFailed\(\s*['"]([A-Z][A-Z0-9_]{4,})['"]"""
+)
+
+
+def test_variable_assigned_and_constructed_failure_codes_have_advice() -> None:
+    scanned: set[str] = set()
+    for name in CODE_VARIABLE_FILES:
+        text = (APP_DIR / name).read_text(encoding="utf-8")
+        scanned.update(match.group(1) for match in CODE_VARIABLE_PATTERN.finditer(text))
+    text = (APP_DIR / CHARACTER_FAILURE_FILE).read_text(encoding="utf-8")
+    scanned.update(match.group(1) for match in CHARACTER_FAILURE_PATTERN.finditer(text))
+    # 防哑弹：两种写法都必须真的扫到码。
+    assert {"IMAGE_TASK_PROVIDER_FAILED", "CHARACTER_PROVIDER_TIMEOUT"} <= scanned
+    missing = sorted(code for code in scanned if code not in FAILURE_RUNBOOK)
+    assert not missing, f"图片 / 人物视图失败码缺少修复建议登记: {missing}"
+
+
 def test_every_variable_path_code_has_advice() -> None:
     missing = sorted(code for code in VARIABLE_PATH_CODES if code not in FAILURE_RUNBOOK)
     assert not missing, f"变量路径 error_code 缺少修复建议登记: {missing}"

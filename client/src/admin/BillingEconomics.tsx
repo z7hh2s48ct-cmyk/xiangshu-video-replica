@@ -106,14 +106,18 @@ function today() {
     day: "2-digit",
   }).format(new Date());
 }
-const initialFilters = () => ({
-  start: `${today().slice(0, 7)}-01`,
+export type BillingAttention = "" | "pending" | "unknown_cost";
+const initialFilters = (attention: BillingAttention = "") => ({
+  // 带着总览「今日」待办进来时只看今天，条数才与待办计数一致。
+  start: attention ? today() : `${today().slice(0, 7)}-01`,
   end: today(),
   grain: "day",
   user_id: "",
   service: "",
   module: "",
   provider: "",
+  // 总览待办跳进来时预置：清单条数与待办计数同口径（服务端 attention 参数）。
+  attention: attention as string,
 });
 function params(filters: ReturnType<typeof initialFilters>) {
   return new URLSearchParams(
@@ -124,14 +128,20 @@ function params(filters: ReturnType<typeof initialFilters>) {
 export function BillingEconomics({
   readOnly = false,
   view = "profit",
+  initialAttention = "",
 }: {
   readOnly?: boolean;
   view?: "profit" | "cost";
+  initialAttention?: BillingAttention;
 }) {
   const costView = view === "cost";
   const detailRequest = useRef(0);
-  const [filters, setFilters] = useState(initialFilters);
-  const [query, setQuery] = useState(() => params(initialFilters()));
+  const [filters, setFilters] = useState(() =>
+    initialFilters(initialAttention),
+  );
+  const [query, setQuery] = useState(() =>
+    params(initialFilters(initialAttention)),
+  );
   const [revision, setRevision] = useState(0);
   const [offset, setOffset] = useState(0);
   const [catalog, setCatalog] = useState<BillingService[]>([]);
@@ -349,6 +359,19 @@ export function BillingEconomics({
             {[...new Set(catalog.map((item) => item.provider))].map((key) => (
               <option key={key}>{key}</option>
             ))}
+          </select>
+        </label>
+        <label>
+          只看
+          <select
+            value={filters.attention}
+            onChange={(event) =>
+              setFilters({ ...filters, attention: event.target.value })
+            }
+          >
+            <option value="">全部请求</option>
+            <option value="pending">待结算</option>
+            <option value="unknown_cost">成本待核对</option>
           </select>
         </label>
         <div className="billing-economics-filters__actions">

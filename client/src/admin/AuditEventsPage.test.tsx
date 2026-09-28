@@ -430,6 +430,28 @@ describe("AuditEventsPage", () => {
     expect(options("管理员强制下线")).toHaveValue("ADMIN_SESSION_LOGOUT");
   });
 
+  it("offers the sensitive admin actions the server already records (P0-4)", async () => {
+    installFetch();
+    render(<AuditEventsPage />);
+    await screen.findByText("管理员调账");
+
+    const options = (name: string) => screen.getByRole("option", { name });
+    expect(options("查看密钥明文")).toHaveValue(
+      "provider_settings.secret_reveal",
+    );
+    expect(options("数据导出")).toHaveValue("control.export");
+    expect(options("开通套餐（线下收款）")).toHaveValue(
+      "customer_package.grant",
+    );
+    expect(options("设置专项折扣")).toHaveValue("customer_discount.create");
+    expect(options("停用专项折扣")).toHaveValue("customer_discount.deactivate");
+    expect(options("修改充值套餐")).toHaveValue("recharge_package.update");
+    expect(options("查单同步")).toHaveValue("payment.sync");
+    expect(options("管理员密码登录")).toHaveValue(
+      "admin_session.password_login",
+    );
+  });
+
   it("labels an administrator-forced session revoke as an administrator session action", async () => {
     vi.stubGlobal(
       "fetch",

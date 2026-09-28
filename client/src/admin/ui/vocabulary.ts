@@ -119,6 +119,26 @@ export const GENERATION_STATUS_LABELS: LabelMap = {
   ARCHIVE_FAILED: "归档失败",
 };
 
+/**
+ * 生成状态筛选项：同一中文标签只出现一次，值为逗号拼接的全部底层状态。
+ *
+ * CANCELED / CANCELLED 两种拼写都映射为「已取消」，逐项渲染会让下拉出现两个
+ * 「已取消」（方案 P0-6）；服务端状态筛选接受逗号分隔的多值。
+ */
+export const GENERATION_STATUS_FILTERS: Array<{
+  value: string;
+  label: string;
+}> = (() => {
+  const grouped = new Map<string, string[]>();
+  for (const [value, label] of Object.entries(GENERATION_STATUS_LABELS)) {
+    grouped.set(label, [...(grouped.get(label) ?? []), value]);
+  }
+  return [...grouped].map(([label, values]) => ({
+    value: values.join(","),
+    label,
+  }));
+})();
+
 /** 查词典并回退到原始值——未知状态原样展示，便于发现新枚举。 */
 export function labelFrom(labels: LabelMap, value: string): string {
   return labels[value] ?? value;

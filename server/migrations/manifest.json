@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20260927T0000_oral_voice_language_settings"
+      "20260928T1000_external_call_response_log"
     ],
     "parents": {
       "001_core": null,
@@ -143,9 +143,10 @@
       "20260925T1400_api_metadata_pending_write": "20260926T0000_viral_homepage_rank",
       "20260926T0000_viral_homepage_rank": "20260924T0200_customer_oral_task_visibility",
       "20260927T0000_oral_voice_language_settings": "20260927T1200_admin_offline_payment_source",
-      "20260927T1200_admin_offline_payment_source": "20260925T1400_api_metadata_pending_write"
+      "20260927T1200_admin_offline_payment_source": "20260925T1400_api_metadata_pending_write",
+      "20260928T1000_external_call_response_log": "20260927T0000_oral_voice_language_settings"
     },
-    "revision_count": 127
+    "revision_count": 128
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -667,6 +668,10 @@
     "20260927T1200_admin_offline_payment_source": {
       "file": "versions/20260927T1200_admin_offline_payment_source.py",
       "sha256": "f94599584813609ca8ff117067b45944ac5d90c9574ad6a538524b4199d08236"
+    },
+    "20260928T1000_external_call_response_log": {
+      "file": "versions/20260928T1000_external_call_response_log.py",
+      "sha256": "f62768c6cf267a1a2413f4ad6982203309f523d413a166848249eb45b59dbc7a"
     }
   },
   "task": "MIGRATION-GUARD-20260912"

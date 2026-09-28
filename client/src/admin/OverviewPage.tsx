@@ -47,12 +47,14 @@ function TodoRow({
   tone,
   hint,
   onOpen,
+  openLabel = "去处理",
 }: {
   label: string;
   count: number;
   tone: "warn" | "danger" | "info";
   hint?: string;
   onOpen?: () => void;
+  openLabel?: string;
 }) {
   return (
     <li>
@@ -61,7 +63,7 @@ function TodoRow({
       {hint ? <small>{hint}</small> : null}
       {onOpen ? (
         <button type="button" onClick={onOpen}>
-          去处理
+          {openLabel}
         </button>
       ) : null}
     </li>
@@ -178,7 +180,8 @@ export function OverviewPage({
       label: "今日操作待结算",
       count: today.pending_operations ?? 0,
       tone: "info",
-      tab: "funds",
+      // 这两项是计费操作口径，清单在经营分析的成本明细里（方案 P0-5）。
+      tab: "pendingOperations",
       hint: "当日金额尚未定稿",
     },
     {
@@ -186,7 +189,7 @@ export function OverviewPage({
       label: "今日收入未确定",
       count: today.unknown_revenue_operations ?? 0,
       tone: "warn",
-      tab: "funds",
+      tab: "unknownRevenue",
       hint: "毛利可能偏低",
     },
   ];
@@ -344,11 +347,12 @@ export function OverviewPage({
                 hint={item.hint}
                 label={item.label}
                 tone={item.tone}
+                // 审计员同样需要落到清单去核对，只是按钮说「去查看」；
+                // 写操作由目标页自身按 readOnly 收敛。
                 onOpen={
-                  !readOnly && item.count > 0
-                    ? () => onNavigate?.(item.tab)
-                    : undefined
+                  item.count > 0 ? () => onNavigate?.(item.tab) : undefined
                 }
+                openLabel={readOnly ? "去查看" : "去处理"}
               />
             ))}
           </ul>
@@ -360,17 +364,24 @@ export function OverviewPage({
           <section className="admin-panel" aria-label="快捷操作">
             <h2>快捷操作</h2>
             <div className="dashboard-quick-actions">
+              {/* 收款开通计入收入、赠送不计收入，入口分开（方案 P0-1）。 */}
               <button
                 type="button"
-                onClick={() => onNavigate?.("customerAdjustments")}
+                onClick={() => onNavigate?.("customerPackage")}
               >
-                后台加款
+                开通套餐（已收款）
               </button>
               <button
                 type="button"
                 onClick={() => onNavigate?.("customerAdjustments")}
               >
-                发放赠送积分
+                赠送积分
+              </button>
+              <button
+                type="button"
+                onClick={() => onNavigate?.("customerRefund")}
+              >
+                退款扣减
               </button>
               <button type="button" onClick={() => onNavigate?.("costDetails")}>
                 成本核对

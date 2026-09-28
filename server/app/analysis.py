@@ -26,6 +26,7 @@ from pydantic import (
 )
 
 from app.db_portable import BusinessConnection
+from app.external_calls import endpoint_from_url, external_call_context, recorded_urlopen
 
 ANALYSIS_KIND = "analysis"
 SHOT_CARD_KIND = "shot_card"
@@ -136,7 +137,9 @@ def analysis_task_context(*, task_id: str, project_id: str, asset_id: str) -> It
     """Bind the task reference for provider-call log lines in this scope."""
     token = _analysis_task_ref.set(f"task={task_id} project={project_id} asset={asset_id}")
     try:
-        yield
+        # 同一作用域内的第三方调用日志也归到这条拆解任务（方案 P0-9）。
+        with external_call_context("ANALYSIS", task_id):
+            yield
     finally:
         _analysis_task_ref.reset(token)
 
@@ -352,8 +355,16 @@ class UrllibApilioChatTransport:
     ) -> tuple[bytes, Mapping[str, str]]:
         try:
             request = Request(url, data=body, headers=dict(headers), method="POST")
-            with urlopen(request, timeout=self.timeout_seconds) as response:  # noqa: S310
-                return response.read(), dict(response.headers.items())
+            # 调用与原始响应落到调用日志（方案 P0-9）；opener 取本模块的 urlopen，
+            # 测试替换它时照样生效。
+            response_body, response_headers, _status = recorded_urlopen(
+                request,
+                timeout=self.timeout_seconds,
+                provider="apilio_gemini",
+                endpoint=endpoint_from_url(url),
+                opener=urlopen,
+            )
+            return response_body, response_headers
         except HTTPError as exc:
             try:
                 reason = redacted_upstream_reason(exc.read())

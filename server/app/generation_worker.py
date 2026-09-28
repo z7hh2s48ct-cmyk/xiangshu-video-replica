@@ -38,6 +38,7 @@ from app.db_pg import (
     validate_customer_production,
 )
 from app.db_portable import BusinessConnection
+from app.external_calls import external_call_context
 from app.first_frame_routes import get_first_frame_quality_inspector, get_image_provider
 from app.first_frames import (
     FirstFrameQualityInspector,
@@ -388,7 +389,7 @@ def _run_pg_source_frame_once(
                 override=quality_inspector,
                 shared_inspector=shared_inspector,
             )
-        with billing_context(lease.id):
+        with billing_context(lease.id), external_call_context("SOURCE_FRAME", lease.id):
             stored = perform_source_frame_extraction(
                 plan,
                 storage=storage,
@@ -605,7 +606,12 @@ def run_worker_once(
                     storage=storage,
                     provider=analysis_provider,
                 )
-                with billing_context(analysis_lease.id):
+                with (
+                    billing_context(analysis_lease.id),
+                    external_call_context(
+                        "ANALYSIS", analysis_lease.id, attempt=analysis_lease.attempt
+                    ),
+                ):
                     analysis_result = perform_analysis_task(analysis_work)
                 complete_analysis_task(conn, work=analysis_work, result=analysis_result)
             except Exception as exc:
@@ -758,7 +764,14 @@ def run_worker_once(
                     model=prepared.plan.model,
                 )
                 submission_started = prepared.provider_submission is not None
-                with billing_context(first_frame_lease.id):
+                with (
+                    billing_context(first_frame_lease.id),
+                    external_call_context(
+                        "FIRST_FRAME_IMAGE",
+                        first_frame_lease.id,
+                        attempt=first_frame_lease.attempt,
+                    ),
+                ):
                     work, stored = run_first_frame_task_outside_transaction(
                         prepared,
                         storage=first_frame_storage or storage,
@@ -814,7 +827,12 @@ def run_worker_once(
                     model=SIMPLE_CONTACT_SHEET_MODEL,
                 )
                 submission_started = True
-                sheet_generation = perform_character_sheet_task(prepared_sheet)
+                with external_call_context(
+                    "CHARACTER_SHEET_IMAGE",
+                    character_sheet_lease.id,
+                    attempt=character_sheet_lease.attempt,
+                ):
+                    sheet_generation = perform_character_sheet_task(prepared_sheet)
                 complete_character_sheet_task(
                     conn,
                     prepared=prepared_sheet,
@@ -1326,7 +1344,10 @@ def run_pg_worker_once(
                 lease = acquire_generation_task_lease(conn, worker_id=worker_id)
         if lease is not None:
             try:
-                with billing_context(str(lease["id"])):
+                with (
+                    billing_context(str(lease["id"])),
+                    external_call_context("VIDEO", str(lease["id"])),
+                ):
                     _run_pg_generation_step(
                         lease=lease,
                         storage=generation_storage or storage,
@@ -1405,7 +1426,12 @@ def run_pg_worker_once(
                         resolution="768P",
                         metadata={"resolution_basis": "default_generation_tier"},
                     )
-                with billing_context(analysis_lease.id):
+                with (
+                    billing_context(analysis_lease.id),
+                    external_call_context(
+                        "ANALYSIS", analysis_lease.id, attempt=analysis_lease.attempt
+                    ),
+                ):
                     analysis_result = perform_analysis_task(
                         analysis_work, on_provider_result=record_analysis_response
                     )
@@ -1502,7 +1528,10 @@ def run_pg_worker_once(
                             )
                         ),
                     )
-                with billing_context(reconcile_lease.task_id):
+                with (
+                    billing_context(reconcile_lease.task_id),
+                    external_call_context("VIDEO", reconcile_lease.task_id),
+                ):
                     reconcile_outcome = perform_generation_reconcile_operation(
                         reconcile_work,
                         storage=generation_storage or storage,
@@ -1642,7 +1671,14 @@ def run_pg_worker_once(
                             raise RuntimeError("first-frame receipt cost binding is missing")
                         if receipt_cost["status"] == "PENDING":
                             first_frame_cost_id = receipt_cost_id
-                with billing_context(first_frame_lease.id):
+                with (
+                    billing_context(first_frame_lease.id),
+                    external_call_context(
+                        "FIRST_FRAME_IMAGE",
+                        first_frame_lease.id,
+                        attempt=first_frame_lease.attempt,
+                    ),
+                ):
                     work, stored = run_first_frame_task_outside_transaction(
                         prepared,
                         storage=first_frame_storage or storage,
@@ -1725,7 +1761,12 @@ def run_pg_worker_once(
                         user_id=character_sheet_lease.created_by_user_id,
                     )
                 submission_started = True
-                sheet_generation = perform_character_sheet_task(prepared_sheet)
+                with external_call_context(
+                    "CHARACTER_SHEET_IMAGE",
+                    character_sheet_lease.id,
+                    attempt=character_sheet_lease.attempt,
+                ):
+                    sheet_generation = perform_character_sheet_task(prepared_sheet)
                 character_sheet_cost_usage = 1
                 with pg_transaction() as raw_conn:
                     conn = BusinessConnection.postgres(raw_conn)

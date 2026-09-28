@@ -41,6 +41,7 @@ from app.character_identity import (
     require_identity_active,
 )
 from app.db_portable import BusinessConnection
+from app.external_calls import external_call_context
 from app.operation_costs import begin_operation_cost, complete_operation_cost
 from app.permissions import require_role, write_audit
 from app.storage import (
@@ -587,6 +588,21 @@ def run_next_character_generation_task(
         task = lease
     if task is None:
         return None
+    # 本任务的图片服务调用都归到这条人物视图记录（P0-9）。
+    with external_call_context("CHARACTER_VIEW_IMAGE", str(task["id"])):
+        return _run_character_generation_task(
+            conn, worker_id=worker_id, storage=storage, provider=provider, task=task
+        )
+
+
+def _run_character_generation_task(
+    conn: BusinessConnection,
+    *,
+    worker_id: str,
+    storage: StorageAdapter,
+    provider: CharacterImageProvider | None,
+    task: sqlite3.Row,
+) -> CharacterGenerationTask | None:
     started = time.monotonic()
     request_hash = str(task["request_hash"] or "")
     cost_record_id = ""

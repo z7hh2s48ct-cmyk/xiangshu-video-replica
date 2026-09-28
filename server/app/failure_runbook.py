@@ -81,6 +81,56 @@ FAILURE_RUNBOOK: dict[str, str] = {
         "图像任务执行中断且已停止自动重试，需要管理员核对。先确认上游任务结果，再决定恢复或重发。"
     ),
     "IMAGE_TASK_RECONCILE_RESUMED": ("管理员已核对上游任务并恢复处理。无需操作，等待继续推进。"),
+    # 方案 P0-10：以下码经 ``code = "..."`` 变量写入任务行，旧覆盖测试扫不到。
+    "IMAGE_TASK_FAILED": (
+        "图像生成失败。查看接口调用记录里的服务商原话；可重试一次，持续失败携任务编号报障。"
+    ),
+    "IMAGE_TASK_PROVIDER_FAILED": (
+        "图像服务返回了不可用的结果（张数不符、状态不可读等），重试同一任务结果相同。"
+        "请重新生成；持续出现时对照调用记录里的原始响应排查。"
+    ),
+    "IMAGE_TASK_STORAGE_UNAVAILABLE": (
+        "图片已生成但保存到素材库失败。检查对象存储配置与网络后重新生成。"
+    ),
+    "IMAGE_TASK_SUBMISSION_UNCERTAIN": (
+        "图像任务提交结果未确认，已停止自动重试。先在生成记录里「重新核对」，确认服务商是否受理，"
+        "避免重复扣费。"
+    ),
+    # ---- 人物视图（character_generation_tasks.error_code）----
+    "CHARACTER_PROVIDER_TIMEOUT": "人物图片服务超时。系统会自动重试；持续超时检查服务状态与并发。",
+    "CHARACTER_PROVIDER_RATE_LIMITED": (
+        "人物图片服务限流（429）。稍后重试或降低并发；长期限流需要扩容服务账号额度。"
+    ),
+    "CHARACTER_PROVIDER_UNAVAILABLE": (
+        "人物图片服务暂时不可用（5xx）。稍后重试；持续失败查看调用记录里的原始响应并联系服务商。"
+    ),
+    "CHARACTER_PROVIDER_INVALID_RESPONSE": (
+        "人物图片服务返回了无法使用的结果。重新生成；持续出现时对照调用记录里的原始响应排查。"
+    ),
+    "CHARACTER_PROVIDER_MISMATCH": (
+        "任务记录的服务与当前配置不一致。到技术配置确认人物图片服务，再重新生成。"
+    ),
+    "CHARACTER_PROVIDER_NOT_CONFIGURED": (
+        "尚未配置人物图片服务。到技术配置填写并测试连接后重新生成。"
+    ),
+    "CHARACTER_STORAGE_UNAVAILABLE": "人物图片保存失败。检查对象存储配置与网络后重新生成。",
+    "CHARACTER_LEASE_EXPIRED": (
+        "人物图片任务执行中断且未自动恢复。重新生成；频繁出现检查后台任务进程是否稳定。"
+    ),
+    "CHARACTER_LEASE_LOST": (
+        "人物图片任务被其他进程接管后结束。重新生成即可；频繁出现检查后台任务进程是否重复启动。"
+    ),
+    "CHARACTER_VERSION_NOT_GENERATABLE": (
+        "该人物版本当前不能生成视图（已归档或资料不全）。换用可用版本。"
+    ),
+    "CHARACTER_VERSION_SOURCE_CHANGED": "人物原图在生成期间被更换。按新的原图重新生成视图。",
+    "CHARACTER_VERSION_SOURCE_MISSING": "人物原图缺失。重新上传人物原图后再生成视图。",
+    "IDENTITY_NOT_ACTIVE": (
+        "人物身份未生效（授权未完成或已停用），不能生成视图。请客户完成人物授权后重新生成。"
+    ),
+    "FAKE_CHARACTER_PROVIDER_FORBIDDEN": (
+        "正式环境不允许使用模拟人物图片服务。到技术配置切换为正式服务后重新生成。"
+    ),
     # ---- 源画面取帧（source_frame_tasks.error_code）----
     "SOURCE_FRAME_TASK_FAILED": "取帧任务失败。重试；检查源视频可读性与对象存储配置。",
     "SOURCE_FRAME_TASK_CANCELLED": "取帧任务已停止。如需继续，请重新开始取帧任务。",

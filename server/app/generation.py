@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request
 from uuid import uuid4
 
 import psycopg
@@ -34,6 +34,12 @@ from app.analysis import get_version, insert_version, next_version_number
 from app.auth import CurrentUser, Role
 from app.bootstrap import is_customer_production
 from app.db_portable import BusinessConnection
+from app.external_calls import (
+    endpoint_from_url,
+    external_call_context,
+    parse_provider_error,
+    recorded_urlopen,
+)
 from app.first_frames import (
     FirstFrameQualityInspector,
     GeneratedVideoQualityResult,
@@ -383,6 +389,8 @@ class H3QueryResult(BaseModel):
     status: Literal["RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"]
     result_url: str | None = None
     output_seconds: float | None = None
+    # 失败 / 取消时服务商给出的原因；此前只取状态字段，原因被丢弃（方案 P0-9）。
+    failure_reason: str | None = None
 
 
 class SubmissionUncertain(RuntimeError):
@@ -411,10 +419,13 @@ class H3ProviderFailed(RuntimeError):
         *,
         provider_task_id: str | None = None,
         terminal: bool = False,
+        provider_reason: str | None = None,
     ) -> None:
         super().__init__(message)
         self.provider_task_id = provider_task_id
         self.terminal = terminal
+        # 服务商给出的失败原话（已脱敏、截断）；落进任务的错误说明供管理端排查。
+        self.provider_reason = provider_reason
 
 
 class H3ProviderSettingsUnavailable(RuntimeError):
@@ -535,8 +546,14 @@ class UrllibMetasoHttpTransport:
     ) -> bytes:
         try:
             request = Request(url, data=body, headers=dict(headers), method=method)
-            with urlopen(request, timeout=self.timeout_seconds) as response:  # noqa: S310
-                return cast(bytes, response.read())
+            # 每次调用（提交、查询进度、下载）都留原始响应，失败原因可在管理端查到。
+            response_body, _headers, _status = recorded_urlopen(
+                request,
+                timeout=self.timeout_seconds,
+                provider="metaso",
+                endpoint=endpoint_from_url(url),
+            )
+            return response_body
         except HTTPError as exc:
             detail = ""
             try:
@@ -548,6 +565,14 @@ class UrllibMetasoHttpTransport:
         except (TimeoutError, URLError, OSError) as exc:
             logger.warning("H3 provider request failed: %s", type(exc).__name__)
             raise H3ProviderFailed("H3 provider request failed") from exc
+
+
+def _metaso_failure_reason(item: Mapping[str, Any]) -> str | None:
+    """从查询结果里取失败原话；服务商没给就返回 None，不编造原因。"""
+    code, message = parse_provider_error(json.dumps(item, ensure_ascii=False, default=str))
+    if message and code:
+        return f"{message}（{code}）"
+    return message or code
 
 
 class MetasoH3Provider(H3Provider):
@@ -622,9 +647,9 @@ class MetasoH3Provider(H3Provider):
                 output_seconds=_metaso_output_seconds(item),
             )
         if status == "failed":
-            return H3QueryResult(status="FAILED")
+            return H3QueryResult(status="FAILED", failure_reason=_metaso_failure_reason(item))
         if status == "cancelled":
-            return H3QueryResult(status="CANCELLED")
+            return H3QueryResult(status="CANCELLED", failure_reason=_metaso_failure_reason(item))
         # queued / running / processing 以及任何未知状态都视为进行中：轮询继续等待，
         # 由轮询超时与对账机制兜底，绝不把仍在排队的任务误判为终态。
         if status not in H3_PENDING_PROVIDER_STATUSES:
@@ -659,6 +684,7 @@ class MetasoH3Provider(H3Provider):
                     f"H3 task finished with status {result.status.lower()}",
                     provider_task_id=provider_task_id,
                     terminal=True,
+                    provider_reason=result.failure_reason,
                 )
             if attempt < self.max_poll_attempts - 1:
                 self.sleeper(self.poll_interval_seconds)
@@ -3214,7 +3240,28 @@ def run_next_generation_task(
         lease = acquire_generation_task_lease(conn, worker_id=worker_id)
     if lease is None:
         return None
+    attempt = lease.get("attempt")
+    # 本任务内的第三方调用（提交、查询进度、下载）都记到这条视频任务名下（P0-9）。
+    with external_call_context(
+        "VIDEO", str(lease["id"]), attempt=None if attempt is None else int(attempt)
+    ):
+        return _run_leased_generation_task(
+            conn,
+            provider=provider,
+            storage=storage,
+            first_frame_storage=first_frame_storage,
+            lease=lease,
+        )
 
+
+def _run_leased_generation_task(
+    conn: BusinessConnection,
+    *,
+    provider: H3Provider | None,
+    storage: StorageAdapter,
+    first_frame_storage: StorageAdapter | None,
+    lease: dict[str, Any],
+) -> TaskResult | None:
     task_id = str(lease["id"])
     source_storage = first_frame_storage or storage
     archive_retry = bool(
@@ -3324,6 +3371,7 @@ def run_next_generation_task(
             conn,
             lease=lease,
             provider_task_id=exc.provider_task_id,
+            provider_reason=exc.provider_reason,
         )
         return get_task_result(conn, task_id)
 
@@ -4224,7 +4272,8 @@ def perform_generation_reconcile_operation(
     if work.provider is None or work.provider_task_id is None:
         raise RuntimeError("reconciliation provider context is unavailable")
     try:
-        query = work.provider.query_image_to_video(work.provider_task_id)
+        with external_call_context("VIDEO", work.lease.task_id):
+            query = work.provider.query_image_to_video(work.provider_task_id)
     except H3ProviderFailed as exc:
         raise generation_error(
             502,
@@ -4277,7 +4326,7 @@ def complete_generation_reconcile_operation(
                   AND superseded_by_task_id IS NULL
                 """,
                 (
-                    f"Provider reports the task finished with {outcome.status.lower()}",
+                    f"服务商报告任务已结束，状态：{outcome.status.lower()}",
                     lease.task_id,
                 ),
             )
@@ -4721,7 +4770,8 @@ def reconcile_submission_uncertain_task(
         )
     _renew_reconcile_reservation(conn, reservation=reconcile_reservation)
     try:
-        item = provider._query_task(str(provider_task_id))
+        with external_call_context("VIDEO", task_id):
+            item = provider._query_task(str(provider_task_id))
     except H3ProviderFailed as exc:
         raise generation_error(
             502, "PROVIDER_QUERY_FAILED", "Provider query failed during reconciliation."
@@ -4803,7 +4853,7 @@ def reconcile_submission_uncertain_task(
                 SET
                     status = 'FAILED',
                     error_code = 'PROVIDER_TERMINAL',
-                    error_message_redacted = 'Provider reports the task finished with ' || %s,
+                    error_message_redacted = '服务商报告任务已结束，状态：' || %s,
                     locked_by = NULL,
                     locked_until = NULL,
                     updated_at = CURRENT_TIMESTAMP
@@ -5728,7 +5778,7 @@ def mark_task_provider_settings_unavailable(
             SET
                 status = 'FAILED',
                 error_code = 'H3_SETTINGS_UNAVAILABLE',
-                error_message_redacted = 'H3 provider settings are unavailable to the worker.',
+                error_message_redacted = '视频生成服务配置不可用，请到技术配置检查后重试。',
                 submitted_at = NULL,
                 locked_by = NULL,
                 locked_until = NULL,
@@ -5756,9 +5806,15 @@ def mark_task_provider_failed(
     *,
     lease: dict[str, Any],
     provider_task_id: str | None,
+    provider_reason: str | None = None,
 ) -> None:
     task_id = str(lease["id"])
     batch_id = str(lease["batch_id"])
+    message = (
+        f"视频生成服务返回失败：{provider_reason}"
+        if provider_reason
+        else "视频生成失败或返回了无效结果，服务商未给出原因。"
+    )
     with conn:
         provider_failed_update = conn.execute(
             """
@@ -5767,7 +5823,7 @@ def mark_task_provider_failed(
                 provider_task_id = %s,
                 status = 'FAILED',
                 error_code = 'H3_PROVIDER_FAILED',
-                error_message_redacted = 'The H3 task failed or returned an invalid result.',
+                error_message_redacted = %s,
                 locked_by = NULL,
                 locked_until = NULL,
                 completed_at = CURRENT_TIMESTAMP,
@@ -5777,6 +5833,7 @@ def mark_task_provider_failed(
             """,
             (
                 provider_task_id,
+                message,
                 task_id,
                 str(lease["status"]),
                 str(lease["locked_by"]),

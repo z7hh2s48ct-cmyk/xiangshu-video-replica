@@ -190,6 +190,16 @@ describe("GenerationRecordsPage", () => {
     expect(screen.queryByLabelText("失败阶段")).toBeNull();
   });
 
+  it("offers a single 已取消 option that covers both spellings (P0-6)", async () => {
+    render(<GenerationRecordsPage />);
+    await waitFor(() =>
+      expect(adminApi.getAdminGenerationRecords).toHaveBeenCalled(),
+    );
+    const cancelled = screen.getAllByRole("option", { name: "已取消" });
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0]).toHaveValue("CANCELED,CANCELLED");
+  });
+
   it("filters analysis failures by phase and surfaces upstream detail", async () => {
     const upstreamReason = "model gemini-3.8-flash is not available";
     const fixAdvice = "稍后重试一次；持续失败核对接入商服务状态。";

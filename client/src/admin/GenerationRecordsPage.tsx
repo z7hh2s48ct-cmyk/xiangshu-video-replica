@@ -18,6 +18,7 @@ import {
   FAILURE_PHASE_LABELS,
   formatDateTime,
   GENERATION_RECORD_TYPE_LABELS,
+  GENERATION_STATUS_FILTERS,
   GENERATION_STATUS_LABELS,
   labelFrom,
   parseUtcTimestamp,
@@ -258,13 +259,11 @@ export function GenerationRecordsPage({
                 onChange={(event) => setStatus(event.target.value)}
               >
                 <option value="">全部状态</option>
-                {Object.entries(GENERATION_STATUS_LABELS).map(
-                  ([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  ),
-                )}
+                {GENERATION_STATUS_FILTERS.map(({ value, label }) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
               </select>
             </label>
             <label>

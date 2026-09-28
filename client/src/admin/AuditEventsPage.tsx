@@ -29,9 +29,34 @@ const EVENT_OPTIONS = [
   ["admin.activation_code_batch.created", "创建激活码批次"],
   // 管理员强制下线：customer_session_events 中 actor 非会话属主的行。
   ["ADMIN_SESSION_LOGOUT", "管理员强制下线"],
+  // 方案 P0-4：服务端早已写这些 audit_logs 动作，但下拉里没有，运营筛不出来——
+  // 其中查看密钥、数据导出、线下开通套餐都是高敏操作。
+  ["admin_session.password_login", "管理员密码登录"],
+  ["admin_session.exchange", "恢复凭据登录"],
+  ["provider_settings.secret_reveal", "查看密钥明文"],
+  ["provider_settings.update", "服务配置修改"],
+  ["provider_settings.paid_test", "付费连接测试"],
+  ["customer_package.grant", "开通套餐（线下收款）"],
+  ["customer_discount.create", "设置专项折扣"],
+  ["customer_discount.deactivate", "停用专项折扣"],
+  ["recharge_package.create", "新建充值套餐"],
+  ["recharge_package.update", "修改充值套餐"],
+  ["payment.sync", "查单同步"],
+  ["control.export", "数据导出"],
 ] as const;
 
 const EVENT_LABELS = new Map<string, string>(EVENT_OPTIONS);
+
+/** 高敏动作：列表里标红，便于从一屏日志里先看到它们。 */
+const SENSITIVE_EVENTS = new Set([
+  "provider_settings.secret_reveal",
+  "control.export",
+  "customer_package.grant",
+  "admin_session.exchange",
+  "admin.activation_code.revealed",
+  "payment.wechat.update",
+  "payment.provider.update",
+]);
 
 function eventLabel(eventType: string) {
   if (EVENT_LABELS.has(eventType))
@@ -45,6 +70,7 @@ function eventLabel(eventType: string) {
 }
 
 function eventTone(eventType: string) {
+  if (SENSITIVE_EVENTS.has(eventType)) return "danger";
   if (/REVOK|DENIED|FAILED|FORCE/.test(eventType)) return "danger";
   if (eventType.includes("rate") || eventType.includes("price"))
     return "warning";

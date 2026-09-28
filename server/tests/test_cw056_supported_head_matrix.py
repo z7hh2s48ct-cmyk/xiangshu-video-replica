@@ -88,8 +88,9 @@ REPO_ROOT = SERVER_DIR.parent
 # 追加修复）再依次叠加于链尾；
 # 20260927T1200_admin_offline_payment_source（管理员代客开通套餐的「线下收款」来源单
 # 类型）再追加其上；20260927T0000_oral_voice_language_settings（声音克隆样本语言与
-# 语速/音量/音调参数）重挂于其后，故链尾为该值。
-HEAD_REVISION = "20260927T0000_oral_voice_language_settings"
+# 语速/音量/音调参数）重挂于其后；20260928T1000_external_call_response_log（管理端
+# 报错排查：第三方接口原始响应、任务归属与第三方任务号）再追加其上，故链尾为该值。
+HEAD_REVISION = "20260928T1000_external_call_response_log"
 
 # 最后一个已发布（受支持）起点。其后的 056…090 与本迁移尚未随任何受支持版本发布，
 # 故冻结范围止于此——把未发布 revision 也纳入哈希会让每次新增迁移都必须改常量，
@@ -161,12 +162,16 @@ HEAD_SCHEMA_COUNTS = {
     # 20260927T0000 给 oral_voices 增加 language / speech_rate / volume / pitch 四列，
     # 各带一条 CHECK（语言键白名单与上游取值范围）：columns 1226 → 1230、
     # check_constraints 323 → 327；不加表 / 索引 / 外键，digest 重算（见下）。
-    "check_constraints": 327,
-    "columns": 1230,
+    # 20260928T1000 给 external_call_logs 追加 14 列（其中 2 列 jsonb）、2 条 CHECK
+    # （outcome 取值、响应字节数非负）与 2 条部分索引（第三方任务号 / 请求编号）：
+    # columns 1230 → 1244、jsonb_columns 6 → 8、check_constraints 327 → 329、
+    # partial_indexes 38 → 40；不加表 / 外键，digest 重算（见下）。
+    "check_constraints": 329,
+    "columns": 1244,
     "foreign_keys": 195,
     "identity_columns": 0,
-    "jsonb_columns": 6,
-    "partial_indexes": 38,
+    "jsonb_columns": 8,
+    "partial_indexes": 40,
     "primary_keys": 104,
     "sequences": 4,
     "tables": 104,
@@ -383,7 +388,7 @@ HEAD_TABLE_NAMES = (
 #  两侧原来的 digest 都不能用——本分支那条是接在 viral 之后的旧链、main 那条只到
 #  MATERIAL-UX，合并后 head 变成接在 MATERIAL-UX 之后的本分支迁移，约束文本随之变化，
 #  digest 必然要重算。由 scripts/ci/migration_manifest.py --print-schema 在 PG 上重算后粘贴。
-HEAD_SCHEMA_DIGEST = "b37360656e18dec866cd114c33255f40009d35e988709352b4c660e2de154297"
+HEAD_SCHEMA_DIGEST = "d5acd276b6e9976361d4073c47dfcc86c32a96cda789bc186a51205c0a56ef10"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

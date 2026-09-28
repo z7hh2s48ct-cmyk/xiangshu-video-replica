@@ -25,6 +25,7 @@ import { yuanInputToFen } from "../rechargePackageDisplay";
 import { AccountCreditPanel } from "./AccountCreditPanel";
 import { CustomerBenefitsSection } from "./CustomerBenefitsSection";
 import { CustomerDeviceSection } from "./CustomerDeviceSection";
+import { CustomerRefundSection } from "./CustomerRefundSection";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { CopyCustomerId } from "./ui/CopyCustomerId";
 import { PageBanner } from "./ui/PageBanner";
@@ -57,8 +58,9 @@ interface CustomersPageProps {
   /**
    * 导航意图（AdminApp 从 hash `?intent=` 解析后透传）。总览快捷入口跳转到
    * 客户管理后必须"有下文"，否则管理员只看到一个与上下文无关的客户列表：
-   * - customerAdjustments（后台加款 / 发放赠送积分）：引导到客户详情内的
-   *   「赠送积分」表单，并在展开客户时自动定位到该区块；
+   * - customerPackage（开通套餐·已收款）/ customerAdjustments（赠送积分）/
+   *   customerRefund（退款扣减）：展开客户时自动定位到对应表单。收款开通计入
+   *   收入、赠送不计收入，两者分开入口，避免把收款误记成赠送；
    * - 其余 intent 与空值：维持原有客户列表行为。
    *
    * （issueCodes / codes 两个 intent 已随本批删除：它们自 #102 下线「快速发码」
@@ -160,6 +162,23 @@ function clearPendingGrantForAttempt(
 // 伪装成状态（2026-09-12 评审 P3 的「伪状态反模式」）。
 const PAGE_SIZE = 20;
 
+/** 总览快捷操作 → 客户详情里的目标区块与引导文案。 */
+const INTENT_TARGETS: Record<string, { sectionId: string; label: string }> = {
+  customerPackage: {
+    sectionId: "customer-benefits",
+    label: "开通套餐（已收款）",
+  },
+  customerAdjustments: { sectionId: "customer-free-grant", label: "赠送积分" },
+  customerRefund: { sectionId: "customer-refund", label: "退款扣减" },
+};
+
+function scrollToSection(sectionId: string) {
+  // jsdom 没有 scrollIntoView，必须走可选调用。
+  document
+    .getElementById(sectionId)
+    ?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+}
+
 export function CustomersPage({
   embedded = false,
   operatorId = "standalone-admin",
@@ -188,17 +207,18 @@ export function CustomersPage({
   });
   const requestId = useRef(0);
   const usernameFilterRef = useRef<HTMLInputElement>(null);
-  // 加款意图只在可写角色下引导：auditor 的详情页没有发放表单。
-  const adjustmentsIntent =
-    initialIntent === "customerAdjustments" && !readOnly;
+  // 资金意图只在可写角色下引导：auditor 的详情页没有这些表单。
+  const intentTarget = readOnly
+    ? null
+    : (INTENT_TARGETS[initialIntent] ?? null);
 
-  // 总览「后台加款 / 发放赠送积分」跳进来后直接落在用户名筛选上，
-  // 管理员可以立刻输入客户名，而不是先自己找筛选框。
+  // 总览快捷操作跳进来后直接落在用户名筛选上，管理员可以立刻输入客户名，
+  // 而不是先自己找筛选框。
   useEffect(() => {
-    if (adjustmentsIntent) {
+    if (intentTarget) {
       usernameFilterRef.current?.focus();
     }
-  }, [adjustmentsIntent]);
+  }, [intentTarget]);
 
   const loadCustomers = useCallback(async () => {
     const sequence = ++requestId.current;
@@ -282,7 +302,7 @@ export function CustomersPage({
     return (
       <CustomerDetailView
         customer={focusedCustomer}
-        focusGrantSection={adjustmentsIntent}
+        focusSectionId={intentTarget?.sectionId ?? null}
         operatorId={operatorId}
         onChanged={() => void loadCustomers()}
         onGranted={(result) => {
@@ -316,9 +336,11 @@ export function CustomersPage({
         </header>
       ) : null}
 
-      {adjustmentsIntent ? (
+      {intentTarget ? (
         <PageBanner tone="notice">
-          后台加款与赠送积分在客户详情内完成：先筛选并展开目标客户，页面会自动定位到「赠送积分」区块。
+          {intentTarget.label}
+          在客户详情内完成：先筛选并展开目标客户，页面会自动定位到「
+          {intentTarget.label}」区块。
         </PageBanner>
       ) : null}
 
@@ -631,7 +653,7 @@ function Customer360Empty() {
 
 function CustomerDetailView({
   customer,
-  focusGrantSection,
+  focusSectionId,
   operatorId,
   onChanged,
   onGranted,
@@ -640,7 +662,7 @@ function CustomerDetailView({
   onBack,
 }: {
   customer: CustomerListItem;
-  focusGrantSection: boolean;
+  focusSectionId: string | null;
   operatorId: string;
   onChanged: () => void;
   onGranted: (result: AdjustmentWriteResult) => void;
@@ -648,14 +670,10 @@ function CustomerDetailView({
   refreshError: string;
   onBack: () => void;
 }) {
-  // 带加款意图进入时，展开客户即直达「赠送积分」表单，省掉再点一次
-  // 「后台加款」滚动按钮；jsdom 没有 scrollIntoView，必须走可选调用。
+  // 带资金意图进入时，展开客户即直达对应表单，省掉再点一次顶部按钮。
   useEffect(() => {
-    if (!focusGrantSection) return;
-    document
-      .getElementById("customer-free-grant")
-      ?.scrollIntoView?.({ behavior: "smooth", block: "start" });
-  }, [focusGrantSection]);
+    if (focusSectionId) scrollToSection(focusSectionId);
+  }, [focusSectionId]);
 
   return (
     <div
@@ -692,17 +710,29 @@ function CustomerDetailView({
           </div>
         </div>
         <div className="customer-detail-operations">
+          {/* 收款开通计入收入、赠送不计收入：两个入口分开，避免把客户付过的
+              钱误记成赠送（方案 P0-1）；退款扣减从会话页迁到这里（P0-2）。 */}
           {!readOnly ? (
-            <button
-              type="button"
-              onClick={() =>
-                document
-                  .getElementById("customer-free-grant")
-                  ?.scrollIntoView({ behavior: "smooth", block: "start" })
-              }
-            >
-              后台加款
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => scrollToSection("customer-benefits")}
+              >
+                开通套餐（已收款）
+              </button>
+              <button
+                type="button"
+                onClick={() => scrollToSection("customer-free-grant")}
+              >
+                赠送积分
+              </button>
+              <button
+                type="button"
+                onClick={() => scrollToSection("customer-refund")}
+              >
+                退款扣减
+              </button>
+            </>
           ) : null}
         </div>
       </section>
@@ -749,6 +779,13 @@ function CustomerDetailView({
           userId={customer.user_id}
         />
       </div>
+      <CustomerRefundSection
+        key={`refund:${customer.user_id}`}
+        availableCredits={customer.available_credits ?? 0}
+        onRefunded={onGranted}
+        readOnly={readOnly}
+        userId={customer.user_id}
+      />
       <CustomerBenefitsSection
         key={`benefits:${customer.user_id}`}
         onChanged={onChanged}
@@ -1155,6 +1192,8 @@ function FreeCreditsSection({
         description={
           <>
             即将发放 {pendingGrant?.credits ?? credits} 积分。
+            <br />
+            本次不产生收入；客户已付款的，请改用「开通套餐（已收款）」。
             <br />
             事由：{pendingGrant?.reason ?? reason.trim()}
             <br />

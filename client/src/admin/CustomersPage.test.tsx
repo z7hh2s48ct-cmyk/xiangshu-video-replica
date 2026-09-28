@@ -1175,9 +1175,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       render(<CustomersPage initialIntent="customerAdjustments" />);
 
       expect(
-        await screen.findByText(
-          /后台加款与赠送积分在客户详情内完成.*赠送积分.*区块/,
-        ),
+        await screen.findByText(/赠送积分在客户详情内完成.*「赠送积分」区块/),
       ).toBeInTheDocument();
       expect(
         screen.getByPlaceholderText("按用户名或公司名称筛选"),
@@ -1190,6 +1188,34 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
     });
 
+    it("routes package and refund intents to their own sections (P0-1/P0-2)", async () => {
+      vi.mocked(adminApi.listCustomers).mockResolvedValue(oneCustomer);
+      const scrollIntoView = vi.fn();
+      Element.prototype.scrollIntoView = scrollIntoView;
+
+      const { unmount } = render(
+        <CustomersPage initialIntent="customerPackage" />,
+      );
+      expect(
+        await screen.findByText(/开通套餐（已收款）在客户详情内完成/),
+      ).toBeInTheDocument();
+      unmount();
+
+      render(<CustomersPage initialIntent="customerRefund" />);
+      expect(
+        await screen.findByText(/退款扣减在客户详情内完成/),
+      ).toBeInTheDocument();
+      fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+      expect(screen.queryByRole("button", { name: "后台加款" })).toBeNull();
+      expect(
+        screen.getByRole("button", { name: "开通套餐（已收款）" }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "提交退款扣减" }),
+      ).toBeInTheDocument();
+      await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+    });
+
     it("keeps the adjustment guidance out of the auditor view", async () => {
       vi.mocked(adminApi.listCustomers).mockResolvedValue(oneCustomer);
 
@@ -1197,7 +1223,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
 
       await screen.findByText("customer-1");
       expect(
-        screen.queryByText(/后台加款与赠送积分在客户详情内完成/),
+        screen.queryByText(/赠送积分在客户详情内完成/),
       ).not.toBeInTheDocument();
     });
 
@@ -1208,7 +1234,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
 
       await screen.findByText("customer-1");
       expect(
-        screen.queryByText(/后台加款与赠送积分在客户详情内完成/),
+        screen.queryByText(/赠送积分在客户详情内完成/),
       ).not.toBeInTheDocument();
       expect(
         screen.queryByText(/激活码发放与查询不在客户管理页/),
