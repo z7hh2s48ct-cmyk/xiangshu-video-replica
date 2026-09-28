@@ -2417,9 +2417,10 @@ export function applyLegacyCreditConversion(
  * 幂等键在这里不是仪式而是防重复扣费：一次网络歧义重试只会回放首次结果
  * （服务端回 `X-Idempotent-Replay: true`），不会第二次真的调用供应商。
  *
- * 现状（真实供应商客户端尚未接入）：服务端默认测试器对 `paid_test` 恒抛
+ * 现状：数字人口播已接入真实客户端，执行会真实提交一次最小计费调用（短文本
+ * 语音合成），可能产生供应商侧费用；其余服务尚未接入，对它们服务端恒抛
  * 501 `PROVIDER_TEST_NOT_IMPLEMENTED`，不会创建供应商任务、不会产生任何费用。
- * 调用方必须如实呈现这一点，不得提示「会产生真实费用」。
+ * 调用方必须按服务如实呈现，不得对未接入的服务提示「会产生真实费用」。
  */
 export function paidTestControlProvider(
   provider: ProviderName,

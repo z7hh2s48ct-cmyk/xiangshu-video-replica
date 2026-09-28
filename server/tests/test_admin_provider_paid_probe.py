@@ -19,10 +19,10 @@
 - 成功路径落审计 `provider_settings.paid_test`，含操作原因与 request_id；
 - 审计器（auditor）只读 → 403 `AUDITOR_READ_ONLY`；无会话 → 401。
 
-另有一条**如实呈现**断言：真实 provider 客户端尚未接入，默认测试器
-（`get_provider_tester` → `NoopProviderTester`）对 paid_test 恒抛
+另有一条**如实呈现**断言：对尚未接入真实客户端的服务（本文件以 metaso 为例），
+默认测试器（`get_provider_tester` → `NoopProviderTester`）对 paid_test 恒抛
 501 `PROVIDER_TEST_NOT_IMPLEMENTED`，且**不落审计**（没有任何付费动作发生）。
-前端文案必须与这条事实一致，不得宣称「会产生真实费用」。
+前端文案必须与这条事实一致，不得对这类服务宣称「会产生真实费用」。
 
 TEST-PG：专属库（module 级建库 → alembic head → 每用例 TRUNCATE），沿用
 `test_admin_session_routes` / `test_customer_registration` 的夹具形态。

@@ -662,7 +662,7 @@ describe("SettingsPanel", () => {
 
     const alert = await metaso.findByRole("alert");
     expect(alert).toHaveTextContent(
-      "付费探针未执行：当前版本尚未接入真实供应商客户端（服务端 501 未实现），未产生任何费用。",
+      "付费探针未执行：该服务尚未接入真实供应商客户端（服务端 501 未实现），未产生任何费用。",
     );
     // 现状下不得出现「会产生真实费用」这类不成立的提示。
     expect(alert).not.toHaveTextContent(/已产生费用/);

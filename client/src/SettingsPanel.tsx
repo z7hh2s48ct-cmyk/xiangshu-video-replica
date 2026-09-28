@@ -748,8 +748,9 @@ function ProviderForm({
             侧费用，因此服务端按敏感写受理，需要操作原因并写入审计。
           </p>
           <p className="paid-probe-confirm__status">
-            现状：真实供应商客户端尚未接入，执行后服务端只会返回 501「未实现」，
-            不会创建供应商任务，也不会产生任何费用。
+            {provider === "hifly"
+              ? "现状：该服务已接入真实客户端——执行会真实提交一次最小计费调用（短文本语音合成），可能产生供应商侧费用，执行后请核对账单。"
+              : "现状：真实供应商客户端尚未接入，执行后服务端只会返回 501「未实现」，不会创建供应商任务，也不会产生任何费用。"}
           </p>
           <label>
             操作原因（必填，写入审计）
@@ -957,10 +958,10 @@ function paidProbeResultLabel(result: ProviderTestResult) {
 /**
  * 付费探针的失败文案。
  *
- * `PROVIDER_TEST_NOT_IMPLEMENTED` 是当前版本的**真实状态**：真实供应商客户端
- * 尚未接入，服务端恒返回 501，且没有创建任何供应商任务、没有产生任何费用。
- * 因此这里如实说明"未执行、未计费"，不得改写成"测试失败请重试"或任何暗示
- * 已经花了钱的措辞——操作者据此才会（或不会）去核对账单。
+ * `PROVIDER_TEST_NOT_IMPLEMENTED` 只会在尚未接入真实客户端的服务上出现：
+ * 服务端 501，且没有创建任何供应商任务、没有产生任何费用。因此这里如实说明
+ * "未执行、未计费"，不得改写成"测试失败请重试"或任何暗示已经花了钱的措辞——
+ * 操作者据此才会（或不会）去核对账单。
  *
  * 错误码的结构化读取刻意不 import 管理端错误类：本组件被客户入口静态复用，
  * 静态引用 `api.admin` 会把管理域代码拖进客户构建制品（CW-019 / entryContract）。
@@ -971,7 +972,7 @@ function paidProbeErrorMessage(error: unknown) {
       ? (error as { code?: unknown }).code
       : undefined;
   if (code === "PROVIDER_TEST_NOT_IMPLEMENTED") {
-    return "付费探针未执行：当前版本尚未接入真实供应商客户端（服务端 501 未实现），未产生任何费用。";
+    return "付费探针未执行：该服务尚未接入真实供应商客户端（服务端 501 未实现），未产生任何费用。";
   }
   return visibleErrorMessage(error, "付费探针执行失败，请稍后重试。");
 }

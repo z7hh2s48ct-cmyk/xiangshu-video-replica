@@ -5,7 +5,7 @@ import logging
 import os
 import uuid
 from collections.abc import Callable, Mapping
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import HTTPException
@@ -667,6 +667,21 @@ class HiflyAccountProbe(Protocol):
     def account_credit(self) -> int: ...
 
 
+class HiflyPaidProbe(HiflyAccountProbe, Protocol):
+    """付费探针在只读面之外需要的客户端面：一个已有声音 + 一次最小计费提交。"""
+
+    def list_voices(
+        self, *, page: int = 1, size: int = 10, kind: int | None = None
+    ) -> list[dict[str, Any]]: ...
+
+    def create_audio_by_tts(self, *, voice: str, text: str, title: str) -> str: ...
+
+
+# 付费探针提交的最小任务：2 个字的 TTS 音频足以走通「余额-权限-结算」全链，
+# 又让供应商侧实际产生的费用可以忽略。文本与标题都取同一常量，避免两处漂移。
+_PAID_PROBE_TEXT = "计费探针"
+
+
 def _default_hifly_client(config: Mapping[str, str]) -> HiflyAccountProbe:
     # app.hifly 顶层反向导入本模块（SettingsRepository）；默认客户端工厂只能在
     # 调用期解析，否则形成 settings -> hifly -> settings 模块级循环导入。
@@ -737,7 +752,100 @@ class HiflyProviderTester:
         )
 
     def paid_test(self, provider: str, config: dict[str, str]) -> ProviderTestResult:
-        return self.fallback.paid_test(provider, config)
+        if provider != "hifly":
+            return self.fallback.paid_test(provider, config)
+        from app.hifly import (
+            HiflyError,
+            HiflySettingsUnavailable,
+            HiflySubmissionUncertain,
+            HiflyTimeoutError,
+        )
+
+        # 最小真实计费链路：先只读取一个已有声音与余额快照，最后才提交一次
+        # 2 字 TTS 音频。计费提交刻意放在最后一步——它之前的任何失败都发生在
+        # 提交之前，「未创建收费任务」因此可以无歧义地断言；提交本身失败的
+        # 措辞则由异常种类决定（见下）。构造客户端也在 try 内：默认工厂在
+        # API Key 缺失时抛 HiflySettingsUnavailable，须映射为配置错误而非漏出。
+        phase = "configuration"
+        try:
+            probe = cast(HiflyPaidProbe, self.client_factory(config))
+            phase = "list_voices"
+            voices = probe.list_voices(page=1, size=1)
+            voice = next(
+                (
+                    row["voice"]
+                    for row in voices
+                    if isinstance(row.get("voice"), str) and row["voice"].strip()
+                ),
+                None,
+            )
+            if voice is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "HIFLY_PAID_PROBE_NO_VOICE",
+                        "failure_phase": "list_voices",
+                        "message": "Hifly 账号没有可用于计费探针的声音；未创建收费任务。",
+                    },
+                )
+            phase = "account_credit"
+            account_credit = probe.account_credit()
+            phase = "submit"
+            probe.create_audio_by_tts(voice=voice, text=_PAID_PROBE_TEXT, title=_PAID_PROBE_TEXT)
+        except HiflySubmissionUncertain as exc:
+            # 提交可能已到达供应商却没有拿到凭证：不得断言未计费。
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "code": "HIFLY_PAID_PROBE_UNCERTAIN",
+                    "failure_phase": "submit",
+                    "message": "Hifly 计费调用结果无法确认；可能已产生费用，请核对账单后再重试。",
+                },
+            ) from exc
+        except HiflyTimeoutError as exc:
+            # 提交阶段的超时会被客户端的 _creation_request 包装成
+            # HiflySubmissionUncertain，走不到这里；submit 分支仅作防御。
+            raise HTTPException(
+                status_code=504,
+                detail={
+                    "code": "HIFLY_PAID_PROBE_TIMEOUT",
+                    "failure_phase": phase,
+                    "message": (
+                        "Hifly 计费调用提交超时；无法确认是否已产生费用，请核对账单后再重试。"
+                        if phase == "submit"
+                        else "Hifly 只读检查超时；未创建收费任务。"
+                    ),
+                },
+            ) from exc
+        except HiflySettingsUnavailable as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "HIFLY_SETTINGS_INVALID",
+                    "failure_phase": "configuration",
+                    "message": "Hifly 配置不完整；请重新保存 API Key。",
+                },
+            ) from exc
+        except HiflyError as exc:
+            is_auth_failure = exc.vendor_code == 2003 or exc.http_status in {401, 403}
+            raise HTTPException(
+                status_code=422 if is_auth_failure else 503,
+                detail={
+                    "code": ("HIFLY_AUTH_FAILED" if is_auth_failure else "HIFLY_PAID_PROBE_FAILED"),
+                    "failure_phase": "authenticate" if is_auth_failure else phase,
+                    "message": (
+                        "Hifly 凭据认证失败；未创建收费任务。"
+                        if is_auth_failure
+                        else f"{exc}；未创建收费任务。"
+                    ),
+                },
+            ) from exc
+        return ProviderTestResult(
+            status="ok",
+            provider=provider,
+            test_kind="paid_probe",
+            account_credit=account_credit,
+        )
 
 
 class StorageProviderTester:
