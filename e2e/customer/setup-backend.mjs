@@ -145,6 +145,10 @@ with psycopg.connect("${adminDsn}", autocommit=True) as c:
     VIDEO_REPLICA_CUSTOMER_IDEMPOTENCY_AEAD_KEY: keys.IDEMPOTENCY_AEAD,
     VIDEO_REPLICA_RATE_LIMIT_ACTIVATE_IP: "100000",
     VIDEO_REPLICA_RATE_LIMIT_ACTIVATE_CODE: "100000",
+    // 注册与登录共用 login:ip 预算（桶前缀 register:/password:），默认 10
+    // 次/窗口；每个 spec 都要注册并登录新账号，整套件的账号数会把它打满
+    // 成 RATE_LIMITED，所以与激活两道一样抬到几乎无限。
+    VIDEO_REPLICA_RATE_LIMIT_LOGIN_IP: "100000",
     VIDEO_REPLICA_RATE_LIMIT_WINDOW_SECONDS: "3600",
     // Recharge lane (PR #65 task #7): the customer wallet view needs the ZPay
     // config + deployment settings to create orders.

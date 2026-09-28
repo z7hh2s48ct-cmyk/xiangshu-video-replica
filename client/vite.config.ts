@@ -142,8 +142,9 @@ export default defineConfig({
     },
   },
   test: {
-    // 只收集 src/ 下的单测；tests/e2e/ 是 Playwright spec（由 e2e 运行器执行，
-    // vitest 环境里既无法解析也无从驱动），不能落进默认的 **/*.spec.ts 收集范围。
+    // 只收集 src/ 下的单测；浏览器 E2E 统一放仓库根 e2e/（各自带 playwright
+    // config，vitest 环境里既无法解析也无从驱动），不能落进默认的 **/*.spec.ts
+    // 收集范围。
     include: ["src/**/*.{test,spec}.{ts,tsx}"],
     environment: "jsdom",
     setupFiles: "./src/test/setup.ts",
