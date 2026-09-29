@@ -158,7 +158,7 @@ def route_state(probe_dsn: str) -> Iterator[str]:
         conn.execute(
             "TRUNCATE audit_logs, admin_write_idempotency, admin_sessions, "
             "admin_password_credentials, provider_settings, security_rate_limit_counters, "
-            "security_auth_failures, users CASCADE"
+            "security_auth_failures, h3_provider_accounts, users CASCADE"
         )
         conn.execute("SET session_replication_role = DEFAULT")
         conn.execute(
@@ -347,6 +347,50 @@ def test_paid_probe_audits_the_operator_and_their_reason(
     assert metadata["provider"] == "metaso"
     assert metadata["test_kind"] == "paid_probe"
     assert isinstance(metadata["request_id"], str) and metadata["request_id"]
+
+
+def test_paid_probe_hands_the_pool_account_key_to_the_tester(
+    client: TestClient,
+    tester: RecordingProviderTester,
+    paid_probe_headers: dict[str, str],
+) -> None:
+    """视频生成：启用账号池时，探针拿到的是池里会接任务的账号密钥，不是旧的设置页密钥。"""
+    from app.db_pg import pg_transaction
+    from app.db_portable import BusinessConnection
+    from app.h3_account_pool import save_account
+    from app.settings import SettingsRepository
+
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        # save_account 要先锁共享并发容量行；探针专属库默认没有这一行。
+        raw.execute(
+            "INSERT INTO runtime_settings "
+            "(id, max_generation_count_per_batch, max_concurrent_h3_tasks, "
+            " internal_base_unit_price_fen, min_recharge_fen, recharge_step_fen) "
+            "VALUES (1, 4, 100, 1000, 10000, 1000) ON CONFLICT (id) DO NOTHING"
+        )
+        save_account(
+            conn,
+            account_id="pool-a",
+            name="pool-a",
+            api_key="synthetic-pool-a",
+            concurrency_limit=2,
+            enabled=True,
+            expected_version=0,
+        )
+        # 建池之后设置页里的旧密钥被改成了别的值：探针不得拿它去测。
+        SettingsRepository(conn).save_provider_config(
+            "metaso", {"api_key": "synthetic-stale"}, actor_user_id="admin_u"
+        )
+
+    response = client.post(
+        "/api/control/settings/providers/metaso/paid-test",
+        headers=paid_probe_headers,
+        json=_payload(),
+    )
+    assert response.status_code == 200, response.text
+    assert [call[0] for call in tester.paid_calls] == ["metaso"]
+    assert tester.paid_calls[0][1]["api_key"] == "synthetic-pool-a"
 
 
 def test_paid_probe_replays_the_snapshot_instead_of_probing_twice(

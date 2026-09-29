@@ -260,7 +260,7 @@ def test_paid_probe_without_a_saved_key_asks_to_save_settings_first() -> None:
 
     assert excinfo.value.status_code == 422
     detail = _detail(excinfo)
-    assert detail["code"] == "METASO_SETTINGS_INVALID"
+    assert detail["code"] == "VIDEO_PAID_PROBE_SETTINGS_INVALID"
     assert detail["failure_phase"] == "configuration"
     assert "未创建收费任务" in str(detail["message"])
 
@@ -275,7 +275,7 @@ def test_paid_probe_maps_a_credential_failure_to_422_not_401() -> None:
 
     assert excinfo.value.status_code == 422
     detail = _detail(excinfo)
-    assert detail["code"] == "METASO_AUTH_FAILED"
+    assert detail["code"] == "VIDEO_PAID_PROBE_AUTH_FAILED"
     assert detail["failure_phase"] == "authenticate"
     assert "未创建收费任务" in str(detail["message"])
 
@@ -289,7 +289,7 @@ def test_paid_probe_reports_a_vendor_rejection_as_unbilled() -> None:
 
     assert excinfo.value.status_code == 503
     detail = _detail(excinfo)
-    assert detail["code"] == "METASO_PAID_PROBE_REJECTED"
+    assert detail["code"] == "VIDEO_PAID_PROBE_REJECTED"
     assert detail["failure_phase"] == "submit"
     assert "HTTP 402" in str(detail["message"])
     assert "未创建收费任务" in str(detail["message"])
@@ -304,7 +304,7 @@ def test_paid_probe_reports_an_uncertain_submission_as_possibly_billed() -> None
 
     assert excinfo.value.status_code == 502
     detail = _detail(excinfo)
-    assert detail["code"] == "METASO_PAID_PROBE_UNCERTAIN"
+    assert detail["code"] == "VIDEO_PAID_PROBE_UNCERTAIN"
     assert "可能已产生费用" in str(detail["message"])
     assert "未创建收费任务" not in str(detail["message"])
 
@@ -316,15 +316,15 @@ def test_paid_probe_reports_a_failed_read_back_with_the_task_id() -> None:
 
     assert excinfo.value.status_code == 502
     detail = _detail(excinfo)
-    assert detail["code"] == "METASO_PAID_PROBE_READBACK_FAILED"
+    assert detail["code"] == "VIDEO_PAID_PROBE_READBACK_FAILED"
     assert detail["failure_phase"] == "query"
     assert "vendor-task-1" in str(detail["message"])
     assert "可能已产生费用" in str(detail["message"])
     assert "未创建收费任务" not in str(detail["message"])
 
 
-def test_error_messages_never_name_the_vendor() -> None:
-    """对外文案保持中性（AGENTS.md 编码红线）：不出现供应商名称。"""
+def test_error_codes_and_messages_never_name_the_vendor() -> None:
+    """对外错误码与文案保持中性（AGENTS.md 编码红线）：不出现供应商名称。"""
     failures: list[Exception] = [
         MetasoProbeSettingsUnavailable("x"),
         MetasoProbeRejected(http_status=401, reason="HTTP 401"),
@@ -336,9 +336,12 @@ def test_error_messages_never_name_the_vendor() -> None:
         probe = RecordingMetasoProbe(submit_error=failure)
         with pytest.raises(HTTPException) as excinfo:
             make_tester(probe).paid_test("metaso", dict(_PROBE_CONFIG))
-        message = str(_detail(excinfo)["message"]).lower()
-        assert "metaso" not in message
-        assert "秘塔" not in message
+        detail = _detail(excinfo)
+        # 对外响应字段（错误码）与文案都不得出现供应商名称。
+        for field in ("code", "message"):
+            text = str(detail[field]).lower()
+            assert "metaso" not in text
+            assert "秘塔" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +355,7 @@ def test_default_tester_chain_routes_metaso_to_the_real_probe() -> None:
         get_provider_tester().paid_test("metaso", {})
 
     assert excinfo.value.status_code == 422
-    assert _detail(excinfo)["code"] == "METASO_SETTINGS_INVALID"
+    assert _detail(excinfo)["code"] == "VIDEO_PAID_PROBE_SETTINGS_INVALID"
 
 
 @pytest.mark.parametrize("provider", ["apilio", "deepseek", "tikhub", "dashscope", "douyidou"])

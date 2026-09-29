@@ -22,6 +22,7 @@ import {
   getCustomerPricing,
   listActivationCodes,
   loginAdminWithPassword,
+  paidTestControlProvider,
   reconcileFirstFrameTask,
   recoverAdminPassword,
   refreshCollectedVideoStatistics,
@@ -1055,5 +1056,206 @@ describe("billing report export", () => {
       vi.unstubAllGlobals();
       setAdminCsrfToken("");
     }
+  });
+});
+
+describe("paid probe idempotency", () => {
+  const PAID_TEST_URL =
+    "http://127.0.0.1:8000/api/control/settings/providers/metaso/paid-test";
+  const OK_RESULT = {
+    status: "ok",
+    provider: "metaso",
+    test_kind: "paid_probe",
+  };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    clearAdminActivationSession();
+  });
+
+  function paidCalls(fetchMock: ReturnType<typeof vi.fn>) {
+    return fetchMock.mock.calls.filter(([url]) => url === PAID_TEST_URL);
+  }
+
+  function keyOf(call: unknown[]): string {
+    const init = call[1] as { headers: Record<string, string> };
+    return init.headers["Idempotency-Key"];
+  }
+
+  async function signedInFetch() {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await signIn(fetchMock);
+    return fetchMock;
+  }
+
+  it("waits far longer than the default five seconds for the server to finish", async () => {
+    vi.useFakeTimers();
+    setAdminCsrfToken(CSRF_TOKEN_TEXT);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise((resolve, reject) => {
+            init.signal?.addEventListener("abort", () =>
+              reject(new DOMException("aborted", "AbortError")),
+            );
+            setTimeout(
+              () =>
+                resolve({
+                  ok: true,
+                  status: 200,
+                  json: async () => OK_RESULT,
+                }),
+              120_000,
+            );
+          }),
+      ),
+    );
+    try {
+      const pending = paidTestControlProvider("metaso", "上线前核对").then(
+        (value) => ({ ok: true, value }),
+        () => ({ ok: false }),
+      );
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(await pending).toMatchObject({ ok: true, value: OK_RESULT });
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      setAdminCsrfToken("");
+    }
+  });
+
+  it("reuses the same key when the first attempt got no answer", async () => {
+    const fetchMock = await signedInFetch();
+    fetchMock.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    fetchMock.mockImplementationOnce(() => jsonResponse(OK_RESULT));
+
+    await expect(
+      paidTestControlProvider("metaso", "上线前核对"),
+    ).rejects.toThrow(/结果未能确认.*相同的操作原因/);
+    await expect(
+      paidTestControlProvider("metaso", "上线前核对"),
+    ).resolves.toEqual(OK_RESULT);
+
+    const [first, second] = paidCalls(fetchMock);
+    expect(keyOf(first)).toBeTruthy();
+    // 同一次逻辑操作：服务端据此回放首次结果，而不是再提交一次计费任务。
+    expect(keyOf(second)).toBe(keyOf(first));
+  });
+
+  it("treats a request timeout as unconfirmed and keeps the key", async () => {
+    const fetchMock = await signedInFetch();
+    fetchMock.mockRejectedValueOnce(new DOMException("aborted", "AbortError"));
+    fetchMock.mockImplementationOnce(() => jsonResponse(OK_RESULT));
+
+    await expect(
+      paidTestControlProvider("metaso", "上线前核对"),
+    ).rejects.toThrow(/结果未能确认/);
+    await paidTestControlProvider("metaso", "上线前核对");
+
+    const [first, second] = paidCalls(fetchMock);
+    expect(keyOf(second)).toBe(keyOf(first));
+  });
+
+  it("refuses a different reason while the previous probe is unconfirmed", async () => {
+    const fetchMock = await signedInFetch();
+    fetchMock.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    await expect(
+      paidTestControlProvider("metaso", "上线前核对"),
+    ).rejects.toThrow();
+    const callsBefore = paidCalls(fetchMock).length;
+
+    // 换原因会换请求指纹：既可能被判键冲突，也可能被误当成新操作再计一次费。
+    await expect(
+      paidTestControlProvider("metaso", "另一个原因"),
+    ).rejects.toThrow(/上一次付费探针的结果尚未确认.*上线前核对/);
+    expect(paidCalls(fetchMock)).toHaveLength(callsBefore);
+  });
+
+  it("mints a fresh key after a successful probe", async () => {
+    const fetchMock = await signedInFetch();
+    fetchMock.mockImplementation(() => jsonResponse(OK_RESULT));
+
+    await paidTestControlProvider("metaso", "上线前核对");
+    await paidTestControlProvider("metaso", "上线前核对");
+
+    const [first, second] = paidCalls(fetchMock);
+    expect(keyOf(second)).not.toBe(keyOf(first));
+  });
+
+  it("mints a fresh key after the server answered with a business error", async () => {
+    const fetchMock = await signedInFetch();
+    fetchMock.mockImplementationOnce(() =>
+      jsonResponse(
+        {
+          detail: {
+            code: "VIDEO_PAID_PROBE_UNCERTAIN",
+            message: "可能已产生费用，请核对账单后再重试。",
+          },
+        },
+        502,
+      ),
+    );
+    fetchMock.mockImplementationOnce(() => jsonResponse(OK_RESULT));
+
+    await expect(
+      paidTestControlProvider("metaso", "上线前核对"),
+    ).rejects.toMatchObject({
+      status: 502,
+      code: "VIDEO_PAID_PROBE_UNCERTAIN",
+    });
+    // 业务进程已明确回应（并提示核对账单）：下一次是操作者有意识的全新操作。
+    await paidTestControlProvider("metaso", "上线前核对");
+
+    const [first, second] = paidCalls(fetchMock);
+    expect(keyOf(second)).not.toBe(keyOf(first));
+  });
+
+  it("keeps the key when only a gateway answered with a bare 5xx", async () => {
+    const fetchMock = await signedInFetch();
+    fetchMock.mockImplementationOnce(() => jsonResponse({}, 504));
+    fetchMock.mockImplementationOnce(() => jsonResponse(OK_RESULT));
+
+    // 网关自己的 504 不带业务错误码，不能证明业务进程没有执行。
+    await expect(
+      paidTestControlProvider("metaso", "上线前核对"),
+    ).rejects.toThrow(/结果未能确认/);
+    await paidTestControlProvider("metaso", "上线前核对");
+
+    const [first, second] = paidCalls(fetchMock);
+    expect(keyOf(second)).toBe(keyOf(first));
+  });
+
+  it("tracks unconfirmed probes per provider", async () => {
+    const fetchMock = await signedInFetch();
+    fetchMock.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    fetchMock.mockImplementation(() => jsonResponse(OK_RESULT));
+
+    await expect(
+      paidTestControlProvider("metaso", "上线前核对"),
+    ).rejects.toThrow();
+    // 另一个服务不受 metaso 未确认状态的牵连，原因也可以不同。
+    await expect(
+      paidTestControlProvider("hifly", "核对数字人"),
+    ).resolves.toEqual(OK_RESULT);
+  });
+
+  it("forgets an unconfirmed probe when the admin session is cleared", async () => {
+    const fetchMock = await signedInFetch();
+    fetchMock.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    await expect(
+      paidTestControlProvider("metaso", "上线前核对"),
+    ).rejects.toThrow();
+
+    // 登出 / 会话过期后换人登录：不得沿用上一个身份的幂等键与原因。
+    clearAdminActivationSession();
+    fetchMock.mockImplementationOnce(() => jsonResponse(exchangePayload));
+    await exchangeAdminSession("ASX1.body.signature");
+    fetchMock.mockImplementationOnce(() => jsonResponse(OK_RESULT));
+    await expect(
+      paidTestControlProvider("metaso", "另一个原因"),
+    ).resolves.toEqual(OK_RESULT);
   });
 });

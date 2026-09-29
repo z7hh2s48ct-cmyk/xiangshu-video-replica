@@ -753,6 +753,7 @@ describe("SettingsPanel", () => {
       metaso.getByText(/任务受理后即产生供应商侧费用/),
     ).toBeInTheDocument();
     expect(metaso.getByText(/不会等待成片/)).toBeInTheDocument();
+    expect(metaso.getByText(/只会测第一个启用的账号/)).toBeInTheDocument();
     expect(metaso.queryByText(/尚未接入/)).toBeNull();
     expect(metaso.queryByText(/不会产生任何费用/)).toBeNull();
   });

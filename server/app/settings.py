@@ -906,7 +906,7 @@ class MetasoProviderTester:
             raise HTTPException(
                 status_code=422,
                 detail={
-                    "code": "METASO_SETTINGS_INVALID",
+                    "code": "VIDEO_PAID_PROBE_SETTINGS_INVALID",
                     "failure_phase": "configuration",
                     "message": "视频生成服务尚未保存 API Key；未创建收费任务。",
                 },
@@ -919,7 +919,9 @@ class MetasoProviderTester:
                 status_code=422 if is_auth_failure else 503,
                 detail={
                     "code": (
-                        "METASO_AUTH_FAILED" if is_auth_failure else "METASO_PAID_PROBE_REJECTED"
+                        "VIDEO_PAID_PROBE_AUTH_FAILED"
+                        if is_auth_failure
+                        else "VIDEO_PAID_PROBE_REJECTED"
                     ),
                     "failure_phase": "authenticate" if is_auth_failure else "submit",
                     "message": (
@@ -934,7 +936,7 @@ class MetasoProviderTester:
             raise HTTPException(
                 status_code=502,
                 detail={
-                    "code": "METASO_PAID_PROBE_UNCERTAIN",
+                    "code": "VIDEO_PAID_PROBE_UNCERTAIN",
                     "failure_phase": "submit",
                     "message": "视频生成计费调用结果无法确认；可能已产生费用，请核对账单后再重试。",
                 },
@@ -943,7 +945,7 @@ class MetasoProviderTester:
             raise HTTPException(
                 status_code=502,
                 detail={
-                    "code": "METASO_PAID_PROBE_READBACK_FAILED",
+                    "code": "VIDEO_PAID_PROBE_READBACK_FAILED",
                     "failure_phase": "query",
                     "message": (
                         f"计费任务已受理（任务编号 {exc.task_id}），可能已产生费用；"
