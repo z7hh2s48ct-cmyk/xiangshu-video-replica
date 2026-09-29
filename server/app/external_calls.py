@@ -24,9 +24,13 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Literal
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    import psycopg
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +42,13 @@ SUCCEEDED_BODY_LIMIT = 4 * 1024
 PROVIDER_MESSAGE_LIMIT = 500
 # 取日志连接最多等 2 秒：池子忙时宁可丢一条诊断日志，也不能拖住生成任务。
 LOG_CONNECTION_TIMEOUT_SECONDS = 2.0
+
+# 保留期（方案 P0-9）：失败调用要留到客户投诉、对账都过了才有用，成功调用只用来
+# 和失败的响应对比，留得短。响应全文不是账务事实，超期直接删行。
+FAILED_RETENTION_DAYS = 180
+SUCCEEDED_RETENTION_DAYS = 30
+# 每批删多少行：日志表可能一次积了很多行，分批提交避免一个长事务锁住写入路径。
+PURGE_BATCH_SIZE = 5000
 
 REDACTED = "[已脱敏]"
 
@@ -461,6 +472,58 @@ def _insert(call: PreparedCall) -> None:
                 _request_id(),
             ),
         )
+
+
+# 超期判定：``created_at`` 是文本列（001 迁移），PG 默认值写成带时区的时间文本，
+# 转 timestamptz 后与 PG 时钟算出的截止时刻比较。``outcome`` 为空的是 P0-9 之前的
+# 旧行，无法判断成败，按失败对待——宁可多留，不误删可能的失败证据。
+_EXPIRED_PREDICATE = """
+    created_at::timestamptz < CASE
+        WHEN outcome = 'SUCCEEDED' THEN %s::timestamptz
+        ELSE %s::timestamptz
+    END
+"""
+
+
+def _retention_cutoffs(now: datetime) -> tuple[datetime, datetime]:
+    """(成功调用截止时刻, 失败调用截止时刻)；早于截止时刻的行算超期。"""
+    return (
+        now - timedelta(days=SUCCEEDED_RETENTION_DAYS),
+        now - timedelta(days=FAILED_RETENTION_DAYS),
+    )
+
+
+def count_expired_calls(conn: psycopg.Connection, *, now: datetime) -> int:
+    """超过保留期的调用日志行数（``--dry-run`` 用，不改任何数据）。"""
+    succeeded_cutoff, failed_cutoff = _retention_cutoffs(now)
+    row = conn.execute(
+        f"SELECT count(*) FROM external_call_logs WHERE {_EXPIRED_PREDICATE}",
+        (succeeded_cutoff, failed_cutoff),
+    ).fetchone()
+    return int(row[0]) if row is not None else 0
+
+
+def purge_expired_call_batch(
+    conn: psycopg.Connection, *, now: datetime, batch_size: int = PURGE_BATCH_SIZE
+) -> int:
+    """删一批超期调用日志，返回本批删除的行数；返回 0 表示已清完。
+
+    调用方在独立事务里循环调用直到返回 0：每批单独提交，长时间清理也不会
+    持有一个长事务。幂等——重复执行只会找不到可删的行。
+    """
+    succeeded_cutoff, failed_cutoff = _retention_cutoffs(now)
+    deleted = conn.execute(
+        f"""
+        DELETE FROM external_call_logs
+        WHERE id IN (
+            SELECT id FROM external_call_logs
+            WHERE {_EXPIRED_PREDICATE}
+            LIMIT %s
+        )
+        """,
+        (succeeded_cutoff, failed_cutoff, batch_size),
+    ).rowcount
+    return int(deleted)
 
 
 def _request_id() -> str:
