@@ -29,18 +29,43 @@ function reportPayload(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function settingsPayload(overrides: Record<string, unknown> = {}) {
+  return {
+    recipient_user_id: null,
+    recipient_display_name: null,
+    failure_rate_window_minutes: 60,
+    failure_rate_threshold_percent: 30,
+    failure_rate_min_sample: 5,
+    updated_by_user_id: null,
+    updated_at: null,
+    ...overrides,
+  };
+}
+
 function installFetch(payload: unknown, status = 200) {
   const fetchMock = vi.fn((url: string, init?: RequestInit) => {
-    if (
-      url.endsWith("/api/control/alerts/failure-rate") &&
-      (init?.method ?? "GET") === "GET"
-    ) {
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/control/alerts/failure-rate") && method === "GET") {
       return jsonResponse(payload, status);
+    }
+    // 下方「告警设置」区块随本组件一起挂载；它有自己的用例
+    //（AlertSettingsPanel.test.tsx），这里只需要让它读得到。
+    if (url.endsWith("/api/control/settings/alerts") && method === "GET") {
+      return jsonResponse(settingsPayload());
+    }
+    if (url.endsWith("/api/control/settings/alerts/recipient-candidates")) {
+      return jsonResponse({ items: [] });
     }
     throw new Error(`unexpected request: ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
+}
+
+function reportCalls(fetchMock: ReturnType<typeof installFetch>) {
+  return fetchMock.mock.calls.filter(([url]) =>
+    String(url).endsWith("/api/control/alerts/failure-rate"),
+  );
 }
 
 describe("AdminAlertsSection", () => {
@@ -90,7 +115,7 @@ describe("AdminAlertsSection", () => {
     ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "刷新" }));
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(reportCalls(fetchMock)).toHaveLength(2));
   });
 
   it("labels groups by threshold status without overstating small samples", async () => {
@@ -176,7 +201,7 @@ describe("AdminAlertsSection", () => {
     render(<AdminAlertsSection />);
 
     await screen.findByText(/没有已终结的任务/);
-    const [url, init] = fetchMock.mock.calls[0] ?? [];
+    const [url, init] = reportCalls(fetchMock)[0] ?? [];
     expect(String(url)).toContain("/api/control/alerts/failure-rate");
     expect((init as RequestInit).method).toBe("GET");
     const headers = ((init as RequestInit).headers ?? {}) as Record<
@@ -185,5 +210,91 @@ describe("AdminAlertsSection", () => {
     >;
     expect(headers["X-Admin-CSRF"]).toBeUndefined();
     expect(headers["Idempotency-Key"]).toBeUndefined();
+  });
+  it("names the designated recipient and follows the configured window", async () => {
+    installFetch(
+      reportPayload({
+        window_minutes: 15,
+        total: 10,
+        failed: 6,
+        failure_rate_percent: 60,
+        exceeded: true,
+        alerting: true,
+        recipient_user_id: "u-tech",
+        recipient_display_name: "王工",
+        groups: [
+          {
+            record_type: "VIDEO",
+            total: 10,
+            failed: 6,
+            failure_rate_percent: 60,
+            exceeded: true,
+            top_errors: [],
+          },
+        ],
+      }),
+    );
+    render(<AdminAlertsSection />);
+
+    expect(await screen.findByText(/指定负责人：王工/)).toBeInTheDocument();
+    // 窗口来自报告而不是写死的「近 1 小时」：设置里改了窗口，文案跟着变。
+    expect(screen.getByText(/按业务类型统计近 15 分钟内/)).toBeInTheDocument();
+    expect(screen.queryByText(/近 1 小时/)).toBeNull();
+  });
+
+  it("re-reads the report after the alert settings are saved", async () => {
+    let reads = 0;
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/api/control/alerts/failure-rate")) {
+        reads += 1;
+        // 第二次读到的是新口径下的报告：阈值 45%。
+        return jsonResponse(
+          reportPayload({ threshold_percent: reads > 1 ? 45 : 30 }),
+        );
+      }
+      if (url.endsWith("/api/control/settings/alerts") && method === "GET") {
+        return jsonResponse(settingsPayload());
+      }
+      if (url.endsWith("/api/control/settings/alerts/recipient-candidates")) {
+        return jsonResponse({ items: [] });
+      }
+      if (url.endsWith("/api/control/settings/alerts") && method === "PUT") {
+        return jsonResponse(
+          settingsPayload({ failure_rate_threshold_percent: 45 }),
+        );
+      }
+      throw new Error(`unexpected request: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    setAdminCsrfToken("csrf-token-1");
+    render(<AdminAlertsSection />);
+
+    expect(
+      await screen.findByText(/没有类型越过 30% 失败率阈值/),
+    ).toBeInTheDocument();
+    fireEvent.change(await screen.findByLabelText("失败率阈值（%）"), {
+      target: { value: "45" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存告警设置" }));
+    fireEvent.change(await screen.findByLabelText("操作原因"), {
+      target: { value: "放宽阈值" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认保存" }));
+
+    expect(
+      await screen.findByText(/没有类型越过 45% 失败率阈值/),
+    ).toBeInTheDocument();
+    expect(reads).toBe(2);
+  });
+
+  it("gives auditors the read-only settings view", async () => {
+    installFetch(reportPayload());
+    render(<AdminAlertsSection readOnly />);
+
+    expect(
+      await screen.findByText(/审计员仅可查看告警设置/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "保存告警设置" })).toBeNull();
   });
 });

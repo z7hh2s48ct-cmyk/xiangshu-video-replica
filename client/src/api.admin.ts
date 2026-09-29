@@ -500,6 +500,11 @@ export type AdminActorInfo = {
   username: string;
   display_name: string;
   role: string;
+  /**
+   * 服务端一律返回；类型上保持可选是为了不破坏只关心 role 的既有夹具。
+   * 界面只用它决定是否露出「团队与权限」——真正的拦截在服务端（403）。
+   */
+  is_super_admin?: boolean;
 };
 
 export type AdminExchangeResult = {
@@ -1691,7 +1696,13 @@ export async function getAdminGenerationRecordSummary(
 
 export type AdminFailureRateError = components["schemas"]["FailureRateError"];
 export type AdminFailureRateGroup = components["schemas"]["FailureRateGroup"];
-export type AdminFailureRateReport = components["schemas"]["FailureRateReport"];
+// 生成类型落后于服务端：报告已带上告警接收人（P2-4），这里按服务端契约补齐，
+// 等下一次整体重生成 OpenAPI 类型后可删掉交叉部分。
+export type AdminFailureRateReport =
+  components["schemas"]["FailureRateReport"] & {
+    recipient_user_id?: string | null;
+    recipient_display_name?: string | null;
+  };
 
 /**
  * 近 1 小时失败率报告（「通知与告警」页）。只读端点（AdminReader），
@@ -1701,6 +1712,169 @@ export async function getFailureRateAlerts(): Promise<AdminFailureRateReport> {
   return adminRead<AdminFailureRateReport>(
     "/api/control/alerts/failure-rate",
     "读取失败率告警失败",
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 通知与告警设置（方案 P2-4）—— /api/control/settings/alerts
+// ---------------------------------------------------------------------------
+
+/**
+ * 告警设置快照：接收人（可空）+ 失败率口径。手写而非取自生成类型——
+ * 与客户标注同理，避免为一个端点重生成整份 OpenAPI 类型。
+ */
+export interface AlertSettings {
+  recipient_user_id: string | null;
+  recipient_display_name: string | null;
+  failure_rate_window_minutes: number;
+  failure_rate_threshold_percent: number;
+  failure_rate_min_sample: number;
+  updated_by_user_id: string | null;
+  updated_at: string | null;
+}
+
+export type AlertSettingsFields = Pick<
+  AlertSettings,
+  | "recipient_user_id"
+  | "failure_rate_window_minutes"
+  | "failure_rate_threshold_percent"
+  | "failure_rate_min_sample"
+>;
+
+export interface AlertRecipientCandidate {
+  user_id: string;
+  username: string;
+  display_name: string;
+  role: string;
+}
+
+export function getAlertSettings(): Promise<AlertSettings> {
+  return adminRead<AlertSettings>(
+    "/api/control/settings/alerts",
+    "读取告警设置失败",
+  );
+}
+
+/** 可作接收人的账号：启用中的管理员与审计员（读侧，普通管理员可见）。 */
+export function listAlertRecipientCandidates(): Promise<{
+  items: AlertRecipientCandidate[];
+}> {
+  return adminRead<{ items: AlertRecipientCandidate[] }>(
+    "/api/control/settings/alerts/recipient-candidates",
+    "读取告警接收人候选失败",
+  );
+}
+
+/**
+ * 全量更新告警设置（写契约：confirm + reason + 幂等键，旧值 / 新值入审计）。
+ * `recipient_user_id` 为 null 表示显式「不指定接收人」。
+ */
+export function updateAlertSettings(
+  fields: AlertSettingsFields,
+  reason: string,
+  idempotencyKey?: string,
+): Promise<AlertSettings> {
+  return adminWrite<AlertSettings>(
+    "/api/control/settings/alerts",
+    fields,
+    reason,
+    "保存告警设置失败",
+    idempotencyKey,
+    "PUT",
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 团队与权限（方案 P2-4）—— /api/control/team，全部为超级管理员专属
+// ---------------------------------------------------------------------------
+
+export type TeamRole = "admin" | "auditor";
+
+export interface TeamMember {
+  user_id: string;
+  username: string;
+  display_name: string;
+  role: string;
+  is_active: boolean;
+  is_super_admin: boolean;
+  has_password: boolean;
+  /** 空串 = 从未登录。 */
+  last_login_at: string;
+  created_at: string;
+}
+
+export interface TeamMemberCreateFields {
+  username: string;
+  display_name: string;
+  role: TeamRole;
+  password: string;
+}
+
+export interface TeamMemberUpdateFields {
+  display_name?: string;
+  is_active?: boolean;
+  is_super_admin?: boolean;
+}
+
+export function listTeamMembers(): Promise<{ items: TeamMember[] }> {
+  return adminRead<{ items: TeamMember[] }>(
+    "/api/control/team/members",
+    "读取团队成员失败",
+  );
+}
+
+export function createTeamMember(
+  fields: TeamMemberCreateFields,
+  reason: string,
+  idempotencyKey?: string,
+): Promise<TeamMember> {
+  return adminWrite<TeamMember>(
+    "/api/control/team/members",
+    { ...fields },
+    reason,
+    "新增团队成员失败",
+    idempotencyKey,
+  );
+}
+
+/**
+ * 更新成员：显示名 / 启用状态 / 超管标记，至少带一项。停用会同时吊销该成员
+ * 的全部管理会话；不能停用自己、不能动自己的超管标记、不能移除最后一个超管
+ * （服务端 400，界面直接展示其中文说明）。
+ */
+export function updateTeamMember(
+  userId: string,
+  fields: TeamMemberUpdateFields,
+  reason: string,
+  idempotencyKey?: string,
+): Promise<TeamMember> {
+  return adminWrite<TeamMember>(
+    `/api/control/team/members/${encodeURIComponent(userId)}`,
+    { ...fields },
+    reason,
+    "更新团队成员失败",
+    idempotencyKey,
+    "PATCH",
+  );
+}
+
+/** 超管为成员设置新密码；旧密码立即失效，该成员全部管理会话被吊销。 */
+export function resetTeamMemberPassword(
+  userId: string,
+  password: string,
+  reason: string,
+  idempotencyKey?: string,
+): Promise<{ user_id: string; revoked_sessions: number; request_id: string }> {
+  return adminWrite<{
+    user_id: string;
+    revoked_sessions: number;
+    request_id: string;
+  }>(
+    `/api/control/team/members/${encodeURIComponent(userId)}/password`,
+    { password },
+    reason,
+    "重置成员密码失败",
+    idempotencyKey,
   );
 }
 

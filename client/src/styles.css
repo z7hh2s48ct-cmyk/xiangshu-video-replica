@@ -4102,6 +4102,24 @@ button.activation-generator__submit {
   color: var(--admin-muted, #a49e95);
 }
 
+/* 告警设置只读视图（审计员）：一行一项的键值列表。 */
+.admin-settings-view {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+.admin-settings-view > div {
+  display: flex;
+  gap: 12px;
+}
+.admin-settings-view dt {
+  min-width: 96px;
+  color: var(--admin-muted, #a49e95);
+}
+.admin-settings-view dd {
+  margin: 0;
+}
+
 .admin-page-tabs {
   display: flex;
   align-items: center;
