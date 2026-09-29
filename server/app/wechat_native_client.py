@@ -45,6 +45,14 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from app.external_calls import (
+    FAILED_BODY_LIMIT,
+    CallTimer,
+    external_call_context,
+    record_external_call,
+    summarize_request_body,
+)
+
 # -----------------------------------------------------------------------------
 # Constants (API paths & schemas)
 # -----------------------------------------------------------------------------
@@ -68,6 +76,14 @@ CERTIFICATE_MIN_REFRESH_INTERVAL_SECONDS = 60.0
 # 微信支付公钥 ID 的固定前缀；Wechatpay-Serial 带这个前缀说明是用公钥体系签的。
 PUBLIC_KEY_ID_PREFIX = "PUB_KEY_ID_"
 WECHAT_USER_AGENT = "customer-v3-wechat-native/1.0"
+
+# 第三方调用日志（P0-9）里的服务商标识与接口名。
+WECHAT_CALL_PROVIDER = "wechat_pay"
+ENDPOINT_NATIVE_ORDER = "native_order"
+ENDPOINT_ORDER_QUERY = "order_query"
+ENDPOINT_CERTIFICATES = "certificates"
+# 微信返回给排查用的响应头：请求编号能让微信侧客服直接定位这一次调用。
+_LOGGED_RESPONSE_HEADERS = ("Content-Type", "Request-ID", "Retry-After")
 
 # How long a Native order stays payable. WeChat's own default is two hours; we
 # state it explicitly so the local order, the QR and the expiry sweep all agree
@@ -381,15 +397,24 @@ def wechat_error_detail(exc: HTTPError) -> str:
     return _summarize_wechat_error(exc)[0]
 
 
-def _summarize_wechat_error(exc: HTTPError) -> tuple[str, str | None]:
-    """The log summary of a WeChat error response plus its business code, if any."""
-    status = f"HTTP {exc.code}"
+def _read_error_body(exc: HTTPError) -> bytes:
+    """Read a WeChat error response once (bounded); an unreadable body is empty."""
     if getattr(exc, "fp", None) is None:
-        return status, None
+        return b""
     try:
-        body = exc.read(MAX_WECHAT_ERROR_BODY_BYTES)
-        payload = json.loads(body.decode("utf-8"))
-    except (OSError, ValueError, UnicodeDecodeError):
+        return exc.read(FAILED_BODY_LIMIT)
+    except (OSError, ValueError):
+        return b""
+
+
+def _summarize_error_body(status_code: int, body: bytes) -> tuple[str, str | None]:
+    """Log summary (``HTTP <status> code=... message=...``) plus WeChat's business code."""
+    status = f"HTTP {status_code}"
+    # 摘要只看开头一小段：更长的错误页几乎不会是微信的 JSON 错误体，解析失败就降级成
+    # 裸状态码，不能因此盖住原始错误。
+    try:
+        payload = json.loads(body[:MAX_WECHAT_ERROR_BODY_BYTES].decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
         return status, None
     if not isinstance(payload, dict):
         return status, None
@@ -404,10 +429,62 @@ def _summarize_wechat_error(exc: HTTPError) -> tuple[str, str | None]:
     return " ".join(parts), wechat_code
 
 
+def _summarize_wechat_error(exc: HTTPError) -> tuple[str, str | None]:
+    """The log summary of a WeChat error response plus its business code, if any."""
+    if getattr(exc, "fp", None) is None:
+        return f"HTTP {exc.code}", None
+    try:
+        body = exc.read(MAX_WECHAT_ERROR_BODY_BYTES)
+    except (OSError, ValueError):
+        return f"HTTP {exc.code}", None
+    return _summarize_error_body(exc.code, body)
+
+
+def _logged_request_summary(request: Request) -> object:
+    """Request summary for the call log: the order fields, minus the customer's IP.
+
+    The body carries ``scene_info.payer_client_ip`` — a customer's address is
+    personal data with no diagnostic value here. Authorization never enters the
+    summary (headers are not recorded at all).
+    """
+    # 这个客户端只会发 bytes 请求体（或没有请求体的 GET）；其它形态不摘要。
+    data = request.data
+    summary = summarize_request_body(data if isinstance(data, bytes) else None)
+    if isinstance(summary, dict) and "scene_info" in summary:
+        summary["scene_info"] = "[已省略：含客户 IP]"
+    return summary
+
+
+def _logged_response_headers(response: WeChatHTTPResponse) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for name in _LOGGED_RESPONSE_HEADERS:
+        value = response.getheader(name)
+        if value:
+            headers[name] = value
+    return headers
+
+
 def _execute_request(
-    opener: WeChatHTTPOpener, request: Request, *, timeout_seconds: float
+    opener: WeChatHTTPOpener,
+    request: Request,
+    *,
+    timeout_seconds: float,
+    endpoint: str,
 ) -> _RawResponse:
-    """Send a request, classify transport errors, and enforce the response size cap."""
+    """Send a request, classify transport errors, and enforce the response size cap.
+
+    Every call is written to the third-party call log (P0-9) — this is the single
+    place all WeChat traffic passes through, so the business flow stays untouched.
+    Recording never raises: a log write that fails only warns.
+    """
+    timer = CallTimer()
+    common = {
+        "provider": WECHAT_CALL_PROVIDER,
+        "endpoint": endpoint,
+        "method": request.get_method(),
+        "url": request.full_url,
+        "request_summary": _logged_request_summary(request),
+    }
     try:
         with opener(request, timeout=timeout_seconds) as response:
             body = response.read(MAX_WECHAT_RESPONSE_BYTES + 1)
@@ -415,15 +492,46 @@ def _execute_request(
             nonce = response.getheader("Wechatpay-Nonce")
             signature = response.getheader("Wechatpay-Signature")
             serial = response.getheader("Wechatpay-Serial")
+            response_headers = _logged_response_headers(response)
+            status = int(getattr(response, "status", 200) or 200)
     except HTTPError as exc:
-        detail, wechat_code = _summarize_wechat_error(exc)
+        error_body = _read_error_body(exc)
+        detail, wechat_code = _summarize_error_body(exc.code, error_body)
+        record_external_call(
+            **common,
+            outcome="PROVIDER_ERROR",
+            http_status=exc.code,
+            response_headers=dict(exc.headers.items()) if exc.headers else None,
+            response_body=error_body,
+            latency_ms=timer.elapsed_ms(),
+        )
         logger.warning("WeChat API rejected the request: %s", detail)
         raise WeChatNativeError(
             f"WeChat API request failed ({detail})", wechat_code=wechat_code
         ) from exc
     except (TimeoutError, URLError, OSError) as exc:
+        timed_out = isinstance(exc, TimeoutError) or (
+            isinstance(exc, URLError) and isinstance(exc.reason, TimeoutError)
+        )
+        record_external_call(
+            **common,
+            outcome="TIMEOUT" if timed_out else "NETWORK_ERROR",
+            latency_ms=timer.elapsed_ms(),
+            error_message=(
+                f"等待 {timeout_seconds:g} 秒未收到响应" if timed_out else type(exc).__name__
+            ),
+        )
         logger.warning("WeChat API request failed: %s", type(exc).__name__)
         raise WeChatNativeError("WeChat API request timed out", status_code=504) from exc
+    record_external_call(
+        **common,
+        outcome="SUCCEEDED",
+        http_status=status,
+        response_headers=response_headers,
+        # 平台证书下载的响应是 api_v3_key 加密的证书密文，对排查没有价值，只记元数据。
+        response_body=None if endpoint == ENDPOINT_CERTIFICATES else body,
+        latency_ms=timer.elapsed_ms(),
+    )
     if len(body) > MAX_WECHAT_RESPONSE_BYTES:
         raise WeChatNativeError("WeChat API response is too large")
     return _RawResponse(
@@ -536,14 +644,24 @@ class PlatformCertificateManager:
         """
         with self._lock:
             request = self._build_request(merchant)
-            raw = _execute_request(self._opener, request, timeout_seconds=self._timeout_seconds)
+            raw = _execute_request(
+                self._opener,
+                request,
+                timeout_seconds=self._timeout_seconds,
+                endpoint=ENDPOINT_CERTIFICATES,
+            )
             self._cache = self._parse_certificates(merchant, raw.body)
             self._fetched_at = self._last_refresh_attempt = self._clock()
             return len(self._cache)
 
     def _refresh(self, merchant: WeChatMerchantConfig, *, now: float) -> None:
         request = self._build_request(merchant)
-        raw = _execute_request(self._opener, request, timeout_seconds=self._timeout_seconds)
+        raw = _execute_request(
+            self._opener,
+            request,
+            timeout_seconds=self._timeout_seconds,
+            endpoint=ENDPOINT_CERTIFICATES,
+        )
         self._cache = self._parse_certificates(merchant, raw.body)
         self._fetched_at = now
 
@@ -729,7 +847,15 @@ class WeChatNativeClient:
         if client_ip:
             payload["scene_info"] = {"payer_client_ip": client_ip}
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        raw = self._request(merchant, method="POST", url_path=NATIVE_ORDER_PATH, body=body)
+        # 下单调用归到这笔订单的商户单号下：客服拿订单号就能翻到微信的应答原文。
+        with external_call_context("RECHARGE_ORDER", out_trade_no):
+            raw = self._request(
+                merchant,
+                method="POST",
+                url_path=NATIVE_ORDER_PATH,
+                body=body,
+                endpoint=ENDPOINT_NATIVE_ORDER,
+            )
         verified = self._verify_response(merchant, raw)
         parsed = _parse_json_object(verified)
         code_url = parsed.get("code_url")
@@ -743,6 +869,13 @@ class WeChatNativeClient:
         self, *, merchant: WeChatMerchantConfig, out_trade_no: str
     ) -> WeChatOrderQueryResult:
         """Query an order by out_trade_no and normalize the trade_state into paid/unpaid."""
+        # 查单调用归到这笔订单的商户单号下（与下单同一口径，见 create_native_order）。
+        with external_call_context("RECHARGE_ORDER", out_trade_no):
+            return self._query_order(merchant=merchant, out_trade_no=out_trade_no)
+
+    def _query_order(
+        self, *, merchant: WeChatMerchantConfig, out_trade_no: str
+    ) -> WeChatOrderQueryResult:
         # mchid 是该接口必填的 query 参数，缺了微信直接回 PARAM_ERROR。签名串里的
         # URL 也必须含完整 query，所以拼进 url_path，让签名与请求用同一个值。
         url_path = (
@@ -750,7 +883,13 @@ class WeChatNativeClient:
             + "?mchid="
             + quote(merchant.mchid, safe="")
         )
-        raw = self._request(merchant, method="GET", url_path=url_path, body="")
+        raw = self._request(
+            merchant,
+            method="GET",
+            url_path=url_path,
+            body="",
+            endpoint=ENDPOINT_ORDER_QUERY,
+        )
         verified = self._verify_response(merchant, raw)
         parsed = _parse_json_object(verified)
         trade_state = parsed.get("trade_state")
@@ -785,7 +924,9 @@ class WeChatNativeClient:
         """
         probe_order_no = "SELFCHECK" + secrets.token_hex(8)
         try:
-            self.query_order(merchant=merchant, out_trade_no=probe_order_no)
+            # 直接走不带订单归属的内部查单：探测用的订单号是编的，不能记成一笔真实
+            # 充值订单的调用（调用日志里它只是一条没有任务归属的凭据自检）。
+            self._query_order(merchant=merchant, out_trade_no=probe_order_no)
         except WeChatNativeError as exc:
             if exc.wechat_code == "ORDER_NOT_EXIST":
                 return
@@ -793,7 +934,13 @@ class WeChatNativeClient:
         raise WeChatNativeError("自检探测订单意外存在，无法判断凭据状态")
 
     def _request(
-        self, merchant: WeChatMerchantConfig, *, method: str, url_path: str, body: str
+        self,
+        merchant: WeChatMerchantConfig,
+        *,
+        method: str,
+        url_path: str,
+        body: str,
+        endpoint: str,
     ) -> _RawResponse:
         authorization = build_authorization_header(
             mchid=merchant.mchid,
@@ -816,7 +963,9 @@ class WeChatNativeClient:
             request.add_header("Wechatpay-Serial", merchant.public_key_id)
         if data is not None:
             request.add_header("Content-Type", "application/json")
-        return _execute_request(self._opener, request, timeout_seconds=self._timeout_seconds)
+        return _execute_request(
+            self._opener, request, timeout_seconds=self._timeout_seconds, endpoint=endpoint
+        )
 
     def _verify_response(self, merchant: WeChatMerchantConfig, raw: _RawResponse) -> bytes:
         if (
