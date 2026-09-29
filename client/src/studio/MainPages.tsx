@@ -44,6 +44,7 @@ import {
   StudioDialog,
   Tabs,
 } from "./ui";
+import { cacheAvailable } from "./viralCache";
 import {
   clearViralImportIdempotencyKey,
   shouldClearViralImportIdempotencyKey,
@@ -218,6 +219,7 @@ export function WorkbenchPage() {
     updateData,
     state,
     extractScriptFromUpload,
+    extractViralCopy,
     refresh,
   } = useStudio();
   const accountId = user.id || "anonymous";
@@ -346,6 +348,40 @@ export function WorkbenchPage() {
       });
       return;
     }
+    if (!video.platformKey || !video.nativeId) {
+      notify("该视频缺少可导入的平台标识");
+      return;
+    }
+    if (purpose === "copy" && !cacheAvailable()) {
+      // Web 端 claim-first：先取共享文案——命中即扣一次「获取文案」费并秒回填入，
+      // 跳过整次导入；未命中分文不扣，回落导入 → 转写链路。
+      extractViralCopy(video, {
+        onCacheMiss: () =>
+          void beginViralImport(
+            video,
+            purpose,
+            providedIdempotencyKey,
+            requestAccount,
+          ),
+      });
+      return;
+    }
+    await beginViralImport(
+      video,
+      purpose,
+      providedIdempotencyKey,
+      requestAccount,
+    );
+  };
+
+  // 爆款导入主体（服务端拉取素材 → 轮询任务 → 转写/复刻分流）。
+  // Web 端「提取文案」先经过 claim-first 分流，未命中才回到这里。
+  const beginViralImport = async (
+    video: StudioVideo,
+    purpose: "copy" | "replica",
+    providedIdempotencyKey?: string,
+    requestAccount = accountId,
+  ) => {
     if (!video.platformKey || !video.nativeId) {
       notify("该视频缺少可导入的平台标识");
       return;

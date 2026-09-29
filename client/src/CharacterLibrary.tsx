@@ -15,6 +15,7 @@ import {
   waitForCharacterSheetTask,
 } from "./api";
 import { CharacterScenePanel } from "./CharacterScenePanel";
+import { CharacterVersionDialog } from "./CharacterVersionDialog";
 import { SimpleCharacterUpload } from "./SimpleCharacterUpload";
 
 const VIEW_LABELS: Record<CharacterViewType, string> = {
@@ -103,6 +104,8 @@ export function CharacterLibrary({
   const [deleteMode, setDeleteMode] = useState<"purge" | "keep">("purge");
   const [deleteRemoveProjectRefs, setDeleteRemoveProjectRefs] = useState(false);
   const [busyRegenerateId, setBusyRegenerateId] = useState("");
+  const [versionWorkflowEntry, setVersionWorkflowEntry] =
+    useState<SimpleLibraryEntry | null>(null);
   const [lightboxId, setLightboxId] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -768,6 +771,18 @@ export function CharacterLibrary({
                               完整档案
                             </button>
                           ) : null}
+                          {userRole === "admin" &&
+                          entry.persona_id &&
+                          entry.status !== "ARCHIVED" ? (
+                            <button
+                              aria-label={`打开人物 ${entry.display_name} 的角色版本工作流`}
+                              className="secondary-button"
+                              onClick={() => setVersionWorkflowEntry(entry)}
+                              type="button"
+                            >
+                              版本工作流
+                            </button>
+                          ) : null}
                           {canRename(entry) ? (
                             <button
                               className="secondary-button"
@@ -836,6 +851,18 @@ export function CharacterLibrary({
           onDownloadAll={handleDownloadAll}
           onSceneCreated={onChanged}
           previewUrls={previewUrls}
+        />
+      ) : null}
+      {versionWorkflowEntry?.persona_id ? (
+        <CharacterVersionDialog
+          key={versionWorkflowEntry.identity_id}
+          displayName={versionWorkflowEntry.display_name}
+          onClose={() => setVersionWorkflowEntry(null)}
+          onPublished={() => {
+            void loadLibrary();
+            onChanged?.();
+          }}
+          personaId={versionWorkflowEntry.persona_id}
         />
       ) : null}
       {deleteTarget ? (
