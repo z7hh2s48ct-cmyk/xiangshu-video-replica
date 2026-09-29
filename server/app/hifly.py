@@ -22,6 +22,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from app.db_portable import BusinessConnection
+from app.external_calls import endpoint_from_url, recorded_urlopen
 from app.settings import SettingsRepository, SettingsUnavailableError
 
 HIFLY_BASE_URL = "https://hfw-api.hifly.cc"
@@ -173,8 +174,15 @@ class UrllibHiflyHttpTransport(HiflyHttpTransport):
     ) -> bytes:
         try:
             request = Request(url, data=body, headers=dict(headers), method=method)
-            with urlopen(request, timeout=self.timeout_seconds) as response:  # noqa: S310
-                return cast(bytes, response.read())
+            # 口播接口的原始响应落调用日志：失败原因（如声音样本太短）可在管理端查到。
+            response_body, _headers, _status = recorded_urlopen(
+                request,
+                timeout=self.timeout_seconds,
+                provider="hifly",
+                endpoint=endpoint_from_url(url),
+                opener=urlopen,
+            )
+            return response_body
         except HTTPError as exc:
             detail = ""
             try:

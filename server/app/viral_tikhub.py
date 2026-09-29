@@ -28,12 +28,13 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from typing import Any, cast
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from app.db_portable import BusinessConnection
+from app.external_calls import endpoint_from_url, recorded_urlopen
 from app.settings import SettingsRepository, SettingsUnavailableError
 
 TIKHUB_BASE_URL = "https://api.tikhub.io"
@@ -166,8 +167,14 @@ class UrllibViralHttpTransport(ViralHttpTransport):
                 headers={**dict(headers), "User-Agent": _BROWSER_USER_AGENT},
                 method=method,
             )
-            with urlopen(request, timeout=self.timeout_seconds) as response:  # noqa: S310
-                return cast(bytes, response.read())
+            response_body, _headers, _status = recorded_urlopen(
+                request,
+                timeout=self.timeout_seconds,
+                provider="tikhub",
+                endpoint=endpoint_from_url(url),
+                opener=urlopen,
+            )
+            return response_body
         except HTTPError as exc:
             logger.warning(
                 "Viral source request failed with HTTP status %s (%s)",

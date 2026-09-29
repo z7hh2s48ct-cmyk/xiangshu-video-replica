@@ -592,6 +592,10 @@ REASON_PASSWORD_CHANGED = "password_changed"
 # lever on its own, without rotating the credential.
 REASON_ALL_DEVICES_REVOKED = "all_devices_revoked"
 
+# The reason recorded when a forgotten password is reset through an emailed
+# code: whoever held the old session may be the reason the owner lost access.
+REASON_PASSWORD_RESET = "password_reset"
+
 # The session/device rows that must be purged before a customer row can be
 # physically deleted: their ``user_id`` FKs carry no CASCADE. Order matters —
 # the session state references the device, so it goes first. The session-event

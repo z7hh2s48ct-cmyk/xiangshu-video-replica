@@ -14,6 +14,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
+from app.external_calls import external_call_context, recorded_urlopen
+
 PUBLIC_BASE_URL_ENV = "PUBLIC_BASE_URL"
 ZPAY_GATEWAY_URL = "https://zpayz.cn/submit.php"
 ZPAY_API_PAYMENT_URL = "https://zpayz.cn/mapi.php"
@@ -232,8 +234,16 @@ class ZPayOrderQueryClient:
         )
         request = Request(request_url, method="GET")
         try:
-            with self._opener(request, timeout=self._timeout_seconds) as response:
-                body = response.read(MAX_ZPAY_QUERY_RESPONSE_BYTES + 1)
+            # 查单的原始响应落调用日志并归到这笔订单（地址里的商户密钥落库前已脱敏）。
+            with external_call_context("RECHARGE_ORDER", merchant_order_no):
+                body, _headers, _status = recorded_urlopen(
+                    request,
+                    timeout=self._timeout_seconds,
+                    provider="zpay",
+                    endpoint="order_query",
+                    opener=self._opener,
+                    read_limit=MAX_ZPAY_QUERY_RESPONSE_BYTES + 1,
+                )
         except HTTPError as exc:
             logger.warning("ZPay order query returned HTTP %s", exc.code)
             raise ZPayOrderQueryError("ZPay order query failed") from exc
@@ -339,8 +349,15 @@ class ZPayPaymentCodeClient:
             method="POST",
         )
         try:
-            with self._opener(request, timeout=self._timeout_seconds) as response:
-                body = response.read(MAX_ZPAY_PAYMENT_RESPONSE_BYTES + 1)
+            with external_call_context("RECHARGE_ORDER", merchant_order_no):
+                body, _headers, _status = recorded_urlopen(
+                    request,
+                    timeout=self._timeout_seconds,
+                    provider="zpay",
+                    endpoint="payment_code",
+                    opener=self._opener,
+                    read_limit=MAX_ZPAY_PAYMENT_RESPONSE_BYTES + 1,
+                )
         except HTTPError as exc:
             logger.warning("Payment-code request returned HTTP %s", exc.code)
             raise ZPayPaymentCodeError("payment-code request failed") from exc

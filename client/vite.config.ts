@@ -149,6 +149,13 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: "./src/test/setup.ts",
     restoreMocks: true,
+    // 关闭文件间并行：本套件里有**依赖时序**的用例，并行带来的 CPU 竞争会让它们
+    // 把「上一条用例已发出、尚未落地」的请求链误判成自己的行为。典型是
+    // RootApp.test.tsx 的「认证前不得触达私有接口」——并行下约 50% 假红、单文件跑
+    // 必过、`--no-file-parallelism` 连续 13 次全过（2026-09-29 实测）。
+    // 门禁的第一要求是确定性而不是速度：代价是全量从 ~80s 变成 ~4.5min；跑单个文件
+    // 或子集不受影响。真修（让那条断言只归因于本用例自己的挂载）另行跟踪。
+    fileParallelism: false,
     // CI 负载下单条用例（多段 findBy + 网络重试时序）可能超过 vitest 默认
     // 5s；20s 只放宽上限，正常用例仍按实际耗时结束。
     testTimeout: 20000,

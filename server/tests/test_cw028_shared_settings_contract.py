@@ -101,7 +101,7 @@ def test_merge_provider_config_blank_plain_field_is_removed() -> None:
 
 @pytest.mark.parametrize(
     "provider",
-    ["apilio", "metaso", "cos", "deepseek", "hifly", "tikhub", "dashscope", "douyidou"],
+    ["apilio", "metaso", "cos", "deepseek", "hifly", "tikhub", "dashscope", "douyidou", "ses"],
 )
 def test_require_supported_provider_accepts_known_providers(provider: str) -> None:
     assert require_supported_provider(provider) == provider
@@ -121,11 +121,14 @@ def test_require_supported_provider_rejects_unknown_with_422() -> None:
     }
 
 
-def test_get_provider_tester_composes_storage_over_hifly_over_noop() -> None:
+def test_get_provider_tester_composes_storage_over_hifly_over_email_over_noop() -> None:
+    from app.email_delivery import EmailProviderTester
+
     tester = get_provider_tester()
     assert isinstance(tester, StorageProviderTester)
     assert isinstance(tester.fallback, HiflyProviderTester)
-    assert isinstance(tester.fallback.fallback, NoopProviderTester)
+    assert isinstance(tester.fallback.fallback, EmailProviderTester)
+    assert isinstance(tester.fallback.fallback.fallback, NoopProviderTester)
 
 
 def test_storage_tester_empty_cos_config_falls_through_to_noop() -> None:

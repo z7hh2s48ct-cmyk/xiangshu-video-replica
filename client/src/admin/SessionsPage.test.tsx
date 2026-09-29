@@ -129,6 +129,31 @@ describe("SessionsPage", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("switches the standalone view to the customer picked from a row", async () => {
+    // 独立模式（无共享上下文）：点行内「选择客户」就地把视图切到该客户，
+    // 而不是委托父级——嵌入模式的委托路径已有用例，独立路径此前无用例。
+    const fetchMock = vi.fn((url: string, _init?: RequestInit) =>
+      jsonResponse(
+        String(url).includes(`/customers/${CUSTOMER_ID}/sessions`)
+          ? sessionList()
+          : { items: [sessionItem], total: 1, limit: 50, offset: 0 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    render(<SessionsPage />);
+
+    await screen.findByText("customer_one");
+    expect(screen.getByLabelText("客户 ID")).toHaveValue("");
+    fireEvent.click(screen.getByRole("button", { name: "选择客户" }));
+
+    await waitFor(() =>
+      expect(String(fetchMock.mock.calls.at(-1)?.[0])).toContain(
+        `/api/control/customers/${CUSTOMER_ID}/sessions?limit=50`,
+      ),
+    );
+    expect(screen.getByLabelText("客户 ID")).toHaveValue(CUSTOMER_ID);
+  });
+
   it("ignores a stale customer response after switching context", async () => {
     let resolveCustomerA:
       | ((value: Awaited<ReturnType<typeof jsonResponse>>) => void)
@@ -300,7 +325,7 @@ describe("SessionsPage", () => {
     ]);
   });
 
-  it("keeps the adjustment form secondary and uses integral credits", async () => {
+  it("no longer hosts credit adjustments (moved to customer detail, P0-2)", async () => {
     const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
       jsonResponse(sessionList()),
     );
@@ -308,42 +333,8 @@ describe("SessionsPage", () => {
     render(<SessionsPage userId={CUSTOMER_ID} />);
 
     await screen.findByText("customer_one");
-    expect(screen.queryByLabelText("积分整数")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "展开后台调账" }));
-    expect(screen.getByLabelText("积分整数")).toBeInTheDocument();
-    expect(screen.queryByText(/加款条数/)).not.toBeInTheDocument();
-  });
-
-  it("labels the confirmation by the amount's sign, not by the source type (preflight P1-2)", async () => {
-    // 上线前检查 P1-2：退款审批来源 + 正数 = 服务端走正向加款通道，
-    // 确认弹窗必须按输入符号显示「增加积分」口径，不能再说「反向调账（扣减）」。
-    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
-      jsonResponse(sessionList()),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-    render(<SessionsPage userId={CUSTOMER_ID} />);
-
-    await screen.findByText("customer_one");
-    fireEvent.click(screen.getByRole("button", { name: "展开后台调账" }));
-    fireEvent.change(screen.getByLabelText("来源单类型"), {
-      target: { value: "REFUND_APPROVAL" },
-    });
-    fireEvent.change(screen.getByLabelText("积分整数"), {
-      target: { value: "5" },
-    });
-    fireEvent.change(screen.getByLabelText("事由"), {
-      target: { value: "补记正向加款" },
-    });
-    fireEvent.submit(
-      screen.getByLabelText("积分整数").closest("form") as HTMLFormElement,
-    );
-
-    const dialog = await screen.findByRole("dialog", {
-      name: "确认后台增加积分",
-    });
-    expect(dialog).toHaveTextContent("增加 5 积分");
-    expect(dialog).not.toHaveTextContent("反向调账");
-    expect(dialog).not.toHaveTextContent("账本扣减");
+    expect(screen.queryByRole("button", { name: /调账/ })).toBeNull();
+    expect(screen.queryByLabelText("积分整数")).toBeNull();
   });
 
   it("hides all write actions for read-only operators", async () => {
@@ -360,51 +351,5 @@ describe("SessionsPage", () => {
     expect(
       screen.queryByRole("button", { name: /后台调账/ }),
     ).not.toBeInTheDocument();
-  });
-
-  it("allows a negative amount only for the reversal sources (B1)", async () => {
-    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
-      jsonResponse(sessionList()),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-    render(<SessionsPage userId={CUSTOMER_ID} />);
-
-    await screen.findByText("customer_one");
-    fireEvent.click(screen.getByRole("button", { name: "展开后台调账" }));
-
-    const credits = screen.getByLabelText("积分整数");
-    const source = screen.getByLabelText("来源单类型");
-    const form = credits.closest("form");
-    if (!form) throw new Error("adjustment form not found");
-    fireEvent.change(screen.getByLabelText("事由"), {
-      target: { value: "客户诉求退款" },
-    });
-
-    // Forward source (the default): a negative amount never reaches the API.
-    fireEvent.change(credits, { target: { value: "-5" } });
-    fireEvent.submit(form);
-    expect(await screen.findByText(/只能正向加积分/)).toBeInTheDocument();
-
-    // Reversal source: the sign is accepted, the copy says where the money
-    // actually moves, and the confirmation dialog switches to the reversal
-    // wording.
-    fireEvent.change(source, { target: { value: "REFUND_APPROVAL" } });
-    expect(
-      screen.getByText(/此为账本反向记账，实际退付在 ZPay 后台办理/),
-    ).toBeInTheDocument();
-    fireEvent.submit(form);
-    const dialog = await screen.findByRole("dialog", {
-      name: "确认反向调账",
-    });
-    // P1-2：方向由「扣减」表达，数字取绝对值——不再渲染「-5 积分」双负号。
-    expect(dialog).toHaveTextContent("反向调账 5 积分");
-    expect(dialog).toHaveTextContent("实际退付在 ZPay 后台办理");
-
-    // Zero is still not a valid amount, even for a reversal source.
-    fireEvent.change(credits, { target: { value: "0" } });
-    fireEvent.submit(form);
-    expect(
-      await screen.findByText("请输入非 0 的积分整数"),
-    ).toBeInTheDocument();
   });
 });

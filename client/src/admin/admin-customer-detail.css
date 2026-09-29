@@ -135,6 +135,32 @@
   font-size: var(--font-subtitle);
 }
 
+/* 展开查单日志时订单面板跨全宽：调用表有 8 列，半宽面板会挤成一团。 */
+.customer-360-panel--wide {
+  grid-column: 1 / -1;
+}
+
+/* 订单行多了「查单日志」工具条：分割线按整个订单块（行+按钮+展开的
+   调用表）划，row 自身不再画线——它是流水面板的共用类，那边维持原规则。 */
+.customer-360-order {
+  border-bottom: 1px solid var(--admin-line-soft);
+}
+
+.customer-360-order:last-child {
+  border-bottom: 0;
+}
+
+.customer-360-order-tools {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 14px 12px;
+}
+
+.customer-360-order-tools button {
+  padding: 4px 10px;
+  font-size: var(--font-caption);
+}
+
 .customer-360-row {
   display: grid;
   grid-template-columns: minmax(0, 1.3fr) repeat(3, minmax(0, 1fr));
@@ -147,6 +173,12 @@
 }
 
 .customer-360-row:last-child {
+  border-bottom: 0;
+}
+
+/* 订单块内的 row 不画线（分割线由 .customer-360-order 承担）。此选择器
+   特指度高于上面的基础规则，必须紧跟其后，否则触发降序警告。 */
+.customer-360-order .customer-360-row {
   border-bottom: 0;
 }
 
@@ -433,6 +465,30 @@
   border-color: #75483e;
   color: #e78974;
   background: transparent;
+}
+
+/* 方案 P0-3：客户详情「操作记录」（CustomerActivitySection），
+   版式与设备视图同源：标题行 + 计数 + 可滚动表格。 */
+.customer-activity {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.customer-activity__header {
+  align-items: baseline;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.customer-activity__header h2 {
+  font-size: 16px;
+  margin: 0;
+}
+
+.customer-activity__header small {
+  color: var(--admin-muted);
 }
 
 /* 权益区横跨整行：表格与两张表单都需要宽度，放进两列设置网格会挤成窄条。 */
