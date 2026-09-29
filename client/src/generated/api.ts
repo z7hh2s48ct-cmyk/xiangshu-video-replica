@@ -3936,6 +3936,91 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/customer/account/email": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Email State */
+    get: operations["read_email_state_api_customer_account_email_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/account/email/send-code": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Send Bind Code */
+    post: operations["send_bind_code_api_customer_account_email_send_code_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/account/email/verify": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Verify Bind Code */
+    post: operations["verify_bind_code_api_customer_account_email_verify_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/password/forgot": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Forgot Password */
+    post: operations["forgot_password_api_customer_password_forgot_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/password/reset": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Reset Password */
+    post: operations["reset_password_api_customer_password_reset_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/customer/api-keys": {
     parameters: {
       query?: never;
@@ -7811,6 +7896,15 @@ export interface components {
       /** Title */
       title: string;
     };
+    /** CodeSentResponse */
+    CodeSentResponse: {
+      /** Sent */
+      sent: boolean;
+      /** Expires In Minutes */
+      expires_in_minutes: number;
+      /** Resend After Seconds */
+      resend_after_seconds: number;
+    };
     /**
      * CollectionBatchApiUsage
      * @description API usage statistics for one collection batch.
@@ -8734,6 +8828,17 @@ export interface components {
       /** Items */
       items: components["schemas"]["DownloadUrlItem"][];
     };
+    /** EmailStateResponse */
+    EmailStateResponse: {
+      /** Email */
+      email: string | null;
+      /** Verified At */
+      verified_at: string | null;
+      /** Can Bind */
+      can_bind: boolean;
+      /** Service Available */
+      service_available: boolean;
+    };
     /** EnqueueFirstFramesRequest */
     EnqueueFirstFramesRequest: {
       /**
@@ -8963,6 +9068,20 @@ export interface components {
       started_at: string | null;
       /** Completed At */
       completed_at: string | null;
+    };
+    /** ForgotPasswordRequest */
+    ForgotPasswordRequest: {
+      /** Account */
+      account: string;
+    };
+    /** ForgotPasswordResponse */
+    ForgotPasswordResponse: {
+      /** Accepted */
+      accepted: boolean;
+      /** Message */
+      message: string;
+      /** Resend After Seconds */
+      resend_after_seconds: number;
     };
     /** GenerateFirstFramesRequest */
     GenerateFirstFramesRequest: {
@@ -9487,7 +9606,8 @@ export interface components {
         | "hifly"
         | "tikhub"
         | "dashscope"
-        | "douyidou";
+        | "douyidou"
+        | "ses";
       /** Configured */
       configured: boolean;
       /** Config */
@@ -10803,6 +10923,22 @@ export interface components {
       /** Replace Device Id */
       replace_device_id: string;
     };
+    /** ResetPasswordRequest */
+    ResetPasswordRequest: {
+      /** Account */
+      account: string;
+      /** Code */
+      code: string;
+      /** New Password */
+      new_password: string;
+    };
+    /** ResetPasswordResponse */
+    ResetPasswordResponse: {
+      /** Reset */
+      reset: boolean;
+      /** Sessions Revoked */
+      sessions_revoked: number;
+    };
     /** RuntimeSettingsRequest */
     RuntimeSettingsRequest: {
       /** Max Generation Count Per Batch */
@@ -11123,6 +11259,11 @@ export interface components {
       character_version_id: string;
       /** Selected Asset Ids */
       selected_asset_ids?: string[] | null;
+    };
+    /** SendBindCodeRequest */
+    SendBindCodeRequest: {
+      /** Email */
+      email: string;
     };
     /** SessionEventItem */
     SessionEventItem: {
@@ -11920,6 +12061,13 @@ export interface components {
       input?: unknown;
       /** Context */
       ctx?: Record<string, never>;
+    };
+    /** VerifyBindCodeRequest */
+    VerifyBindCodeRequest: {
+      /** Email */
+      email: string;
+      /** Code */
+      code: string;
     };
     /** VersionResponse */
     VersionResponse: {
@@ -20737,6 +20885,158 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["SessionHistoryResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_email_state_api_customer_account_email_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["EmailStateResponse"];
+        };
+      };
+    };
+  };
+  send_bind_code_api_customer_account_email_send_code_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["SendBindCodeRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CodeSentResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  verify_bind_code_api_customer_account_email_verify_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["VerifyBindCodeRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["EmailStateResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  forgot_password_api_customer_password_forgot_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ForgotPasswordRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ForgotPasswordResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  reset_password_api_customer_password_reset_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ResetPasswordRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ResetPasswordResponse"];
         };
       };
       /** @description Validation Error */

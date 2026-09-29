@@ -27,7 +27,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision = "20260928T1000_external_call_response_log"
-down_revision = "20260927T0000_oral_voice_language_settings"
+down_revision = "20260928T1200_customer_email_password_reset"
 branch_labels = None
 depends_on = None
 

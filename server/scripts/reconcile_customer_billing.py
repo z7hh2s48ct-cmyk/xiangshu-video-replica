@@ -121,6 +121,11 @@ PG_ONLY_TABLES: frozenset[str] = frozenset(
         # 汇总与客户侧「我的发现」的共同事实来源），PG-only（守卫同 20260916T1400）。
         # T07 导入源无此表，目标库为空属预期；非空即 divergent，仍 fail closed。
         "viral_search_discoveries",
+        # 20260928T1200_customer_email_password_reset: 邮箱验证码表（绑定邮箱与
+        # 找回密码共用的一次性验证码，只存密钥摘要），PG-only（守卫同
+        # 20260916T1400）。T07 导入源无此表，目标库为空属预期；非空即 divergent，
+        # 仍 fail closed。
+        "customer_email_codes",
     }
 )
 
@@ -177,8 +182,18 @@ PG_ONLY_COLUMNS: dict[str, frozenset[str]] = {
     # （SQLite 内部泳道从不自注册客户，088 在该 lane 为 guarded no-op）。
     # 20260919T1200_sub_accounts: 母子账号层级列仅存在于 PG（客户版 V3 新体系，
     # T07 的 SQLite 源 schema 冻结于其前基线）。
+    # 20260928T1200_customer_email_password_reset: 验证通过的邮箱与验证时间仅存在于
+    # PG（T07 的 SQLite 源 schema 冻结于其前基线；待验证地址只活在验证码行里）。
     "users": frozenset(
-        {"max_devices", "password_hash", "registration_source", "account_type", "parent_user_id"}
+        {
+            "max_devices",
+            "password_hash",
+            "registration_source",
+            "account_type",
+            "parent_user_id",
+            "email",
+            "email_verified_at",
+        }
     ),
     # 20260912T1353_customer_discounts: wallet_transactions.discount_rate 仅存在于 PG
     # （本迁移非 postgresql 方言 return，SQLite lane 不建此列）。

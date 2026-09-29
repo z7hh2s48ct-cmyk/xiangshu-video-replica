@@ -144,9 +144,10 @@
       "20260926T0000_viral_homepage_rank": "20260924T0200_customer_oral_task_visibility",
       "20260927T0000_oral_voice_language_settings": "20260927T1200_admin_offline_payment_source",
       "20260927T1200_admin_offline_payment_source": "20260925T1400_api_metadata_pending_write",
-      "20260928T1000_external_call_response_log": "20260927T0000_oral_voice_language_settings"
+      "20260928T1000_external_call_response_log": "20260928T1200_customer_email_password_reset",
+      "20260928T1200_customer_email_password_reset": "20260927T0000_oral_voice_language_settings"
     },
-    "revision_count": 128
+    "revision_count": 129
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -671,7 +672,11 @@
     },
     "20260928T1000_external_call_response_log": {
       "file": "versions/20260928T1000_external_call_response_log.py",
-      "sha256": "f62768c6cf267a1a2413f4ad6982203309f523d413a166848249eb45b59dbc7a"
+      "sha256": "62ec5233230e7ce99a900adf990d65c60bfb26ead53fccd0f1c4431843e69222"
+    },
+    "20260928T1200_customer_email_password_reset": {
+      "file": "versions/20260928T1200_customer_email_password_reset.py",
+      "sha256": "9bab578c58459367ede0ce1fef0360396703c7adec6b362c95d494da01975327"
     }
   },
   "task": "MIGRATION-GUARD-20260912"
