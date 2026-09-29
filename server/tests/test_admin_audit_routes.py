@@ -514,6 +514,51 @@ def test_list_audit_log_unions_all_audited_surfaces(client: TestClient, route_st
 
 
 @pytest.mark.pg
+def test_default_audit_view_excludes_customer_workspace_actions(
+    client: TestClient, route_state: str
+):
+    """P0-3：客户在工作台的日常动作也写 audit_logs，默认视图只给管理员操作."""
+    _admin_session(client, "admin_u")
+    with psycopg.connect(_t34_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "UPDATE users SET role = 'customer' WHERE id = 'customer_u'",
+        )
+        conn.execute(
+            "INSERT INTO audit_logs "
+            "(id, actor_user_id, action, entity_type, entity_id, metadata_json) "
+            "VALUES (%s, 'admin_u', 'provider_settings.secret_reveal', "
+            "'provider_settings', 'video', %s), "
+            "(%s, 'customer_u', 'project.create', 'project', 'proj-1', '{}'), "
+            "(%s, 'customer_u', 'asset.download_url.create', 'asset', 'asset-1', '{}')",
+            (
+                str(uuid.uuid4()),
+                '{"reason": "排查连接失败", "request_id": "req-reveal-1"}',
+                str(uuid.uuid4()),
+                str(uuid.uuid4()),
+            ),
+        )
+
+    default_view = client.get(AUDIT_PATH).json()
+    default_types = {item["event_type"] for item in default_view["items"]}
+    assert "provider_settings.secret_reveal" in default_types
+    assert "project.create" not in default_types
+    assert "asset.download_url.create" not in default_types
+    assert default_view["total"] == len(default_view["items"])
+
+    customer_view = client.get(
+        AUDIT_PATH, params={"scope": "customer", "target_user_id": "customer_u"}
+    ).json()
+    assert {item["event_type"] for item in customer_view["items"]} == {
+        "project.create",
+        "asset.download_url.create",
+    }
+
+    everything = client.get(AUDIT_PATH, params={"scope": "all"}).json()
+    assert everything["total"] == default_view["total"] + customer_view["total"]
+    assert client.get(AUDIT_PATH, params={"scope": "nobody"}).status_code == 422
+
+
+@pytest.mark.pg
 def test_session_audit_shows_admin_revokes_and_hides_customer_traffic(
     client: TestClient, route_state: str
 ):

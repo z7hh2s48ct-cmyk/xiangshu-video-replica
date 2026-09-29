@@ -21,6 +21,7 @@ export function Icon({ name, size = 22 }: { name: string; size?: number }) {
     pen: "m4 4 8 2 8 12-3 3L5 13 4 4Zm0 0 7 7m0 0a2 2 0 1 0 3 3 2 2 0 0 0-3-3M4 20h9",
     video: "M3 5h18v14H3V5Zm7 4 6 3-6 3V9",
     person: "M8 7a4 4 0 1 0 8 0 4 4 0 0 0-8 0M4 21v-3c0-7 16-7 16 0v3H4",
+    mail: "M3 5h18v14H3V5Zm0 1 9 7 9-7",
     folder: "M3 6V3h6l3 3h9v14H3V6Zm0 3h18",
     upload: "M12 16V2m-5 5 5-5 5 5M3 15v6h18v-6",
     chart: "M3 21V11h4v10m3 0V3h4v18m3 0V7h4v14M1 21h22",

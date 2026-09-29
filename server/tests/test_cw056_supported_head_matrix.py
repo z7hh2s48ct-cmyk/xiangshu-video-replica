@@ -88,8 +88,10 @@ REPO_ROOT = SERVER_DIR.parent
 # 追加修复）再依次叠加于链尾；
 # 20260927T1200_admin_offline_payment_source（管理员代客开通套餐的「线下收款」来源单
 # 类型）再追加其上；20260927T0000_oral_voice_language_settings（声音克隆样本语言与
-# 语速/音量/音调参数）重挂于其后，故链尾为该值。
-HEAD_REVISION = "20260927T0000_oral_voice_language_settings"
+# 语速/音量/音调参数）重挂于其后；20260928T1200_customer_email_password_reset（客户
+# 邮箱绑定与邮箱找回密码）追加其上；本分支的 20260928T1000_external_call_response_log
+# （管理端报错排查）按手册 §3 重挂于 20260928T1200 之后，故链尾仍为该值。
+HEAD_REVISION = "20260928T1000_external_call_response_log"
 
 # 最后一个已发布（受支持）起点。其后的 056…090 与本迁移尚未随任何受支持版本发布，
 # 故冻结范围止于此——把未发布 revision 也纳入哈希会让每次新增迁移都必须改常量，
@@ -138,39 +140,22 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # ——故 check_constraints +1，其余计数与表名全集不变。注意 `HEAD_SCHEMA_DIGEST`
 # 仍然会变：它把 `pg_get_constraintdef` 的文本一起哈希，约束体一改就换值。
 HEAD_SCHEMA_COUNTS = {
-    # 两条线上各加一项，且互不相干，故两边都要取：
-    #   check_constraints 322 → 323：本分支新增 ck_admin_adjustments_order_required
-    #   columns           1219 → 1220：main 的 material_preferences.tags_json
-    # 20260923T1800 重加 runtime_settings.h3_extended_modes_enabled 部署兼容垫片
-    # （旧镜像在 MIGRATE→ROLL 混合窗口与镜像回滚时仍 SELECT 该列）：
-    #   columns           1220 → 1221；digest 重算（见下）。
-    # 20260924T0000 给 recharge_orders.transaction_id（wechat_native 交易号）补
-    # 部分唯一索引兜底：partial_indexes 37 → 38；digest 重算（见下）。
-    # 20260924T0100 给 oral_tasks 增加 submitted_at（口播轮询看播计时锚点，
-    # 可空 Text 无默认）：columns 1221 → 1222；digest 重算（见下）。
-    # 20260924T0200 新增 customer_oral_task_visibility（账号级隐藏口播任务，
-    # 两列复合主键 + 两条 CASCADE 外键，hidden_at 走 Text）：tables 103 → 104、
-    # columns 1222 → 1225、primary_keys 103 → 104、foreign_keys 193 → 195；
-    # digest 重算（见下）。
-    # 20260925T1400 只 CREATE OR REPLACE 触发器函数 billing_refuse_fact_rewrite()
-    # （把 api_metadata 加进 billing_operations 的 PENDING 期可写列白名单）：
-    # 不加表 / 列 / 索引 / 触发器，故本字典与表名全集不变；digest 进
-    # pg_get_functiondef 文本，必然重算（见下）。
-    # 20260927T1200 只 drop+recreate ck_admin_adjustments_source_type（追加
-    # OFFLINE_PAYMENT）：计数净 0；约束文本变了，digest 重算（见下）。
-    # 20260927T0000 给 oral_voices 增加 language / speech_rate / volume / pitch 四列，
-    # 各带一条 CHECK（语言键白名单与上游取值范围）：columns 1226 → 1230、
-    # check_constraints 323 → 327；不加表 / 索引 / 外键，digest 重算（见下）。
-    "check_constraints": 327,
-    "columns": 1230,
-    "foreign_keys": 195,
+    # 20260928T1200（客户邮箱绑定与找回密码）的增量见该迁移自身说明。
+    # 本分支 20260928T1000 给 external_call_logs 追加 14 列（其中 2 列 jsonb）、
+    # 2 条 CHECK（outcome 取值、响应字节数非负）与 2 条部分索引（第三方任务号 /
+    # 请求编号），并按其重挂位置追加在 20260928T1200 之后：
+    # columns 1241 → 1255、jsonb_columns 6 → 8、check_constraints 330 → 332、
+    # partial_indexes 39 → 41；不加表 / 外键，digest 重算（见下）。
+    "check_constraints": 332,
+    "columns": 1255,
+    "foreign_keys": 196,
     "identity_columns": 0,
-    "jsonb_columns": 6,
-    "partial_indexes": 38,
-    "primary_keys": 104,
+    "jsonb_columns": 8,
+    "partial_indexes": 41,
+    "primary_keys": 105,
     "sequences": 4,
-    "tables": 104,
-    "timestamptz_columns": 56,
+    "tables": 105,
+    "timestamptz_columns": 60,
     "triggers": 27,
     "unique_constraints": 39,
 }
@@ -230,6 +215,7 @@ HEAD_TABLE_NAMES = (
     "customer_credit_pricing",
     "customer_devices",
     "customer_discounts",
+    "customer_email_codes",
     "customer_fencing_write_evidence",
     "customer_idempotency_envelopes",
     "customer_oral_task_visibility",
@@ -376,6 +362,8 @@ HEAD_TABLE_NAMES = (
 # - 20260927T0000_oral_voice_language_settings（声音克隆样本语言与语速/音量/音调，
 #   重挂于 20260927T1200 之后）：oral_voices +4 列、+4 条 CHECK，digest 由
 #   migration_manifest.py --print-schema 在全新迁移到 head 的库上重算。
+# - 20260928T1200_customer_email_password_reset（客户邮箱找回密码）：users +2 列、
+#   新表 customer_email_codes、provider 白名单追加 ses，digest 同法重算。
 # digest/counts 以 scripts/ci/migration_manifest.py --print-schema 于 postgres:16 重算
 # （合并后的新 head：sub_account_permissions + 三个 analysis 迁移 + viral 搜索发现表
 #  + main 的 MATERIAL-UX tags_json 列 + REFUND 调账迁移 + 1800 垫片 + 交易号唯一
@@ -383,7 +371,7 @@ HEAD_TABLE_NAMES = (
 #  两侧原来的 digest 都不能用——本分支那条是接在 viral 之后的旧链、main 那条只到
 #  MATERIAL-UX，合并后 head 变成接在 MATERIAL-UX 之后的本分支迁移，约束文本随之变化，
 #  digest 必然要重算。由 scripts/ci/migration_manifest.py --print-schema 在 PG 上重算后粘贴。
-HEAD_SCHEMA_DIGEST = "b37360656e18dec866cd114c33255f40009d35e988709352b4c660e2de154297"
+HEAD_SCHEMA_DIGEST = "489e58b844a64ca1eb473e6309d9ec69aa5b1ff8b60214e83cc2e51b975c8baf"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

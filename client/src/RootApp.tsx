@@ -4,6 +4,7 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import "./customer/customer-access.css";
 import { AccountAccessPage } from "./customer/AccountAccessPage";
 import { CustomerWelcomePage } from "./customer/CustomerWelcomePage";
+import { ForgotPasswordPage } from "./customer/ForgotPasswordPage";
 
 import { LoginPage } from "./customer/LoginPage";
 import { SessionConflictDialog } from "./customer/SessionConflictDialog";
@@ -88,11 +89,17 @@ function CustomerSessionShell({ store }: { store: CustomerCredentialStore }) {
     () =>
       window.location.pathname === "/login" ||
       window.location.pathname === "/register" ||
+      window.location.pathname === "/forgot" ||
       (window.location.hash.startsWith("#studio/") &&
         window.location.hash !== "#studio/workbench"),
   );
   const [accessMode, setAccessMode] = useState<"login" | "register">(
     window.location.pathname === "/register" ? "register" : "login",
+  );
+  // 登录屏内含两个视图：普通登录/注册与邮箱找回密码。独立于 accessOpen——
+  // 后者描述「是否停留在门禁屏」，前者描述门禁屏内展示哪一个。
+  const [accessView, setAccessView] = useState<"access" | "forgot">(
+    window.location.pathname === "/forgot" ? "forgot" : "access",
   );
   // 「记住密码」只在这里落地：登录页保持纯展示，凭据的读写都收在这一处，
   // 免得口令散落到多个组件里。`undefined` 表示还没读完，用来推迟首帧渲染，
@@ -117,9 +124,11 @@ function CustomerSessionShell({ store }: { store: CustomerCredentialStore }) {
     function syncAccessRoute() {
       const path = window.location.pathname;
       setAccessMode(path === "/register" ? "register" : "login");
+      setAccessView(path === "/forgot" ? "forgot" : "access");
       setAccessOpen(
         path === "/login" ||
           path === "/register" ||
+          path === "/forgot" ||
           (window.location.hash.startsWith("#studio/") &&
             window.location.hash !== "#studio/workbench"),
       );
@@ -134,6 +143,12 @@ function CustomerSessionShell({ store }: { store: CustomerCredentialStore }) {
   function openAccess(mode: "login" | "register") {
     window.history.pushState(null, "", `/${mode}`);
     setAccessMode(mode);
+    setAccessView("access");
+    setAccessOpen(true);
+  }
+  function openForgotPassword() {
+    window.history.pushState(null, "", "/forgot");
+    setAccessView("forgot");
     setAccessOpen(true);
   }
 
@@ -156,13 +171,16 @@ function CustomerSessionShell({ store }: { store: CustomerCredentialStore }) {
             </div>
           )}
           {accessOpen ? (
-            // 等金库读完再挂载。登录页用 useState 初始化输入框，晚到的
+            accessView === "forgot" ? (
+              <ForgotPasswordPage onBack={() => openAccess("login")} />
+            ) : // 等金库读完再挂载。登录页用 useState 初始化输入框，晚到的
             // remembered 不会再写进去——先渲染空表单就永远填不上了。这里返回
             // null 而不是退回欢迎页，否则读金库的这一瞬会闪出另一个屏。
             remembered === undefined ? null : (
               <AccountAccessPage
                 initialMode={accessMode}
                 onModeChange={openAccess}
+                onForgotPassword={openForgotPassword}
                 remembered={remembered}
                 onSubmit={async (input) => {
                   await session.loginWithPassword(input);

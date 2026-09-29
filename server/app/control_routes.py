@@ -6,10 +6,11 @@ import io
 import json
 import logging
 import os
+import re
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import Annotated, Any, Literal, cast
 
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -31,6 +32,7 @@ from app.billing_catalog import SERVICES
 from app.control_auth import ControlUser, ControlWriter
 from app.csv_export import spreadsheet_safe_cell
 from app.db_portable import BusinessConnection
+from app.external_calls import summarize_provider_message
 from app.failure_runbook import failure_advice
 from app.ops_metrics import get_or_create_request_id
 from app.permissions import write_audit
@@ -68,12 +70,33 @@ TransactionType = Literal["CHARGE", "RESERVE", "SETTLE", "RELEASE", "CONVERSION"
 GenerationRecordType = Literal[
     "VIDEO",
     "ORAL_VIDEO",
+    # 口播分身与声音克隆是独立资源（oral_avatars / oral_voices），任务调用在写入侧
+    # 就按这两个类型落库；列在这里，调用日志接口才能按各自主键直接查到（方案 P0-9）。
+    "ORAL_AVATAR",
+    "ORAL_VOICE",
     "FIRST_FRAME_IMAGE",
     "CHARACTER_SHEET_IMAGE",
     "CHARACTER_VIEW_IMAGE",
     "SOURCE_FRAME_AI_SCORE",
     "SOURCE_FRAME_PROCESS",
     "ANALYSIS",
+]
+# 调用日志的读取端另接受充值查单（RECHARGE_ORDER）：zpay.py 按商户单号落任务归属，
+# 管理端用它定位一次充值到底请求了支付网关什么、对方怎么回（P0-9）。充值订单不是
+# 生成记录，不进 GenerationRecordType——生成记录列表没有对应的任务表。
+# 新增生成记录类型时，这里要同步补上，否则新类型的调用日志查不到。
+ExternalCallRecordType = Literal[
+    "VIDEO",
+    "ORAL_VIDEO",
+    "ORAL_AVATAR",
+    "ORAL_VOICE",
+    "FIRST_FRAME_IMAGE",
+    "CHARACTER_SHEET_IMAGE",
+    "CHARACTER_VIEW_IMAGE",
+    "SOURCE_FRAME_AI_SCORE",
+    "SOURCE_FRAME_PROCESS",
+    "ANALYSIS",
+    "RECHARGE_ORDER",
 ]
 ProviderCostStatus = Literal["KNOWN", "ESTIMATED", "UNAVAILABLE", "NOT_APPLICABLE"]
 RecordDataStatus = Literal["VALID", "UNAVAILABLE", "CORRUPTED"]
@@ -194,6 +217,11 @@ class ControlGenerationRecord(BaseModel):
     retryable: bool | None = None
     upstream_status: int | None = None
     upstream_reason: str | None = None
+    # 方案 P0-10 / P0-11：每条失败记录都带中文处理建议与服务商原话（已脱敏），
+    # 原话取自任务行或第三方接口调用日志，管理端据此判断该怎么处理。
+    advice: str | None = None
+    provider_error_code: str | None = None
+    provider_message: str | None = None
 
 
 class ControlGenerationRecordPage(BaseModel):
@@ -809,10 +837,14 @@ def list_generation_records(
     failure_phase: str | None = None,
     created_from: str | None = None,
     created_to: str | None = None,
+    task_ref: Annotated[str | None, Query(max_length=200)] = None,
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> ControlGenerationRecordPage:
+    """``task_ref``：我方任务编号、8 位短编号、第三方任务号或第三方请求编号，
+    任填一个都落到同一条记录（方案 P0-12）。"""
     records: list[ControlGenerationRecord] = []
+    ref_filter = _task_ref_filter(conn, task_ref)
     scan_limit = offset + limit
     video_where, video_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -822,6 +854,7 @@ def list_generation_records(
         record_type=record_type,
         created_from=created_from,
         created_to=created_to,
+        task_ref=ref_filter,
     )
     oral_where, oral_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -831,6 +864,7 @@ def list_generation_records(
         record_type=record_type,
         created_from=created_from,
         created_to=created_to,
+        task_ref=ref_filter,
     )
     first_where, first_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -840,6 +874,7 @@ def list_generation_records(
         record_type=record_type,
         created_from=created_from,
         created_to=created_to,
+        task_ref=ref_filter,
     )
     sheet_where, sheet_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -849,6 +884,7 @@ def list_generation_records(
         record_type=record_type,
         created_from=created_from,
         created_to=created_to,
+        task_ref=ref_filter,
     )
     view_where, view_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -858,6 +894,7 @@ def list_generation_records(
         record_type=record_type,
         created_from=created_from,
         created_to=created_to,
+        task_ref=ref_filter,
     )
     source_where, source_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -867,6 +904,7 @@ def list_generation_records(
         record_type=record_type,
         created_from=created_from,
         created_to=created_to,
+        task_ref=ref_filter,
     )
     analysis_where, analysis_params = _analysis_record_filters(
         postgres=conn.is_postgres,
@@ -876,6 +914,7 @@ def list_generation_records(
         failure_phase=failure_phase,
         created_from=created_from,
         created_to=created_to,
+        task_ref=ref_filter,
     )
     if record_type in {"SOURCE_FRAME_PROCESS", "SOURCE_FRAME_AI_SCORE"}:
         # 与 summary 聚合同口径：按审计留痕归类。json_valid/json_extract 只有
@@ -1263,6 +1302,8 @@ def list_generation_records(
                     status=oral_status,
                     raw_message=_optional_text(row["error_message"]),
                 ),
+                # 概要保持固定中文，原始报错（脱敏后）单独给出（P0-11）。
+                provider_message=summarize_provider_message(_optional_text(row["error_message"])),
                 created_at=str(row["created_at"]),
                 completed_at=(
                     str(row["updated_at"]) if oral_status in terminal_oral_statuses else None
@@ -1337,12 +1378,205 @@ def list_generation_records(
         )
 
     records.sort(key=lambda item: (item.created_at, item.record_id), reverse=True)
+    page = records[offset : offset + limit]
+    _attach_failure_explanations(conn, page)
     return ControlGenerationRecordPage(
-        items=records[offset : offset + limit],
+        items=page,
         total=total,
         limit=limit,
         offset=offset,
     )
+
+
+class ExternalCallSummary(BaseModel):
+    """一次第三方接口调用的概要（不含响应体）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    call_id: str
+    created_at: str
+    provider: str
+    model: str | None
+    endpoint: str
+    method: str | None
+    url: str | None
+    attempt: int | None
+    http_status: int | None
+    latency_ms: int | None
+    outcome: str | None
+    provider_task_id: str | None
+    provider_request_id: str | None
+    provider_error_code: str | None
+    provider_message: str | None
+    error_message: str | None
+    # 请求摘要含客户提示词等内容：审计员只看元数据，这里对审计员置空。
+    request_summary: Any = None
+    response_body_bytes: int | None
+    has_response_body: bool
+
+
+class ExternalCallList(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ExternalCallSummary]
+    # 匹配该记录的全部调用条数；items 最多 _CALL_LIST_LIMIT 条，
+    # total 大于 items 长度时说明清单被截断（方案 #27）。
+    total: int
+
+
+class ExternalCallResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    call_id: str
+    response_headers: dict[str, str] | None
+    response_body: str | None
+    response_body_bytes: int | None
+    truncated: bool
+
+
+_CALL_LIST_LIMIT = 200
+
+
+@router.get(
+    "/generation-records/{record_type}/{record_id}/calls",
+    response_model=ExternalCallList,
+)
+def list_generation_record_calls(
+    conn: Database,
+    actor: ControlUser,
+    record_type: ExternalCallRecordType,
+    record_id: str,
+) -> ExternalCallList:
+    """某条生成记录（或充值订单）的全部第三方接口调用，按时间顺序（方案 P0-9）。"""
+    if not conn.is_postgres:
+        # 非 PG 环境下没有调用日志表：集合端点返回空清单，单体端点
+        # （read_external_call_response）对必然不存在的 id 返回 404——
+        # 两者是同一事实（这里没有调用日志）在集合/单体上的统一口径。
+        return ExternalCallList(items=[], total=0)
+    # 源画面两种记录类型共用一个工作流程，调用日志统一记为 SOURCE_FRAME；
+    # 口播分身/声音克隆的日志本就按各自主类型落库，直接匹配即可。
+    call_type = (
+        "SOURCE_FRAME"
+        if record_type in {"SOURCE_FRAME_PROCESS", "SOURCE_FRAME_AI_SCORE"}
+        else record_type
+    )
+    rows = conn.execute(
+        """
+        SELECT id, created_at, provider, model, endpoint_name, method, url_redacted, attempt,
+               http_status, latency_ms, outcome, provider_task_id, provider_request_id,
+               provider_error_code, provider_message, error_message_redacted,
+               request_summary_json, response_body_bytes,
+               response_body IS NOT NULL AS has_response_body,
+               count(*) OVER () AS total_count
+        FROM external_call_logs
+        WHERE task_type = %s AND task_id = %s
+        ORDER BY created_at, id
+        LIMIT %s
+        """,
+        (call_type, record_id, _CALL_LIST_LIMIT),
+    ).fetchall()
+    show_summary = actor.role != "auditor"
+    return ExternalCallList(
+        total=int(rows[0]["total_count"]) if rows else 0,
+        items=[
+            ExternalCallSummary(
+                call_id=str(row["id"]),
+                created_at=str(row["created_at"]),
+                provider=str(row["provider"]),
+                model=_optional_text(row["model"]),
+                endpoint=str(row["endpoint_name"]),
+                method=_optional_text(row["method"]),
+                url=_optional_text(row["url_redacted"]),
+                attempt=None if row["attempt"] is None else int(row["attempt"]),
+                http_status=None if row["http_status"] is None else int(row["http_status"]),
+                latency_ms=None if row["latency_ms"] is None else int(row["latency_ms"]),
+                outcome=_optional_text(row["outcome"]),
+                provider_task_id=_optional_text(row["provider_task_id"]),
+                provider_request_id=_optional_text(row["provider_request_id"]),
+                provider_error_code=_optional_text(row["provider_error_code"]),
+                provider_message=_optional_text(row["provider_message"]),
+                error_message=_optional_text(row["error_message_redacted"]),
+                request_summary=_json_value(row["request_summary_json"]) if show_summary else None,
+                response_body_bytes=(
+                    None if row["response_body_bytes"] is None else int(row["response_body_bytes"])
+                ),
+                has_response_body=bool(row["has_response_body"]),
+            )
+            for row in rows
+        ],
+    )
+
+
+@router.get("/external-calls/{call_id}/response", response_model=ExternalCallResponse)
+def read_external_call_response(
+    conn: Database,
+    actor: ControlUser,
+    call_id: str,
+) -> ExternalCallResponse:
+    """读取一次调用的原始响应（已脱敏）；每次查看都写高敏审计。
+
+    审计员只能看调用概要：原始响应可能含客户内容，不对只读角色开放。
+    """
+    if actor.role == "auditor":
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "EXTERNAL_CALL_RESPONSE_FORBIDDEN",
+                "message": "审计员只能查看调用概要，不能查看接口原始响应。",
+            },
+        )
+    if not conn.is_postgres:
+        # 与清单端点同口径：非 PG 环境没有调用日志，清单为空、单体按 404。
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "EXTERNAL_CALL_NOT_FOUND", "message": "没有找到这次接口调用。"},
+        )
+    row = conn.execute(
+        """
+        SELECT id, task_type, task_id, response_headers_json, response_body,
+               response_body_bytes
+        FROM external_call_logs WHERE id = %s
+        """,
+        (call_id,),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "EXTERNAL_CALL_NOT_FOUND", "message": "没有找到这次接口调用。"},
+        )
+    body = _optional_text(row["response_body"])
+    body_bytes = None if row["response_body_bytes"] is None else int(row["response_body_bytes"])
+    write_audit(
+        conn,
+        actor=actor,
+        action="external_call.response_view",
+        entity_type="external_call_log",
+        entity_id=call_id,
+        metadata={
+            "task_type": _optional_text(row["task_type"]),
+            "task_id": _optional_text(row["task_id"]),
+        },
+    )
+    headers = _json_value(row["response_headers_json"])
+    return ExternalCallResponse(
+        call_id=str(row["id"]),
+        response_headers=headers if isinstance(headers, dict) else None,
+        response_body=body,
+        response_body_bytes=body_bytes,
+        truncated=body is not None
+        and body_bytes is not None
+        and len(body.encode("utf-8")) < body_bytes,
+    )
+
+
+def _json_value(value: object) -> Any:
+    """jsonb 列在 psycopg 下已是 Python 对象；兼容以文本存放的情形。"""
+    if value is None or isinstance(value, dict | list):
+        return value
+    try:
+        return json.loads(str(value))
+    except (TypeError, ValueError):
+        return None
 
 
 @router.get("/generation-records/summary", response_model=ControlGenerationRecordSummary)
@@ -1355,13 +1589,18 @@ def summarize_generation_records(
     failure_phase: str | None = None,
     created_from: str | None = None,
     created_to: str | None = None,
+    task_ref: Annotated[str | None, Query(max_length=200)] = None,
 ) -> ControlGenerationRecordSummary:
     """与列表同筛选口径的聚合。
 
     生成记录列表是分页的，管理端无法靠自己汇总，「筛选后 3 条失败」与「聚合里
     还有 12 条」会互相打脸；因此聚合与列表共用同一批过滤器，并额外回答「拆解
     为什么失败、能不能重试」——这正是 2026-09-20 事故里完全缺失的视角。
+
+    ``task_ref`` 与列表同一口径（方案 P0-12）：给了编号就必须落到同一条记录，
+    否则列表能搜到、聚合却还算全量，两边数字又对不上。
     """
+    ref_filter = _task_ref_filter(conn, task_ref)
     video_where, video_params = _generation_record_filters(
         postgres=conn.is_postgres,
         record_types=("VIDEO",),
@@ -1370,6 +1609,7 @@ def summarize_generation_records(
         record_type=record_type,
         created_from=created_from,
         created_to=created_to,
+        task_ref=ref_filter,
     )
     oral_where, oral_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -1379,6 +1619,7 @@ def summarize_generation_records(
         record_type=record_type,
         created_from=created_from,
         created_to=created_to,
+        task_ref=ref_filter,
     )
     first_where, first_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -1388,6 +1629,7 @@ def summarize_generation_records(
         record_type=record_type,
         created_from=created_from,
         created_to=created_to,
+        task_ref=ref_filter,
     )
     sheet_where, sheet_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -1397,6 +1639,7 @@ def summarize_generation_records(
         record_type=record_type,
         created_from=created_from,
         created_to=created_to,
+        task_ref=ref_filter,
     )
     view_where, view_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -1406,6 +1649,7 @@ def summarize_generation_records(
         record_type=record_type,
         created_from=created_from,
         created_to=created_to,
+        task_ref=ref_filter,
     )
     source_where, source_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -1415,6 +1659,7 @@ def summarize_generation_records(
         record_type=record_type,
         created_from=created_from,
         created_to=created_to,
+        task_ref=ref_filter,
     )
     analysis_where, analysis_params = _analysis_record_filters(
         postgres=conn.is_postgres,
@@ -1424,6 +1669,7 @@ def summarize_generation_records(
         failure_phase=failure_phase,
         created_from=created_from,
         created_to=created_to,
+        task_ref=ref_filter,
     )
     # 源画面分支按审计留痕归类：列表里的 json_valid/json_extract 只有 SQLite 有，
     # PG 上会直接报函数不存在。列表还会按 payload 的 semantic_quality_status 兜底，
@@ -1508,6 +1754,7 @@ def summarize_generation_records(
             failure_phase=failure_phase,
             created_from=created_from,
             created_to=created_to,
+            task_ref=ref_filter,
         ),
     )
 
@@ -1737,8 +1984,8 @@ def paid_test_control_provider(
     幂等键不是仪式：一次网络歧义重试若变成第二次付费调用就是真实的重复扣费，
     快照层让重放直接回放首次结果（`X-Idempotent-Replay: true`）。
 
-    审计写在探针**成功返回之后**：探针抛错（含当前真实供应商客户端尚未接入的
-    501 存根）时没有任何付费动作发生，也就没有可 attest 的事实；而且写契约的
+    审计写在探针**成功返回之后**：探针抛错（含尚未接入真实客户端的服务的 501 存根、
+    以及提交结果不确定的 502）时没有可供 attest 的成功事实；而且写契约的
     事务语义会让抛错前的写入回滚，提前写审计反而会得到「开发态留下、生产态被
     回滚」的不一致。
     """
@@ -2137,6 +2384,111 @@ def _transaction_filters(
     return (f"WHERE {' AND '.join(clauses)}" if clauses else "", tuple(params))
 
 
+@dataclass(frozen=True)
+class TaskRefFilter:
+    """编号检索：命中的我方任务编号集合 + 短编号前缀（小写 LIKE 模式）。"""
+
+    ids: tuple[str, ...]
+    prefix: str | None
+
+
+_SHORT_REF_PATTERN = re.compile(r"[0-9A-Za-z-]{6,64}")
+
+
+def _task_ref_filter(conn: BusinessConnection, task_ref: str | None) -> TaskRefFilter | None:
+    """把任一编号解析成我方任务编号（方案 P0-12）。
+
+    第三方任务号、第三方请求编号与我方请求编号（调用日志的 request_id，与审计、
+    服务日志同源）先查调用日志，再查各任务表自带的第三方任务号列（视频、人物
+    视图、口播）；首帧任务没有这一列，只能靠调用日志反查。
+    """
+    ref = (task_ref or "").strip()
+    if not ref:
+        return None
+    ids: set[str] = {ref}
+    if conn.is_postgres:
+        rows = conn.execute(
+            """
+            SELECT task_id AS id FROM external_call_logs
+            WHERE task_id IS NOT NULL
+              AND (provider_task_id = %s OR provider_request_id = %s OR request_id = %s)
+            UNION SELECT id FROM generation_tasks WHERE provider_task_id = %s
+            UNION SELECT id FROM character_generation_tasks WHERE provider_task_id = %s
+            UNION SELECT id FROM oral_tasks WHERE vendor_task_id = %s
+            """,
+            (ref, ref, ref, ref, ref, ref),
+        ).fetchall()
+        ids.update(str(row["id"]) for row in rows)
+    # 任务编号是小写 UUID；客户端给客户看的短编号是前 8 位大写。
+    prefix = f"{ref.lower()}%" if _SHORT_REF_PATTERN.fullmatch(ref) else None
+    return TaskRefFilter(ids=tuple(sorted(ids)), prefix=prefix)
+
+
+_EXPLAINED_STATUSES = frozenset(
+    {
+        "FAILED",
+        "SUBMISSION_UNCERTAIN",
+        "UNKNOWN",
+        "ARCHIVE_FAILED",
+        "CANCELED",
+        "CANCELLED",
+    }
+)
+
+
+def _attach_failure_explanations(
+    conn: BusinessConnection, records: list[ControlGenerationRecord]
+) -> None:
+    """给当前页的失败记录补中文处理建议与服务商原话（方案 P0-10 / P0-9）。
+
+    原话优先取任务行自带的（口播），没有时取该任务最近一次失败调用的日志。
+    """
+    for record in records:
+        if record.error_code and record.advice is None:
+            record.advice = failure_advice(record.error_code)
+    if not conn.is_postgres:
+        return
+    wanted = [
+        record
+        for record in records
+        if record.status in _EXPLAINED_STATUSES and record.provider_message is None
+    ]
+    if not wanted:
+        return
+    ids = [record.record_id for record in wanted]
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT ON (task_id) task_id, provider_error_code, provider_message,
+               error_message_redacted
+        FROM external_call_logs
+        WHERE task_id IN ({", ".join(["%s"] * len(ids))})
+          AND outcome IS NOT NULL AND outcome <> 'SUCCEEDED'
+        ORDER BY task_id, created_at DESC
+        """,  # noqa: S608
+        tuple(ids),
+    ).fetchall()
+    latest = {str(row["task_id"]): row for row in rows}
+    for record in wanted:
+        row = latest.get(record.record_id)
+        if row is None:
+            continue
+        record.provider_error_code = _optional_text(row["provider_error_code"])
+        record.provider_message = _optional_text(row["provider_message"]) or _optional_text(
+            row["error_message_redacted"]
+        )
+
+
+def _status_values(status: str | None) -> list[str]:
+    """状态筛选接受逗号分隔的多个值。
+
+    同一业务状态在不同任务表里有两种拼写（CANCELED / CANCELLED）：管理端
+    下拉只显示一个「已取消」，一次请求要把两种拼写都查到（方案 P0-6）。
+    """
+    if not status:
+        return []
+    return [value for value in (part.strip() for part in status.split(",")) if value]
+
+
 def _generation_record_filters(
     *,
     postgres: bool = False,
@@ -2146,17 +2498,26 @@ def _generation_record_filters(
     record_type: GenerationRecordType | None,
     created_from: str | None,
     created_to: str | None,
+    task_ref: TaskRefFilter | None = None,
 ) -> tuple[str, tuple[str, ...]]:
     clauses: list[str] = []
     params: list[str] = []
     if record_type is not None and record_type not in record_types:
         clauses.append("1 = 0")
+    if task_ref is not None:
+        ref_clauses = [f"task.id IN ({', '.join(['%s'] * len(task_ref.ids))})"]
+        params.extend(task_ref.ids)
+        if task_ref.prefix:
+            ref_clauses.append("task.id LIKE %s")
+            params.append(task_ref.prefix)
+        clauses.append(f"({' OR '.join(ref_clauses)})")
     if username:
         clauses.append("users.username LIKE %s")
         params.append(f"%{username}%")
-    if status:
-        clauses.append("task.status = %s")
-        params.append(status)
+    statuses = _status_values(status)
+    if statuses:
+        clauses.append(f"task.status IN ({', '.join(['%s'] * len(statuses))})")
+        params.extend(statuses)
     append_admin_date_filters(
         clauses,
         params,
@@ -2177,6 +2538,7 @@ def _analysis_record_filters(
     failure_phase: str | None,
     created_from: str | None,
     created_to: str | None,
+    task_ref: TaskRefFilter | None = None,
 ) -> tuple[str, tuple[str, ...]]:
     """拆解分支的过滤器。
 
@@ -2191,6 +2553,7 @@ def _analysis_record_filters(
         record_type=record_type,
         created_from=created_from,
         created_to=created_to,
+        task_ref=task_ref,
     )
     if failure_phase:
         conjunction = "AND" if where else "WHERE"
@@ -2208,6 +2571,7 @@ def _analysis_failure_reasons(
     failure_phase: str | None,
     created_from: str | None,
     created_to: str | None,
+    task_ref: TaskRefFilter | None = None,
 ) -> list[AnalysisFailureReason]:
     """按「为什么失败」聚合拆解失败行：错误码 × 失败阶段 × 上游原话 × 可否重试。
 
@@ -2215,7 +2579,7 @@ def _analysis_failure_reasons(
     列表无关的失败清单。原因取自 P0-2 落库的上游诊断（``->>`` 只有 PG 的
     jsonb 支持；SQLite 开发库没有该列，自然也没有原因）。
     """
-    if status and status != "FAILED":
+    if status and "FAILED" not in _status_values(status):
         return []
     where, params = _analysis_record_filters(
         postgres=conn.is_postgres,
@@ -2225,6 +2589,7 @@ def _analysis_failure_reasons(
         failure_phase=failure_phase,
         created_from=created_from,
         created_to=created_to,
+        task_ref=task_ref,
     )
     reason_expr = "(task.upstream_diagnostic_json ->> 'reason')" if conn.is_postgres else "NULL"
     rows = conn.execute(

@@ -282,7 +282,8 @@ export type ProviderName =
   | "hifly"
   | "tikhub"
   | "dashscope"
-  | "douyidou";
+  | "douyidou"
+  | "ses";
 
 export type ProviderSettings = {
   provider: ProviderName;
@@ -8616,6 +8617,109 @@ export async function customerListLoginHistory(
     await customerJson<{ items: CustomerSessionEvent[]; total: number }>(
       `/api/customer/sessions/history?limit=${encodeURIComponent(String(limit))}`,
       { credential },
+    )
+  ).body;
+}
+
+// ---------------------------------------------------------------------------
+// EMAIL-RESET-20260928：邮箱绑定与邮箱找回密码。绑定是登录后的自助动作
+// （主账号专属）；找回/重置无会话——丢了密码的人正是登不进来的人。服务端
+// 契约见 server/app/customer_email_routes.py。
+// ---------------------------------------------------------------------------
+
+export type CustomerEmailState = {
+  email: string | null;
+  verified_at: string | null;
+  /** 子账号不能绑定（密码由主账号管理），界面据此不展示引导。 */
+  can_bind: boolean;
+  /** 发信未配置时不引导绑定：绑了也收不到码，只会制造一次失败体验。 */
+  service_available: boolean;
+};
+
+export type CustomerEmailCodeSent = {
+  sent: boolean;
+  expires_in_minutes: number;
+  resend_after_seconds: number;
+};
+
+export type CustomerForgotPasswordResult = {
+  accepted: boolean;
+  message: string;
+  resend_after_seconds: number;
+};
+
+export type CustomerPasswordResetResult = {
+  reset: boolean;
+  sessions_revoked: number;
+};
+
+export async function customerEmailState(
+  credential: CustomerSessionCredential,
+): Promise<CustomerEmailState> {
+  return (
+    await customerJson<CustomerEmailState>("/api/customer/account/email", {
+      credential,
+    })
+  ).body;
+}
+
+export async function customerSendEmailBindCode(
+  credential: CustomerSessionCredential,
+  email: string,
+): Promise<CustomerEmailCodeSent> {
+  return (
+    await customerJson<CustomerEmailCodeSent>(
+      "/api/customer/account/email/send-code",
+      { credential, method: "POST", body: { email } },
+    )
+  ).body;
+}
+
+export async function customerVerifyEmailBindCode(
+  credential: CustomerSessionCredential,
+  input: { email: string; code: string },
+): Promise<CustomerEmailState> {
+  return (
+    await customerJson<CustomerEmailState>(
+      "/api/customer/account/email/verify",
+      {
+        credential,
+        method: "POST",
+        body: input,
+      },
+    )
+  ).body;
+}
+
+/** 无会话：按用户名或邮箱定位账号发验证码；对未知账号同样回 202（防枚举）。 */
+export async function customerForgotPassword(
+  account: string,
+): Promise<CustomerForgotPasswordResult> {
+  return (
+    await customerJson<CustomerForgotPasswordResult>(
+      "/api/customer/password/forgot",
+      { method: "POST", body: { account } },
+    )
+  ).body;
+}
+
+/** 无会话：凭验证码设新密码；成功后服务端撤销该账号全部在线会话。 */
+export async function customerResetPassword(input: {
+  account: string;
+  code: string;
+  newPassword: string;
+}): Promise<CustomerPasswordResetResult> {
+  return (
+    await customerJson<CustomerPasswordResetResult>(
+      "/api/customer/password/reset",
+      {
+        method: "POST",
+        body: {
+          account: input.account,
+          code: input.code,
+          new_password: input.newPassword,
+        },
+      },
     )
   ).body;
 }

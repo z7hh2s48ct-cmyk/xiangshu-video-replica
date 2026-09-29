@@ -7,7 +7,7 @@ import io
 import json
 from datetime import date
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 import psycopg
@@ -291,6 +291,7 @@ def operations(
     service: str | None = None,
     module: str | None = None,
     provider: str | None = None,
+    attention: Literal["pending", "unknown_cost"] | None = None,
     limit: int = Query(default=100, ge=1, le=5000),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
@@ -303,6 +304,7 @@ def operations(
             service=service,
             module=module,
             provider=provider,
+            attention=attention,
             limit=limit,
             offset=offset,
         )

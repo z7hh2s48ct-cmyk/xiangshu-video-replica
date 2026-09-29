@@ -9,7 +9,7 @@ import {
 } from "../api.admin";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { PageBanner } from "./ui/PageBanner";
-import { platformLabel } from "./ui/vocabulary";
+import { formatDateTime, platformLabel } from "./ui/vocabulary";
 
 // 任务书 C（2026-09-18）第 2 项：客户详情设备视图。
 // 只接 unbind 与 revoke-credential —— approve/replace-device 属旧配对审批链，
@@ -49,13 +49,6 @@ const ACTION_COPY: Record<
       `吊销后 ${device.device_id} 的凭据永久失效且不可恢复（后端置为 REVOKED 终态）。`,
   },
 };
-
-function formatDateTime(value: string | null | undefined) {
-  if (!value) return "—";
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return parsed.toLocaleString("zh-CN", { hour12: false });
-}
 
 export function CustomerDeviceSection({
   userId,

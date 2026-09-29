@@ -901,6 +901,88 @@ def test_statistics_leave_profit_pending_when_cost_not_configured(client, route_
         assert report["totals"]["profit_fen"] is None
 
 
+def test_operation_attention_filter_matches_dashboard_todo_counts(client, route_state):
+    """总览待办「待结算」「成本待核对」点进去的清单必须与计数同口径。"""
+    _, user_id = account(client)
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        raw.execute("INSERT INTO billing_tariffs(service, unit_cost_fen) VALUES ('analysis', 2.5)")
+        pending = accept_operation(
+            conn, user_id=user_id, service="analysis", source_id="pending", units=1
+        )
+        known = accept_operation(
+            conn, user_id=user_id, service="analysis", source_id="known", units=1
+        )
+        record_attempt(conn, operation_id=known, attempt_key="a", usage=1)
+        finish_operation(conn, operation_id=known, units=1, succeeded=True)
+        unknown = accept_operation(
+            conn, user_id=user_id, service="rewrite", source_id="unknown", units=1
+        )
+        record_attempt(conn, operation_id=unknown, attempt_key="a", usage=1)
+        finish_operation(conn, operation_id=unknown, units=1, succeeded=True)
+        window = {"start": date(2000, 1, 1), "end": date(2099, 1, 1)}
+
+        pending_ids = {row["id"] for row in operation_rows(conn, **window, attention="pending")}
+        unknown_ids = {
+            row["id"] for row in operation_rows(conn, **window, attention="unknown_cost")
+        }
+        all_ids = {row["id"] for row in operation_rows(conn, **window)}
+
+        assert pending_ids == {pending}
+        assert unknown_ids == {unknown}
+        assert {pending, known, unknown} <= all_ids
+        report = statistics(conn, **window, grain="year")
+        assert report["totals"]["pending_count"] == len(pending_ids)
+        assert report["totals"]["unknown_cost_count"] == len(unknown_ids)
+        with pytest.raises(ValueError):
+            operation_rows(conn, **window, attention="everything")
+
+
+def test_operations_route_carries_the_attention_filter(pricing_client, route_state):
+    """attention 从 HTTP 层到清单同口径：点「待结算 / 成本待核对」落到这些行。
+
+    函数级用例已锁定 ``operation_rows`` 的口径；这里补路由级：query 参数经
+    Literal 校验后落到同一份清单，非法值 422 而不是悄悄算全量。
+    """
+    from app.billing_routes import router
+
+    pricing_client.app.include_router(router)
+    _, user_id = account(pricing_client)
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        raw.execute("INSERT INTO billing_tariffs(service, unit_cost_fen) VALUES ('analysis', 2.5)")
+        pending = accept_operation(
+            conn, user_id=user_id, service="analysis", source_id="route-pending", units=1
+        )
+        known = accept_operation(
+            conn, user_id=user_id, service="analysis", source_id="route-known", units=1
+        )
+        record_attempt(conn, operation_id=known, attempt_key="a", usage=1)
+        finish_operation(conn, operation_id=known, units=1, succeeded=True)
+        unknown = accept_operation(
+            conn, user_id=user_id, service="rewrite", source_id="route-unknown", units=1
+        )
+        record_attempt(conn, operation_id=unknown, attempt_key="a", usage=1)
+        finish_operation(conn, operation_id=unknown, units=1, succeeded=True)
+    admin = admin_login(pricing_client, route_state)
+    window = "start=2000-01-01&end=2099-01-01"
+
+    def listed(suffix: str) -> set[str]:
+        response = pricing_client.get(
+            f"/api/control/billing/operations?{window}{suffix}", headers=admin
+        )
+        assert response.status_code == 200, response.text
+        return {item["id"] for item in response.json()["items"]}
+
+    assert listed("&attention=pending") == {pending}
+    assert listed("&attention=unknown_cost") == {unknown}
+    assert listed("") == {pending, known, unknown}
+    rejected = pricing_client.get(
+        f"/api/control/billing/operations?{window}&attention=everything", headers=admin
+    )
+    assert rejected.status_code == 422
+
+
 def test_shanghai_range_includes_leap_day_and_has_exclusive_upper_bound():
     lower, upper = date_bounds(date(2024, 2, 29), date(2024, 2, 29))
     assert lower.isoformat() == "2024-02-29T00:00:00+08:00"

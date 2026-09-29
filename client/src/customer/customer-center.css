@@ -478,6 +478,17 @@
 .uc-dialog h2 {
   margin-bottom: 14px;
 }
+/* 绑定邮箱（EmailBindingSection）：状态行右侧的动作按钮与表单动作行。 */
+.uc-email .uc-preference > button {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.uc-email__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 24px;
+}
 .uc-dialog-actions {
   display: flex;
   justify-content: flex-end;

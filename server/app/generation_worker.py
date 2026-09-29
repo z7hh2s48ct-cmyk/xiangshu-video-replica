@@ -38,6 +38,7 @@ from app.db_pg import (
     validate_customer_production,
 )
 from app.db_portable import BusinessConnection
+from app.external_calls import external_call_context
 from app.first_frame_routes import get_first_frame_quality_inspector, get_image_provider
 from app.first_frames import (
     FirstFrameQualityInspector,
@@ -84,6 +85,7 @@ from app.image_tasks import (
     perform_character_sheet_task,
     prepare_character_sheet_task,
     prepare_first_frame_task,
+    rate_limit_backoff_seconds,
     record_image_task_provider,
     renew_image_task_lease,
     run_first_frame_task_outside_transaction,
@@ -241,12 +243,14 @@ def _run_audio_lease(
         with connection() as conn:
             work = prepare_script_from_audio_task(conn, lease=lease, storage=storage)
         submission_started = work.provider_task_id is not None
-        result = perform_script_from_audio_task(
-            work,
-            before_provider_call=before_provider_call,
-            on_submitted=checkpoint,
-            heartbeat=checkpoint,
-        )
+        # 方案 P0-9：语音转写的第三方调用归到本条任务（含轮询恢复），失败原因可查。
+        with external_call_context("SCRIPT_FROM_AUDIO", lease.id, attempt=lease.attempt):
+            result = perform_script_from_audio_task(
+                work,
+                before_provider_call=before_provider_call,
+                on_submitted=checkpoint,
+                heartbeat=checkpoint,
+            )
         with connection() as conn:
             complete_script_from_audio_task(
                 conn,
@@ -388,7 +392,10 @@ def _run_pg_source_frame_once(
                 override=quality_inspector,
                 shared_inspector=shared_inspector,
             )
-        with billing_context(lease.id):
+        with (
+            billing_context(lease.id),
+            external_call_context("SOURCE_FRAME", lease.id, attempt=lease.attempt),
+        ):
             stored = perform_source_frame_extraction(
                 plan,
                 storage=storage,
@@ -429,6 +436,17 @@ def _run_pg_source_frame_once(
 def _is_quality_settings_failure(exc: HTTPException) -> bool:
     detail: dict[str, Any] = exc.detail if isinstance(exc.detail, dict) else {}
     return str(detail.get("code", "")).startswith("FIRST_FRAME_QUALITY_SETTINGS_")
+
+
+def _sleep_rate_limit_backoff(exc: Exception, lease: Any) -> None:
+    """429 错峰退避：必须在数据库事务外 sleep，避免占着连接等限流窗口。
+
+    full jitter 退避同时形成背压，压住同 worker 后续任务的提交节奏；
+    非 429 失败返回 0，不增加任何延迟。
+    """
+    backoff = rate_limit_backoff_seconds(exc, attempt=int(lease.attempt))
+    if backoff > 0:
+        time.sleep(backoff)
 
 
 def _oral_settings_failure(kind: OralWorkKind) -> OralWorkResult:
@@ -487,7 +505,9 @@ def _run_pg_viral_refresh(lease: ViralRefreshLease, storage: StorageAdapter) -> 
     from app.viral_collection import run_viral_collection
 
     try:
-        run_viral_collection(lease, storage)
+        # 方案 P0-9：采集过程中的数据源调用归到本条刷新任务，管理端能按任务查到。
+        with external_call_context("VIRAL_REFRESH", lease.id, attempt=lease.attempt):
+            run_viral_collection(lease, storage)
         with pg_transaction() as raw_conn:
             complete_viral_refresh_task(BusinessConnection.postgres(raw_conn), lease=lease)
     except Exception as exc:
@@ -605,7 +625,12 @@ def run_worker_once(
                     storage=storage,
                     provider=analysis_provider,
                 )
-                with billing_context(analysis_lease.id):
+                with (
+                    billing_context(analysis_lease.id),
+                    external_call_context(
+                        "ANALYSIS", analysis_lease.id, attempt=analysis_lease.attempt
+                    ),
+                ):
                     analysis_result = perform_analysis_task(analysis_work)
                 complete_analysis_task(conn, work=analysis_work, result=analysis_result)
             except Exception as exc:
@@ -627,7 +652,12 @@ def run_worker_once(
                     lease=script_rewrite_lease,
                 )
                 submission_started = True
-                rewrite_result = perform_script_rewrite_task(rewrite_work)
+                with external_call_context(
+                    "SCRIPT_REWRITE",
+                    script_rewrite_lease.id,
+                    attempt=script_rewrite_lease.attempt,
+                ):
+                    rewrite_result = perform_script_rewrite_task(rewrite_work)
                 complete_script_rewrite_task(
                     conn,
                     lease=script_rewrite_lease,
@@ -758,7 +788,14 @@ def run_worker_once(
                     model=prepared.plan.model,
                 )
                 submission_started = prepared.provider_submission is not None
-                with billing_context(first_frame_lease.id):
+                with (
+                    billing_context(first_frame_lease.id),
+                    external_call_context(
+                        "FIRST_FRAME_IMAGE",
+                        first_frame_lease.id,
+                        attempt=first_frame_lease.attempt,
+                    ),
+                ):
                     work, stored = run_first_frame_task_outside_transaction(
                         prepared,
                         storage=first_frame_storage or storage,
@@ -814,7 +851,12 @@ def run_worker_once(
                     model=SIMPLE_CONTACT_SHEET_MODEL,
                 )
                 submission_started = True
-                sheet_generation = perform_character_sheet_task(prepared_sheet)
+                with external_call_context(
+                    "CHARACTER_SHEET_IMAGE",
+                    character_sheet_lease.id,
+                    attempt=character_sheet_lease.attempt,
+                ):
+                    sheet_generation = perform_character_sheet_task(prepared_sheet)
                 complete_character_sheet_task(
                     conn,
                     prepared=prepared_sheet,
@@ -939,7 +981,6 @@ def _run_pg_generation_step(
                         lease=lease,
                         provider_task_id=provider_task_id,
                         provider_request=work.provider_request,
-                        request_hash=work.request_hash,
                     )
 
             work.provider.task_created_observer = persist_created_task
@@ -1013,7 +1054,6 @@ def _run_pg_generation_step(
                 lease=lease,
                 provider_task_id=result.provider_task_id,
                 provider_request=work.provider_request,
-                request_hash=work.request_hash,
                 release_lease=False,
             )
             mark_generation_task_archiving(
@@ -1326,7 +1366,10 @@ def run_pg_worker_once(
                 lease = acquire_generation_task_lease(conn, worker_id=worker_id)
         if lease is not None:
             try:
-                with billing_context(str(lease["id"])):
+                with (
+                    billing_context(str(lease["id"])),
+                    external_call_context("VIDEO", str(lease["id"]), attempt=lease["attempt"]),
+                ):
                     _run_pg_generation_step(
                         lease=lease,
                         storage=generation_storage or storage,
@@ -1405,7 +1448,12 @@ def run_pg_worker_once(
                         resolution="768P",
                         metadata={"resolution_basis": "default_generation_tier"},
                     )
-                with billing_context(analysis_lease.id):
+                with (
+                    billing_context(analysis_lease.id),
+                    external_call_context(
+                        "ANALYSIS", analysis_lease.id, attempt=analysis_lease.attempt
+                    ),
+                ):
                     analysis_result = perform_analysis_task(
                         analysis_work, on_provider_result=record_analysis_response
                     )
@@ -1452,7 +1500,12 @@ def run_pg_worker_once(
                         lease=script_rewrite_lease,
                     )
                 submission_started = True
-                rewrite_result = perform_script_rewrite_task(rewrite_work)
+                with external_call_context(
+                    "SCRIPT_REWRITE",
+                    script_rewrite_lease.id,
+                    attempt=script_rewrite_lease.attempt,
+                ):
+                    rewrite_result = perform_script_rewrite_task(rewrite_work)
                 with pg_transaction() as raw_conn:
                     complete_script_rewrite_task(
                         BusinessConnection.postgres(raw_conn),
@@ -1502,7 +1555,12 @@ def run_pg_worker_once(
                             )
                         ),
                     )
-                with billing_context(reconcile_lease.task_id):
+                with (
+                    billing_context(reconcile_lease.task_id),
+                    external_call_context(
+                        "VIDEO", reconcile_lease.task_id, attempt=reconcile_lease.attempt
+                    ),
+                ):
                     reconcile_outcome = perform_generation_reconcile_operation(
                         reconcile_work,
                         storage=generation_storage or storage,
@@ -1642,7 +1700,14 @@ def run_pg_worker_once(
                             raise RuntimeError("first-frame receipt cost binding is missing")
                         if receipt_cost["status"] == "PENDING":
                             first_frame_cost_id = receipt_cost_id
-                with billing_context(first_frame_lease.id):
+                with (
+                    billing_context(first_frame_lease.id),
+                    external_call_context(
+                        "FIRST_FRAME_IMAGE",
+                        first_frame_lease.id,
+                        attempt=first_frame_lease.attempt,
+                    ),
+                ):
                     work, stored = run_first_frame_task_outside_transaction(
                         prepared,
                         storage=first_frame_storage or storage,
@@ -1663,6 +1728,7 @@ def run_pg_worker_once(
                     )
             except Exception as exc:
                 log_image_task_failure("first_frame_tasks", first_frame_lease, exc)
+                _sleep_rate_limit_backoff(exc, first_frame_lease)
                 if stored is not None and work is not None:
                     from app.first_frames import delete_created_first_frames
 
@@ -1725,7 +1791,12 @@ def run_pg_worker_once(
                         user_id=character_sheet_lease.created_by_user_id,
                     )
                 submission_started = True
-                sheet_generation = perform_character_sheet_task(prepared_sheet)
+                with external_call_context(
+                    "CHARACTER_SHEET_IMAGE",
+                    character_sheet_lease.id,
+                    attempt=character_sheet_lease.attempt,
+                ):
+                    sheet_generation = perform_character_sheet_task(prepared_sheet)
                 character_sheet_cost_usage = 1
                 with pg_transaction() as raw_conn:
                     conn = BusinessConnection.postgres(raw_conn)
@@ -1738,6 +1809,7 @@ def run_pg_worker_once(
                     )
             except Exception as exc:
                 log_image_task_failure("character_sheet_tasks", character_sheet_lease, exc)
+                _sleep_rate_limit_backoff(exc, character_sheet_lease)
                 with pg_transaction() as raw_conn:
                     conn = BusinessConnection.postgres(raw_conn)
                     complete_operation_cost(
