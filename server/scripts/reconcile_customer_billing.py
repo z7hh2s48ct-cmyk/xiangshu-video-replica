@@ -141,8 +141,16 @@ PG_ONLY_TABLES: frozenset[str] = frozenset(
 # Most PG-only tables must be empty before cutover. Rate configuration is the
 # one exception: revision 056 seeds these exact defaults. Any edit, omission,
 # or extra subject is pre-existing target state and must still fail closed.
+# ``alert_settings`` (20260929T1200) is the same kind of exception: the
+# migration inserts its single default row, so a freshly migrated target is
+# never empty.
 PG_ONLY_SEEDED_TABLES: frozenset[str] = frozenset(
-    {"operation_cost_rates", "customer_credit_pricing", "legacy_credit_policy"}
+    {
+        "operation_cost_rates",
+        "customer_credit_pricing",
+        "legacy_credit_policy",
+        "alert_settings",
+    }
 )
 _OPERATION_COST_RATE_SEEDS = (
     ("character_sheet_image", "upstream_cost", "image", None, 5, None),
@@ -856,6 +864,27 @@ def pg_only_table_has_divergent_state(conn: psycopg.Connection[Any], table: str)
             or _row_value(rows[0], "version", 1) != 0
             or _row_value(rows[0], "config_json", 2) is not None
         )
+    if table == "alert_settings":
+        # 单行配置表：迁移写入 id=1 的默认行（接收人为空、30% / 60 分钟 / 5 条、
+        # 无修改人）。被改过或多出行，说明目标库已经有人在用，同样按分歧拒绝。
+        rows = conn.execute(
+            "SELECT id, recipient_user_id, failure_rate_threshold_percent, "
+            "failure_rate_window_minutes, failure_rate_min_sample, updated_by_user_id "
+            "FROM alert_settings"
+        ).fetchall()
+        return len(rows) != 1 or tuple(
+            _row_value(rows[0], name, i)
+            for i, name in enumerate(
+                (
+                    "id",
+                    "recipient_user_id",
+                    "failure_rate_threshold_percent",
+                    "failure_rate_window_minutes",
+                    "failure_rate_min_sample",
+                    "updated_by_user_id",
+                )
+            )
+        ) != (1, None, Decimal(30), 60, 5, None)
     if table not in PG_ONLY_SEEDED_TABLES:
         query = sql.SQL("SELECT COUNT(*) FROM {}").format(sql.Identifier(table))
         return bool(_count_rows(conn, query))

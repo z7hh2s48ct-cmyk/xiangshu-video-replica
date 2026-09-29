@@ -566,6 +566,7 @@ def test_pg_only_cost_tables_have_explicit_cutover_contracts() -> None:
     assert {"daily_external_prices", "operation_cost_records"} <= PG_ONLY_TABLES
     assert "viral_script_cache" in PG_ONLY_TABLES
     assert "operation_cost_rates" in PG_ONLY_SEEDED_TABLES
+    assert "alert_settings" in PG_ONLY_SEEDED_TABLES
     assert "viral_runtime_controls" in SEED_TABLES
 
 
@@ -1078,6 +1079,30 @@ def test_real_pg_import_rejects_modified_cost_rate_seed(tmp_path: Path) -> None:
                 "UPDATE operation_cost_rates SET unit_price_fen = 999 "
                 "WHERE subject = 'video_generation_768p'"
             )
+            conn.commit()
+        with pytest.raises(MigrationSafetyError, match="table contract differs"):
+            migrate_snapshot(snapshot, dsn)
+        with psycopg.connect(dsn) as conn:
+            assert conn.execute("SELECT count(*) FROM users").fetchone()[0] == 0
+    finally:
+        _drop_database(name)
+
+
+@pg_only
+def test_real_pg_import_rejects_modified_alert_settings_seed(tmp_path: Path) -> None:
+    """``alert_settings`` 带迁移写入的默认行：默认值放行（其余导入用例已覆盖），
+    被改过的阈值说明目标库已有人在用，必须拒绝且不导入任何业务行。"""
+    import psycopg
+
+    source = tmp_path / "source.db"
+    _create_head_source(source)
+    snapshot = create_readonly_snapshot(source, tmp_path / "snapshot.db")
+    name = "p1_alert_settings_guard"
+    dsn = _create_database(name)
+    try:
+        _upgrade_pg(dsn)
+        with psycopg.connect(dsn) as conn:
+            conn.execute("UPDATE alert_settings SET failure_rate_threshold_percent = 50")
             conn.commit()
         with pytest.raises(MigrationSafetyError, match="table contract differs"):
             migrate_snapshot(snapshot, dsn)
