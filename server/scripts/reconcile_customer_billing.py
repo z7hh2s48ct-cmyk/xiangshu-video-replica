@@ -230,6 +230,27 @@ PG_ONLY_COLUMNS: dict[str, frozenset[str]] = {
     # 诊断列仅存在于 PG（非 postgresql 方言 return，SQLite lane 不加此列）。
     # 同链的 20260922T1600 request_id 两泳道都加，故不在此豁免。
     "analysis_tasks": frozenset({"upstream_diagnostic_json"}),
+    # 20260928T1000_external_call_response_log: external_call_logs 的排查列
+    # （任务归属、脱敏请求摘要、原始响应与第三方任务号）仅存在于 PG
+    # （非 postgresql 方言 return，SQLite lane 不加这些列）。
+    "external_call_logs": frozenset(
+        {
+            "task_type",
+            "task_id",
+            "attempt",
+            "method",
+            "url_redacted",
+            "request_summary_json",
+            "outcome",
+            "response_headers_json",
+            "response_body",
+            "response_body_bytes",
+            "provider_error_code",
+            "provider_message",
+            "provider_task_id",
+            "request_id",
+        }
+    ),
 }
 DEFAULT_DIGEST_BATCH_SIZE = 1000
 _DIGEST_MODULUS = 1 << 256

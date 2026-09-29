@@ -35,6 +35,7 @@ table stores a real actor id; machine-only rows surface with an empty actor.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from fastapi import APIRouter
 
@@ -62,14 +63,14 @@ _UNION_SQL = """
     SELECT aa.id, 'ADMIN_ADJUSTMENT', aa.admin_user_id, u.username,
            aa.target_user_id, aa.source_document_type, aa.source_document_ref,
            aa.reason, aa.request_id, aa.created_at::timestamptz,
-           ''::text, NULL::integer, NULL::integer, NULL::jsonb
+           ''::text, NULL::integer, NULL::integer, NULL::jsonb, 'admin'::text
     FROM admin_adjustments aa
     JOIN users u ON u.id = aa.admin_user_id
     UNION ALL
     SELECT de.id, 'ADMIN_DEVICE_' || de.event, de.admin_user_id, u.username,
            de.target_user_id, 'DEVICE', COALESCE(de.device_id, ''),
            de.reason, de.request_id, de.created_at::timestamptz,
-           ''::text, NULL::integer, NULL::integer, NULL::jsonb
+           ''::text, NULL::integer, NULL::integer, NULL::jsonb, 'admin'::text
     FROM admin_device_events de
     JOIN users u ON u.id = de.admin_user_id
     UNION ALL
@@ -78,7 +79,7 @@ _UNION_SQL = """
            cse.user_id, 'CUSTOMER_SESSION', cse.session_id,
            COALESCE(cse.reason, ''), COALESCE(cse.request_id, ''),
            cse.created_at::timestamptz,
-           ''::text, NULL::integer, NULL::integer, NULL::jsonb
+           ''::text, NULL::integer, NULL::integer, NULL::jsonb, 'admin'::text
     FROM customer_session_events cse
     LEFT JOIN users u5 ON u5.id = cse.actor_user_id
     WHERE cse.actor_user_id IS NOT NULL AND cse.actor_user_id <> cse.user_id
@@ -87,7 +88,7 @@ _UNION_SQL = """
            COALESCE(ae.actor_user_id, ''), COALESCE(u2.username, ''),
            COALESCE(code.bound_user_id, ''), 'ACTIVATION_CODE', ae.code_id,
            COALESCE(ae.reason, ''), COALESCE(ae.request_id, ''), ae.created_at::timestamptz,
-           ''::text, NULL::integer, NULL::integer, NULL::jsonb
+           ''::text, NULL::integer, NULL::integer, NULL::jsonb, 'admin'::text
     FROM activation_code_events ae
     LEFT JOIN users u2 ON u2.id = ae.actor_user_id
     LEFT JOIN activation_codes code ON code.id = ae.code_id
@@ -96,7 +97,7 @@ _UNION_SQL = """
            COALESCE(code.bound_user_id, ''), 'ACTIVATION_CODE_DELIVERY',
            COALESCE(d.external_order_ref, ''), COALESCE(d.note, ''),
            '', d.delivered_at::timestamptz,
-           ''::text, NULL::integer, NULL::integer, NULL::jsonb
+           ''::text, NULL::integer, NULL::integer, NULL::jsonb, 'admin'::text
     FROM activation_code_deliveries d
     JOIN users u3 ON u3.id = d.delivered_by_user_id
     LEFT JOIN activation_codes code ON code.id = d.code_id
@@ -104,7 +105,9 @@ _UNION_SQL = """
     SELECT al.id, al.action, COALESCE(al.actor_user_id, ''),
            COALESCE(u4.username, ''),
            CASE WHEN al.entity_type IN ('user', 'customer_unit_price')
-                THEN al.entity_id ELSE '' END,
+                THEN al.entity_id
+                WHEN u4.role NOT IN ('admin', 'auditor') THEN al.actor_user_id
+                ELSE '' END,
            al.entity_type, al.entity_id,
            COALESCE(al.metadata_json::json ->> 'reason', ''),
            COALESCE(al.metadata_json::json ->> 'request_id', ''),
@@ -143,7 +146,9 @@ _UNION_SQL = """
                        'new', al.metadata_json::jsonb -> 'new'
                    )
                ELSE NULL
-           END
+           END,
+           CASE WHEN al.actor_user_id IS NULL OR u4.role IN ('admin', 'auditor')
+                THEN 'admin' ELSE 'customer' END
     FROM audit_logs al
     LEFT JOIN users u4 ON u4.id = al.actor_user_id
 """
@@ -165,17 +170,25 @@ def list_audit_log(
     target_username: str | None = None,
     created_from: str | None = None,
     created_to: str | None = None,
+    scope: Literal["admin", "customer", "all"] = "admin",
     limit: int = DEFAULT_LIST_LIMIT,
     offset: int = 0,
 ) -> dict[str, object]:
     """List the unified audit trail with pagination and combined filters.
 
     Both admin and auditor roles can access this endpoint (read-only).
+
+    ``scope`` 默认 ``admin``：客户在工作台的日常动作（建项目、读素材等）也写在
+    ``audit_logs``，整表并入会淹没管理员操作（方案 P0-3）；客户详情的「操作
+    记录」用 ``scope=customer`` + ``target_user_id`` 查看某位客户自己的动作。
     """
     bounded_limit, bounded_offset = page_bounds(limit, offset, max_limit=MAX_LIST_LIMIT)
 
     clauses: list[str] = []
     params: list[object] = []
+    if scope != "all":
+        clauses.append("ev.actor_scope = %s")
+        params.append(scope)
     if event_type:
         clauses.append("ev.event_type = %s")
         params.append(event_type)
@@ -213,7 +226,8 @@ def list_audit_log(
                                           source_document_ref, reason,
                                           request_id, created_at,
                                           change_subject, old_unit_price_fen,
-                                          new_unit_price_fen, change_detail)
+                                          new_unit_price_fen, change_detail,
+                                          actor_scope)
                 LEFT JOIN users tu ON tu.id = ev.target_user_id
                 {where}
                 ORDER BY ev.created_at DESC, ev.event_id
@@ -238,7 +252,8 @@ def list_audit_log(
                     event_id, event_type, actor_user_id, actor_username,
                     target_user_id, source_document_type, source_document_ref,
                     reason, request_id, created_at, change_subject,
-                    old_unit_price_fen, new_unit_price_fen, change_detail)
+                    old_unit_price_fen, new_unit_price_fen, change_detail,
+                    actor_scope)
                 LEFT JOIN users tu ON tu.id = ev.target_user_id
                 {where}
                 """,

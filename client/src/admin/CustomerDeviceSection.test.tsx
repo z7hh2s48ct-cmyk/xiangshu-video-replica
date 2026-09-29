@@ -56,6 +56,8 @@ describe("CustomerDeviceSection", () => {
     expect(screen.getByText("Windows")).toBeInTheDocument();
     expect(screen.getByText("在线")).toBeInTheDocument();
     expect(screen.getByText("已绑定 1 台")).toBeInTheDocument();
+    // 时间列锁定北京时间口径（Asia/Shanghai）：10:00 UTC → 18:00。
+    expect(screen.getByText("2026/9/1 18:00:00")).toBeInTheDocument();
 
     const url = String(fetchMock.mock.calls[0]?.[0]);
     expect(url).toContain("/api/control/devices?");

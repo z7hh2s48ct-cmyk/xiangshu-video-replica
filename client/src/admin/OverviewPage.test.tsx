@@ -105,10 +105,16 @@ describe("OverviewPage", () => {
     expect(
       screen.queryByRole("button", { name: "快速发码" }),
     ).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "后台加款" }));
+    // P0-1：收款开通与赠送分开入口，「后台加款」字样不再出现。
+    expect(
+      screen.queryByRole("button", { name: "后台加款" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "开通套餐（已收款）" }));
+    expect(onNavigate).toHaveBeenCalledWith("customerPackage");
+    fireEvent.click(screen.getByRole("button", { name: "赠送积分" }));
     expect(onNavigate).toHaveBeenCalledWith("customerAdjustments");
-    fireEvent.click(screen.getByRole("button", { name: "发放赠送积分" }));
-    expect(onNavigate).toHaveBeenCalledWith("customerAdjustments");
+    fireEvent.click(screen.getByRole("button", { name: "退款扣减" }));
+    expect(onNavigate).toHaveBeenCalledWith("customerRefund");
     fireEvent.click(screen.getByRole("button", { name: "成本核对" }));
     expect(onNavigate).toHaveBeenCalledWith("costDetails");
 
@@ -124,13 +130,14 @@ describe("OverviewPage", () => {
     const pendingOps = screen.getByText("今日操作待结算").closest("li");
     expect(pendingOps).toHaveTextContent("4");
     expect(pendingOps).toHaveTextContent("当日金额尚未定稿");
+    // P0-5：这两项是计费操作口径，落到经营分析而不是资金流水。
     fireEvent.click(within(pendingOps as HTMLElement).getByRole("button"));
-    expect(onNavigate).toHaveBeenCalledWith("funds");
+    expect(onNavigate).toHaveBeenCalledWith("pendingOperations");
 
     const unknownRevenue = screen.getByText("今日收入未确定").closest("li");
     expect(unknownRevenue).toHaveTextContent("1");
     fireEvent.click(within(unknownRevenue as HTMLElement).getByRole("button"));
-    expect(onNavigate).toHaveBeenCalledWith("funds");
+    expect(onNavigate).toHaveBeenCalledWith("unknownRevenue");
 
     // 拆解失败单列一行，并把最集中的上游原因摆在行上。
     expect(screen.getByText("拆解失败待排查")).toBeInTheDocument();
@@ -144,6 +151,26 @@ describe("OverviewPage", () => {
     expect(onNavigate).toHaveBeenCalledWith("analysisFailures");
   });
 
+  it("lets auditors open todo lists but hides quick write actions", async () => {
+    const onNavigate = vi.fn();
+    installFetch();
+    render(<OverviewPage onNavigate={onNavigate} readOnly />);
+
+    const failedTasks = (await screen.findByText("失败任务待处理")).closest(
+      "li",
+    );
+    fireEvent.click(
+      within(failedTasks as HTMLElement).getByRole("button", {
+        name: "去查看",
+      }),
+    );
+    expect(onNavigate).toHaveBeenCalledWith("failedGenerationRecords");
+    expect(screen.queryByRole("button", { name: "去处理" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "开通套餐（已收款）" }),
+    ).toBeNull();
+  });
+
   it("shows an error banner when the summary request fails", async () => {
     vi.stubGlobal(
       "fetch",
@@ -155,6 +182,7 @@ describe("OverviewPage", () => {
   });
 
   it("keeps unsettled and legacy costs unknown in cards and chart", async () => {
+    const onNavigate = vi.fn();
     installFetch({
       ...summaryPayload,
       today: {
@@ -167,8 +195,12 @@ describe("OverviewPage", () => {
         legacy_settlements: 1,
       },
       trend: [{ day: "2026-09-05", succeeded: 1, failed: 0, cost_fen: null }],
+      todos: {
+        ...summaryPayload.todos,
+        unknown_cost_records: 3,
+      },
     });
-    render(<OverviewPage />);
+    render(<OverviewPage onNavigate={onNavigate} />);
     const cost = await screen.findByRole("region", { name: "今日成本" });
     expect(cost).toHaveTextContent("待核对");
     expect(cost).not.toHaveTextContent("¥0.00");
@@ -180,5 +212,12 @@ describe("OverviewPage", () => {
     expect(
       screen.getByText(/2 条历史成本、1 条历史结算待核对/),
     ).toBeInTheDocument();
+    // P0-5 收口：KpiCard 的「待核对」不是一个终点，待办行要能一键落到
+    // 条数同口径的 attention=unknown_cost 清单（AdminApp 三层映射已就绪）。
+    const unknownCost = screen.getByText("今日成本待核对").closest("li");
+    expect(unknownCost).toHaveTextContent("3");
+    expect(unknownCost).toHaveTextContent("成本金额尚未确定");
+    fireEvent.click(within(unknownCost as HTMLElement).getByRole("button"));
+    expect(onNavigate).toHaveBeenCalledWith("unknownCost");
   });
 });

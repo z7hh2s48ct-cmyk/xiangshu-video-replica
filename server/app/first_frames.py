@@ -28,6 +28,7 @@ from app.character_reference_matching import (
 )
 from app.characters import character_is_available, get_project_main_character, read_character
 from app.db_portable import BusinessConnection
+from app.external_calls import endpoint_from_url, recorded_urlopen
 from app.net_safety import FAKE_IP_NETWORK
 from app.permissions import (
     require_asset_access,
@@ -631,14 +632,18 @@ class UrllibApilioTransport:
     ) -> tuple[bytes, Mapping[str, str]]:
         try:
             opener = build_opener(NoRedirectHandler())
-            with opener.open(request, timeout=timeout_seconds or self.timeout_seconds) as response:
-                content_length = response.headers.get("Content-Length")
-                if content_length and int(content_length) > MAX_PROVIDER_IMAGE_BYTES:
-                    raise ImageProviderFailed("Apilio response exceeds the image size limit")
-                body = response.read(MAX_PROVIDER_IMAGE_BYTES + 1)
-                if len(body) > MAX_PROVIDER_IMAGE_BYTES:
-                    raise ImageProviderFailed("Apilio response exceeds the image size limit")
-                return body, dict(response.headers.items())
+            # 记录每次调用的原始响应，图片失败原因可在管理端查到（方案 P0-9）。
+            body, headers, _status = recorded_urlopen(
+                request,
+                timeout=timeout_seconds or self.timeout_seconds,
+                provider="apilio",
+                endpoint=endpoint_from_url(request.full_url),
+                opener=opener.open,
+                read_limit=MAX_PROVIDER_IMAGE_BYTES + 1,
+            )
+            if len(body) > MAX_PROVIDER_IMAGE_BYTES:
+                raise ImageProviderFailed("Apilio response exceeds the image size limit")
+            return body, headers
         except HTTPError as exc:
             logger.warning("Apilio image request failed with HTTP status %s", exc.code)
             if exc.code == 429 or exc.code >= 500:

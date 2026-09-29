@@ -1834,8 +1834,54 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** List Generation Records */
+    /**
+     * List Generation Records
+     * @description ``task_ref``：我方任务编号、8 位短编号、第三方任务号或第三方请求编号，
+     *     任填一个都落到同一条记录（方案 P0-12）。
+     */
     get: operations["list_generation_records_api_control_generation_records_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/generation-records/{record_type}/{record_id}/calls": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Generation Record Calls
+     * @description 某条生成记录（或充值订单）的全部第三方接口调用，按时间顺序（方案 P0-9）。
+     */
+    get: operations["list_generation_record_calls_api_control_generation_records__record_type___record_id__calls_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/external-calls/{call_id}/response": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Read External Call Response
+     * @description 读取一次调用的原始响应（已脱敏）；每次查看都写高敏审计。
+     *
+     *     审计员只能看调用概要：原始响应可能含客户内容，不对只读角色开放。
+     */
+    get: operations["read_external_call_response_api_control_external_calls__call_id__response_get"];
     put?: never;
     post?: never;
     delete?: never;
@@ -1858,6 +1904,9 @@ export interface paths {
      *     生成记录列表是分页的，管理端无法靠自己汇总，「筛选后 3 条失败」与「聚合里
      *     还有 12 条」会互相打脸；因此聚合与列表共用同一批过滤器，并额外回答「拆解
      *     为什么失败、能不能重试」——这正是 2026-09-20 事故里完全缺失的视角。
+     *
+     *     ``task_ref`` 与列表同一口径（方案 P0-12）：给了编号就必须落到同一条记录，
+     *     否则列表能搜到、聚合却还算全量，两边数字又对不上。
      */
     get: operations["summarize_generation_records_api_control_generation_records_summary_get"];
     put?: never;
@@ -1982,8 +2031,8 @@ export interface paths {
      *     幂等键不是仪式：一次网络歧义重试若变成第二次付费调用就是真实的重复扣费，
      *     快照层让重放直接回放首次结果（`X-Idempotent-Replay: true`）。
      *
-     *     审计写在探针**成功返回之后**：探针抛错（含当前真实供应商客户端尚未接入的
-     *     501 存根）时没有任何付费动作发生，也就没有可 attest 的事实；而且写契约的
+     *     审计写在探针**成功返回之后**：探针抛错（含尚未接入真实客户端的服务的 501 存根、
+     *     以及提交结果不确定的 502）时没有可供 attest 的成功事实；而且写契约的
      *     事务语义会让抛错前的写入回滚，提前写审计反而会得到「开发态留下、生产态被
      *     回滚」的不一致。
      */
@@ -3379,6 +3428,10 @@ export interface paths {
      * @description List the unified audit trail with pagination and combined filters.
      *
      *     Both admin and auditor roles can access this endpoint (read-only).
+     *
+     *     ``scope`` 默认 ``admin``：客户在工作台的日常动作（建项目、读素材等）也写在
+     *     ``audit_logs``，整表并入会淹没管理员操作（方案 P0-3）；客户详情的「操作
+     *     记录」用 ``scope=customer`` + ``target_user_id`` 查看某位客户自己的动作。
      */
     get: operations["list_audit_log_api_control_audit_log_get"];
     put?: never;
@@ -8001,6 +8054,8 @@ export interface components {
       record_type:
         | "VIDEO"
         | "ORAL_VIDEO"
+        | "ORAL_AVATAR"
+        | "ORAL_VOICE"
         | "FIRST_FRAME_IMAGE"
         | "CHARACTER_SHEET_IMAGE"
         | "CHARACTER_VIEW_IMAGE"
@@ -8063,6 +8118,12 @@ export interface components {
       upstream_status?: number | null;
       /** Upstream Reason */
       upstream_reason?: string | null;
+      /** Advice */
+      advice?: string | null;
+      /** Provider Error Code */
+      provider_error_code?: string | null;
+      /** Provider Message */
+      provider_message?: string | null;
     };
     /** ControlGenerationRecordPage */
     ControlGenerationRecordPage: {
@@ -8894,6 +8955,72 @@ export interface components {
        */
       max_revenue_fen?: number | null;
     };
+    /** ExternalCallList */
+    ExternalCallList: {
+      /** Items */
+      items: components["schemas"]["ExternalCallSummary"][];
+      /** Total */
+      total: number;
+    };
+    /** ExternalCallResponse */
+    ExternalCallResponse: {
+      /** Call Id */
+      call_id: string;
+      /** Response Headers */
+      response_headers: {
+        [key: string]: string;
+      } | null;
+      /** Response Body */
+      response_body: string | null;
+      /** Response Body Bytes */
+      response_body_bytes: number | null;
+      /** Truncated */
+      truncated: boolean;
+    };
+    /**
+     * ExternalCallSummary
+     * @description 一次第三方接口调用的概要（不含响应体）。
+     */
+    ExternalCallSummary: {
+      /** Call Id */
+      call_id: string;
+      /** Created At */
+      created_at: string;
+      /** Provider */
+      provider: string;
+      /** Model */
+      model: string | null;
+      /** Endpoint */
+      endpoint: string;
+      /** Method */
+      method: string | null;
+      /** Url */
+      url: string | null;
+      /** Attempt */
+      attempt: number | null;
+      /** Http Status */
+      http_status: number | null;
+      /** Latency Ms */
+      latency_ms: number | null;
+      /** Outcome */
+      outcome: string | null;
+      /** Provider Task Id */
+      provider_task_id: string | null;
+      /** Provider Request Id */
+      provider_request_id: string | null;
+      /** Provider Error Code */
+      provider_error_code: string | null;
+      /** Provider Message */
+      provider_message: string | null;
+      /** Error Message */
+      error_message: string | null;
+      /** Request Summary */
+      request_summary?: unknown;
+      /** Response Body Bytes */
+      response_body_bytes: number | null;
+      /** Has Response Body */
+      has_response_body: boolean;
+    };
     /** ExtractSourceFramesRequest */
     ExtractSourceFramesRequest: {
       /** Asset Id */
@@ -9212,6 +9339,8 @@ export interface components {
       record_type:
         | "VIDEO"
         | "ORAL_VIDEO"
+        | "ORAL_AVATAR"
+        | "ORAL_VOICE"
         | "FIRST_FRAME_IMAGE"
         | "CHARACTER_SHEET_IMAGE"
         | "CHARACTER_VIEW_IMAGE"
@@ -16983,6 +17112,8 @@ export interface operations {
           | (
               | "VIDEO"
               | "ORAL_VIDEO"
+              | "ORAL_AVATAR"
+              | "ORAL_VOICE"
               | "FIRST_FRAME_IMAGE"
               | "CHARACTER_SHEET_IMAGE"
               | "CHARACTER_VIEW_IMAGE"
@@ -16994,6 +17125,7 @@ export interface operations {
         failure_phase?: string | null;
         created_from?: string | null;
         created_to?: string | null;
+        task_ref?: string | null;
         limit?: number;
         offset?: number;
       };
@@ -17025,6 +17157,84 @@ export interface operations {
       };
     };
   };
+  list_generation_record_calls_api_control_generation_records__record_type___record_id__calls_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Control-Proxy-Token"?: string | null;
+      };
+      path: {
+        record_type:
+          | "VIDEO"
+          | "ORAL_VIDEO"
+          | "ORAL_AVATAR"
+          | "ORAL_VOICE"
+          | "FIRST_FRAME_IMAGE"
+          | "CHARACTER_SHEET_IMAGE"
+          | "CHARACTER_VIEW_IMAGE"
+          | "SOURCE_FRAME_AI_SCORE"
+          | "SOURCE_FRAME_PROCESS"
+          | "ANALYSIS"
+          | "RECHARGE_ORDER";
+        record_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ExternalCallList"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_external_call_response_api_control_external_calls__call_id__response_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Control-Proxy-Token"?: string | null;
+      };
+      path: {
+        call_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ExternalCallResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   summarize_generation_records_api_control_generation_records_summary_get: {
     parameters: {
       query?: {
@@ -17034,6 +17244,8 @@ export interface operations {
           | (
               | "VIDEO"
               | "ORAL_VIDEO"
+              | "ORAL_AVATAR"
+              | "ORAL_VOICE"
               | "FIRST_FRAME_IMAGE"
               | "CHARACTER_SHEET_IMAGE"
               | "CHARACTER_VIEW_IMAGE"
@@ -17045,6 +17257,7 @@ export interface operations {
         failure_phase?: string | null;
         created_from?: string | null;
         created_to?: string | null;
+        task_ref?: string | null;
       };
       header?: {
         "X-Control-Proxy-Token"?: string | null;
@@ -18535,6 +18748,7 @@ export interface operations {
         service?: string | null;
         module?: string | null;
         provider?: string | null;
+        attention?: ("pending" | "unknown_cost") | null;
         limit?: number;
         offset?: number;
       };
@@ -19938,6 +20152,7 @@ export interface operations {
         target_username?: string | null;
         created_from?: string | null;
         created_to?: string | null;
+        scope?: "admin" | "customer" | "all";
         limit?: number;
         offset?: number;
       };

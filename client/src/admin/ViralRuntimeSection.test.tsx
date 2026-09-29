@@ -69,7 +69,12 @@ describe("ViralRuntimeSection", () => {
       target: { value: "1" },
     });
     fireEvent.click(screen.getByRole("button", { name: "保存采集设置" }));
-    expect(screen.queryByLabelText("操作原因")).not.toBeInTheDocument();
+    // P0-8：原因由操作人填写，空原因不能提交。
+    fireEvent.click(screen.getByRole("button", { name: "确认更新" }));
+    expect(await screen.findByText("请填写操作原因")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("操作原因"), {
+      target: { value: "新增庭院类关键词备货" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "确认更新" }));
     await screen.findByText("定时采集设置已更新。");
     const patch = fetchMock.mock.calls.find(
@@ -81,7 +86,7 @@ describe("ViralRuntimeSection", () => {
       ],
       per_keyword_limit: 12,
       collection_interval_days: 1,
-      reason: "更新爆款视频采集设置",
+      reason: "新增庭院类关键词备货",
       confirm: true,
     });
   });
@@ -160,6 +165,9 @@ describe("ViralRuntimeSection", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "暂停采集" }));
     await waitFor(() => expect(reads).toBe(2), { timeout: 4500 });
+    fireEvent.change(screen.getByLabelText("操作原因"), {
+      target: { value: "国庆期间暂停采集" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "确认更新" }));
     expect(
       await screen.findByRole("button", { name: "恢复采集" }),
@@ -173,7 +181,7 @@ describe("ViralRuntimeSection", () => {
     ).toBeInTheDocument();
   });
 
-  it("直接确认暂停采集并自动记录操作说明", async () => {
+  it("暂停采集时写入操作人填写的原因", async () => {
     setAdminCsrfToken("csrf-viral");
     const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
       if (init?.method === "PATCH") {
@@ -185,7 +193,9 @@ describe("ViralRuntimeSection", () => {
     render(<ViralRuntimeSection />);
 
     fireEvent.click(await screen.findByRole("button", { name: "暂停采集" }));
-    expect(screen.queryByLabelText("操作原因")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("操作原因"), {
+      target: { value: "国庆期间暂停采集" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "确认更新" }));
 
     expect(
@@ -199,7 +209,7 @@ describe("ViralRuntimeSection", () => {
       collection_enabled: false,
       import_enabled: true,
       confirm: true,
-      reason: "更新爆款视频采集开关",
+      reason: "国庆期间暂停采集",
     });
   });
 });

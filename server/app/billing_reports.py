@@ -51,7 +51,12 @@ def operation_rows(
     limit: int = 5000,
     offset: int = 0,
     operation_id: str | None = None,
+    attention: str | None = None,
 ) -> list[dict[str, Any]]:
+    # 总览待办「今日操作待结算」「成本待核对」要落到条数一致的清单上，
+    # 所以筛选口径与下面 cost_fen 的判定共用同一组表达式。
+    if attention not in (None, "pending", "unknown_cost"):
+        raise ValueError(f"unsupported attention filter: {attention}")
     lower, upper = date_bounds(start, end)
     # Aggregate provider attempts before joining the single revenue fact.
     unmetered = UNMETERED_DELIVERED_CHARGE.format(calls="c.attempt_count")
@@ -81,6 +86,10 @@ def operation_rows(
             WHERE (parent.id=o.id OR (o.collection_batch_id IS NOT NULL
               AND parent.id=o.source_id AND parent.collection_batch_id=o.collection_batch_id))
             AND a.provider=%s))
+          AND (%s::text IS NULL
+            OR (%s='pending' AND o.state='PENDING')
+            OR (%s='unknown_cost' AND o.state<>'PENDING'
+              AND (COALESCE(c.unknown_cost_count,0)>0 OR {unmetered})))
         ORDER BY COALESCE(o.completed_at,o.created_at) DESC,o.id DESC {PAGE_CLAUSE}
     """,
         (
@@ -96,6 +105,9 @@ def operation_rows(
             operation_id,
             provider,
             provider,
+            attention,
+            attention,
+            attention,
             limit,
             offset,
         ),

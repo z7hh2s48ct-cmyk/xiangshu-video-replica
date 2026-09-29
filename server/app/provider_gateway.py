@@ -298,6 +298,8 @@ class ProviderGateway:
         import urllib.request
         from urllib.error import HTTPError, URLError
 
+        from app.external_calls import endpoint_from_url, recorded_urlopen
+
         url = f"{provider.base_url}/api/v1/{endpoint}"
 
         headers = {
@@ -320,10 +322,15 @@ class ProviderGateway:
                 method="POST",
             )
 
-            with urllib.request.urlopen(request, timeout=provider.timeout_seconds) as response:
-                content = response.read()
-                decoded: dict[str, Any] = json.loads(content.decode("utf-8"))
-                return decoded
+            # 方案 P0-9：网关调用与直连传输同样落调用日志，失败原因可在管理端查到。
+            content, _headers, _status = recorded_urlopen(
+                request,
+                timeout=provider.timeout_seconds,
+                provider=provider.name,
+                endpoint=endpoint_from_url(url),
+            )
+            decoded: dict[str, Any] = json.loads(content.decode("utf-8"))
+            return decoded
 
         except HTTPError as exc:
             raise ProviderGatewayError(f"API call failed: {exc.code} {exc.reason}") from exc

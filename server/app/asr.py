@@ -25,6 +25,7 @@ from urllib.request import Request, urlopen
 from uuid import UUID
 
 from app.db_portable import BusinessConnection
+from app.external_calls import endpoint_from_url, recorded_urlopen
 from app.settings import SettingsRepository, SettingsUnavailableError
 
 logger = logging.getLogger("app.asr")
@@ -144,8 +145,15 @@ def _default_transport(
 ) -> tuple[int, bytes]:
     request = Request(url, data=body, headers=headers, method=method)  # noqa: S310
     try:
-        with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310
-            return response.status, response.read()
+        # 语音转写（口播稿识别）的原始响应落调用日志（方案 P0-9）。
+        response_body, _headers, status = recorded_urlopen(
+            request,
+            timeout=timeout_seconds,
+            provider="asr",
+            endpoint=endpoint_from_url(url),
+            opener=urlopen,
+        )
+        return status, response_body
     except HTTPError as exc:
         return exc.code, exc.read()
     except (TimeoutError, URLError, OSError) as exc:

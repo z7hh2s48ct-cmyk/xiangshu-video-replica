@@ -266,6 +266,28 @@ def test_failure_phase_filter_only_narrows_the_analysis_branch(
     assert other_branch.total == 0
 
 
+def test_status_filter_accepts_several_values_for_one_business_state(
+    records_dsn: str, seeded: dict[str, str], owner: CurrentUser
+) -> None:
+    """P0-6：一个下拉项（如「已取消」）可能对应多种底层拼写，逗号分隔一起查。"""
+    from app.control_routes import list_generation_records, summarize_generation_records
+
+    with psycopg.connect(records_dsn) as raw:
+        conn = BusinessConnection.postgres(raw)
+        combined = list_generation_records(
+            conn, owner, record_type="ANALYSIS", status="SUCCEEDED, PENDING", limit=50, offset=0
+        )
+        summary = summarize_generation_records(
+            conn, owner, record_type="ANALYSIS", status="PENDING,FAILED"
+        )
+
+    assert {item.record_id for item in combined.items} == {seeded["ok"], seeded["pending"]}
+    assert combined.total == 2
+    assert summary.total == 4
+    # 含 FAILED 时失败原因聚合照常给出，不因为多值而被当成「非失败视图」。
+    assert sum(item.count for item in summary.failure_reasons) == 3
+
+
 def test_summary_aggregates_by_type_and_status_with_failure_reasons(
     records_dsn: str, owner: CurrentUser
 ) -> None:
