@@ -16,6 +16,8 @@ import { Pagination } from "./ui/Pagination";
 import { StatusBadge } from "./ui/StatusBadge";
 import { TabBar } from "./ui/TabBar";
 import {
+  FAILURE_CATEGORY_LABELS,
+  FAILURE_OWNER_LABELS,
   FAILURE_PHASE_LABELS,
   formatDateTime,
   GENERATION_RECORD_TYPE_LABELS,
@@ -330,6 +332,22 @@ export function GenerationRecordsPage({
                       key={`${reason.error_code}-${reason.failure_phase}-${reason.reason}`}
                     >
                       <span>
+                        {/* 分类与处理人放在最前：运营扫一眼就知道这条该归谁办，
+                            再往下才是环节与错误码这类排查细节。 */}
+                        {reason.failure_category && reason.failure_owner ? (
+                          <>
+                            {labelFrom(
+                              FAILURE_OWNER_LABELS,
+                              reason.failure_owner,
+                            )}
+                            {" · "}
+                            {labelFrom(
+                              FAILURE_CATEGORY_LABELS,
+                              reason.failure_category,
+                            )}
+                            {" · "}
+                          </>
+                        ) : null}
                         {reason.failure_phase
                           ? labelFrom(
                               FAILURE_PHASE_LABELS,
@@ -461,6 +479,24 @@ export function GenerationRecordsPage({
                           <>
                             <dt>修复建议</dt>
                             <dd>{item.advice}</dd>
+                          </>
+                        ) : null}
+                        {item.failure_category && item.failure_owner ? (
+                          <>
+                            <dt>原因分类</dt>
+                            <dd>
+                              {labelFrom(
+                                FAILURE_CATEGORY_LABELS,
+                                item.failure_category,
+                              )}
+                            </dd>
+                            <dt>处理人</dt>
+                            <dd>
+                              {labelFrom(
+                                FAILURE_OWNER_LABELS,
+                                item.failure_owner,
+                              )}
+                            </dd>
                           </>
                         ) : null}
                         {item.failure_phase ? (

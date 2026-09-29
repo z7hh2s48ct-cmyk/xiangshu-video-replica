@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 # 文案规则：一句「这是什么、下一步做什么」，写给客服/运维/客户三方中
 # 最先看到它的人；不出现内部文件名、类名与密钥形态信息。
 FAILURE_RUNBOOK: dict[str, str] = {
@@ -190,6 +192,120 @@ FAILURE_RUNBOOK: dict[str, str] = {
         "连接测试发生内部错误。重试；仍失败请下载诊断日志并检查服务端日志。"
     ),
 }
+
+
+# ---------------------------------------------------------------------------
+# 失败分类（P2-1「生成记录加缩略图与失败分类」）
+# ---------------------------------------------------------------------------
+# 原因分类 × 处理人：管理端在「谁该处理这条失败」上比建议文本更需要一个可筛选的
+# 口径——客服照着念、运营照着重试、技术照着查，三者的动作完全不同。
+#
+# 与 FAILURE_RUNBOOK 同键：键集必须完全一致（少一个红、多一个也红），由
+# ``test_failure_runbook.py`` 的契约钉住，所以两处不会漂移；一份是「怎么说」，
+# 一份是「谁来看、看什么」。
+#
+# 分类口径：
+#   CUSTOMER_ASSET  问题出在客户提供的素材或客户侧动作（原图缺失、链接不可读、主动取消）
+#   CONTENT_REVIEW  内容审核（当前无码：审核结论经服务商原话给出，尚无独立码）
+#   PROVIDER_BUSY   上游限流/繁忙类可重试状态（429、超时）
+#   PROVIDER_FAULT  上游故障或返回不可用结果（5xx、无效响应、提交结果待核对）
+#   CONFIG          配置缺失/不一致（服务未配置、密钥、存储模式、渠道参数）
+#   DEFECT          系统缺陷或自身基础设施问题（worker 中断、存储不可用、契约校验）
+#   NOT_A_FAILURE   流程状态而非失败（主动取消、检查点自愈、对账已恢复）——不需要按故障处理
+FailureCategory = Literal[
+    "CUSTOMER_ASSET",
+    "CONTENT_REVIEW",
+    "PROVIDER_BUSY",
+    "PROVIDER_FAULT",
+    "CONFIG",
+    "DEFECT",
+    "NOT_A_FAILURE",
+]
+# 处理人：客服告知客户 / 运营重试 / 技术处理。与原因的对应不是一对一——
+# 例如「配置问题」通常要技术去改，而「客户素材」由客服引导客户。
+FailureOwner = Literal["SUPPORT", "OPS", "ENGINEERING"]
+
+FAILURE_CLASSIFICATION: dict[str, tuple[FailureCategory, FailureOwner]] = {
+    "ANALYSIS_WORKER_FAILED": ("DEFECT", "ENGINEERING"),
+    "ANALYSIS_WORKER_INTERRUPTED": ("DEFECT", "ENGINEERING"),
+    "ANALYSIS_PROVIDER_FAILED": ("PROVIDER_FAULT", "OPS"),
+    "ANALYSIS_PROVIDER_UNREACHABLE": ("PROVIDER_FAULT", "OPS"),
+    "ANALYSIS_PROVIDER_RATE_LIMITED": ("PROVIDER_BUSY", "OPS"),
+    "ANALYSIS_PROVIDER_SETTINGS_REQUIRED": ("CONFIG", "ENGINEERING"),
+    "ANALYSIS_VIDEO_URL_UNAVAILABLE": ("CONFIG", "ENGINEERING"),
+    "ANALYSIS_TASK_CANCELLED": ("NOT_A_FAILURE", "SUPPORT"),
+    "APILIO_SETTINGS_REQUIRED": ("CONFIG", "ENGINEERING"),
+    "APILIO_SETTINGS_UNAVAILABLE": ("CONFIG", "ENGINEERING"),
+    "PROVIDER_TERMINAL": ("PROVIDER_FAULT", "OPS"),
+    "H3_PROVIDER_FAILED": ("PROVIDER_FAULT", "OPS"),
+    "ARCHIVE_RETRY_EXHAUSTED": ("DEFECT", "ENGINEERING"),
+    "FIRST_FRAME_URL_SIGN_FAILED": ("CONFIG", "ENGINEERING"),
+    "H3_SETTINGS_UNAVAILABLE": ("CONFIG", "ENGINEERING"),
+    "PROVIDER_REQUEST_CONTRACT": ("DEFECT", "ENGINEERING"),
+    "VISUAL_VALIDATION_UNAVAILABLE": ("DEFECT", "OPS"),
+    "LEASE_EXPIRED_NEEDS_ATTENTION": ("DEFECT", "OPS"),
+    "RECONCILE_ACTOR_UNAVAILABLE": ("CONFIG", "OPS"),
+    "RECONCILE_OPERATION_FAILED": ("DEFECT", "OPS"),
+    "PROMPT_WORKER_INTERRUPTED": ("DEFECT", "OPS"),
+    "FIRST_FRAME_CHECKPOINT_RESUME": ("NOT_A_FAILURE", "OPS"),
+    "IMAGE_TASK_LEASE_EXPIRED": ("DEFECT", "OPS"),
+    "IMAGE_TASK_PROVIDER_BUSY": ("PROVIDER_BUSY", "OPS"),
+    "IMAGE_TASK_RECONCILE_RESUMED": ("NOT_A_FAILURE", "OPS"),
+    "IMAGE_TASK_FAILED": ("PROVIDER_FAULT", "OPS"),
+    "IMAGE_TASK_PROVIDER_FAILED": ("PROVIDER_FAULT", "OPS"),
+    "IMAGE_TASK_STORAGE_UNAVAILABLE": ("DEFECT", "ENGINEERING"),
+    "IMAGE_TASK_SUBMISSION_UNCERTAIN": ("PROVIDER_FAULT", "OPS"),
+    "CHARACTER_PROVIDER_TIMEOUT": ("PROVIDER_BUSY", "OPS"),
+    "CHARACTER_PROVIDER_RATE_LIMITED": ("PROVIDER_BUSY", "OPS"),
+    "CHARACTER_PROVIDER_UNAVAILABLE": ("PROVIDER_FAULT", "OPS"),
+    "CHARACTER_PROVIDER_INVALID_RESPONSE": ("PROVIDER_FAULT", "OPS"),
+    "CHARACTER_PROVIDER_MISMATCH": ("CONFIG", "ENGINEERING"),
+    "CHARACTER_PROVIDER_NOT_CONFIGURED": ("CONFIG", "ENGINEERING"),
+    "CHARACTER_STORAGE_UNAVAILABLE": ("DEFECT", "ENGINEERING"),
+    "CHARACTER_LEASE_EXPIRED": ("DEFECT", "OPS"),
+    "CHARACTER_LEASE_LOST": ("DEFECT", "OPS"),
+    "CHARACTER_VERSION_NOT_GENERATABLE": ("CUSTOMER_ASSET", "SUPPORT"),
+    "CHARACTER_VERSION_SOURCE_CHANGED": ("CUSTOMER_ASSET", "SUPPORT"),
+    "CHARACTER_VERSION_SOURCE_MISSING": ("CUSTOMER_ASSET", "SUPPORT"),
+    "IDENTITY_NOT_ACTIVE": ("CUSTOMER_ASSET", "SUPPORT"),
+    "FAKE_CHARACTER_PROVIDER_FORBIDDEN": ("CONFIG", "ENGINEERING"),
+    "SOURCE_FRAME_TASK_FAILED": ("CUSTOMER_ASSET", "OPS"),
+    "SOURCE_FRAME_TASK_CANCELLED": ("NOT_A_FAILURE", "OPS"),
+    "SOURCE_FRAME_TASK_RECOVERY_REQUIRED": ("DEFECT", "OPS"),
+    "SOURCE_FRAME_STORAGE_UNAVAILABLE": ("DEFECT", "ENGINEERING"),
+    "SCRIPT_FROM_AUDIO_SUBMISSION_UNCERTAIN": ("PROVIDER_FAULT", "OPS"),
+    "SCRIPT_FROM_AUDIO_PIPELINE_FAILED": ("CUSTOMER_ASSET", "OPS"),
+    "SCRIPT_FROM_AUDIO_PROVIDER_FAILED": ("PROVIDER_FAULT", "OPS"),
+    "SCRIPT_REWRITE_SUBMISSION_UNCERTAIN": ("PROVIDER_FAULT", "OPS"),
+    "SCRIPT_REWRITE_TASK_FAILED": ("PROVIDER_FAULT", "OPS"),
+    "DEEPSEEK_NETWORK_FAILED": ("PROVIDER_FAULT", "OPS"),
+    "DEEPSEEK_REQUEST_FAILED": ("PROVIDER_FAULT", "OPS"),
+    "DEEPSEEK_RESPONSE_INVALID": ("PROVIDER_FAULT", "OPS"),
+    "DEEPSEEK_RESPONSE_TRUNCATED": ("CUSTOMER_ASSET", "SUPPORT"),
+    "DEEPSEEK_RESPONSE_EMPTY": ("PROVIDER_FAULT", "OPS"),
+    "ORAL_TASK_FAILED": ("PROVIDER_FAULT", "OPS"),
+    "ORAL_SUBMISSION_UNCERTAIN": ("PROVIDER_FAULT", "OPS"),
+    "ORAL_ARCHIVE_FAILED": ("DEFECT", "OPS"),
+    "VIRAL_IMPORT_FAILED": ("CUSTOMER_ASSET", "OPS"),
+    "VIRAL_MEDIA_PREPARATION_FAILED": ("CUSTOMER_ASSET", "OPS"),
+    "VIRAL_REFRESH_FAILED": ("PROVIDER_FAULT", "OPS"),
+    "ZPAY_INVALID_SIGN_TYPE": ("CONFIG", "ENGINEERING"),
+    "ZPAY_SIGNATURE_MISMATCH": ("CONFIG", "ENGINEERING"),
+    "ZPAY_PID_MISMATCH": ("CONFIG", "ENGINEERING"),
+    "ZPAY_TRADE_NOT_SUCCESS": ("NOT_A_FAILURE", "SUPPORT"),
+    "ZPAY_MISSING_FIELDS": ("CONFIG", "ENGINEERING"),
+    "ZPAY_INVALID_AMOUNT": ("CONFIG", "ENGINEERING"),
+    "DIAGNOSTIC_INTERNAL_ERROR": ("DEFECT", "ENGINEERING"),
+}
+
+
+def failure_classification(
+    error_code: str | None,
+) -> tuple[FailureCategory, FailureOwner] | None:
+    """查回 (原因分类, 处理人)；归一与 fail-open 语义同 :func:`failure_advice`。"""
+    if not error_code:
+        return None
+    return FAILURE_CLASSIFICATION.get(error_code.strip().upper())
 
 
 def failure_advice(error_code: str | None) -> str | None:

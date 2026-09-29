@@ -356,6 +356,56 @@ describe("GenerationRecordsPage", () => {
     expect(screen.getByText(upstreamReason)).toBeInTheDocument();
   });
 
+  it("shows the failure category and who is expected to handle it", async () => {
+    // P2-1：分类与处理人回答「这条失败该归谁办」，运营先筛一遍再分工。
+    const advice = "稍后重试一次；持续失败核对接入商服务状态。";
+    vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
+      items: [
+        firstFrameRecord({
+          status: "FAILED",
+          error_code: "ANALYSIS_PROVIDER_FAILED",
+          advice,
+          failure_category: "PROVIDER_FAULT",
+          failure_owner: "OPS",
+        }),
+      ],
+      total: 1,
+    } as unknown as Awaited<
+      ReturnType<typeof adminApi.getAdminGenerationRecords>
+    >);
+    vi.mocked(adminApi.getAdminGenerationRecordSummary).mockResolvedValue({
+      total: 1,
+      counts: [
+        { record_type: "FIRST_FRAME_IMAGE", status: "FAILED", count: 1 },
+      ],
+      failure_reasons: [
+        {
+          error_code: "ANALYSIS_PROVIDER_FAILED",
+          failure_phase: "http",
+          reason: null,
+          retryable: true,
+          count: 1,
+          advice,
+          failure_category: "PROVIDER_FAULT",
+          failure_owner: "OPS",
+        },
+      ],
+    });
+
+    render(<GenerationRecordsPage initialStatus="FAILED" />);
+
+    // 聚合行把「谁办 + 归哪类」放在最前，再才是环节与错误码这类排查细节。
+    expect(
+      await screen.findByText(/运营重试 · 服务商故障 · 上游拒绝（HTTP）/),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("查看详情"));
+    expect(screen.getByText("原因分类")).toBeInTheDocument();
+    expect(screen.getByText("服务商故障")).toBeInTheDocument();
+    expect(screen.getByText("处理人")).toBeInTheDocument();
+    expect(screen.getByText("运营重试")).toBeInTheDocument();
+  });
+
   it("shows read-only oral failure details without a retry action", async () => {
     vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
       items: [

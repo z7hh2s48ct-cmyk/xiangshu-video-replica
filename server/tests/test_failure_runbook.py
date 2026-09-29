@@ -19,8 +19,16 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import get_args
 
-from app.failure_runbook import FAILURE_RUNBOOK, failure_advice
+from app.failure_runbook import (
+    FAILURE_CLASSIFICATION,
+    FAILURE_RUNBOOK,
+    FailureCategory,
+    FailureOwner,
+    failure_advice,
+    failure_classification,
+)
 
 APP_DIR = Path(__file__).resolve().parents[1] / "app"
 
@@ -149,3 +157,30 @@ def test_lookup_normalizes_and_fails_open() -> None:
     assert failure_advice("no-such-code") is None
     assert failure_advice("") is None
     assert failure_advice(None) is None
+
+
+def test_classification_is_keyed_exactly_like_the_runbook() -> None:
+    """分类与建议同键：少一个红、多一个也红——两处不允许漂移。
+
+    这两份映射回答的是同一个码的两个问题（「怎么说」与「谁来看、看什么」），
+    拆成两张表是为了让既有建议文本不必重排；键集一致由本用例钉住。
+    """
+    assert set(FAILURE_CLASSIFICATION) == set(FAILURE_RUNBOOK)
+
+
+def test_classification_values_are_declared_members() -> None:
+    categories = set(get_args(FailureCategory))
+    owners = set(get_args(FailureOwner))
+    for code, (category, owner) in FAILURE_CLASSIFICATION.items():
+        assert category in categories, f"{code} 的原因分类未在枚举内: {category}"
+        assert owner in owners, f"{code} 的处理人未在枚举内: {owner}"
+
+
+def test_classification_lookup_normalizes_and_fails_open() -> None:
+    assert failure_classification(" analysis_provider_failed ") == (
+        "PROVIDER_FAULT",
+        "OPS",
+    )
+    assert failure_classification("no-such-code") is None
+    assert failure_classification("") is None
+    assert failure_classification(None) is None

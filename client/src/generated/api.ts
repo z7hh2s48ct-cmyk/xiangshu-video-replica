@@ -6965,6 +6965,10 @@ export interface components {
       count: number;
       /** Advice */
       advice?: string | null;
+      /** Failure Category */
+      failure_category?: string | null;
+      /** Failure Owner */
+      failure_owner?: string | null;
     };
     /** AnalysisTaskResponse */
     AnalysisTaskResponse: {
@@ -8124,6 +8128,10 @@ export interface components {
       provider_error_code?: string | null;
       /** Provider Message */
       provider_message?: string | null;
+      /** Failure Category */
+      failure_category?: string | null;
+      /** Failure Owner */
+      failure_owner?: string | null;
     };
     /** ControlGenerationRecordPage */
     ControlGenerationRecordPage: {

@@ -33,7 +33,7 @@ from app.control_auth import ControlUser, ControlWriter
 from app.csv_export import spreadsheet_safe_cell
 from app.db_portable import BusinessConnection
 from app.external_calls import summarize_provider_message
-from app.failure_runbook import failure_advice
+from app.failure_runbook import failure_advice, failure_classification
 from app.ops_metrics import get_or_create_request_id
 from app.permissions import write_audit
 from app.security_rate_limit import (
@@ -222,6 +222,11 @@ class ControlGenerationRecord(BaseModel):
     advice: str | None = None
     provider_error_code: str | None = None
     provider_message: str | None = None
+    # P2-1：原因分类与处理人。回答的是「谁该看这条、他该做什么」——比建议文本
+    # 更适合运营筛一遍再分工；与 advice 同源（failure_runbook 的同一张码表），
+    # 一起填、一起为空。
+    failure_category: str | None = None
+    failure_owner: str | None = None
 
 
 class ControlGenerationRecordPage(BaseModel):
@@ -258,6 +263,9 @@ class AnalysisFailureReason(BaseModel):
     retryable: bool
     count: int
     advice: str | None = None
+    # P2-1：聚合行同样带分类与处理人，便于「一眼看出这是谁的事」。
+    failure_category: str | None = None
+    failure_owner: str | None = None
 
 
 class ControlGenerationRecordSummary(BaseModel):
@@ -2436,6 +2444,15 @@ _EXPLAINED_STATUSES = frozenset(
 )
 
 
+def _failure_axis(error_code: str | None) -> tuple[str | None, str | None]:
+    """失败码的 (原因分类, 处理人)；无码或未登记时双 None。
+
+    与 :func:`failure_advice` 同源（同一张码表），所以「有建议必有分类」。
+    """
+    classification = failure_classification(error_code)
+    return classification if classification is not None else (None, None)
+
+
 def _attach_failure_explanations(
     conn: BusinessConnection, records: list[ControlGenerationRecord]
 ) -> None:
@@ -2446,6 +2463,8 @@ def _attach_failure_explanations(
     for record in records:
         if record.error_code and record.advice is None:
             record.advice = failure_advice(record.error_code)
+        if record.error_code and record.failure_category is None:
+            record.failure_category, record.failure_owner = _failure_axis(record.error_code)
     if not conn.is_postgres:
         return
     wanted = [
@@ -2610,6 +2629,7 @@ def _analysis_failure_reasons(
     items: list[AnalysisFailureReason] = []
     for row in rows:
         error_code = _optional_text(row["error_code"])
+        category, owner = _failure_axis(error_code)
         items.append(
             AnalysisFailureReason(
                 error_code=error_code,
@@ -2618,6 +2638,8 @@ def _analysis_failure_reasons(
                 retryable=bool(row["retryable"]),
                 count=int(row["total"]),
                 advice=failure_advice(error_code),
+                failure_category=category,
+                failure_owner=owner,
             )
         )
     return items
