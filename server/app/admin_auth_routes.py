@@ -389,6 +389,7 @@ class AdminActor:
     username: str
     display_name: str
     role: str
+    is_super_admin: bool
     auth_method: str
     session_id: str
     session_expires_at: str
@@ -517,7 +518,8 @@ def _create_admin_session_for_actor(
 
     with pg_transaction() as conn:
         user_row = conn.execute(
-            "SELECT id, username, display_name, role FROM users WHERE id = %s AND is_active = 1",
+            "SELECT id, username, display_name, role, is_super_admin "
+            "FROM users WHERE id = %s AND is_active = 1",
             (actor_user_id,),
         ).fetchone()
         if user_row is None:
@@ -563,6 +565,7 @@ def _create_admin_session_for_actor(
             username=str(user_row[1]),
             display_name=str(user_row[2]),
             role=role,
+            is_super_admin=bool(user_row[4]),
             auth_method=auth_method,
             session_id=session_id,
             session_expires_at=expires_at.isoformat(),
@@ -645,6 +648,7 @@ def load_admin_session(
             "LEAST(s.expires_at::timestamptz, s.created_at::timestamptz + interval '10 minutes') "
             "ELSE s.expires_at::timestamptz END, s.last_activity_at, "
             "       s.auth_method, s.actor_user_id, u.username, u.display_name, u.role, "
+            "       u.is_super_admin, "
             "       s.created_ip_digest, s.created_ua_digest, now() AS db_now "
             "FROM admin_sessions s JOIN users u ON u.id = s.actor_user_id "
             "WHERE s.session_digest = %s AND s.revoked_at IS NULL AND u.is_active = 1",
@@ -654,7 +658,7 @@ def load_admin_session(
             raise _http(
                 401, "ADMIN_SESSION_INVALID", "Admin session is missing, revoked or invalid."
             )
-        db_now = _as_datetime(row[11])
+        db_now = _as_datetime(row[12])
         expires_at = _as_datetime(row[2])
         if db_now >= expires_at:
             raise _http(401, "ADMIN_SESSION_EXPIRED", "Admin session has expired.")
@@ -666,10 +670,10 @@ def load_admin_session(
         last_activity_at = _as_datetime(row[3])
         idle_timeout = timedelta(seconds=resolve_admin_session_idle_timeout_seconds())
         # Browser environment (User-Agent) only — see the docstring: a rotated
-        # network egress IP (row[9]/created_ip_digest stays audit-only) must not
+        # network egress IP (row[10]/created_ip_digest stays audit-only) must not
         # revoke the operator's session.
         context_changed = user_agent is not None and not hmac.compare_digest(
-            str(row[10]), _sha256_hex(user_agent)
+            str(row[11]), _sha256_hex(user_agent)
         )
         if db_now >= last_activity_at + idle_timeout:
             rejection = ("ADMIN_SESSION_IDLE_EXPIRED", "Admin session was idle for too long.")
@@ -705,6 +709,7 @@ def load_admin_session(
                 username=str(row[6]),
                 display_name=str(row[7]),
                 role=role,
+                is_super_admin=bool(row[9]),
                 auth_method=str(row[4]),
                 session_id=str(row[0]),
                 session_expires_at=expires_at.isoformat(),
@@ -799,8 +804,37 @@ def get_admin_writer(actor: Annotated[AdminActor, Depends(get_admin_actor)]) -> 
     return actor
 
 
+def _require_super_admin(actor: AdminActor) -> AdminActor:
+    """团队管理只对超级管理员开放（方案 P2-4 团队与权限）。
+
+    同时要求 role==admin：角色的合法性由上游依赖保证，这里额外校验
+    is_super_admin 是为了防御「标记位与角色不一致」的脏数据——即便有人误把
+    auditor 标成超管，也不能获得团队成员管理权。
+    """
+    if actor.role != "admin" or not actor.is_super_admin:
+        raise _http(403, "SUPER_ADMIN_REQUIRED", "Only super admins may manage the team.")
+    return actor
+
+
+def get_super_admin_actor(
+    actor: Annotated[AdminActor, Depends(get_admin_actor)],
+) -> AdminActor:
+    """超管门槛（读侧）：团队信息只对超级管理员可见。"""
+    return _require_super_admin(actor)
+
+
+def get_super_admin_writer(
+    actor: Annotated[AdminActor, Depends(get_admin_writer)],
+) -> AdminActor:
+    """超管门槛（写侧）：auditor 先撞既有 AUDITOR_READ_ONLY，普通 admin 再撞
+    SUPER_ADMIN_REQUIRED——两层拒绝各回答自己的语义。"""
+    return _require_super_admin(actor)
+
+
 AdminReader = Annotated[AdminActor, Depends(get_admin_actor)]
 AdminWriter = Annotated[AdminActor, Depends(get_admin_writer)]
+SuperAdminReader = Annotated[AdminActor, Depends(get_super_admin_actor)]
+SuperAdminWriter = Annotated[AdminActor, Depends(get_super_admin_writer)]
 
 
 # ---------------------------------------------------------------------------
@@ -826,6 +860,7 @@ class AdminActorInfo(BaseModel):
     username: str
     display_name: str
     role: str
+    is_super_admin: bool
 
 
 class ExchangeResponse(BaseModel):
@@ -872,6 +907,7 @@ def _exchange_response(actor: AdminActor, csrf_token: str) -> ExchangeResponse:
             username=actor.username,
             display_name=actor.display_name,
             role=actor.role,
+            is_super_admin=actor.is_super_admin,
         ),
     )
 
@@ -1132,6 +1168,7 @@ def get_current_admin_session(
             username=actor.username,
             display_name=actor.display_name,
             role=actor.role,
+            is_super_admin=actor.is_super_admin,
         ),
     )
 

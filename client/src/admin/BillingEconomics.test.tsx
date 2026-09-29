@@ -132,7 +132,7 @@ test("defaults to the month so far without an attention filter", async () => {
     expect(url).toContain(`start=${today.slice(0, 7)}-01`);
     expect(url).toContain(`end=${today}`);
     expect(url).not.toContain("attention=");
-    // 空筛选不占位：用户 ID、科目、模块、服务商都不出现在查询串里。
+    // 空筛选不占位：用户 ID、业务、模块、服务商都不出现在查询串里。
     expect(url).not.toContain("user_id=");
     expect(url).not.toContain("service=");
   }
@@ -160,17 +160,17 @@ test("re-queries the list with the selected intent after submit", async () => {
 test("opens the request detail with snapshot, usage and a reconciliation form", async () => {
   mockBilling({ items: [pendingOperation], detail: pendingOperation });
   render(<BillingEconomics />);
-  const table = await screen.findByRole("table", { name: "请求明细" });
-  fireEvent.click(within(table).getByRole("button", { name: "查看请求" }));
+  const table = await screen.findByRole("table", { name: "生成明细" });
+  fireEvent.click(within(table).getByRole("button", { name: "查看详情" }));
   const detail = await screen.findByRole("complementary", {
-    name: "请求核算详情",
+    name: "生成核算详情",
   });
-  expect(detail).toHaveTextContent("请求编号：op-detail · 处理中 / 待核对");
+  expect(detail).toHaveTextContent("生成编号：op-detail · 处理中 / 待核对");
   expect(detail).toHaveTextContent(
-    "受理时售价：2 积分 / 秒；折扣 100%；价格版本 3",
+    "受理时售价：2 积分 / 秒；折扣 10 折；价格版本 3",
   );
   expect(detail).toHaveTextContent("预算 10.0 秒，实际 8.0 秒");
-  // 管理端可对缺时长的成功交付补录：PENDING + asr 在允许补录的科目列表里。
+  // 管理端可对缺时长的成功交付补录：PENDING + asr 在允许补录的业务列表里。
   expect(
     within(detail).getByRole("form", { name: "核对成功时长" }),
   ).toBeInTheDocument();
@@ -179,21 +179,19 @@ test("opens the request detail with snapshot, usage and a reconciliation form", 
 test("auditor sessions read the same detail without reconciliation forms", async () => {
   mockBilling({ items: [pendingOperation], detail: pendingOperation });
   render(<BillingEconomics readOnly />);
-  const table = await screen.findByRole("table", { name: "请求明细" });
-  fireEvent.click(within(table).getByRole("button", { name: "查看请求" }));
+  const table = await screen.findByRole("table", { name: "生成明细" });
+  fireEvent.click(within(table).getByRole("button", { name: "查看详情" }));
   const detail = await screen.findByRole("complementary", {
-    name: "请求核算详情",
+    name: "生成核算详情",
   });
-  expect(detail).toHaveTextContent("请求编号：op-detail");
+  expect(detail).toHaveTextContent("生成编号：op-detail");
   expect(
     within(detail).queryByRole("form", { name: "核对成功时长" }),
   ).toBeNull();
 });
 
 test("exports the current query and reports the download", async () => {
-  vi.mocked(downloadBillingCsv)
-    .mockReset()
-    .mockResolvedValue("已导出 3 条请求明细（CSV）。");
+  vi.mocked(downloadBillingCsv).mockReset().mockResolvedValue("明细已导出。");
   mockBilling();
   render(<BillingEconomics initialAttention="pending" />);
   await waitFor(() =>
@@ -202,9 +200,7 @@ test("exports the current query and reports the download", async () => {
     ).toBeEnabled(),
   );
   fireEvent.click(screen.getByRole("button", { name: "导出当前查询 CSV" }));
-  expect(
-    await screen.findByText("已导出 3 条请求明细（CSV）。"),
-  ).toBeInTheDocument();
+  expect(await screen.findByText("明细已导出。")).toBeInTheDocument();
   expect(vi.mocked(downloadBillingCsv)).toHaveBeenCalledWith(
     expect.stringContaining("attention=pending"),
   );
@@ -222,5 +218,5 @@ test("surfaces a load failure as an alert and hides the report tables", async ()
     "读取经营统计失败：统计暂不可用（500）",
   );
   expect(screen.queryByRole("table", { name: "周期汇总" })).toBeNull();
-  expect(screen.queryByRole("table", { name: "请求明细" })).toBeNull();
+  expect(screen.queryByRole("table", { name: "生成明细" })).toBeNull();
 });

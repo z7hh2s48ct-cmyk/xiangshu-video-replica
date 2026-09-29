@@ -33,7 +33,7 @@ from app.control_auth import ControlUser, ControlWriter
 from app.csv_export import spreadsheet_safe_cell
 from app.db_portable import BusinessConnection
 from app.external_calls import summarize_provider_message
-from app.failure_runbook import failure_advice, failure_classification
+from app.failure_runbook import failure_advice, failure_explanation
 from app.material_thumbs import THUMBNAIL_URL_EXPIRES_IN
 from app.media_routes import storage_for_asset
 from app.ops_metrics import get_or_create_request_id
@@ -65,6 +65,9 @@ _TRUTHY = {"1", "true", "yes", "on"}
 # 诊断是定点查询：任务编号/问题编号理论上唯一，命中上限只是「一个请求号关联到
 # 一批任务」时的安全阀，不做分页——检索无结果是常态而非异常。
 ANALYSIS_DIAGNOSTIC_MATCH_LIMIT = 20
+# 失败原因聚合的分组展示上限：分组按条数降序，尾部长尾（每个码 1 条的个别
+# 客户问题）不在聚合卡里展开，避免一份几百行的清单。
+FAILURE_REASON_GROUP_LIMIT = 20
 
 OrderStatus = Literal["PENDING", "PAID", "FAILED", "CLOSED"]
 # REFUND（20260923T1200_admin_refund_adjustment）：审计调账的反向记账类型，
@@ -225,11 +228,17 @@ class ControlGenerationRecord(BaseModel):
     advice: str | None = None
     provider_error_code: str | None = None
     provider_message: str | None = None
-    # P2-1：原因分类与处理人。回答的是「谁该看这条、他该做什么」——比建议文本
-    # 更适合运营筛一遍再分工；与 advice 同源（failure_runbook 的同一张码表），
-    # 一起填、一起为空。
+    # 失败原因分类与处理人（方案 P1-1 / P2-1）：接口只给稳定代码，中文标签由
+    # 前端词典翻译；与 advice 同源（failure_runbook 的同一张码表），一起填、
+    # 一起为空。原话命中审核关键词时分类升为 CONTENT_REVIEW、处理人改为 SUPPORT。
     failure_category: str | None = None
     failure_owner: str | None = None
+    # 方案 P1-1：失败任务的预扣积分是否已退回（存在 RELEASE 流水）。None 表示
+    # 非失败状态或无法判定（SQLite 降级通道）。
+    credits_refunded: bool | None = None
+    # 方案 P2-2：该记录是否有可在线预览的成片/生成图产物。True 时管理端可用
+    # 媒体端点查看原件（视频成片为视频，其余为图片）；缩略图另由签名直连端点提供。
+    has_preview: bool = False
 
 
 class ControlGenerationRecordPage(BaseModel):
@@ -252,21 +261,27 @@ class GenerationRecordCount(BaseModel):
 
 
 class AnalysisFailureReason(BaseModel):
-    """拆解失败原因聚合：回答「上游到底为什么拒绝」以及「能不能重试」。
+    """失败原因聚合：回答「上游到底为什么拒绝」以及「能不能重试」。
 
-    ``advice`` 是 P2-2 runbook（``app.failure_runbook``）的译文：管理端聚合
-    列表直接展示，用户/客服不必拿内部错误码去别处搜索。
+    方案 P1-3：从只覆盖拆解扩到全部任务类型（视频/口播/首帧/人物表/人物
+    视图/取帧/拆解）——按「类型 + 错误码 + 失败阶段」分组计数，一眼看出
+    是个别客户的问题还是整体故障。``reason`` 优先取任务行自带的上游诊断
+    （拆解），没有时取该组样本任务在第三方接口调用日志里的服务商原话。
+
+    ``advice`` 是 P2-2 runbook（``app.failure_runbook``）的译文，``failure_category``
+    与 ``failure_owner`` 是方案 P1-1 的原因分类与处理人代码，标签由管理端词典翻译。
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    record_type: GenerationRecordType
     error_code: str | None
     failure_phase: str | None
     reason: str | None
-    retryable: bool
+    retryable: bool | None
     count: int
     advice: str | None = None
-    # P2-1：聚合行同样带分类与处理人，便于「一眼看出这是谁的事」。
+    # 聚合行同样带分类与处理人代码，便于「一眼看出这是谁的事」。
     failure_category: str | None = None
     failure_owner: str | None = None
 
@@ -1037,6 +1052,7 @@ def list_generation_records(
                 result_reference=(
                     None if row["result_reference"] is None else str(row["result_reference"])
                 ),
+                has_preview=row["result_reference"] is not None,
                 provider_reference=_optional_text(row["provider_task_id"]),
                 error_code=None if row["error_code"] is None else str(row["error_code"]),
                 error_message=_optional_text(row["error_message"]),
@@ -1087,6 +1103,7 @@ def list_generation_records(
                     result.get("model") or execution.get("model") or request.get("model")
                 ),
                 result_reference=_optional_text(row["result_version_id"]),
+                has_preview=_has_candidate_asset(result),
                 record_data_status=_combined_record_data_status(
                     request_status,
                     result_status,
@@ -1128,6 +1145,7 @@ def list_generation_records(
                 provider=provider,
                 model=_optional_text(result.get("model") or execution.get("model")),
                 result_reference=_optional_text(row["result_version_id"]),
+                has_preview=bool(result.get("contact_sheet_asset_id")),
                 record_data_status=result_status,
             )
         )
@@ -1246,6 +1264,7 @@ def list_generation_records(
                 record_data_status=payload_status,
                 charged_credits=0,
                 result_reference=_optional_text(row["result_version_id"]),
+                has_preview=_has_candidate_asset(payload),
                 provider_reference=None,
                 error_code=_optional_text(row["error_code"]),
                 error_message=_optional_text(row["error_message_redacted"]),
@@ -1307,6 +1326,7 @@ def list_generation_records(
                 record_data_status="VALID",
                 charged_credits=int(row["charged_credits"]),
                 result_reference=_optional_text(row["result_asset_id"]),
+                has_preview=row["result_asset_id"] is not None,
                 provider_reference=_optional_text(row["vendor_task_id"]),
                 error_code=oral_error_codes.get(oral_status),
                 error_message=_oral_admin_error_message(
@@ -1884,7 +1904,7 @@ def summarize_generation_records(
     return ControlGenerationRecordSummary(
         total=sum(item.count for item in counts),
         counts=counts,
-        failure_reasons=_analysis_failure_reasons(
+        failure_reasons=_generation_failure_reasons(
             conn,
             username=username,
             status=status,
@@ -2574,57 +2594,95 @@ _EXPLAINED_STATUSES = frozenset(
 )
 
 
-def _failure_axis(error_code: str | None) -> tuple[str | None, str | None]:
-    """失败码的 (原因分类, 处理人)；无码或未登记时双 None。
-
-    与 :func:`failure_advice` 同源（同一张码表），所以「有建议必有分类」。
-    """
-    classification = failure_classification(error_code)
-    return classification if classification is not None else (None, None)
-
-
 def _attach_failure_explanations(
     conn: BusinessConnection, records: list[ControlGenerationRecord]
 ) -> None:
-    """给当前页的失败记录补中文处理建议与服务商原话（方案 P0-10 / P0-9）。
+    """给当前页的失败记录补中文处理建议/分类/处理人与服务商原话（方案 P0-10 / P0-9 / P1-1）。
 
     原话优先取任务行自带的（口播），没有时取该任务最近一次失败调用的日志。
+    分类取 failure_runbook 的静态映射；原话命中审核关键词时升级为「内容审核」。
     """
+    if conn.is_postgres:
+        wanted = [
+            record
+            for record in records
+            if record.status in _EXPLAINED_STATUSES and record.provider_message is None
+        ]
+        if wanted:
+            ids = [record.record_id for record in wanted]
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT ON (task_id) task_id, provider_error_code, provider_message,
+                       error_message_redacted
+                FROM external_call_logs
+                WHERE task_id IN ({", ".join(["%s"] * len(ids))})
+                  AND outcome IS NOT NULL AND outcome <> 'SUCCEEDED'
+                ORDER BY task_id, created_at DESC
+                """,  # noqa: S608
+                tuple(ids),
+            ).fetchall()
+            latest = {str(row["task_id"]): row for row in rows}
+            for record in wanted:
+                row = latest.get(record.record_id)
+                if row is None:
+                    continue
+                record.provider_error_code = _optional_text(row["provider_error_code"])
+                record.provider_message = _optional_text(row["provider_message"]) or _optional_text(
+                    row["error_message_redacted"]
+                )
+    # 建议/分类/处理人统一在这里落地：原话先取到，审核升级才能生效。
     for record in records:
-        if record.error_code and record.advice is None:
-            record.advice = failure_advice(record.error_code)
-        if record.error_code and record.failure_category is None:
-            record.failure_category, record.failure_owner = _failure_axis(record.error_code)
-    if not conn.is_postgres:
-        return
-    wanted = [
-        record
-        for record in records
-        if record.status in _EXPLAINED_STATUSES and record.provider_message is None
-    ]
+        if not record.error_code:
+            continue
+        explanation = failure_explanation(
+            record.error_code, provider_message=record.provider_message
+        )
+        if explanation is None:
+            continue
+        if record.advice is None:
+            record.advice = explanation.advice
+        record.failure_category = explanation.category
+        record.failure_owner = explanation.owner
+    _attach_credit_refunds(conn, records)
+
+
+def _attach_credit_refunds(
+    conn: BusinessConnection, records: list[ControlGenerationRecord]
+) -> None:
+    """标记失败记录的预扣积分是否已退回（存在 RELEASE 流水）。
+
+    三路归集：视频线挂 ``task_id``、口播挂 ``oral_task_id``、图片/分析经
+    ``billing_operations.source_id`` 桥接（其余类型的钱包行不挂任务列）。
+    """
+    wanted = [record for record in records if record.status in _EXPLAINED_STATUSES]
     if not wanted:
         return
+    for record in wanted:
+        if not conn.is_postgres:
+            record.credits_refunded = None
+    if not conn.is_postgres:
+        return
     ids = [record.record_id for record in wanted]
+    placeholders = ", ".join(["%s"] * len(ids))
     rows = conn.execute(
         f"""
-        SELECT DISTINCT ON (task_id) task_id, provider_error_code, provider_message,
-               error_message_redacted
-        FROM external_call_logs
-        WHERE task_id IN ({", ".join(["%s"] * len(ids))})
-          AND outcome IS NOT NULL AND outcome <> 'SUCCEEDED'
-        ORDER BY task_id, created_at DESC
+        SELECT released.ref FROM (
+            SELECT wt.task_id AS ref FROM wallet_transactions wt
+            WHERE wt.type = 'RELEASE' AND wt.task_id IN ({placeholders})
+            UNION
+            SELECT wt.oral_task_id AS ref FROM wallet_transactions wt
+            WHERE wt.type = 'RELEASE' AND wt.oral_task_id IN ({placeholders})
+            UNION
+            SELECT op.source_id AS ref FROM wallet_transactions wt
+            JOIN billing_operations op ON op.id = wt.billing_operation_id
+            WHERE wt.type = 'RELEASE' AND op.source_id IN ({placeholders})
+        ) AS released
         """,  # noqa: S608
-        tuple(ids),
+        tuple(ids) * 3,
     ).fetchall()
-    latest = {str(row["task_id"]): row for row in rows}
+    refunded = {str(row["ref"]) for row in rows}
     for record in wanted:
-        row = latest.get(record.record_id)
-        if row is None:
-            continue
-        record.provider_error_code = _optional_text(row["provider_error_code"])
-        record.provider_message = _optional_text(row["provider_message"]) or _optional_text(
-            row["error_message_redacted"]
-        )
+        record.credits_refunded = record.record_id in refunded
 
 
 def _status_values(status: str | None) -> list[str]:
@@ -2711,7 +2769,7 @@ def _analysis_record_filters(
     return where, params
 
 
-def _analysis_failure_reasons(
+def _generation_failure_reasons(
     conn: BusinessConnection,
     *,
     username: str | None,
@@ -2722,15 +2780,40 @@ def _analysis_failure_reasons(
     created_to: str | None,
     task_ref: TaskRefFilter | None = None,
 ) -> list[AnalysisFailureReason]:
-    """按「为什么失败」聚合拆解失败行：错误码 × 失败阶段 × 上游原话 × 可否重试。
+    """按「为什么失败」聚合失败行：类型 × 错误码 × 失败阶段（方案 P1-3）。
+
+    覆盖全部任务类型（视频/口播/首帧/人物表/人物视图/取帧/拆解），不再是
+    只看拆解——「近一小时整体故障」与「个别客户问题」在同一个视图里一眼能分。
+
+    原因（``reason``）是「错误码 + 服务商原话」里的原话：拆解取 P0-2 落库的
+    上游诊断（``->>`` 只有 PG 的 jsonb 支持；SQLite 开发库没有该列，自然也
+    没有原因），其余类型取该组样本任务在调用日志里的最新失败原话。
 
     当前视图里根本没有失败行（状态过滤不是 FAILED）时返回空——不给一份与
-    列表无关的失败清单。原因取自 P0-2 落库的上游诊断（``->>`` 只有 PG 的
-    jsonb 支持；SQLite 开发库没有该列，自然也没有原因）。
+    列表无关的失败清单。
     """
     if status and "FAILED" not in _status_values(status):
         return []
-    where, params = _analysis_record_filters(
+
+    def group_where(types: tuple[GenerationRecordType, ...]) -> tuple[str, tuple[str, ...]]:
+        return _generation_record_filters(
+            postgres=conn.is_postgres,
+            record_types=types,
+            username=username,
+            status="FAILED",
+            record_type=record_type,
+            created_from=created_from,
+            created_to=created_to,
+            task_ref=task_ref,
+        )
+
+    video_where, video_params = group_where(("VIDEO",))
+    oral_where, oral_params = group_where(("ORAL_VIDEO",))
+    first_where, first_params = group_where(("FIRST_FRAME_IMAGE",))
+    sheet_where, sheet_params = group_where(("CHARACTER_SHEET_IMAGE",))
+    view_where, view_params = group_where(("CHARACTER_VIEW_IMAGE",))
+    source_where, source_params = group_where(("SOURCE_FRAME_PROCESS", "SOURCE_FRAME_AI_SCORE"))
+    analysis_where, analysis_params = _analysis_record_filters(
         postgres=conn.is_postgres,
         username=username,
         status="FAILED",
@@ -2740,36 +2823,144 @@ def _analysis_failure_reasons(
         created_to=created_to,
         task_ref=task_ref,
     )
-    reason_expr = "(task.upstream_diagnostic_json ->> 'reason')" if conn.is_postgres else "NULL"
+    # 拆解行有专属的失败阶段/可否重试/上游原因列，其余表没有：用 CAST 置空，
+    # PG 与 SQLite 都认这一写法（``::`` 只有 PG 支持）。
+    analysis_reason = (
+        "CAST(task.upstream_diagnostic_json ->> 'reason' AS text)" if conn.is_postgres else "NULL"
+    )
+    semantic_requested_sql = """
+        EXISTS (
+            SELECT 1 FROM audit_logs quality_audit
+            WHERE quality_audit.action = 'source_frame.semantic_quality_started'
+              AND quality_audit.entity_id = task.id
+        )
+    """
     rows = conn.execute(
         f"""
-        SELECT task.error_code AS error_code,
-               task.failure_phase AS failure_phase,
-               {reason_expr} AS reason,
-               task.retryable AS retryable,
-               COUNT(*) AS total
-        FROM analysis_tasks AS task
-        JOIN users ON users.id = task.created_by_user_id
-        {where}
-        GROUP BY task.error_code, task.failure_phase, {reason_expr}, task.retryable
-        ORDER BY total DESC, task.error_code ASC, task.failure_phase ASC
+        SELECT record_type, error_code, failure_phase, reason, retryable,
+               COUNT(*) AS total, MIN(sample_id) AS sample_id
+        FROM (
+            SELECT 'VIDEO' AS record_type, task.error_code AS error_code,
+                   CAST(NULL AS text) AS failure_phase, CAST(NULL AS text) AS reason,
+                   CAST(NULL AS boolean) AS retryable, task.id AS sample_id
+            FROM generation_tasks AS task
+            JOIN generation_batches AS batch ON batch.id = task.batch_id
+            JOIN users ON users.id = batch.created_by_user_id
+            {video_where}
+            UNION ALL
+            -- 口播表没有 error_code 列（只有原始 error_message）：管理端展示码
+            -- 按状态映射，与记录组装处（oral_error_codes）同一口径；
+            -- 直接取列会 UndefinedColumn（2026-09-29 回归修复）。
+            SELECT 'ORAL_VIDEO',
+                   CASE task.status
+                       WHEN 'SUBMISSION_UNCERTAIN' THEN 'ORAL_SUBMISSION_UNCERTAIN'
+                       WHEN 'ARCHIVE_FAILED' THEN 'ORAL_ARCHIVE_FAILED'
+                       ELSE 'ORAL_TASK_FAILED'
+                   END,
+                   CAST(NULL AS text), CAST(NULL AS text),
+                   CAST(NULL AS boolean), task.id
+            FROM oral_tasks AS task
+            JOIN users ON users.id = task.owner_user_id
+            {oral_where}
+            UNION ALL
+            SELECT 'FIRST_FRAME_IMAGE', task.error_code,
+                   CAST(NULL AS text), CAST(NULL AS text),
+                   CAST(NULL AS boolean), task.id
+            FROM first_frame_tasks AS task
+            JOIN users ON users.id = task.created_by_user_id
+            {first_where}
+            UNION ALL
+            SELECT 'CHARACTER_SHEET_IMAGE', task.error_code,
+                   CAST(NULL AS text), CAST(NULL AS text),
+                   CAST(NULL AS boolean), task.id
+            FROM character_sheet_tasks AS task
+            JOIN users ON users.id = task.created_by_user_id
+            {sheet_where}
+            UNION ALL
+            SELECT 'CHARACTER_VIEW_IMAGE', task.error_code,
+                   CAST(NULL AS text), CAST(NULL AS text),
+                   CAST(NULL AS boolean), task.id
+            FROM character_generation_tasks AS task
+            JOIN users ON users.id = task.created_by
+            {view_where}
+            UNION ALL
+            SELECT CASE WHEN {semantic_requested_sql}
+                        THEN 'SOURCE_FRAME_AI_SCORE' ELSE 'SOURCE_FRAME_PROCESS' END,
+                   task.error_code,
+                   CAST(NULL AS text), CAST(NULL AS text),
+                   CAST(NULL AS boolean), task.id
+            FROM source_frame_tasks AS task
+            JOIN users ON users.id = task.created_by_user_id
+            {source_where}
+            UNION ALL
+            -- retryable 在拆解表是 integer（0/1），其余分支是 boolean：UNION 要求
+            -- 类型一致，用布尔表达式归一（PG 出 boolean，SQLite 出 0/1，均可）。
+            SELECT 'ANALYSIS', task.error_code, task.failure_phase,
+                   {analysis_reason}, (task.retryable = 1), task.id
+            FROM analysis_tasks AS task
+            JOIN users ON users.id = task.created_by_user_id
+            {analysis_where}
+        ) AS failure_rows
+        GROUP BY record_type, error_code, failure_phase, reason, retryable
+        ORDER BY total DESC, record_type ASC, error_code ASC
+        LIMIT %s
         """,  # noqa: S608
-        params,
+        (
+            *video_params,
+            *oral_params,
+            *first_params,
+            *sheet_params,
+            *view_params,
+            *source_params,
+            *analysis_params,
+            FAILURE_REASON_GROUP_LIMIT,
+        ),
     ).fetchall()
-    items: list[AnalysisFailureReason] = []
+    # 没有任务行原因的组，用样本任务在调用日志里的最近一次失败原话补上，
+    # 让「同因聚合」保留服务商原话这个关键判据。
+    pending: list[tuple[Any, str | None, str | None, str | None]] = []
+    sample_ids: list[str] = []
     for row in rows:
         error_code = _optional_text(row["error_code"])
-        category, owner = _failure_axis(error_code)
+        reason = _optional_text(row["reason"])
+        sample_id = _optional_text(row["sample_id"])
+        pending.append((row, error_code, reason, sample_id))
+        if reason is None and sample_id:
+            sample_ids.append(sample_id)
+    sample_messages: dict[str, str] = {}
+    if conn.is_postgres and sample_ids:
+        call_rows = conn.execute(
+            f"""
+            SELECT DISTINCT ON (task_id) task_id, provider_message, error_message_redacted
+            FROM external_call_logs
+            WHERE task_id IN ({", ".join(["%s"] * len(sample_ids))})
+              AND outcome IS NOT NULL AND outcome <> 'SUCCEEDED'
+            ORDER BY task_id, created_at DESC
+            """,  # noqa: S608
+            tuple(sample_ids),
+        ).fetchall()
+        for call_row in call_rows:
+            message = _optional_text(call_row["provider_message"]) or _optional_text(
+                call_row["error_message_redacted"]
+            )
+            if message:
+                sample_messages[str(call_row["task_id"])] = message
+    items: list[AnalysisFailureReason] = []
+    for row, error_code, reason, sample_id in pending:
+        if reason is None and sample_id:
+            reason = sample_messages.get(sample_id)
+        explanation = failure_explanation(error_code, provider_message=reason)
         items.append(
             AnalysisFailureReason(
+                record_type=cast(GenerationRecordType, str(row["record_type"])),
                 error_code=error_code,
                 failure_phase=_optional_text(row["failure_phase"]),
-                reason=_optional_text(row["reason"]),
-                retryable=bool(row["retryable"]),
+                reason=reason,
+                retryable=None if row["retryable"] is None else bool(row["retryable"]),
                 count=int(row["total"]),
-                advice=failure_advice(error_code),
-                failure_category=category,
-                failure_owner=owner,
+                advice=explanation.advice if explanation is not None else None,
+                failure_category=explanation.category if explanation is not None else None,
+                failure_owner=explanation.owner if explanation is not None else None,
             )
         )
     return items
@@ -2786,6 +2977,14 @@ def _oral_admin_error_message(*, status: str, raw_message: str | None) -> str | 
     return "口播任务处理异常，请核对任务状态。" if raw_message else None
 
 
+def _has_candidate_asset(payload: dict[str, object]) -> bool:
+    """结果版本候选池里是否有可预览的产物资产（P2-2 缩略图的数据前提）。"""
+    candidates = payload.get("candidates")
+    return isinstance(candidates, list) and any(
+        isinstance(candidate, dict) and candidate.get("asset_id") for candidate in candidates
+    )
+
+
 def _image_generation_record(
     *,
     conn: BusinessConnection,
@@ -2796,6 +2995,7 @@ def _image_generation_record(
     model: str | None,
     result_reference: str | None,
     record_data_status: RecordDataStatus,
+    has_preview: bool = False,
 ) -> ControlGenerationRecord:
     billing = image_task_billing(
         conn, task_id=str(row["id"]), user_id=str(row["created_by_user_id"])
@@ -2823,6 +3023,7 @@ def _image_generation_record(
         record_data_status=record_data_status,
         charged_credits=billing[0],
         result_reference=result_reference,
+        has_preview=has_preview,
         provider_reference=None,
         error_code=_optional_text(row["error_code"]),
         error_message=_optional_text(row["error_message_redacted"]),

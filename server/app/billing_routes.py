@@ -399,9 +399,9 @@ def source_action_panorama(
     user_id: str | None = None,
     platform: bool = False,
 ) -> dict[str, Any]:
-    """P1-5：一次业务动作的全部请求与供应商调用；作用域必须明确，避免混账。"""
+    """P1-5：一次操作的全部生成与供应商调用；作用域必须明确，避免混账。"""
     if user_id is None and not platform:
-        raise HTTPException(422, detail="请指明用户或平台范围后再查看业务动作全景")
+        raise HTTPException(422, detail="请指明用户或平台范围后再查看操作全景")
     with pg_transaction() as raw:
         detail = source_action_detail(
             BusinessConnection.postgres(raw),
@@ -410,7 +410,7 @@ def source_action_panorama(
             platform=platform,
         )
         if detail is None:
-            raise HTTPException(404, detail="业务动作不存在")
+            raise HTTPException(404, detail="该操作不存在")
         return detail
 
 

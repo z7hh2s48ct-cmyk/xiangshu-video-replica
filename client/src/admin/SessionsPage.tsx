@@ -23,25 +23,9 @@ const PAGE_SIZE = 50;
 
 // 平台名一律走共享词典（ui/vocabulary.ts 的 PLATFORM_LABELS）。
 // 后台调账（含反向扣减）已迁到客户详情（方案 P0-2）：资金操作放在会话页既难找，
-// 又要求手输客户 ID，本页只保留会话查看与强制下线。
-
-function secondsBetween(later: string | number, earlier: string | number) {
-  return Math.max(
-    0,
-    Math.ceil((new Date(later).getTime() - new Date(earlier).getTime()) / 1000),
-  );
-}
-
-function leaseState(item: CustomerSessionListItem, now: number) {
-  const remaining = secondsBetween(item.lease_until, now);
-  const duration = Math.max(
-    1,
-    secondsBetween(item.lease_until, item.last_heartbeat_at),
-  );
-  const percent = Math.round(Math.min(1, remaining / duration) * 100);
-  const heartbeatAgo = secondsBetween(now, item.last_heartbeat_at);
-  return { heartbeatAgo, percent, remaining };
-}
+// 又要求手输客户 ID，本页只保留会话查看与下线。
+// P2-1：租约剩余 / 心跳 / Epoch 与每秒进度条从主视图移除——运营只问“谁在线”，
+// 技术细节留给后续的技术详情抽屉，这里不再承接。
 
 export function SessionsPage({
   userId,
@@ -60,7 +44,6 @@ export function SessionsPage({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [now, setNow] = useState(Date.now());
 
   const [pendingRevoke, setPendingRevoke] =
     useState<CustomerSessionListItem | null>(null);
@@ -69,11 +52,6 @@ export function SessionsPage({
   const [revoking, setRevoking] = useState(false);
   const requestIdRef = useRef(0);
   const contextIdRef = useRef(0);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, []);
 
   const load = useCallback(
     async (targetUserId: string | null, nextOffset = 0) => {
@@ -184,14 +162,14 @@ export function SessionsPage({
         key,
       );
       if (contextIdRef.current !== actionContextId) return;
-      setNotice(`已强制下线 ${pendingRevoke.username}，会话状态已刷新。`);
+      setNotice(`已下线 ${pendingRevoke.username}，会话状态已刷新。`);
       setPendingRevoke(null);
       setRevokeKey(null);
       await load(viewUserId, offset);
     } catch (cause) {
       if (contextIdRef.current !== actionContextId) return;
       setRevokeError(
-        cause instanceof Error ? cause.message : "结束会话失败：未知错误",
+        cause instanceof Error ? cause.message : "下线失败：未知错误",
       );
       if (cause instanceof AdminSessionError && cause.status !== undefined) {
         setRevokeKey(null);
@@ -208,7 +186,7 @@ export function SessionsPage({
       <header className="admin-sessions__header">
         <div>
           <h2>在线会话</h2>
-          <p>实时查看客户租约，并在必要时强制结束当前会话。</p>
+          <p>实时查看客户登录会话，并在必要时结束当前会话。</p>
         </div>
         <span className="admin-sessions__count">{total} 个在线</span>
       </header>
@@ -241,54 +219,36 @@ export function SessionsPage({
 
       {!loading && items.length > 0 ? (
         <ul aria-label="在线会话列表" className="admin-sessions__list">
-          {items.map((item) => {
-            const lease = leaseState(item, now);
-            return (
-              <li className="admin-sessions__card" key={item.session_id}>
-                <div className="admin-sessions__identity">
-                  <span aria-hidden="true" className="admin-sessions__avatar">
-                    {item.username.slice(0, 1).toUpperCase()}
-                  </span>
-                  <div>
-                    <strong>{item.username}</strong>
-                    <span>{platformLabel(item.platform)}</span>
-                  </div>
+          {items.map((item) => (
+            <li className="admin-sessions__card" key={item.session_id}>
+              <div className="admin-sessions__identity">
+                <span aria-hidden="true" className="admin-sessions__avatar">
+                  {item.username.slice(0, 1).toUpperCase()}
+                </span>
+                <div>
+                  <strong>{item.username}</strong>
+                  <span>{platformLabel(item.platform)}</span>
                 </div>
-                <div className="admin-sessions__lease-meta">
-                  <span>租约剩余 {lease.remaining} 秒</span>
-                  <span>心跳 {lease.heartbeatAgo} 秒前</span>
-                  <span>Epoch {item.session_epoch}</span>
-                </div>
-                <div
-                  aria-label={`${item.username} 租约剩余`}
-                  aria-valuemax={100}
-                  aria-valuemin={0}
-                  aria-valuenow={lease.percent}
-                  className="admin-sessions__progress"
-                  role="progressbar"
-                >
-                  <span style={{ width: `${lease.percent}%` }} />
-                </div>
-                <div className="admin-sessions__actions">
-                  {!userId ? (
-                    <button type="button" onClick={() => selectCustomer(item)}>
-                      选择客户
-                    </button>
-                  ) : null}
-                  {!readOnly ? (
-                    <button
-                      aria-label={`强制下线 ${item.username}`}
-                      className="admin-sessions__revoke"
-                      type="button"
-                      onClick={() => beginRevoke(item)}
-                    >
-                      强制下线
-                    </button>
-                  ) : null}
-                </div>
-              </li>
-            );
-          })}
+              </div>
+              <div className="admin-sessions__actions">
+                {!userId ? (
+                  <button type="button" onClick={() => selectCustomer(item)}>
+                    选择客户
+                  </button>
+                ) : null}
+                {!readOnly ? (
+                  <button
+                    aria-label={`下线 ${item.username}`}
+                    className="admin-sessions__revoke"
+                    type="button"
+                    onClick={() => beginRevoke(item)}
+                  >
+                    下线
+                  </button>
+                ) : null}
+              </div>
+            </li>
+          ))}
         </ul>
       ) : null}
 
@@ -304,7 +264,7 @@ export function SessionsPage({
 
       <ConfirmDialog
         busy={revoking}
-        confirmLabel="确认强制下线"
+        confirmLabel="确认下线"
         description={
           pendingRevoke
             ? `将结束 ${pendingRevoke.username} 的当前登录会话。`
@@ -313,7 +273,7 @@ export function SessionsPage({
         error={revokeError}
         level="reason"
         open={pendingRevoke !== null && !readOnly}
-        title="确认强制下线"
+        title="确认下线"
         onClose={() => {
           setPendingRevoke(null);
           setRevokeError("");

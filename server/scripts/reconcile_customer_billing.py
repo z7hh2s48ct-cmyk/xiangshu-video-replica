@@ -126,14 +126,31 @@ PG_ONLY_TABLES: frozenset[str] = frozenset(
         # 20260916T1400）。T07 导入源无此表，目标库为空属预期；非空即 divergent，
         # 仍 fail closed。
         "customer_email_codes",
+        # 20260929T1000_customer_annotations: 客户标注（标签 / 备注 / 负责人，方案
+        # P2-3），PG-only（守卫同 20260916T1400）。T07 导入源无此表，目标库为空
+        # 属预期；非空即 divergent，仍 fail closed。
+        "customer_annotations",
+        # 20260929T1200_admin_team_and_alert_settings: 通知与告警单行配置表
+        # （方案 P2-4：接收人 + 失败率阈值 / 窗口 / 最小样本），PG-only
+        # （守卫同 20260916T1400）。T07 导入源无此表，目标库为空属预期；
+        # 非空即 divergent，仍 fail closed。
+        "alert_settings",
     }
 )
 
 # Most PG-only tables must be empty before cutover. Rate configuration is the
 # one exception: revision 056 seeds these exact defaults. Any edit, omission,
 # or extra subject is pre-existing target state and must still fail closed.
+# ``alert_settings`` (20260929T1200) is the same kind of exception: the
+# migration inserts its single default row, so a freshly migrated target is
+# never empty.
 PG_ONLY_SEEDED_TABLES: frozenset[str] = frozenset(
-    {"operation_cost_rates", "customer_credit_pricing", "legacy_credit_policy"}
+    {
+        "operation_cost_rates",
+        "customer_credit_pricing",
+        "legacy_credit_policy",
+        "alert_settings",
+    }
 )
 _OPERATION_COST_RATE_SEEDS = (
     ("character_sheet_image", "upstream_cost", "image", None, 5, None),
@@ -184,6 +201,8 @@ PG_ONLY_COLUMNS: dict[str, frozenset[str]] = {
     # T07 的 SQLite 源 schema 冻结于其前基线）。
     # 20260928T1200_customer_email_password_reset: 验证通过的邮箱与验证时间仅存在于
     # PG（T07 的 SQLite 源 schema 冻结于其前基线；待验证地址只活在验证码行里）。
+    # 20260929T1200_admin_team_and_alert_settings: 超级管理员标记列仅存在于 PG
+    # （守卫同 20260916T1400，SQLite lane 不加此列）。
     "users": frozenset(
         {
             "max_devices",
@@ -193,6 +212,7 @@ PG_ONLY_COLUMNS: dict[str, frozenset[str]] = {
             "parent_user_id",
             "email",
             "email_verified_at",
+            "is_super_admin",
         }
     ),
     # 20260912T1353_customer_discounts: wallet_transactions.discount_rate 仅存在于 PG
@@ -844,6 +864,27 @@ def pg_only_table_has_divergent_state(conn: psycopg.Connection[Any], table: str)
             or _row_value(rows[0], "version", 1) != 0
             or _row_value(rows[0], "config_json", 2) is not None
         )
+    if table == "alert_settings":
+        # 单行配置表：迁移写入 id=1 的默认行（接收人为空、30% / 60 分钟 / 5 条、
+        # 无修改人）。被改过或多出行，说明目标库已经有人在用，同样按分歧拒绝。
+        rows = conn.execute(
+            "SELECT id, recipient_user_id, failure_rate_threshold_percent, "
+            "failure_rate_window_minutes, failure_rate_min_sample, updated_by_user_id "
+            "FROM alert_settings"
+        ).fetchall()
+        return len(rows) != 1 or tuple(
+            _row_value(rows[0], name, i)
+            for i, name in enumerate(
+                (
+                    "id",
+                    "recipient_user_id",
+                    "failure_rate_threshold_percent",
+                    "failure_rate_window_minutes",
+                    "failure_rate_min_sample",
+                    "updated_by_user_id",
+                )
+            )
+        ) != (1, None, Decimal(30), 60, 5, None)
     if table not in PG_ONLY_SEEDED_TABLES:
         query = sql.SQL("SELECT COUNT(*) FROM {}").format(sql.Identifier(table))
         return bool(_count_rows(conn, query))

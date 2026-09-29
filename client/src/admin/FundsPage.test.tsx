@@ -36,7 +36,7 @@ test("hands the writable state to the orders tab when not read-only", () => {
 test("switches to the wallet ledger tab", () => {
   render(<FundsPage />);
 
-  fireEvent.click(screen.getByRole("tab", { name: "额度流水" }));
+  fireEvent.click(screen.getByRole("tab", { name: "积分流水" }));
   expect(screen.getByTestId("accounts")).toBeInTheDocument();
   expect(screen.queryByTestId("orders")).toBeNull();
 

@@ -249,8 +249,16 @@ ADMIN_WRITE_AUTHORITIES = {
     "get_control_writer",
     "require_settings_admin",
     "get_character_admin",
+    # 方案 P2-4 团队与权限：超管专属写门槛——是 get_admin_writer 的加强版，
+    # 矩阵按「携带管理级权限」核销；role+is_super_admin 的具体判定在
+    # test_admin_team_routes.py 有专测。
+    "get_super_admin_writer",
 }
-ADMIN_READ_AUTHORITIES = ADMIN_WRITE_AUTHORITIES | {"get_admin_actor"}
+ADMIN_READ_AUTHORITIES = ADMIN_WRITE_AUTHORITIES | {
+    "get_admin_actor",
+    # 方案 P2-4：团队信息只对超管可见，读侧门槛是 get_admin_actor 的加强版。
+    "get_super_admin_actor",
+}
 
 # Self-scoped recovery changes only the caller's password and revokes their
 # sessions. The recovery restriction is enforced inside get_admin_actor and

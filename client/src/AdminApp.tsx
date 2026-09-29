@@ -84,7 +84,7 @@ const tabGroups: Array<{
     tabs: [
       { id: "overview", label: "总览仪表盘", helper: "核心指标与经营总览" },
       { id: "analytics", label: "经营分析", helper: "利润、成本与趋势" },
-      { id: "funds", label: "资金流水", helper: "充值订单与额度流水" },
+      { id: "funds", label: "资金流水", helper: "充值订单与积分流水" },
     ],
   },
   {
@@ -859,6 +859,8 @@ export function AdminApp() {
           ) : null}
           {activeTab === "systemSettings" ? (
             <SystemSettingsPage
+              currentUserId={actor.user_id}
+              isSuperAdmin={actor.is_super_admin === true}
               readOnly={readOnly}
               initialTab={navigationIntent === "rates" ? "rates" : "payment"}
             />

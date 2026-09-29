@@ -89,9 +89,12 @@ REPO_ROOT = SERVER_DIR.parent
 # 20260927T1200_admin_offline_payment_source（管理员代客开通套餐的「线下收款」来源单
 # 类型）再追加其上；20260927T0000_oral_voice_language_settings（声音克隆样本语言与
 # 语速/音量/音调参数）重挂于其后；20260928T1200_customer_email_password_reset（客户
-# 邮箱绑定与邮箱找回密码）追加其上；本分支的 20260928T1000_external_call_response_log
-# （管理端报错排查）按手册 §3 重挂于 20260928T1200 之后，故链尾仍为该值。
-HEAD_REVISION = "20260928T1000_external_call_response_log"
+# 邮箱绑定与邮箱找回密码）追加其上；20260928T1000_external_call_response_log（管理端
+# 报错排查）按手册 §3 重挂于 20260928T1200 之后；20260929T1000_customer_annotations
+# （方案 P2-3 客户标注：标签 / 备注 / 负责人）与 20260929T1200_admin_team_and_alert_settings
+# （方案 P2-4 团队与权限 + 通知与告警：users 超管标记 + alert_settings 单行配置表）
+# 依次追加其上，故链尾为该值。
+HEAD_REVISION = "20260929T1200_admin_team_and_alert_settings"
 
 # 最后一个已发布（受支持）起点。其后的 056…090 与本迁移尚未随任何受支持版本发布，
 # 故冻结范围止于此——把未发布 revision 也纳入哈希会让每次新增迁移都必须改常量，
@@ -146,16 +149,28 @@ HEAD_SCHEMA_COUNTS = {
     # 请求编号），并按其重挂位置追加在 20260928T1200 之后：
     # columns 1241 → 1255、jsonb_columns 6 → 8、check_constraints 330 → 332、
     # partial_indexes 39 → 41；不加表 / 外键，digest 重算（见下）。
-    "check_constraints": 332,
-    "columns": 1255,
-    "foreign_keys": 196,
+    # 20260929T1000 新建 customer_annotations（方案 P2-3 客户标注：标签 JSONB / 备注 /
+    # 负责人）：tables 105 → 106、primary_keys 105 → 106、columns 1255 → 1261、
+    # foreign_keys 196 → 199（user_id / owner_user_id / updated_by_user_id → users）、
+    # check_constraints 332 → 335（tags 是数组 / ≤10 个 / 备注 ≤2000 字符）、
+    # jsonb_columns 8 → 9、timestamptz_columns 60 → 61；无部分索引增量。
+    # 20260929T1200 为 users 增加超管标记列（is_super_admin + 1 条 CHECK）并新建
+    # alert_settings 通知与告警单行配置表（7 列、2 条用户外键、4 条 CHECK；
+    # updated_at 为 timestamptz，Integer 主键 id 走序列）：tables/primary_keys
+    # 106 → 107、columns 1261 → 1269、foreign_keys 199 → 201、check_constraints
+    # 335 → 340、sequences 4 → 5、timestamptz_columns 61 → 62；jsonb / 部分索引
+    # 无增量。以上数字均由 migration_manifest.py --print-schema 在空库迁移到 head
+    # 后实测得出，digest 同法重算（见下）。
+    "check_constraints": 340,
+    "columns": 1269,
+    "foreign_keys": 201,
     "identity_columns": 0,
-    "jsonb_columns": 8,
+    "jsonb_columns": 9,
     "partial_indexes": 41,
-    "primary_keys": 105,
-    "sequences": 4,
-    "tables": 105,
-    "timestamptz_columns": 60,
+    "primary_keys": 107,
+    "sequences": 5,
+    "tables": 107,
+    "timestamptz_columns": 62,
     "triggers": 27,
     "unique_constraints": 39,
 }
@@ -191,6 +206,7 @@ HEAD_TABLE_NAMES = (
     "admin_sessions",
     "admin_write_idempotency",
     "alembic_version",
+    "alert_settings",
     "analysis_task_attempts",
     "analysis_tasks",
     "assets",
@@ -209,6 +225,7 @@ HEAD_TABLE_NAMES = (
     "character_versions",
     "characters",
     "content_objects",
+    "customer_annotations",
     "customer_api_keys",
     "customer_authorization_evidence",
     "customer_batch_visibility",
@@ -364,6 +381,14 @@ HEAD_TABLE_NAMES = (
 #   migration_manifest.py --print-schema 在全新迁移到 head 的库上重算。
 # - 20260928T1200_customer_email_password_reset（客户邮箱找回密码）：users +2 列、
 #   新表 customer_email_codes、provider 白名单追加 ses，digest 同法重算。
+# - 20260929T1000_customer_annotations（方案 P2-3 客户标注）：新建 customer_annotations
+#   （标签 JSONB / 备注 / 负责人 + 三条 CHECK 与三条外键），counts 与表名集随之更新，
+#   digest 由 --print-schema 在全新迁移到 head 的库上重算。
+# - 20260929T1200_admin_team_and_alert_settings（方案 P2-4 团队与权限 + 通知与告警）：
+#   users 增加 is_super_admin（标记位 + 1 条 CHECK）并新建 alert_settings 单行
+#   配置表（接收人 / 失败率阈值 / 窗口 / 最小样本；7 列、2 条 SET NULL 外键、
+#   4 条 CHECK），counts 与表名集随之更新，digest 由 --print-schema 在全新迁移
+#   到 head 的库上重算。
 # digest/counts 以 scripts/ci/migration_manifest.py --print-schema 于 postgres:16 重算
 # （合并后的新 head：sub_account_permissions + 三个 analysis 迁移 + viral 搜索发现表
 #  + main 的 MATERIAL-UX tags_json 列 + REFUND 调账迁移 + 1800 垫片 + 交易号唯一
@@ -371,7 +396,7 @@ HEAD_TABLE_NAMES = (
 #  两侧原来的 digest 都不能用——本分支那条是接在 viral 之后的旧链、main 那条只到
 #  MATERIAL-UX，合并后 head 变成接在 MATERIAL-UX 之后的本分支迁移，约束文本随之变化，
 #  digest 必然要重算。由 scripts/ci/migration_manifest.py --print-schema 在 PG 上重算后粘贴。
-HEAD_SCHEMA_DIGEST = "489e58b844a64ca1eb473e6309d9ec69aa5b1ff8b60214e83cc2e51b975c8baf"
+HEAD_SCHEMA_DIGEST = "6da5a3a10c280f56fc15a0573d4efccb5d66c5accddc3d565158ff6687848174"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

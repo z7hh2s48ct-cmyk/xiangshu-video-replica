@@ -6,11 +6,11 @@ import { TabBar } from "./ui/TabBar";
 
 const tabs = [
   { id: "orders", label: "充值订单" },
-  { id: "transactions", label: "额度流水" },
+  { id: "transactions", label: "积分流水" },
 ];
 
 /**
- * v4 导航合并 — 资金流水：充值订单与额度流水合并为一个菜单项，
+ * v4 导航合并 — 资金流水：充值订单与积分流水合并为一个菜单项，
  * 以页签切换，收支付款与账本变动的对账视图保持各自组件不变。
  */
 export function FundsPage({ readOnly = false }: { readOnly?: boolean }) {

@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AdminRechargeOrder } from "../api.admin";
@@ -112,10 +118,10 @@ describe("OrdersPage", () => {
     const fetchMock = installFetch();
     render(<OrdersPage />);
     await screen.findByText("¥100.50");
-    fireEvent.change(screen.getByLabelText("订单账号"), {
+    fireEvent.change(screen.getByLabelText("订单客户"), {
       target: { value: "customer" },
     });
-    fireEvent.change(screen.getByLabelText("支付渠道"), {
+    fireEvent.change(screen.getByLabelText("支付方式"), {
       target: { value: "alipay" },
     });
     fireEvent.change(screen.getByLabelText("订单起始时间"), {
@@ -242,7 +248,7 @@ describe("OrdersPage", () => {
     expect(screen.queryByRole("button", { name: "查单同步" })).toBeNull();
   });
 
-  it("shows the WeChat trade number and names the payment provider", async () => {
+  it("shows the WeChat trade number and the merged payment method column", async () => {
     installFetch([paidWechatOrder]);
     render(<OrdersPage />);
 
@@ -251,14 +257,21 @@ describe("OrdersPage", () => {
     expect(
       await screen.findByText("4200001234202608190001"),
     ).toBeInTheDocument();
-    expect(screen.getByText("微信官方")).toBeInTheDocument();
+    // P2-1：支付通道 / 支付渠道合并为“支付方式”（微信）；
+    // 限定在表格内断言，避免命中筛选下拉的同名选项。
+    expect(
+      within(screen.getByRole("table", { name: "充值订单列表" })).getByText(
+        "微信",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("does not offer ZPay-only 查单同步 on a pending WeChat order", async () => {
     installFetch([pendingWechatOrder]);
     render(<OrdersPage />);
 
-    expect(await screen.findByText("微信官方")).toBeInTheDocument();
+    const table = await screen.findByRole("table", { name: "充值订单列表" });
+    expect(within(table).getByText("微信")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "查单同步" })).toBeNull();
     expect(screen.getByText("客户详情核验")).toBeInTheDocument();
   });

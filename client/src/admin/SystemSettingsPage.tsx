@@ -8,6 +8,7 @@ import {
 } from "../api";
 import { paidTestControlProvider } from "../api.admin";
 import { type SettingsBackend, SettingsPanel } from "../SettingsPanel";
+import { AdminAlertsSection } from "./AdminAlertsSection";
 import { AdminEnvironmentSwitch } from "./AdminEnvironmentSwitch";
 import { BillingRatesManager } from "./BillingRatesManager";
 import { CustomerPricingManager } from "./CustomerPricingManager";
@@ -15,6 +16,7 @@ import { H3AccountsManager } from "./H3AccountsManager";
 import { PaymentSettingsSection } from "./PaymentSettingsSection";
 import { QueueModeSection } from "./QueueModeSection";
 import { RechargePackageManager } from "./RechargePackageManager";
+import { TeamManagementSection } from "./TeamManagementSection";
 import { TabBar } from "./ui/TabBar";
 import { ViralRuntimeSection } from "./ViralRuntimeSection";
 
@@ -22,7 +24,12 @@ const tabs = [
   { id: "payment", label: "支付与价格" },
   { id: "rates", label: "API 端点与价格" },
   { id: "services", label: "服务配置" },
+  { id: "alerts", label: "通知与告警" },
 ];
+
+// 团队成员管理整组接口只对超级管理员开放：其他人连页签都不给，
+// 而不是点进去看到一页 403。拦截本身仍在服务端。
+const teamTab = { id: "team", label: "团队与权限" };
 
 /**
  * 控制面设置后端：走 `/api/control/settings`（内部通道，由反代注入
@@ -49,18 +56,25 @@ const controlBackend: SettingsBackend = {
 export function SystemSettingsPage({
   readOnly = false,
   initialTab = "payment",
+  isSuperAdmin = false,
+  currentUserId = "",
 }: {
   readOnly?: boolean;
-  initialTab?: "payment" | "rates" | "services";
+  initialTab?: "payment" | "rates" | "services" | "alerts" | "team";
+  isSuperAdmin?: boolean;
+  /** 团队页据此隐藏「自己」那一行的停用 / 超管 / 重置密码按钮。 */
+  currentUserId?: string;
 }) {
-  const [tab, setTab] = useState<string>(initialTab);
+  const [tab, setTab] = useState<string>(
+    initialTab === "team" && !isSuperAdmin ? "payment" : initialTab,
+  );
   const [serviceTab, setServiceTab] = useState("providers");
   return (
     <div>
       <TabBar
         active={tab}
         ariaLabel="系统设置页签"
-        items={tabs}
+        items={isSuperAdmin ? [...tabs, teamTab] : tabs}
         onChange={setTab}
       />
       {tab === "payment" ? (
@@ -108,6 +122,10 @@ export function SystemSettingsPage({
             </div>
           )}
         </div>
+      ) : null}
+      {tab === "alerts" ? <AdminAlertsSection readOnly={readOnly} /> : null}
+      {tab === "team" && isSuperAdmin ? (
+        <TeamManagementSection currentUserId={currentUserId} />
       ) : null}
     </div>
   );

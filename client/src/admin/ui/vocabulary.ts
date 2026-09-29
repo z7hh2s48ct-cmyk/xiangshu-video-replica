@@ -7,6 +7,10 @@
 //    显示成 100 元，属数据失真，已修复。
 // 4. REVOKED 按域区分动词：激活码"已撤销"、设备"已强制退出"（沿用操作
 //    动词），客户沿用其激活码口径"已撤销"。
+// 5. 术语词典（方案 P2-1）：积分流水类型用"生成冻结 / 生成扣费 / 失败退回 /
+//    退款扣减"；金额不足 1 分显示 "< ¥0.01"，不得四舍五入成 ¥0.01 虚报。
+// 6. 列表里的"最近活动"用相对时间（formatRelativeTime），其余时间走
+//    formatDateTime（北京时间）。
 
 type LabelMap = Record<string, string>;
 
@@ -48,13 +52,14 @@ export const ROLE_LABELS: LabelMap = {
 };
 
 export const TRANSACTION_TYPE_LABELS: LabelMap = {
-  CONVERSION: "历史积分转换",
+  CONVERSION: "历史转换",
   CHARGE: "充值到账",
-  RESERVE: "冻结",
-  SETTLE: "结算",
-  RELEASE: "释放",
+  // P2-1：冻结/结算/释放太抽象，运营要能一眼看出这笔钱是哪一步产生的。
+  RESERVE: "生成冻结",
+  SETTLE: "生成扣费",
+  RELEASE: "失败退回",
   // B1：审计调账的反向记账类型（20260923T1200），金额为负、不挂充值单。
-  REFUND: "退款调账",
+  REFUND: "退款扣减",
 };
 
 export const ADJUSTMENT_SOURCE_LABELS: LabelMap = {
@@ -196,8 +201,14 @@ export function platformLabel(platform: string): string {
   return labelFrom(PLATFORM_LABELS, platform);
 }
 
-/** 精确的分为元展示：不丢分位（¥10050 → "¥100.50"）。 */
+/**
+ * 精确的分为元展示：不丢分位（¥10050 → "¥100.50"）。
+ *
+ * 按售价折合等场景会出现不足 1 分的非零值（0 < fen < 1）：四舍五入成
+ * "¥0.01" 会虚报金额，显示 "¥0.00" 会谎称零成本，用 "< ¥0.01" 如实表达量级。
+ */
 export function formatFen(fen: number): string {
+  if (fen > 0 && fen < 1) return "< ¥0.01";
   return `¥${formatYuanFromFen(fen)}`;
 }
 
@@ -229,6 +240,31 @@ export function formatDateTime(value: string | null | undefined): string {
     hour12: false,
     timeZone: "Asia/Shanghai",
   });
+}
+
+/**
+ * 列表里的"最近活动"用相对时间；超过 7 天回退到绝对时间（formatDateTime）。
+ *
+ * 活动间隔几秒到几天都有，绝对时间串要运营自己做减法；相对时间一眼可读。
+ * 但太久远的记录（> 7 天）相对数字反而失去意义，回退绝对时间更精确。
+ */
+export function formatRelativeTime(
+  value: string | null | undefined,
+  now: number = Date.now(),
+): string {
+  if (!value) {
+    return "—";
+  }
+  const timestamp = parseUtcTimestamp(value);
+  if (Number.isNaN(timestamp)) {
+    return "—";
+  }
+  const seconds = Math.floor((now - timestamp) / 1000);
+  if (seconds < 60) return "刚刚";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`;
+  if (seconds < 604800) return `${Math.floor(seconds / 86400)} 天前`;
+  return formatDateTime(value);
 }
 
 /** 服务端旧时间列按 UTC 解释，日期展示与耗时计算共用该契约。 */

@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AccountsPage } from "./AccountsPage";
@@ -96,10 +102,10 @@ describe("AccountsPage", () => {
     );
     render(<AccountsPage />);
     await screen.findByText("operator-1");
-    fireEvent.change(screen.getByLabelText("流水账号"), {
+    fireEvent.change(screen.getByLabelText("流水客户"), {
       target: { value: "operator" },
     });
-    fireEvent.change(screen.getByLabelText("流水类型"), {
+    fireEvent.change(screen.getByLabelText("流水业务类型"), {
       target: { value: "CHARGE" },
     });
     fireEvent.change(screen.getByLabelText("流水起始时间"), {
@@ -137,7 +143,10 @@ describe("AccountsPage", () => {
     render(<AccountsPage />);
 
     expect(await screen.findByText("operator-1")).toBeInTheDocument();
-    expect(screen.getByText("充值到账")).toBeInTheDocument();
+    // P2-1：业务类型下拉从词典生成后，选项文本与表格徽章重名，
+    // 断言限定到表格内。
+    const table = screen.getByRole("table", { name: "账务流水列表" });
+    expect(within(table).getByText("充值到账")).toBeInTheDocument();
     expect(screen.getByText("+10 积分")).toBeInTheDocument();
     expect(screen.getByText(/18 积分/)).toBeInTheDocument();
     expect(screen.getByText(/冻结 2 积分/)).toBeInTheDocument();

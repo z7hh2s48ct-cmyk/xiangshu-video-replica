@@ -487,7 +487,7 @@ export async function listAdminWalletTransactions(
     options.userId
       ? `/api/control/customers/${encodeURIComponent(options.userId)}/wallet-transactions?${params}`
       : `/api/control/wallet-transactions?${params}`,
-    "读取额度流水失败",
+    "读取积分流水失败",
   );
 }
 
@@ -500,6 +500,11 @@ export type AdminActorInfo = {
   username: string;
   display_name: string;
   role: string;
+  /**
+   * 服务端一律返回；类型上保持可选是为了不破坏只关心 role 的既有夹具。
+   * 界面只用它决定是否露出「团队与权限」——真正的拦截在服务端（403）。
+   */
+  is_super_admin?: boolean;
 };
 
 export type AdminExchangeResult = {
@@ -1007,6 +1012,11 @@ export interface CustomerListItem {
   generation_in_progress?: number;
   generation_attention?: number;
   credits_spent?: number;
+  /** 客户标注（方案 P2-3）：空标注不落行，故缺省即「未标注」。 */
+  tags?: string[];
+  note?: string;
+  owner_user_id?: string;
+  owner_username?: string;
 }
 
 export interface CustomerListResponse {
@@ -1119,6 +1129,74 @@ export async function updateCustomerUnitPrice(
     throw await parseActivationError(response, "保存客户单价失败");
   }
   return response.json() as Promise<CustomerUnitPrice>;
+}
+
+// ---------------------------------------------------------------------------
+// P2-3 — Customer annotations (tags / note / owner)
+// ---------------------------------------------------------------------------
+
+/**
+ * 客户标注（方案 P2-3）。无行时服务端返回零值 payload（空标签 / 空备注 /
+ * 无负责人），前端不需要区分「没标过」与「被清空」。
+ */
+export interface CustomerAnnotation {
+  user_id: string;
+  tags: string[];
+  note: string;
+  owner_user_id: string;
+  owner_username: string;
+  updated_by_user_id: string;
+  updated_at: string;
+  request_id: string | null;
+}
+
+export interface CustomerOwnerCandidate {
+  user_id: string;
+  username: string;
+  display_name: string;
+}
+
+/** Read one customer's annotation; a missing row degrades to zero values. */
+export async function fetchCustomerAnnotation(
+  userId: string,
+): Promise<CustomerAnnotation> {
+  return adminRead<CustomerAnnotation>(
+    `/api/control/customers/${encodeURIComponent(userId)}/annotation`,
+    "读取客户标注失败",
+  );
+}
+
+/**
+ * 负责人候选：启用中的管理员账号（服务端排除审计员——审计员只读，
+ * 不成为负责人）。
+ */
+export async function listCustomerOwnerCandidates(): Promise<{
+  items: CustomerOwnerCandidate[];
+}> {
+  return adminRead<{ items: CustomerOwnerCandidate[] }>(
+    "/api/control/customers/owner-candidates",
+    "读取负责人候选失败",
+  );
+}
+
+/**
+ * 整体替换一条客户标注：三字段一律覆盖；全空收缩为删除整行（服务端语义，
+ * 空标注不落行）。reason 必填（写契约四段之一），旧值 / 新值一并入审计。
+ */
+export function updateCustomerAnnotation(
+  userId: string,
+  fields: { tags: string[]; note: string; owner_user_id: string | null },
+  reason: string,
+  idempotencyKey?: string,
+): Promise<CustomerAnnotation> {
+  return adminWrite<CustomerAnnotation>(
+    `/api/control/customers/${encodeURIComponent(userId)}/annotation`,
+    fields,
+    reason,
+    "保存客户标注失败",
+    idempotencyKey,
+    "PUT",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1612,6 +1690,194 @@ export async function getAdminGenerationRecordSummary(
   return response.json() as Promise<AdminGenerationRecordSummary>;
 }
 
+// ---------------------------------------------------------------------------
+// 失败率告警（方案 P1-5）—— GET /api/control/alerts/failure-rate
+// ---------------------------------------------------------------------------
+
+export type AdminFailureRateError = components["schemas"]["FailureRateError"];
+export type AdminFailureRateGroup = components["schemas"]["FailureRateGroup"];
+// 生成类型落后于服务端：报告已带上告警接收人（P2-4），这里按服务端契约补齐，
+// 等下一次整体重生成 OpenAPI 类型后可删掉交叉部分。
+export type AdminFailureRateReport =
+  components["schemas"]["FailureRateReport"] & {
+    recipient_user_id?: string | null;
+    recipient_display_name?: string | null;
+  };
+
+/**
+ * 近 1 小时失败率报告（「通知与告警」页）。只读端点（AdminReader），
+ * 不走写契约；`alerting` 为真表示已有类型越过阈值且样本量达标。
+ */
+export async function getFailureRateAlerts(): Promise<AdminFailureRateReport> {
+  return adminRead<AdminFailureRateReport>(
+    "/api/control/alerts/failure-rate",
+    "读取失败率告警失败",
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 通知与告警设置（方案 P2-4）—— /api/control/settings/alerts
+// ---------------------------------------------------------------------------
+
+/**
+ * 告警设置快照：接收人（可空）+ 失败率口径。手写而非取自生成类型——
+ * 与客户标注同理，避免为一个端点重生成整份 OpenAPI 类型。
+ */
+export interface AlertSettings {
+  recipient_user_id: string | null;
+  recipient_display_name: string | null;
+  failure_rate_window_minutes: number;
+  failure_rate_threshold_percent: number;
+  failure_rate_min_sample: number;
+  updated_by_user_id: string | null;
+  updated_at: string | null;
+}
+
+export type AlertSettingsFields = Pick<
+  AlertSettings,
+  | "recipient_user_id"
+  | "failure_rate_window_minutes"
+  | "failure_rate_threshold_percent"
+  | "failure_rate_min_sample"
+>;
+
+export interface AlertRecipientCandidate {
+  user_id: string;
+  username: string;
+  display_name: string;
+  role: string;
+}
+
+export function getAlertSettings(): Promise<AlertSettings> {
+  return adminRead<AlertSettings>(
+    "/api/control/settings/alerts",
+    "读取告警设置失败",
+  );
+}
+
+/** 可作接收人的账号：启用中的管理员与审计员（读侧，普通管理员可见）。 */
+export function listAlertRecipientCandidates(): Promise<{
+  items: AlertRecipientCandidate[];
+}> {
+  return adminRead<{ items: AlertRecipientCandidate[] }>(
+    "/api/control/settings/alerts/recipient-candidates",
+    "读取告警接收人候选失败",
+  );
+}
+
+/**
+ * 全量更新告警设置（写契约：confirm + reason + 幂等键，旧值 / 新值入审计）。
+ * `recipient_user_id` 为 null 表示显式「不指定接收人」。
+ */
+export function updateAlertSettings(
+  fields: AlertSettingsFields,
+  reason: string,
+  idempotencyKey?: string,
+): Promise<AlertSettings> {
+  return adminWrite<AlertSettings>(
+    "/api/control/settings/alerts",
+    fields,
+    reason,
+    "保存告警设置失败",
+    idempotencyKey,
+    "PUT",
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 团队与权限（方案 P2-4）—— /api/control/team，全部为超级管理员专属
+// ---------------------------------------------------------------------------
+
+export type TeamRole = "admin" | "auditor";
+
+export interface TeamMember {
+  user_id: string;
+  username: string;
+  display_name: string;
+  role: string;
+  is_active: boolean;
+  is_super_admin: boolean;
+  has_password: boolean;
+  /** 空串 = 从未登录。 */
+  last_login_at: string;
+  created_at: string;
+}
+
+export interface TeamMemberCreateFields {
+  username: string;
+  display_name: string;
+  role: TeamRole;
+  password: string;
+}
+
+export interface TeamMemberUpdateFields {
+  display_name?: string;
+  is_active?: boolean;
+  is_super_admin?: boolean;
+}
+
+export function listTeamMembers(): Promise<{ items: TeamMember[] }> {
+  return adminRead<{ items: TeamMember[] }>(
+    "/api/control/team/members",
+    "读取团队成员失败",
+  );
+}
+
+export function createTeamMember(
+  fields: TeamMemberCreateFields,
+  reason: string,
+  idempotencyKey?: string,
+): Promise<TeamMember> {
+  return adminWrite<TeamMember>(
+    "/api/control/team/members",
+    { ...fields },
+    reason,
+    "新增团队成员失败",
+    idempotencyKey,
+  );
+}
+
+/**
+ * 更新成员：显示名 / 启用状态 / 超管标记，至少带一项。停用会同时吊销该成员
+ * 的全部管理会话；不能停用自己、不能动自己的超管标记、不能移除最后一个超管
+ * （服务端 400，界面直接展示其中文说明）。
+ */
+export function updateTeamMember(
+  userId: string,
+  fields: TeamMemberUpdateFields,
+  reason: string,
+  idempotencyKey?: string,
+): Promise<TeamMember> {
+  return adminWrite<TeamMember>(
+    `/api/control/team/members/${encodeURIComponent(userId)}`,
+    { ...fields },
+    reason,
+    "更新团队成员失败",
+    idempotencyKey,
+    "PATCH",
+  );
+}
+
+/** 超管为成员设置新密码；旧密码立即失效，该成员全部管理会话被吊销。 */
+export function resetTeamMemberPassword(
+  userId: string,
+  password: string,
+  reason: string,
+  idempotencyKey?: string,
+): Promise<{ user_id: string; revoked_sessions: number; request_id: string }> {
+  return adminWrite<{
+    user_id: string;
+    revoked_sessions: number;
+    request_id: string;
+  }>(
+    `/api/control/team/members/${encodeURIComponent(userId)}/password`,
+    { password },
+    reason,
+    "重置成员密码失败",
+    idempotencyKey,
+  );
+}
+
 export type AdminExternalCall = components["schemas"]["ExternalCallSummary"];
 export type AdminExternalCallList = components["schemas"]["ExternalCallList"];
 export type AdminExternalCallResponse =
@@ -1715,6 +1981,61 @@ export async function reconcileFirstFrameTask(
     reason,
     "首帧任务对账失败",
   );
+}
+
+export interface GenerationRetryResult {
+  task_id: string;
+  status: string;
+  archive_status: string;
+}
+
+/**
+ * 一键重试一条视频生成记录（方案 P1-4）。
+ *
+ * `POST /api/control/generation-records/{record_id}/retry` —— 能否原地重试
+ * 由服务端按既有业务规则裁决（任务状态 + 错误码），拒绝时返回具体原因，
+ * 前端不复制这套判断。reason 同时作为业务层 retry_reason 留痕。
+ *
+ * 幂等键由调用方传入并在「请求可能已提交但响应丢了」的失败后沿用同一个：
+ * 每次都自动换新键，第二次确认服务端就认不出这是同一次操作，任务已经变成
+ * PENDING 之后只会被回一句「不可重试」。不传时才自动生成。
+ */
+export function retryGenerationRecord(
+  recordId: string,
+  reason: string,
+  idempotencyKey?: string,
+): Promise<GenerationRetryResult> {
+  return adminWrite<GenerationRetryResult>(
+    `/api/control/generation-records/${encodeURIComponent(recordId)}/retry`,
+    {},
+    reason,
+    "重试生成任务失败",
+    idempotencyKey,
+  );
+}
+
+/**
+ * 「查看成片 / 查看图片」：读取生成记录的原件（方案 P2-2）。
+ *
+ * `GET /api/control/generation-records/{record_type}/{record_id}/content` ——
+ * 客户生成内容是高敏数据，服务端每次查看都写
+ * `generation_record.content_view` 审计（与 external_call.response_view 同一
+ * 口径），所以只在运营显式点击时调用，不做预取、不做缓存。返回 Blob，由
+ * 调用方转 object URL 喂给 `<video>` / `<img>`（视频可拖动进度：服务端支持
+ * Range，整段拿到本地后由浏览器自行 seek）。
+ */
+export async function getGenerationRecordContent(
+  recordType: string,
+  recordId: string,
+): Promise<Blob> {
+  const response = await requestControl(
+    `/api/control/generation-records/${encodeURIComponent(recordType)}/${encodeURIComponent(recordId)}/content`,
+    { method: "GET" },
+  );
+  if (!response.ok) {
+    throw await parseActivationError(response, "读取生成记录内容失败");
+  }
+  return response.blob();
 }
 
 export type AdminAnalysisDiagnosticAttempt =

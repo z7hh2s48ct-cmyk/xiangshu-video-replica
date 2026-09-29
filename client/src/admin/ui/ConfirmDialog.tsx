@@ -11,6 +11,7 @@ export function ConfirmDialog({
   open,
   title,
   description,
+  children,
   level = "reason",
   confirmLabel = "确认执行",
   busy = false,
@@ -21,6 +22,8 @@ export function ConfirmDialog({
   open: boolean;
   title: string;
   description?: React.ReactNode;
+  /** 原因输入之前的额外表单项（如补偿积分数量）；状态由调用方持有。 */
+  children?: React.ReactNode;
   level?: ConfirmLevel;
   confirmLabel?: string;
   busy?: boolean;
@@ -143,6 +146,7 @@ export function ConfirmDialog({
         {description ? (
           <p className="admin-hint admin-dialog__description">{description}</p>
         ) : null}
+        {children}
         {level !== "standard" ? (
           <label>
             操作原因

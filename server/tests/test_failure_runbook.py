@@ -28,6 +28,7 @@ from app.failure_runbook import (
     FailureOwner,
     failure_advice,
     failure_classification,
+    failure_explanation,
 )
 
 APP_DIR = Path(__file__).resolve().parents[1] / "app"
@@ -184,3 +185,34 @@ def test_classification_lookup_normalizes_and_fails_open() -> None:
     assert failure_classification("no-such-code") is None
     assert failure_classification("") is None
     assert failure_classification(None) is None
+
+
+def test_explanation_returns_codes_and_advice() -> None:
+    """解释对象只带稳定代码与建议；中文标签是前端词典的事，后端不重复存一份。"""
+    explanation = failure_explanation("analysis_provider_rate_limited")
+    assert explanation is not None
+    assert explanation.category == "PROVIDER_BUSY"
+    assert explanation.owner == "OPS"
+    assert explanation.advice == FAILURE_RUNBOOK["ANALYSIS_PROVIDER_RATE_LIMITED"]
+    assert failure_explanation("no-such-code") is None
+    assert failure_explanation(None) is None
+
+
+def test_content_review_upgrade_uses_provider_message() -> None:
+    """审核拒绝无专属错误码，凭服务商原话升级分类且只对扫描族生效。"""
+    upgraded = failure_explanation(
+        "PROVIDER_TERMINAL", provider_message="Rejected: content policy violation"
+    )
+    assert upgraded is not None
+    assert upgraded.category == "CONTENT_REVIEW"
+    assert upgraded.owner == "SUPPORT"
+    # 非扫描族的码不参与升级（限流原话里出现关键词是误报温床）。
+    not_scanned = failure_explanation(
+        "ANALYSIS_PROVIDER_RATE_LIMITED", provider_message="content policy violation"
+    )
+    assert not_scanned is not None
+    assert not_scanned.category == "PROVIDER_BUSY"
+    # 扫描族但原话无关时保持原分类。
+    plain = failure_explanation("PROVIDER_TERMINAL", provider_message="connection reset by peer")
+    assert plain is not None
+    assert plain.category == "PROVIDER_FAULT"
