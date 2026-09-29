@@ -85,6 +85,7 @@ from app.image_tasks import (
     perform_character_sheet_task,
     prepare_character_sheet_task,
     prepare_first_frame_task,
+    rate_limit_backoff_seconds,
     record_image_task_provider,
     renew_image_task_lease,
     run_first_frame_task_outside_transaction,
@@ -435,6 +436,17 @@ def _run_pg_source_frame_once(
 def _is_quality_settings_failure(exc: HTTPException) -> bool:
     detail: dict[str, Any] = exc.detail if isinstance(exc.detail, dict) else {}
     return str(detail.get("code", "")).startswith("FIRST_FRAME_QUALITY_SETTINGS_")
+
+
+def _sleep_rate_limit_backoff(exc: Exception, lease: Any) -> None:
+    """429 错峰退避：必须在数据库事务外 sleep，避免占着连接等限流窗口。
+
+    full jitter 退避同时形成背压，压住同 worker 后续任务的提交节奏；
+    非 429 失败返回 0，不增加任何延迟。
+    """
+    backoff = rate_limit_backoff_seconds(exc, attempt=int(lease.attempt))
+    if backoff > 0:
+        time.sleep(backoff)
 
 
 def _oral_settings_failure(kind: OralWorkKind) -> OralWorkResult:
@@ -1716,6 +1728,7 @@ def run_pg_worker_once(
                     )
             except Exception as exc:
                 log_image_task_failure("first_frame_tasks", first_frame_lease, exc)
+                _sleep_rate_limit_backoff(exc, first_frame_lease)
                 if stored is not None and work is not None:
                     from app.first_frames import delete_created_first_frames
 
@@ -1796,6 +1809,7 @@ def run_pg_worker_once(
                     )
             except Exception as exc:
                 log_image_task_failure("character_sheet_tasks", character_sheet_lease, exc)
+                _sleep_rate_limit_backoff(exc, character_sheet_lease)
                 with pg_transaction() as raw_conn:
                     conn = BusinessConnection.postgres(raw_conn)
                     complete_operation_cost(

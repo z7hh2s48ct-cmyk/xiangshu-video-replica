@@ -80,6 +80,9 @@ FAILURE_RUNBOOK: dict[str, str] = {
     "IMAGE_TASK_LEASE_EXPIRED": (
         "图像任务执行中断且已停止自动重试，需要管理员核对。先确认上游任务结果，再决定恢复或重发。"
     ),
+    "IMAGE_TASK_PROVIDER_BUSY": (
+        "生成服务限流繁忙。任务已自动错峰重试；终态失败时稍后重新生成即可，无需联系管理员。"
+    ),
     "IMAGE_TASK_RECONCILE_RESUMED": ("管理员已核对上游任务并恢复处理。无需操作，等待继续推进。"),
     # 方案 P0-10：以下码经 ``code = "..."`` 变量写入任务行，旧覆盖测试扫不到。
     "IMAGE_TASK_FAILED": (
