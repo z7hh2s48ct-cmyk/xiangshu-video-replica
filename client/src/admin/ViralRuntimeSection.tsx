@@ -102,18 +102,10 @@ export function ViralRuntimeSection({
     return () => window.clearInterval(timer);
   }, [collectionActive, loadStatus, saving]);
 
-  async function confirm() {
+  // 原因由操作人填写：此前写死成「更新爆款视频采集设置」之类的固定文字，
+  // 审计里查不出谁为什么改了采集（方案 P0-8）。
+  async function confirm(reason: string) {
     if (!controls || !pending) return;
-    const reason =
-      pending === "availability"
-        ? "更新视频可用状态"
-        : pending === "collection"
-          ? "更新爆款视频采集开关"
-          : pending === "collect"
-            ? "立即采集爆款视频"
-            : pending === "keywords"
-              ? "更新爆款视频采集设置"
-              : "更新爆款视频导入开关";
     statusRequest.current += 1;
     setSaving(true);
     setError("");
@@ -435,13 +427,13 @@ export function ViralRuntimeSection({
       <ConfirmDialog
         busy={saving}
         confirmLabel="确认更新"
-        description="确认后立即生效。"
+        description="确认后立即生效，原因会写入审计。"
         error={error}
-        level="standard"
+        level="reason"
         open={pending !== null}
         title="更新爆款视频运行状态"
         onClose={() => setPending(null)}
-        onConfirm={() => void confirm()}
+        onConfirm={(reason) => void confirm(reason)}
       />
     </section>
   );

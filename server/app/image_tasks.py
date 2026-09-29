@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import random
 import sqlite3
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
@@ -69,8 +70,39 @@ from app.storage import (
 # phase instead of relying on one fixed lease for the whole multi-round job.
 IMAGE_TASK_LEASE_MINUTES = 30
 ACTIVE_IMAGE_TASK_STATUSES = ("PENDING", "RUNNING")
+# 429 限流错峰重试上限：与到期回收的 attempt>=3 终止线对齐，每次领取
+# attempt+1，最多 3 次供应商调用后落为忙碌失败，交用户自助重新生成。
+IMAGE_TASK_RATE_LIMIT_MAX_ATTEMPTS = 3
+IMAGE_TASK_RATE_LIMIT_BACKOFF_BASE_SECONDS = 5.0
+IMAGE_TASK_RATE_LIMIT_BACKOFF_CAP_SECONDS = 45.0
 
 logger = logging.getLogger(__name__)
+
+
+def _is_rate_limited_cause(cause: BaseException) -> bool:
+    """429=上游明确拒绝且未受理本次请求，重试不会重复计费。
+
+    两个来源：传输层原始异常（``rate_limited`` 标记）与人物五视图包装层
+    （detail 里的 ``failure_kind``）。超时/连接中断/5xx 一律不算——它们
+    的结果未知，绝不允许自动重试。
+    """
+    if isinstance(cause, RetryableImageProviderFailed):
+        return cause.rate_limited
+    if isinstance(cause, HTTPException) and isinstance(cause.detail, dict):
+        return str(cause.detail.get("failure_kind") or "") == "rate_limited"
+    return False
+
+
+def rate_limit_backoff_seconds(cause: BaseException, *, attempt: int) -> float:
+    """限流错峰退避秒数：full jitter 指数退避并封顶，worker 在事务外 sleep。
+
+    非 429 类失败返回 0。退避同时起到背压作用——占用中的 worker 槽位天然
+    压住同进程后续任务的提交节奏，避免高并发下集体撞限流窗口。
+    """
+    if not _is_rate_limited_cause(cause):
+        return 0.0
+    window = IMAGE_TASK_RATE_LIMIT_BACKOFF_BASE_SECONDS * (2 ** max(0, attempt - 1))
+    return random.uniform(0.0, min(IMAGE_TASK_RATE_LIMIT_BACKOFF_CAP_SECONDS, window))
 
 
 @dataclass(frozen=True)
@@ -1299,6 +1331,13 @@ def fail_image_task(
             # regenerates a new task instead of hitting the reconcile desk.
             known_failure = True
             retryable = True
+        # 人物五视图包装层（simple_character）把供应商异常包成 502，同时在
+        # detail 里携带真实失败类别。上游明确回答的失败没有"未知"可言；
+        # 429 限流未受理，可安全重试——只有 transport_uncertain 保持未知。
+        failure_kind = str(detail.get("failure_kind") or "")
+        if failure_kind in {"definitive", "rate_limited"}:
+            known_failure = True
+            retryable = True
     elif isinstance(cause, (StorageBackendUnavailable, OSError, ValueError)):
         code = "IMAGE_TASK_STORAGE_UNAVAILABLE"
         message = "素材库暂不可用，请稍后重试。"
@@ -1350,6 +1389,42 @@ def fail_image_task(
             extra={"task_id": lease.id, "attempt": lease.attempt, "error_code": code},
         )
         return
+    if (
+        _is_rate_limited_cause(cause)
+        and submission_started
+        and lease.attempt < IMAGE_TASK_RATE_LIMIT_MAX_ATTEMPTS
+    ):
+        # 429 放回队列错峰重试：上游未受理本次请求，重试不会重复计费；
+        # attempt 上限耗尽后走忙碌失败，交用户自助重新生成。
+        updated = conn.execute(
+            f"""
+            UPDATE {table}
+            SET status = 'PENDING', error_code = 'IMAGE_TASK_PROVIDER_BUSY',
+                error_message_redacted = '生成服务繁忙，正在自动错峰重试。',
+                retryable = 1, locked_by = NULL, locked_until = NULL,
+                completed_at = NULL, updated_at = %s
+            WHERE id = %s AND status = 'RUNNING' AND locked_by = %s AND attempt = %s
+            """,
+            (_now_text(), lease.id, lease.worker_id, lease.attempt),
+        )
+        if updated.rowcount != 1:
+            # 租约在长调用期间被到期回收，状态已易手：不得再重排队。
+            conn.rollback()
+            raise _task_error(409, "IMAGE_TASK_STATE_CHANGED", "任务状态已变化，请刷新后重试。")
+        conn.commit()
+        logger.warning(
+            "requeued rate-limited image task for staggered retry",
+            extra={"task_id": lease.id, "attempt": lease.attempt},
+        )
+        return
+    if _is_rate_limited_cause(cause) and not resumable_checkpoint:
+        # 重排队耗尽后的 429 终态：落忙碌失败而不是"待核对"（上游从未受理，
+        # 没有可核对的东西）。有可恢复检查点/回执时保持"未知"，给回执续查
+        # 一个拯救已付费产出的机会。
+        known_failure = True
+        code = "IMAGE_TASK_PROVIDER_BUSY"
+        message = "生成服务繁忙，本次未扣除积分，请稍后重新生成。"
+        retryable = True
     status = "FAILED" if known_failure or not submission_started else "SUBMISSION_UNCERTAIN"
     if status == "SUBMISSION_UNCERTAIN":
         code = "IMAGE_TASK_SUBMISSION_UNCERTAIN"

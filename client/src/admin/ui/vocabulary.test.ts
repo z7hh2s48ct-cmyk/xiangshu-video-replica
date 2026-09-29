@@ -65,9 +65,12 @@ describe("vocabulary", () => {
   });
 
   it("formats timestamps in zh-CN and degrades gracefully", () => {
+    // 锁定时区口径：12:30 UTC 必须显示成北京时间 20:30，
+    // 换回本地时区实现（或去掉 timeZone）时该断言会失败。
     const formatted = formatDateTime("2026-09-01T12:30:00+00:00");
     expect(formatted).not.toBe("—");
     expect(formatted).toMatch(/2026/);
+    expect(formatted).toContain("20:30");
     expect(formatDateTime(null)).toBe("—");
     expect(formatDateTime("not-a-date")).toBe("—");
     expect(formatDateTime("2026-09-01 12:30:00")).toBe(

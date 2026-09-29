@@ -97,4 +97,27 @@ describe("account gate", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("两次输入的密码不一致");
     expect(submit).not.toHaveBeenCalled();
   });
+
+  it("登录页提供找回密码入口，注册模式不提供", () => {
+    const forgot = vi.fn();
+    render(
+      <AccountAccessPage
+        onSubmit={vi.fn()}
+        onHome={vi.fn()}
+        onForgotPassword={forgot}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "忘记密码？" }));
+    expect(forgot).toHaveBeenCalledTimes(1);
+
+    // 注册模式收回入口：注册的人手里还没有账号，去「找回」只会绕圈。
+    fireEvent.click(screen.getByRole("button", { name: "去注册" }));
+    expect(screen.queryByRole("button", { name: "忘记密码？" })).toBeNull();
+  });
+
+  it("未注入找回回调时不渲染忘记密码入口", () => {
+    render(<AccountAccessPage onSubmit={vi.fn()} onHome={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: "忘记密码？" })).toBeNull();
+  });
 });

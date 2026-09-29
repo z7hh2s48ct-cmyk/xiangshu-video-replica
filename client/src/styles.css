@@ -4422,6 +4422,56 @@ button.activation-generator__submit {
   margin-top: 12px;
 }
 
+/* 生成记录详情里的第三方调用留痕（P0-9）：与外层详情字段保持同样的
+   12px 区块间距；段落与错误块收左对齐，表格沿用 DataTable 的横向滚动。 */
+.admin-shell--control .admin-generation-records__calls,
+.admin-shell--control .admin-generation-records__response {
+  margin-top: 12px;
+}
+
+.admin-shell--control .admin-generation-records__calls h4,
+.admin-shell--control .admin-generation-records__response h5 {
+  margin: 0 0 10px;
+  color: var(--admin-muted, #a49e95);
+  font-size: var(--admin-font-caption);
+  font-weight: 600;
+}
+
+.admin-shell--control .admin-generation-records__calls-note {
+  margin: 0 0 8px;
+  color: var(--admin-muted, #a49e95);
+  font-size: var(--admin-font-caption);
+}
+
+.admin-shell--control .admin-generation-records__calls-error {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+
+.admin-shell--control .admin-generation-records__response .settings-error {
+  margin: 0 0 8px;
+}
+
+/* 原始响应按等宽文本原样展示：保留换行、允许横向滚动，并限高。 */
+.admin-shell--control .admin-generation-records__response-body {
+  margin: 10px 0 0;
+  border: 1px solid var(--admin-line, #2e2c29);
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.28);
+  padding: 14px 16px;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: var(--admin-font-caption);
+  line-height: 1.6;
+}
+
+.admin-shell--control .admin-generation-records__response-close {
+  margin-top: 10px;
+}
+
 .admin-shell--control .pagination {
   margin-top: 18px;
   padding-top: 16px;

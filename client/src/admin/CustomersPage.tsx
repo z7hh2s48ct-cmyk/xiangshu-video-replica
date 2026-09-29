@@ -23,8 +23,11 @@ import {
 } from "../api.admin";
 import { yuanInputToFen } from "../rechargePackageDisplay";
 import { AccountCreditPanel } from "./AccountCreditPanel";
+import { CustomerActivitySection } from "./CustomerActivitySection";
 import { CustomerBenefitsSection } from "./CustomerBenefitsSection";
 import { CustomerDeviceSection } from "./CustomerDeviceSection";
+import { CustomerRefundSection } from "./CustomerRefundSection";
+import { RecordCallsPanel } from "./RecordCallsPanel";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { CopyCustomerId } from "./ui/CopyCustomerId";
 import { PageBanner } from "./ui/PageBanner";
@@ -57,8 +60,9 @@ interface CustomersPageProps {
   /**
    * 导航意图（AdminApp 从 hash `?intent=` 解析后透传）。总览快捷入口跳转到
    * 客户管理后必须"有下文"，否则管理员只看到一个与上下文无关的客户列表：
-   * - customerAdjustments（后台加款 / 发放赠送积分）：引导到客户详情内的
-   *   「赠送积分」表单，并在展开客户时自动定位到该区块；
+   * - customerPackage（开通套餐·已收款）/ customerAdjustments（赠送积分）/
+   *   customerRefund（退款扣减）：展开客户时自动定位到对应表单。收款开通计入
+   *   收入、赠送不计收入，两者分开入口，避免把收款误记成赠送；
    * - 其余 intent 与空值：维持原有客户列表行为。
    *
    * （issueCodes / codes 两个 intent 已随本批删除：它们自 #102 下线「快速发码」
@@ -160,6 +164,23 @@ function clearPendingGrantForAttempt(
 // 伪装成状态（2026-09-12 评审 P3 的「伪状态反模式」）。
 const PAGE_SIZE = 20;
 
+/** 总览快捷操作 → 客户详情里的目标区块与引导文案。 */
+const INTENT_TARGETS: Record<string, { sectionId: string; label: string }> = {
+  customerPackage: {
+    sectionId: "customer-benefits",
+    label: "开通套餐（已收款）",
+  },
+  customerAdjustments: { sectionId: "customer-free-grant", label: "赠送积分" },
+  customerRefund: { sectionId: "customer-refund", label: "退款扣减" },
+};
+
+function scrollToSection(sectionId: string) {
+  // jsdom 没有 scrollIntoView，必须走可选调用。
+  document
+    .getElementById(sectionId)
+    ?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+}
+
 export function CustomersPage({
   embedded = false,
   operatorId = "standalone-admin",
@@ -188,17 +209,18 @@ export function CustomersPage({
   });
   const requestId = useRef(0);
   const usernameFilterRef = useRef<HTMLInputElement>(null);
-  // 加款意图只在可写角色下引导：auditor 的详情页没有发放表单。
-  const adjustmentsIntent =
-    initialIntent === "customerAdjustments" && !readOnly;
+  // 资金意图只在可写角色下引导：auditor 的详情页没有这些表单。
+  const intentTarget = readOnly
+    ? null
+    : (INTENT_TARGETS[initialIntent] ?? null);
 
-  // 总览「后台加款 / 发放赠送积分」跳进来后直接落在用户名筛选上，
-  // 管理员可以立刻输入客户名，而不是先自己找筛选框。
+  // 总览快捷操作跳进来后直接落在用户名筛选上，管理员可以立刻输入客户名，
+  // 而不是先自己找筛选框。
   useEffect(() => {
-    if (adjustmentsIntent) {
+    if (intentTarget) {
       usernameFilterRef.current?.focus();
     }
-  }, [adjustmentsIntent]);
+  }, [intentTarget]);
 
   const loadCustomers = useCallback(async () => {
     const sequence = ++requestId.current;
@@ -282,7 +304,7 @@ export function CustomersPage({
     return (
       <CustomerDetailView
         customer={focusedCustomer}
-        focusGrantSection={adjustmentsIntent}
+        focusSectionId={intentTarget?.sectionId ?? null}
         operatorId={operatorId}
         onChanged={() => void loadCustomers()}
         onGranted={(result) => {
@@ -316,9 +338,11 @@ export function CustomersPage({
         </header>
       ) : null}
 
-      {adjustmentsIntent ? (
+      {intentTarget ? (
         <PageBanner tone="notice">
-          后台加款与赠送积分在客户详情内完成：先筛选并展开目标客户，页面会自动定位到「赠送积分」区块。
+          {intentTarget.label}
+          在客户详情内完成：先筛选并展开目标客户，页面会自动定位到「
+          {intentTarget.label}」区块。
         </PageBanner>
       ) : null}
 
@@ -531,9 +555,21 @@ type Customer360Snapshot = {
   transactions: AdminWalletTransaction[];
 };
 
-function Customer360Data({ userId }: { userId: string }) {
+// 充值订单不进生成记录列表（它不是生成任务），但第三方调用同源落库：
+// #9 要求用订单号也能反查这张单出网调了什么，支付回调报文就在原始响应里。
+const RECHARGE_ORDER_RECORD_TYPE = "RECHARGE_ORDER";
+
+function Customer360Data({
+  userId,
+  readOnly,
+}: {
+  userId: string;
+  readOnly: boolean;
+}) {
   const [snapshot, setSnapshot] = useState<Customer360Snapshot | null>(null);
   const [error, setError] = useState("");
+  // 一次只展开一单的查单日志；再点一次收起。
+  const [openedOrderNo, setOpenedOrderNo] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -573,14 +609,44 @@ function Customer360Data({ userId }: { userId: string }) {
 
   return (
     <section aria-label="客户 360 度运营数据" className="customer-360-grid">
-      <Customer360Panel title="最近充值订单">
+      <Customer360Panel
+        className={openedOrderNo ? "customer-360-panel--wide" : undefined}
+        title="最近充值订单"
+      >
         {snapshot.orders.length ? (
           snapshot.orders.map((order) => (
-            <div className="customer-360-row" key={order.id}>
-              <code>{order.order_no}</code>
-              <span>{formatFen(order.amount_fen)}</span>
-              <OrderStatusBadge status={order.status} />
-              <small>{formatDateTime(order.paid_at ?? order.created_at)}</small>
+            <div className="customer-360-order" key={order.id}>
+              <div className="customer-360-row">
+                <code>{order.order_no}</code>
+                <span>{formatFen(order.amount_fen)}</span>
+                <OrderStatusBadge status={order.status} />
+                <small>
+                  {formatDateTime(order.paid_at ?? order.created_at)}
+                </small>
+              </div>
+              <div className="customer-360-order-tools">
+                <button
+                  aria-expanded={openedOrderNo === order.order_no}
+                  type="button"
+                  onClick={() =>
+                    setOpenedOrderNo((current) =>
+                      current === order.order_no ? null : order.order_no,
+                    )
+                  }
+                >
+                  {openedOrderNo === order.order_no
+                    ? "收起查单日志"
+                    : "查单日志"}
+                </button>
+              </div>
+              {openedOrderNo === order.order_no ? (
+                <RecordCallsPanel
+                  active
+                  readOnly={readOnly}
+                  recordId={order.order_no}
+                  recordType={RECHARGE_ORDER_RECORD_TYPE}
+                />
+              ) : null}
             </div>
           ))
         ) : (
@@ -613,12 +679,18 @@ function Customer360Data({ userId }: { userId: string }) {
 function Customer360Panel({
   title,
   children,
+  className,
 }: {
   title: string;
   children: ReactNode;
+  className?: string;
 }) {
   return (
-    <section className="customer-360-panel">
+    <section
+      className={
+        className ? `customer-360-panel ${className}` : "customer-360-panel"
+      }
+    >
       <h3>{title}</h3>
       <div>{children}</div>
     </section>
@@ -631,7 +703,7 @@ function Customer360Empty() {
 
 function CustomerDetailView({
   customer,
-  focusGrantSection,
+  focusSectionId,
   operatorId,
   onChanged,
   onGranted,
@@ -640,7 +712,7 @@ function CustomerDetailView({
   onBack,
 }: {
   customer: CustomerListItem;
-  focusGrantSection: boolean;
+  focusSectionId: string | null;
   operatorId: string;
   onChanged: () => void;
   onGranted: (result: AdjustmentWriteResult) => void;
@@ -648,14 +720,10 @@ function CustomerDetailView({
   refreshError: string;
   onBack: () => void;
 }) {
-  // 带加款意图进入时，展开客户即直达「赠送积分」表单，省掉再点一次
-  // 「后台加款」滚动按钮；jsdom 没有 scrollIntoView，必须走可选调用。
+  // 带资金意图进入时，展开客户即直达对应表单，省掉再点一次顶部按钮。
   useEffect(() => {
-    if (!focusGrantSection) return;
-    document
-      .getElementById("customer-free-grant")
-      ?.scrollIntoView?.({ behavior: "smooth", block: "start" });
-  }, [focusGrantSection]);
+    if (focusSectionId) scrollToSection(focusSectionId);
+  }, [focusSectionId]);
 
   return (
     <div
@@ -692,17 +760,29 @@ function CustomerDetailView({
           </div>
         </div>
         <div className="customer-detail-operations">
+          {/* 收款开通计入收入、赠送不计收入：两个入口分开，避免把客户付过的
+              钱误记成赠送（方案 P0-1）；退款扣减从会话页迁到这里（P0-2）。 */}
           {!readOnly ? (
-            <button
-              type="button"
-              onClick={() =>
-                document
-                  .getElementById("customer-free-grant")
-                  ?.scrollIntoView({ behavior: "smooth", block: "start" })
-              }
-            >
-              后台加款
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => scrollToSection("customer-benefits")}
+              >
+                开通套餐（已收款）
+              </button>
+              <button
+                type="button"
+                onClick={() => scrollToSection("customer-free-grant")}
+              >
+                赠送积分
+              </button>
+              <button
+                type="button"
+                onClick={() => scrollToSection("customer-refund")}
+              >
+                退款扣减
+              </button>
+            </>
           ) : null}
         </div>
       </section>
@@ -733,6 +813,7 @@ function CustomerDetailView({
       />
       <Customer360Data
         key={`ledger:${customer.user_id}:${customer.available_credits}`}
+        readOnly={readOnly}
         userId={customer.user_id}
       />
       {/* 任务书 C：设备视图（BOUND 设备 + 解绑/吊销凭据）。 */}
@@ -749,10 +830,23 @@ function CustomerDetailView({
           userId={customer.user_id}
         />
       </div>
+      <CustomerRefundSection
+        key={`refund:${customer.user_id}`}
+        availableCredits={customer.available_credits ?? 0}
+        onRefunded={onGranted}
+        readOnly={readOnly}
+        userId={customer.user_id}
+      />
       <CustomerBenefitsSection
         key={`benefits:${customer.user_id}`}
         onChanged={onChanged}
         readOnly={readOnly}
+        userId={customer.user_id}
+      />
+      {/* 方案 P0-3：客户自己的动作（建项目、读素材等）——与管理员处置共用
+          同一张审计表，这里按 scope=customer + 客户 ID 取出属于自己的部分。 */}
+      <CustomerActivitySection
+        key={`activity:${customer.user_id}`}
         userId={customer.user_id}
       />
     </div>
@@ -939,7 +1033,19 @@ function CustomerPriceEditor({
 /**
  * 赠送积分发放（FREE_GRANT，054）：为账号发放无收款积分。
  * 走 T23 审计调账闭环——账面金额为 0、钱包照增、自动单号与事由留痕。
+ *
+ * 客服工单 / 补偿审批两类补偿（服务端同为正向口径）也从这里发起：区别只在
+ * 来源单据——必须挂真实工单号 / 审批单号，事后能回溯到客服与审批流程。
  */
+const REFERENCED_GRANT_SOURCES = [
+  "CS_TICKET",
+  "COMPENSATION_APPROVAL",
+] as const;
+
+function needsSourceRef(sourceType: string): boolean {
+  return (REFERENCED_GRANT_SOURCES as readonly string[]).includes(sourceType);
+}
+
 function FreeCreditsSection({
   userId,
   onGranted,
@@ -953,6 +1059,7 @@ function FreeCreditsSection({
 }) {
   const [credits, setCredits] = useState("");
   const [sourceType, setSourceType] = useState("FREE_GRANT");
+  const [sourceRef, setSourceRef] = useState("");
   const [reason, setReason] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -992,6 +1099,12 @@ function FreeCreditsSection({
       setDialogError("请填写事由");
       return;
     }
+    if (needsSourceRef(sourceType) && !sourceRef.trim()) {
+      setDialogError(
+        "请填写来源单号（工单号或审批单号），用于和客服与审批流程对齐",
+      );
+      return;
+    }
     const key = crypto.randomUUID();
     setPendingGrant({
       key,
@@ -999,7 +1112,7 @@ function FreeCreditsSection({
       userId,
       credits: creditsNumber,
       sourceType,
-      sourceRef: `GRANT-${key}`,
+      sourceRef: needsSourceRef(sourceType) ? sourceRef.trim() : `GRANT-${key}`,
       reason: reason.trim(),
       uncertain: false,
       attemptId: null,
@@ -1046,6 +1159,7 @@ function FreeCreditsSection({
       );
       onGranted(result);
       setCredits("");
+      setSourceRef("");
       setReason("");
       setPendingGrant(null);
       setDialogOpen(false);
@@ -1121,6 +1235,8 @@ function FreeCreditsSection({
           >
             <option value="FREE_GRANT">积分赠送</option>
             <option value="CREDIT_COMPENSATION">无收款补偿</option>
+            <option value="CS_TICKET">客服工单补偿</option>
+            <option value="COMPENSATION_APPROVAL">补偿审批</option>
           </select>
         </label>
         <label>
@@ -1135,6 +1251,21 @@ function FreeCreditsSection({
             onChange={(event) => setCredits(event.target.value)}
           />
         </label>
+        {needsSourceRef(sourceType) ? (
+          <label>
+            来源单号
+            <input
+              disabled={dialogOpen || pendingGrant !== null}
+              placeholder={
+                sourceType === "CS_TICKET"
+                  ? "例如：TICKET-20260928-001"
+                  : "例如：COMP-20260928-001"
+              }
+              value={sourceRef}
+              onChange={(event) => setSourceRef(event.target.value)}
+            />
+          </label>
+        ) : null}
         <label>
           事由
           <input
@@ -1155,6 +1286,8 @@ function FreeCreditsSection({
         description={
           <>
             即将发放 {pendingGrant?.credits ?? credits} 积分。
+            <br />
+            本次不产生收入；客户已付款的，请改用「开通套餐（已收款）」。
             <br />
             事由：{pendingGrant?.reason ?? reason.trim()}
             <br />

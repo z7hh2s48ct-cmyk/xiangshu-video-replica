@@ -18,6 +18,7 @@ import psycopg
 
 from app import content_store
 from app.db_portable import BusinessConnection
+from app.external_calls import external_call_context
 from app.generation import (
     ensure_user_queue_cursor,
     lock_shared_generation_capacity,
@@ -435,6 +436,24 @@ def perform_oral_work(
     storage: StorageAdapter,
 ) -> OralWorkResult:
     """Perform provider/storage I/O with no database transaction."""
+    # 口播接口调用归到对应记录：视频任务在管理端生成记录里按 ORAL_VIDEO 查询（P0-9）。
+    call_type = (
+        "ORAL_VIDEO"
+        if lease.kind.startswith("task")
+        else "ORAL_AVATAR"
+        if lease.kind.startswith("avatar")
+        else "ORAL_VOICE"
+    )
+    with external_call_context(call_type, str(lease.record_id), attempt=lease.attempt_count):
+        return _perform_oral_work(lease, vendor=vendor, storage=storage)
+
+
+def _perform_oral_work(
+    lease: OralWorkLease,
+    *,
+    vendor: HiflyClient,
+    storage: StorageAdapter,
+) -> OralWorkResult:
     row = lease.row
     try:
         if lease.kind in {"avatar_submit", "voice_submit", "task_submit"}:

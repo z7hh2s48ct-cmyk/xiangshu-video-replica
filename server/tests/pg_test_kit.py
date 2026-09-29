@@ -211,6 +211,10 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
         # 幂等重放 / 审计矩阵 (test_admin_provider_paid_probe.py), migrated to
         # alembic head and truncated per test.
         "t04_provider_probe_test",
+        # ADMIN-P0-20260928 第三方接口调用日志：dedicated database for 原始响应
+        # 落库、按第三方任务号/短编号检索生成记录、调用列表与原始响应审计
+        # (test_external_calls_pg.py), migrated to alembic head.
+        "external_calls_test",
         # CHARACTER-VIEW-APILIO 角色五视图生成链路：dedicated database for the
         # 注册表解析 / 配置缺失回队列 / worker 全链路（任务→质检→计费）矩阵
         # (test_character_image_provider.py), migrated to alembic head and

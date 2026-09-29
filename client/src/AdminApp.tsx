@@ -162,6 +162,11 @@ const adminTabs = new Set<AdminTab>(Object.keys(tabPageTitles) as AdminTab[]);
 const adminIntents = new Set([
   "costDetails",
   "customerAdjustments",
+  "customerPackage",
+  "customerRefund",
+  "pendingOperations",
+  "unknownCost",
+  "unknownRevenue",
   "failedGenerationRecords",
   "analysisFailures",
   "rates",
@@ -774,7 +779,14 @@ export function AdminApp() {
                 onNavigate={(destination) => {
                   const routes: Record<string, AdminTab> = {
                     customerAdjustments: "customersMgmt",
+                    customerPackage: "customersMgmt",
+                    customerRefund: "customersMgmt",
                     costDetails: "analytics",
+                    // 待结算 / 成本待核对 / 收入未确定都是计费操作口径，落在
+                    // 经营分析而不是资金流水（方案 P0-5）。
+                    pendingOperations: "analytics",
+                    unknownCost: "analytics",
+                    unknownRevenue: "analytics",
                     failedGenerationRecords: "generationRecords",
                     analysisFailures: "generationRecords",
                     rates: "systemSettings",
@@ -789,17 +801,29 @@ export function AdminApp() {
           ) : null}
           {activeTab === "analytics" ? (
             <AnalyticsPage
+              key={`analytics:${navigationIntent}`}
               readOnly={readOnly}
               initialTab={
-                navigationIntent === "costDetails" ? "cost" : "profit"
+                navigationIntent === "costDetails" ||
+                navigationIntent === "pendingOperations" ||
+                navigationIntent === "unknownCost"
+                  ? "cost"
+                  : "profit"
+              }
+              initialAttention={
+                navigationIntent === "pendingOperations"
+                  ? "pending"
+                  : navigationIntent === "unknownCost"
+                    ? "unknown_cost"
+                    : ""
               }
             />
           ) : null}
           {activeTab === "funds" ? <FundsPage readOnly={readOnly} /> : null}
           {activeTab === "customersMgmt" ? (
-            /* 总览快捷入口（后台加款 / 发放赠送积分 / 历史激活码入口）都落在
-               本页：把 intent 透传下去，客户管理页才能给出对应表单或说明，
-               否则点完只是换了个页签、没有下文。 */
+            /* 总览快捷入口（开通套餐 / 赠送积分 / 退款扣减）都落在本页：把
+               intent 透传下去，客户管理页才能定位到对应表单，否则点完只是
+               换了个页签、没有下文。 */
             <CustomersManagementPage
               initialIntent={navigationIntent}
               operatorId={actor.user_id}

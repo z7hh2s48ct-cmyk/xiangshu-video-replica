@@ -7,6 +7,8 @@ import { GenerationRecordsPage } from "./GenerationRecordsPage";
 vi.mock("../api.admin", () => ({
   getAdminGenerationRecords: vi.fn(),
   getAdminGenerationRecordSummary: vi.fn(),
+  getAdminGenerationRecordCalls: vi.fn(),
+  getExternalCallResponse: vi.fn(),
   getAdminAnalysisDiagnostics: vi.fn(),
   reconcileFirstFrameTask: vi.fn(),
 }));
@@ -56,6 +58,11 @@ describe("GenerationRecordsPage", () => {
         { record_type: "SOURCE_FRAME_AI_SCORE", status: "SUCCEEDED", count: 1 },
       ],
       failure_reasons: [],
+    });
+    // 调用日志区块懒加载：默认给空列表，展开详情不会打到未 mock 的路径。
+    vi.mocked(adminApi.getAdminGenerationRecordCalls).mockResolvedValue({
+      items: [],
+      total: 0,
     });
     vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
       items: [
@@ -149,6 +156,48 @@ describe("GenerationRecordsPage", () => {
     expect(screen.getAllByText("customer-1")).toHaveLength(3);
   });
 
+  it("shows the calls panel total with a truncation note (P0-9 #27)", async () => {
+    // 调用日志固定最多 200 条（服务端 _CALL_LIST_LIMIT），面板必须把真实
+    // 总条数与截断说明摆出来，而不是静默只给前 200 条。
+    vi.mocked(adminApi.getAdminGenerationRecordCalls).mockResolvedValue({
+      items: [
+        {
+          call_id: "call-1",
+          created_at: "2026-09-02T11:00:00Z",
+          provider: "minimax",
+          model: "Hailuo-02",
+          endpoint: "v1/video_generation",
+          method: "POST",
+          url: "https://api.example.com/v1/video_generation",
+          attempt: 1,
+          http_status: 200,
+          latency_ms: 320,
+          outcome: "SUCCEEDED",
+          provider_task_id: "provider-task-1",
+          provider_request_id: null,
+          provider_error_code: null,
+          provider_message: null,
+          error_message: null,
+          request_summary: null,
+          response_body_bytes: 128,
+          has_response_body: true,
+        },
+      ],
+      total: 201,
+    });
+    render(<GenerationRecordsPage />);
+
+    fireEvent.click((await screen.findAllByText("查看详情"))[0]);
+    expect(
+      await screen.findByText("共 201 次调用，仅列出最早的 1 次。"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("v1/video_generation")).toBeInTheDocument();
+    expect(adminApi.getAdminGenerationRecordCalls).toHaveBeenCalledWith(
+      "VIDEO",
+      "video-1",
+    );
+  });
+
   it("reloads the current page on demand", async () => {
     render(<GenerationRecordsPage />);
     await screen.findByText("人物置换首帧");
@@ -188,6 +237,16 @@ describe("GenerationRecordsPage", () => {
     expect(screen.getByLabelText("生成状态")).toHaveValue("FAILED");
     // 失败阶段只有拆解任务有，其他类型下不该出现这个筛选项。
     expect(screen.queryByLabelText("失败阶段")).toBeNull();
+  });
+
+  it("offers a single 已取消 option that covers both spellings (P0-6)", async () => {
+    render(<GenerationRecordsPage />);
+    await waitFor(() =>
+      expect(adminApi.getAdminGenerationRecords).toHaveBeenCalled(),
+    );
+    const cancelled = screen.getAllByRole("option", { name: "已取消" });
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0]).toHaveValue("CANCELED,CANCELLED");
   });
 
   it("filters analysis failures by phase and surfaces upstream detail", async () => {

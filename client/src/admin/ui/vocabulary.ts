@@ -78,6 +78,8 @@ export const PLATFORM_LABELS: LabelMap = {
 export const GENERATION_RECORD_TYPE_LABELS: LabelMap = {
   VIDEO: "视频生成",
   ORAL_VIDEO: "口播视频",
+  ORAL_AVATAR: "口播分身",
+  ORAL_VOICE: "声音克隆",
   FIRST_FRAME_IMAGE: "人物置换首帧",
   CHARACTER_SHEET_IMAGE: "人物五视图",
   CHARACTER_VIEW_IMAGE: "人物单视图",
@@ -118,6 +120,26 @@ export const GENERATION_STATUS_LABELS: LabelMap = {
   ARCHIVING: "归档中",
   ARCHIVE_FAILED: "归档失败",
 };
+
+/**
+ * 生成状态筛选项：同一中文标签只出现一次，值为逗号拼接的全部底层状态。
+ *
+ * CANCELED / CANCELLED 两种拼写都映射为「已取消」，逐项渲染会让下拉出现两个
+ * 「已取消」（方案 P0-6）；服务端状态筛选接受逗号分隔的多值。
+ */
+export const GENERATION_STATUS_FILTERS: Array<{
+  value: string;
+  label: string;
+}> = (() => {
+  const grouped = new Map<string, string[]>();
+  for (const [value, label] of Object.entries(GENERATION_STATUS_LABELS)) {
+    grouped.set(label, [...(grouped.get(label) ?? []), value]);
+  }
+  return [...grouped].map(([label, values]) => ({
+    value: values.join(","),
+    label,
+  }));
+})();
 
 /** 查词典并回退到原始值——未知状态原样展示，便于发现新枚举。 */
 export function labelFrom(labels: LabelMap, value: string): string {
