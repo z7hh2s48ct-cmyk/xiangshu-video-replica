@@ -1848,6 +1848,28 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/control/generation-records/{record_type}/{record_id}/thumbnail": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Read Generation Record Thumbnail
+     * @description 签发该条生成记录的缩略图地址（方案 P2-1）。
+     *
+     *     查看客户媒体要留痕：签出成功时写一条审计（与资产下载签发的既有口径一致）。
+     */
+    get: operations["read_generation_record_thumbnail_api_control_generation_records__record_type___record_id__thumbnail_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/control/generation-records/{record_type}/{record_id}/calls": {
     parameters: {
       query?: never;
@@ -9359,6 +9381,27 @@ export interface components {
       status: string;
       /** Count */
       count: number;
+    };
+    /**
+     * GenerationRecordThumbnail
+     * @description 一条生成记录的派生缩略图地址（方案 P2-1）。
+     *
+     *     只签入库时派生的小图（``<原对象键>.thumb.jpg``，480px）：原视频与原图仍走可吊销的
+     *     代理通道，派生物按低敏感度接受 7 天窗口——与素材链路的既有口径一致。
+     *
+     *     ``url`` 允许为空，三处都会为空：记录类型没有媒体（拆解/取帧）、结果资产已删、
+     *     以及存储不是对象存储（本地盘不发外链）。管理端据此显示占位，不为历史记录补抽帧
+     *     —— 那需要离线任务，另立。
+     */
+    GenerationRecordThumbnail: {
+      /** Record Type */
+      record_type: string;
+      /** Record Id */
+      record_id: string;
+      /** Url */
+      url: string | null;
+      /** Expires In Seconds */
+      expires_in_seconds: number;
     };
     /** GenerationRuntimeLimits */
     GenerationRuntimeLimits: {
@@ -17152,6 +17195,50 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["ControlGenerationRecordPage"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_generation_record_thumbnail_api_control_generation_records__record_type___record_id__thumbnail_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Control-Proxy-Token"?: string | null;
+      };
+      path: {
+        record_type:
+          | "VIDEO"
+          | "ORAL_VIDEO"
+          | "ORAL_AVATAR"
+          | "ORAL_VOICE"
+          | "FIRST_FRAME_IMAGE"
+          | "CHARACTER_SHEET_IMAGE"
+          | "CHARACTER_VIEW_IMAGE"
+          | "SOURCE_FRAME_AI_SCORE"
+          | "SOURCE_FRAME_PROCESS"
+          | "ANALYSIS";
+        record_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["GenerationRecordThumbnail"];
         };
       };
       /** @description Validation Error */

@@ -488,3 +488,112 @@ def test_generation_records_route_searches_every_reference(
     # 编号长度上限在路由层校验（Query max_length=200）。
     too_long = route_client.get("/api/control/generation-records", params={"task_ref": "x" * 201})
     assert too_long.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# 缩略图签发（方案 P2-1）
+# ---------------------------------------------------------------------------
+
+
+def _audit_count(dsn: str, action: str) -> int:
+    with psycopg.connect(dsn, autocommit=True) as raw:
+        return int(
+            raw.execute("SELECT count(*) FROM audit_logs WHERE action = %s", (action,)).fetchone()[
+                0
+            ]
+        )
+
+
+def _seed_video_with_thumbnail(dsn: str) -> tuple[str, str]:
+    """播一条带结果资产的视频记录：资产带缩略图键、存储为对象存储。"""
+    suffix = uuid.uuid4().hex[:12]
+    user_id = f"thumb-user-{suffix}"
+    project_id = f"thumb-project-{suffix}"
+    asset_id = f"thumb-asset-{suffix}"
+    task_id = f"thumb-task-{suffix}"
+    thumbnail_key = f"thumbs/{asset_id}.thumb.jpg"
+    with psycopg.connect(dsn, autocommit=True) as raw:
+        raw.execute(
+            "INSERT INTO users (id, username, display_name, role, is_active) "
+            "VALUES (%s, %s, '缩略图客户', 'customer', 1)",
+            (user_id, user_id),
+        )
+        raw.execute(
+            "INSERT INTO projects (id, owner_user_id, name) VALUES (%s, %s, '缩略图项目')",
+            (project_id, user_id),
+        )
+        raw.execute(
+            "INSERT INTO assets (id, project_id, kind, storage_uri, sha256, size_bytes, "
+            "content_type, metadata_json, created_by_user_id) VALUES "
+            "(%s, %s, 'generated_video', %s, %s, 2048, 'video/mp4', %s, %s)",
+            (
+                asset_id,
+                project_id,
+                f"cos://thumb-bucket/{asset_id}.mp4",
+                "b" * 64,
+                json.dumps({"thumbnail_key": thumbnail_key}),
+                user_id,
+            ),
+        )
+        batch_id = f"thumb-batch-{suffix}"
+        raw.execute(
+            "INSERT INTO generation_batches (id, project_id, created_by_user_id, "
+            "idempotency_key, request_hash, request_snapshot_json) "
+            "VALUES (%s, %s, %s, %s, %s, '{}')",
+            (batch_id, project_id, user_id, f"key-{suffix}", f"hash-{suffix}"),
+        )
+        raw.execute(
+            "INSERT INTO generation_tasks (id, batch_id, generation_mode, provider, model, "
+            "status, archive_status, result_asset_id, created_at_utc) VALUES "
+            "(%s, %s, 'I2V', 'metaso', 'MiniMax-H3', 'SUCCEEDED', 'DIRECT', %s, now())",
+            (task_id, batch_id, asset_id),
+        )
+    return task_id, asset_id
+
+
+def test_thumbnail_route_requires_an_admin_session(route_client: TestClient) -> None:
+    """新端点的权限面走路由级证据：没有管理员会话一律挡在门外。"""
+    response = route_client.get("/api/control/generation-records/ANALYSIS/whatever/thumbnail")
+    assert response.status_code == 401
+
+
+def test_thumbnail_route_returns_a_placeholder_without_media(
+    route_client: TestClient, pg_env: str
+) -> None:
+    """没有媒体的记录给空 url：管理端显示占位，而不是给一张必然 404 的图。
+
+    同时钉住「没签出就不留痕」——审计只在真的给出媒体地址时写。
+    """
+    task_id = _seed_failed_analysis(pg_env)
+    _admin_session(route_client)
+
+    response = route_client.get(f"/api/control/generation-records/ANALYSIS/{task_id}/thumbnail")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["record_type"] == "ANALYSIS"
+    assert body["record_id"] == task_id
+    assert body["url"] is None
+    assert body["expires_in_seconds"] > 0
+    assert _audit_count(pg_env, "generation_record.thumbnail_view") == 0
+
+
+def test_thumbnail_route_signs_object_storage_and_writes_audit(
+    route_client: TestClient, pg_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """有缩略图键的对象存储资产：签出地址并写审计（查看客户媒体要留痕）。
+
+    存储用假适配器替身，但 provider 是 ``cos``——这正是签发分支的判据。
+    """
+    from app import control_routes
+    from app.storage import FakeStorageAdapter
+
+    task_id, _asset_id = _seed_video_with_thumbnail(pg_env)
+    _admin_session(route_client)
+    fake = FakeStorageAdapter(provider="cos", bucket="thumb-tests")
+    monkeypatch.setattr(control_routes, "storage_for_asset", lambda conn, uri: fake)
+
+    response = route_client.get(f"/api/control/generation-records/VIDEO/{task_id}/thumbnail")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert isinstance(body["url"], str) and body["url"]
+    assert _audit_count(pg_env, "generation_record.thumbnail_view") == 1

@@ -9,6 +9,7 @@ import {
 } from "../api.admin";
 import { AnalysisDiagnosticPanel } from "./AnalysisDiagnosticPanel";
 import { RecordCallsPanel } from "./RecordCallsPanel";
+import { RecordThumbnail } from "./RecordThumbnail";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { DataTable } from "./ui/DataTable";
 import { PageBanner } from "./ui/PageBanner";
@@ -535,6 +536,11 @@ export function GenerationRecordsPage({
                             : "正常"}
                         </dd>
                       </dl>
+                      <RecordThumbnail
+                        active={openedDetails.has(recordKey(item))}
+                        recordId={item.record_id}
+                        recordType={item.record_type}
+                      />
                       <RecordCallsPanel
                         active={openedDetails.has(recordKey(item))}
                         readOnly={readOnly}

@@ -8,6 +8,7 @@ vi.mock("../api.admin", () => ({
   getAdminGenerationRecords: vi.fn(),
   getAdminGenerationRecordSummary: vi.fn(),
   getAdminGenerationRecordCalls: vi.fn(),
+  getAdminGenerationRecordThumbnail: vi.fn(),
   getExternalCallResponse: vi.fn(),
   getAdminAnalysisDiagnostics: vi.fn(),
   reconcileFirstFrameTask: vi.fn(),
@@ -50,6 +51,16 @@ describe("GenerationRecordsPage", () => {
       items: [],
       total: 0,
     });
+    // 缩略图默认给「没有派生小图」：展开详情的用例都会渲染它，不该让它们各自
+    // 关心图片；要验图片的用例自己覆盖这一条。
+    vi.mocked(adminApi.getAdminGenerationRecordThumbnail).mockResolvedValue({
+      record_type: "FIRST_FRAME_IMAGE",
+      record_id: "ff-1",
+      url: null,
+      expires_in_seconds: 604800,
+    } as Awaited<
+      ReturnType<typeof adminApi.getAdminGenerationRecordThumbnail>
+    >);
     vi.mocked(adminApi.getAdminGenerationRecordSummary).mockResolvedValue({
       total: 3,
       counts: [
