@@ -485,6 +485,7 @@ describe("GenerationRecordsPage", () => {
       ],
       failure_reasons: [
         {
+          record_type: "FIRST_FRAME_IMAGE",
           error_code: "ANALYSIS_PROVIDER_FAILED",
           failure_phase: "http",
           reason: null,
