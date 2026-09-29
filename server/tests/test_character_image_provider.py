@@ -755,14 +755,18 @@ def test_worker_full_chain_reaches_reviewing_with_assets_and_billing(pg_state: s
         )
         == 5
     )
+    # 桩不发起网络调用，因此不会产生调用日志：调用日志只由真实的 recorded_urlopen
+    # 入口写入（app.external_calls，ADMIN-P0-20260928 的调用日志收口）。此前这里断言
+    # 的是 character_generation.py 的直写路径（已随该收口删除），故改为钉住「桩路径
+    # 零写入」这一性质——它同时能抓到「桩路径意外走了网络」的回归。真实 HTTP 调用的
+    # 落库与任务归属由 test_external_calls_pg.py 覆盖。
     assert (
         _one(
             pg_state,
             "SELECT count(*) FROM external_call_logs "
-            "WHERE endpoint_name='character_image.generate_view' AND provider='apilio' "
-            "AND error_code IS NULL AND character_generation_task_id IS NOT NULL",
+            "WHERE task_type = 'CHARACTER_VIEW_IMAGE' AND task_id IS NOT NULL",
         )
-        == 5
+        == 0
     )
     assert (
         _one(
