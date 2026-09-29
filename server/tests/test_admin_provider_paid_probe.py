@@ -19,8 +19,9 @@
 - 成功路径落审计 `provider_settings.paid_test`，含操作原因与 request_id；
 - 审计器（auditor）只读 → 403 `AUDITOR_READ_ONLY`；无会话 → 401。
 
-另有一条**如实呈现**断言：对尚未接入真实客户端的服务（本文件以 metaso 为例），
-默认测试器（`get_provider_tester` → `NoopProviderTester`）对 paid_test 恒抛
+另有一条**如实呈现**断言：对尚未接入真实客户端的服务（本文件以 deepseek 为例；
+metaso 已接入真实探针，见 `test_metaso_paid_probe.py`），默认测试器
+（`get_provider_tester` → `NoopProviderTester`）对 paid_test 恒抛
 501 `PROVIDER_TEST_NOT_IMPLEMENTED`，且**不落审计**（没有任何付费动作发生）。
 前端文案必须与这条事实一致，不得对这类服务宣称「会产生真实费用」。
 
@@ -399,7 +400,7 @@ def test_paid_probe_reports_the_unwired_stub_honestly(
     该断言是前端文案的事实来源——未接入就是未接入，不得提示「会产生真实费用」。
     """
     response = client.post(
-        "/api/control/settings/providers/metaso/paid-test",
+        "/api/control/settings/providers/deepseek/paid-test",
         headers=paid_probe_headers,
         json=_payload(),
     )
