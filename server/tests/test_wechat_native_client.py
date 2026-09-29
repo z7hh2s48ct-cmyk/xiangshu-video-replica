@@ -29,6 +29,7 @@ from app.wechat_native_client import (
     CERTIFICATES_PATH,
     NATIVE_ORDER_PATH,
     WECHAT_API_BASE,
+    WECHAT_INVALID_RESPONSE_CODE,
     PlatformCertificateManager,
     WeChatDeploymentConfig,
     WeChatMerchantConfig,
@@ -1474,3 +1475,196 @@ def test_a_failing_call_log_never_breaks_the_payment_flow(
     )
 
     assert result.code_url == "weixin://wxpay/bizpayurl?pr=STILLOK"
+
+
+# --- 2xx 应答没通过校验：不能记成成功 ---------------------------------------------
+# HTTP 200 只说明网关收了请求；验签 / 解析 / 字段校验拒绝的调用，对排查就是失败，
+# 要按失败保留期留存并带上原因，而不是先记成 SUCCEEDED 再没人改。
+
+
+def _tampered_response(platform_serial: str, body: bytes) -> _MockResponse:
+    return _MockResponse(
+        body=body,
+        headers={
+            "Wechatpay-Timestamp": "1700000000",
+            "Wechatpay-Nonce": "respnonce123456",
+            "Wechatpay-Signature": base64.b64encode(b"not-a-real-signature").decode(),
+            "Wechatpay-Serial": platform_serial,
+        },
+    )
+
+
+def test_a_rejected_signature_is_logged_as_a_failure_under_the_order(
+    captured_calls: list,
+    platform_cert_pem: bytes,
+    platform_serial: str,
+    merchant_config: WeChatMerchantConfig,
+    deployment: WeChatDeploymentConfig,
+) -> None:
+    body = json.dumps({"code_url": "weixin://wxpay/bizpayurl?pr=FORGED"}).encode()
+    tampered = _tampered_response(platform_serial, body)
+    opener = _RouteOpener(_native_routes(tampered, platform_cert_pem, platform_serial))
+
+    with pytest.raises(WeChatSignatureError):
+        WeChatNativeClient(opener=opener).create_native_order(
+            merchant=merchant_config,
+            deployment=deployment,
+            out_trade_no="OUT_LOG_BAD_SIG",
+            description="d",
+            amount_fen=100,
+        )
+
+    [call] = _calls_for(captured_calls, "native_order")
+    assert call.outcome == "PARSE_ERROR"
+    assert call.error_code == WECHAT_INVALID_RESPONSE_CODE
+    assert "signature" in (call.error_message or "")
+    # 网关确实答了 200，状态码与应答原文照留，方便对照微信侧的记录。
+    assert call.http_status == 200
+    assert "FORGED" in (call.response_body or "")
+    # 结算发生在订单上下文之外，订单归属仍要带上。
+    assert call.context is not None
+    assert (call.context.task_type, call.context.task_id) == ("RECHARGE_ORDER", "OUT_LOG_BAD_SIG")
+
+
+def test_a_response_missing_its_code_url_is_logged_as_a_failure(
+    captured_calls: list,
+    platform_key: rsa.RSAPrivateKey,
+    platform_cert_pem: bytes,
+    platform_serial: str,
+    merchant_config: WeChatMerchantConfig,
+    deployment: WeChatDeploymentConfig,
+) -> None:
+    body = json.dumps({"prepay_id": "no-code-url-here"}).encode()
+    signed = _signed_response(platform_key, body, platform_serial)
+    opener = _RouteOpener(_native_routes(signed, platform_cert_pem, platform_serial))
+
+    with pytest.raises(WeChatNativeError, match="code_url"):
+        WeChatNativeClient(opener=opener).create_native_order(
+            merchant=merchant_config,
+            deployment=deployment,
+            out_trade_no="OUT_LOG_NO_CODE",
+            description="d",
+            amount_fen=100,
+        )
+
+    [call] = _calls_for(captured_calls, "native_order")
+    assert call.outcome == "PARSE_ERROR"
+    assert "code_url" in (call.error_message or "")
+
+
+def test_an_order_query_for_another_order_is_logged_as_a_failure(
+    captured_calls: list,
+    platform_key: rsa.RSAPrivateKey,
+    platform_cert_pem: bytes,
+    platform_serial: str,
+    merchant_config: WeChatMerchantConfig,
+) -> None:
+    body = json.dumps({"trade_state": "SUCCESS", "out_trade_no": "SOMEONE_ELSE"}).encode()
+    signed = _signed_response(platform_key, body, platform_serial)
+    opener = _RouteOpener(_query_routes(signed, platform_cert_pem, platform_serial))
+
+    with pytest.raises(WeChatNativeError, match="mismatch"):
+        WeChatNativeClient(opener=opener).query_order(
+            merchant=merchant_config, out_trade_no="OUT_LOG_Q_MISMATCH"
+        )
+
+    [call] = _calls_for(captured_calls, "order_query")
+    assert call.outcome == "PARSE_ERROR"
+    assert call.context is not None
+    assert call.context.task_id == "OUT_LOG_Q_MISMATCH"
+
+
+def test_a_certificate_refresh_during_order_query_is_not_attributed_to_the_order(
+    captured_calls: list,
+    platform_key: rsa.RSAPrivateKey,
+    platform_cert_pem: bytes,
+    platform_serial: str,
+    merchant_config: WeChatMerchantConfig,
+) -> None:
+    """验签时冷缓存会顺带下载平台证书：那次下载不属于任何订单，只有查单本身才是。"""
+    body = json.dumps({"trade_state": "NOTPAY", "out_trade_no": "OUT_LOG_Q_CERT"}).encode()
+    signed = _signed_response(platform_key, body, platform_serial)
+    opener = _RouteOpener(_query_routes(signed, platform_cert_pem, platform_serial))
+
+    WeChatNativeClient(opener=opener).query_order(
+        merchant=merchant_config, out_trade_no="OUT_LOG_Q_CERT"
+    )
+
+    [download] = _calls_for(captured_calls, "certificates")
+    assert download.context is None
+    [query] = _calls_for(captured_calls, "order_query")
+    assert query.outcome == "SUCCEEDED"
+    assert query.context is not None
+    assert query.context.task_id == "OUT_LOG_Q_CERT"
+
+
+def test_an_oversized_response_is_logged_as_a_failure(
+    captured_calls: list,
+    merchant_config: WeChatMerchantConfig,
+    deployment: WeChatDeploymentConfig,
+) -> None:
+    from app.wechat_native_client import MAX_WECHAT_RESPONSE_BYTES
+
+    oversized = _MockResponse(body=b"x" * (MAX_WECHAT_RESPONSE_BYTES + 10))
+    opener = _RouteOpener({NATIVE_ORDER_PATH: oversized})
+
+    with pytest.raises(WeChatNativeError, match="too large"):
+        WeChatNativeClient(opener=opener).create_native_order(
+            merchant=merchant_config,
+            deployment=deployment,
+            out_trade_no="OUT_LOG_BIG",
+            description="d",
+            amount_fen=100,
+        )
+
+    [call] = _calls_for(captured_calls, "native_order")
+    assert call.outcome == "PARSE_ERROR"
+    assert call.error_code == WECHAT_INVALID_RESPONSE_CODE
+
+
+def test_an_undecryptable_certificate_download_is_logged_as_a_failure(
+    captured_calls: list,
+    platform_cert_pem: bytes,
+    platform_serial: str,
+    merchant_config: WeChatMerchantConfig,
+) -> None:
+    """api_v3_key 配错时下载本身是 200，但证书解不开——排查时它必须显示为失败。"""
+    wrong_key = "fedcba9876543210fedcba9876543210"
+    opener = _RouteOpener(
+        {CERTIFICATES_PATH: _certificates_response(wrong_key, platform_cert_pem, platform_serial)}
+    )
+
+    with pytest.raises(WeChatNativeError):
+        PlatformCertificateManager(opener=opener).get_certificate(merchant_config, platform_serial)
+
+    [download] = _calls_for(captured_calls, "certificates")
+    assert download.outcome == "PARSE_ERROR"
+    assert download.response_body is None
+
+
+def test_a_failing_call_log_does_not_mask_the_validation_error(
+    monkeypatch: pytest.MonkeyPatch,
+    platform_cert_pem: bytes,
+    platform_serial: str,
+    merchant_config: WeChatMerchantConfig,
+    deployment: WeChatDeploymentConfig,
+) -> None:
+    from app import external_calls
+
+    def broken(_call: object) -> None:
+        raise RuntimeError("log store is down")
+
+    monkeypatch.setattr(external_calls, "_insert", broken)
+    body = json.dumps({"code_url": "weixin://x"}).encode()
+    tampered = _tampered_response(platform_serial, body)
+    opener = _RouteOpener(_native_routes(tampered, platform_cert_pem, platform_serial))
+
+    # 日志写不进去时，调用方拿到的仍是验签失败本身，而不是日志库的错。
+    with pytest.raises(WeChatSignatureError):
+        WeChatNativeClient(opener=opener).create_native_order(
+            merchant=merchant_config,
+            deployment=deployment,
+            out_trade_no="OUT_LOG_BROKEN_SIG",
+            description="d",
+            amount_fen=100,
+        )

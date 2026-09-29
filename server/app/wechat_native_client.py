@@ -30,8 +30,9 @@ import os
 import secrets
 import threading
 import time
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager, nullcontext
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol, Self, cast
 from urllib.error import HTTPError, URLError
@@ -47,7 +48,10 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from app.external_calls import (
     FAILED_BODY_LIMIT,
+    CallContext,
     CallTimer,
+    Outcome,
+    current_call_context,
     external_call_context,
     record_external_call,
     summarize_request_body,
@@ -82,6 +86,8 @@ WECHAT_CALL_PROVIDER = "wechat_pay"
 ENDPOINT_NATIVE_ORDER = "native_order"
 ENDPOINT_ORDER_QUERY = "order_query"
 ENDPOINT_CERTIFICATES = "certificates"
+# 微信答了 2xx 却没能通过验签 / 解析 / 字段校验时写进调用日志的错误码。
+WECHAT_INVALID_RESPONSE_CODE = "WECHAT_RESPONSE_INVALID"
 # 微信返回给排查用的响应头：请求编号能让微信侧客服直接定位这一次调用。
 _LOGGED_RESPONSE_HEADERS = ("Content-Type", "Request-ID", "Retry-After")
 
@@ -372,6 +378,44 @@ class WeChatHTTPOpener(Protocol):
     def __call__(self, request: Request, *, timeout: float) -> WeChatHTTPResponse: ...
 
 
+@dataclass
+class _PendingCall:
+    """已收到 2xx 应答、但还没通过校验的一次调用；有了结论才写调用日志。
+
+    HTTP 200 只说明网关收了请求。验签、JSON 解析、字段校验任何一步拒绝，这次调用
+    对排查来说就是失败：得按失败保留期留存并带上原因，不能先记成成功再没人改。
+    """
+
+    fields: dict[str, object]
+    # 请求发出时的任务归属。结算发生在订单上下文之外（证书刷新不能记到订单名下），
+    # 所以要在这里存下来，结算时再带回去。
+    context: CallContext | None
+    settled: bool = False
+
+    def settle(
+        self,
+        outcome: Outcome,
+        *,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        if self.settled:
+            return
+        self.settled = True
+        fields = {**self.fields, "outcome": outcome}
+        if error_code is not None:
+            fields["error_code"] = error_code
+        if error_message is not None:
+            fields["error_message"] = error_message
+        if self.context is None:
+            record_external_call(**fields)
+            return
+        with external_call_context(
+            self.context.task_type, self.context.task_id, attempt=self.context.attempt
+        ):
+            record_external_call(**fields)
+
+
 @dataclass(frozen=True)
 class _RawResponse:
     """Raw HTTP response body plus the Wechatpay-* verification headers."""
@@ -381,6 +425,25 @@ class _RawResponse:
     nonce: str | None
     signature: str | None
     serial: str | None
+    # 待结算的调用日志；由 :func:`_validated` 在校验有结论后写入。
+    call: _PendingCall | None = field(default=None, compare=False, repr=False)
+
+
+@contextmanager
+def _validated(raw: _RawResponse) -> Iterator[None]:
+    """包住对应答的校验：全部通过记成功，任何一步拒绝就改记为解析失败并照旧抛出。"""
+    try:
+        yield
+    except Exception as exc:  # noqa: BLE001 — 只改写日志结论，异常原样向上抛
+        if raw.call is not None:
+            raw.call.settle(
+                "PARSE_ERROR",
+                error_code=WECHAT_INVALID_RESPONSE_CODE,
+                error_message=str(exc),
+            )
+        raise
+    if raw.call is not None:
+        raw.call.settle("SUCCEEDED")
 
 
 def wechat_error_detail(exc: HTTPError) -> str:
@@ -475,7 +538,10 @@ def _execute_request(
 
     Every call is written to the third-party call log (P0-9) — this is the single
     place all WeChat traffic passes through, so the business flow stays untouched.
-    Recording never raises: a log write that fails only warns.
+    Transport failures and non-2xx answers are recorded right here; a 2xx answer is
+    only handed back as a pending call, and the caller settles it (:func:`_validated`)
+    once the signature and payload checks have a verdict. Recording never raises: a
+    log write that fails only warns.
     """
     timer = CallTimer()
     common = {
@@ -523,19 +589,31 @@ def _execute_request(
         )
         logger.warning("WeChat API request failed: %s", type(exc).__name__)
         raise WeChatNativeError("WeChat API request timed out", status_code=504) from exc
-    record_external_call(
-        **common,
-        outcome="SUCCEEDED",
-        http_status=status,
-        response_headers=response_headers,
-        # 平台证书下载的响应是 api_v3_key 加密的证书密文，对排查没有价值，只记元数据。
-        response_body=None if endpoint == ENDPOINT_CERTIFICATES else body,
-        latency_ms=timer.elapsed_ms(),
+    pending = _PendingCall(
+        fields={
+            **common,
+            "http_status": status,
+            "response_headers": response_headers,
+            # 平台证书下载的响应是 api_v3_key 加密的证书密文，对排查没有价值，只记元数据。
+            "response_body": None if endpoint == ENDPOINT_CERTIFICATES else body,
+            "latency_ms": timer.elapsed_ms(),
+        },
+        context=current_call_context(),
     )
     if len(body) > MAX_WECHAT_RESPONSE_BYTES:
+        pending.settle(
+            "PARSE_ERROR",
+            error_code=WECHAT_INVALID_RESPONSE_CODE,
+            error_message=f"应答体超过 {MAX_WECHAT_RESPONSE_BYTES} 字节上限",
+        )
         raise WeChatNativeError("WeChat API response is too large")
     return _RawResponse(
-        body=body, timestamp=timestamp, nonce=nonce, signature=signature, serial=serial
+        body=body,
+        timestamp=timestamp,
+        nonce=nonce,
+        signature=signature,
+        serial=serial,
+        call=pending,
     )
 
 
@@ -650,7 +728,8 @@ class PlatformCertificateManager:
                 timeout_seconds=self._timeout_seconds,
                 endpoint=ENDPOINT_CERTIFICATES,
             )
-            self._cache = self._parse_certificates(merchant, raw.body)
+            with _validated(raw):
+                self._cache = self._parse_certificates(merchant, raw.body)
             self._fetched_at = self._last_refresh_attempt = self._clock()
             return len(self._cache)
 
@@ -662,7 +741,8 @@ class PlatformCertificateManager:
             timeout_seconds=self._timeout_seconds,
             endpoint=ENDPOINT_CERTIFICATES,
         )
-        self._cache = self._parse_certificates(merchant, raw.body)
+        with _validated(raw):
+            self._cache = self._parse_certificates(merchant, raw.body)
         self._fetched_at = now
 
     def _build_request(self, merchant: WeChatMerchantConfig) -> Request:
@@ -856,11 +936,12 @@ class WeChatNativeClient:
                 body=body,
                 endpoint=ENDPOINT_NATIVE_ORDER,
             )
-        verified = self._verify_response(merchant, raw)
-        parsed = _parse_json_object(verified)
-        code_url = parsed.get("code_url")
-        if not isinstance(code_url, str) or not code_url:
-            raise WeChatNativeError("WeChat native order response is missing code_url")
+        with _validated(raw):
+            verified = self._verify_response(merchant, raw)
+            parsed = _parse_json_object(verified)
+            code_url = parsed.get("code_url")
+            if not isinstance(code_url, str) or not code_url:
+                raise WeChatNativeError("WeChat native order response is missing code_url")
         return WeChatNativeOrderResult(
             code_url=code_url, response_digest=hashlib.sha256(raw.body).hexdigest()
         )
@@ -869,13 +950,12 @@ class WeChatNativeClient:
         self, *, merchant: WeChatMerchantConfig, out_trade_no: str
     ) -> WeChatOrderQueryResult:
         """Query an order by out_trade_no and normalize the trade_state into paid/unpaid."""
-        # 查单调用归到这笔订单的商户单号下（与下单同一口径，见 create_native_order）。
-        with external_call_context("RECHARGE_ORDER", out_trade_no):
-            return self._query_order(merchant=merchant, out_trade_no=out_trade_no)
+        return self._query_order(merchant=merchant, out_trade_no=out_trade_no, order_scoped=True)
 
     def _query_order(
-        self, *, merchant: WeChatMerchantConfig, out_trade_no: str
+        self, *, merchant: WeChatMerchantConfig, out_trade_no: str, order_scoped: bool
     ) -> WeChatOrderQueryResult:
+        """``order_scoped=False`` 用于凭据自检：它查的是编造的订单号，不能记到真实订单名下。"""
         # mchid 是该接口必填的 query 参数，缺了微信直接回 PARAM_ERROR。签名串里的
         # URL 也必须含完整 query，所以拼进 url_path，让签名与请求用同一个值。
         url_path = (
@@ -883,20 +963,27 @@ class WeChatNativeClient:
             + "?mchid="
             + quote(merchant.mchid, safe="")
         )
-        raw = self._request(
-            merchant,
-            method="GET",
-            url_path=url_path,
-            body="",
-            endpoint=ENDPOINT_ORDER_QUERY,
+        # 只把「发出查单请求」这一步归到订单名下（与下单同一口径）。验签时可能顺带刷新
+        # 平台证书，那次下载不属于任何订单，所以验签和解析要放在这个 with 之外。
+        scope: AbstractContextManager[None] = (
+            external_call_context("RECHARGE_ORDER", out_trade_no) if order_scoped else nullcontext()
         )
-        verified = self._verify_response(merchant, raw)
-        parsed = _parse_json_object(verified)
-        trade_state = parsed.get("trade_state")
-        if not isinstance(trade_state, str) or not trade_state:
-            raise WeChatNativeError("WeChat order query response is missing trade_state")
-        if parsed.get("out_trade_no") != out_trade_no:
-            raise WeChatNativeError("WeChat order query number mismatch")
+        with scope:
+            raw = self._request(
+                merchant,
+                method="GET",
+                url_path=url_path,
+                body="",
+                endpoint=ENDPOINT_ORDER_QUERY,
+            )
+        with _validated(raw):
+            verified = self._verify_response(merchant, raw)
+            parsed = _parse_json_object(verified)
+            trade_state = parsed.get("trade_state")
+            if not isinstance(trade_state, str) or not trade_state:
+                raise WeChatNativeError("WeChat order query response is missing trade_state")
+            if parsed.get("out_trade_no") != out_trade_no:
+                raise WeChatNativeError("WeChat order query number mismatch")
         paid = trade_state == "SUCCESS"
         transaction_id = parsed.get("transaction_id")
         amount_fen: int | None = None
@@ -926,7 +1013,7 @@ class WeChatNativeClient:
         try:
             # 直接走不带订单归属的内部查单：探测用的订单号是编的，不能记成一笔真实
             # 充值订单的调用（调用日志里它只是一条没有任务归属的凭据自检）。
-            self._query_order(merchant=merchant, out_trade_no=probe_order_no)
+            self._query_order(merchant=merchant, out_trade_no=probe_order_no, order_scoped=False)
         except WeChatNativeError as exc:
             if exc.wechat_code == "ORDER_NOT_EXIST":
                 return
