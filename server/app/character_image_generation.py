@@ -15,7 +15,7 @@ from fastapi import HTTPException
 from app import content_store
 from app.auth import CurrentUser
 from app.bootstrap import is_customer_production
-from app.character_asset_quality import inspect_fake_character_asset
+from app.character_asset_quality import inspect_character_asset
 from app.character_contracts import (
     CharacterAsset,
     CharacterGenerationTask,
@@ -248,12 +248,7 @@ def create_character_generation_tasks(
             "客户生产环境禁止创建模拟角色图片生成任务。",
         )
     require_version_generatable(version)
-    if provider_name != FAKE_CHARACTER_PROVIDER:
-        raise character_error(
-            503,
-            "CHARACTER_PROVIDER_NOT_CONFIGURED",
-            "当前角色图片 Provider 尚未接入生成 Worker。",
-        )
+    require_character_provider_configured(conn, provider_name=provider_name)
     source_asset_id = str(version["source_asset_id"] or "")
     if not source_asset_id or not str(version["source_sha256"] or ""):
         raise character_error(
@@ -601,13 +596,11 @@ def _run_character_generation_task(
     cost_completed = False
     try:
         request = load_character_image_request(conn, task=task, storage=storage)
-        selected_provider = provider or character_provider_for_name(str(task["provider"]))
-        if selected_provider.provider_name != str(task["provider"]):
-            raise CharacterImageProviderFailed(
-                "CHARACTER_PROVIDER_MISMATCH",
-                "character image provider does not match the queued task",
-                retriable=False,
-            )
+        selected_provider = resolve_character_image_provider(
+            conn,
+            provider=provider,
+            provider_name=str(task["provider"]),
+        )
         cost_record_id = begin_operation_cost(
             conn,
             source_type="character_generation_task",
@@ -621,7 +614,7 @@ def _run_character_generation_task(
         cost_completed = True
         validate_character_image_result(result)
         try:
-            auto_quality = inspect_fake_character_asset(result.content, view_type=request.view_type)
+            auto_quality = inspect_character_asset(result.content, view_type=request.view_type)
         except ValueError as exc:
             raise CharacterImageProviderFailed(
                 "CHARACTER_PROVIDER_INVALID_RESPONSE",
@@ -909,8 +902,24 @@ def delete_character_object_quietly(storage: StorageAdapter, object_key: str) ->
         logger.exception("Failed to clean an orphaned character image object")
 
 
+def character_image_content_matches(content_type: str, content: bytes) -> bool:
+    """按声明的 content_type 校验输出魔数，接受 PNG/JPEG/WebP。
+
+    供应商网关在不同模型下会返回这三种格式中的任意一种（见
+    build_apilio_edit_multipart 的 response_format 注释），只要字节与声明
+    一致就放行，避免把「格式不同」误判成「内容无效」。
+    """
+    if content_type == "image/png":
+        return content.startswith(b"\x89PNG\r\n\x1a\n")
+    if content_type == "image/jpeg":
+        return content.startswith(b"\xff\xd8\xff")
+    if content_type == "image/webp":
+        return len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP"
+    return False
+
+
 def validate_character_image_result(result: CharacterImageResult) -> None:
-    if result.content_type != "image/png" or not result.content.startswith(b"\x89PNG\r\n\x1a\n"):
+    if not character_image_content_matches(result.content_type, result.content):
         raise CharacterImageProviderFailed(
             "CHARACTER_PROVIDER_INVALID_RESPONSE",
             "character image provider returned an invalid response",
@@ -1101,7 +1110,58 @@ def get_character_generation_task(
     return character_task_from_row(row)
 
 
-def character_provider_for_name(provider_name: str) -> CharacterImageProvider:
+def require_character_provider_configured(
+    conn: BusinessConnection,
+    *,
+    provider_name: str,
+) -> None:
+    """创建任务前校验 Provider 确实可用，把配置缺失拦在计费之前。"""
+    if provider_name == FAKE_CHARACTER_PROVIDER:
+        return
+    # 延迟导入：character_image_provider 顶层引用本模块的类型，避免成环。
+    from app.character_image_provider import (
+        APILIO_CHARACTER_PROVIDER,
+        load_apilio_character_provider,
+    )
+
+    if provider_name == APILIO_CHARACTER_PROVIDER:
+        if load_apilio_character_provider(conn) is not None:
+            return
+        raise character_error(
+            503,
+            "CHARACTER_PROVIDER_NOT_CONFIGURED",
+            "当前角色图片 Provider 尚未配置，请先在管理端保存图像服务配置。",
+        )
+    raise character_error(
+        503,
+        "CHARACTER_PROVIDER_NOT_CONFIGURED",
+        "当前角色图片 Provider 不受支持，请更换角色版本使用的 Provider。",
+    )
+
+
+def resolve_character_image_provider(
+    conn: BusinessConnection,
+    *,
+    provider: CharacterImageProvider | None,
+    provider_name: str,
+) -> CharacterImageProvider:
+    """解析任务应使用的 Provider：显式注入优先（测试/离线工具），否则按注册表构造。"""
+    if provider is not None:
+        if provider.provider_name != provider_name:
+            raise CharacterImageProviderFailed(
+                "CHARACTER_PROVIDER_MISMATCH",
+                "character image provider does not match the queued task",
+                retriable=False,
+            )
+        return provider
+    return character_provider_for_name(provider_name, conn=conn)
+
+
+def character_provider_for_name(
+    provider_name: str,
+    *,
+    conn: BusinessConnection | None = None,
+) -> CharacterImageProvider:
     if provider_name == FAKE_CHARACTER_PROVIDER:
         if is_customer_production():
             raise CharacterImageProviderFailed(
@@ -1110,6 +1170,22 @@ def character_provider_for_name(provider_name: str) -> CharacterImageProvider:
                 retriable=False,
             )
         return FakeCharacterImageProvider()
+    # 延迟导入：character_image_provider 顶层引用本模块的类型，避免成环。
+    from app.character_image_provider import (
+        APILIO_CHARACTER_PROVIDER,
+        load_apilio_character_provider,
+    )
+
+    if provider_name == APILIO_CHARACTER_PROVIDER:
+        configured = load_apilio_character_provider(conn) if conn is not None else None
+        if configured is not None:
+            return configured
+        raise CharacterImageProviderFailed(
+            "CHARACTER_PROVIDER_NOT_CONFIGURED",
+            "character image provider is not configured",
+            # 配置是可恢复状态：任务回队列等管理员补齐，而不是立即判死。
+            retriable=True,
+        )
     raise CharacterImageProviderFailed(
         "CHARACTER_PROVIDER_NOT_CONFIGURED",
         "character image provider is not configured",
