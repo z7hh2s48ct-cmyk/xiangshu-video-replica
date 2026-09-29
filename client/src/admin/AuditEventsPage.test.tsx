@@ -452,7 +452,7 @@ describe("AuditEventsPage", () => {
 
     // 下拉项的值必须是后端真实产生的 event_type。此前"查看激活码明文"
     // 只存在于标签映射里（且键是后端从不产生的 CODE_REVEAL），运营选不到；
-    // 批次创建与管理员强制下线也没有任何入口。
+    // 批次创建与管理员下线也没有任何入口。
     const options = (name: string) => screen.getByRole("option", { name });
     expect(options("查看激活码明文")).toHaveValue(
       "admin.activation_code.revealed",
@@ -461,7 +461,7 @@ describe("AuditEventsPage", () => {
     expect(options("创建激活码批次")).toHaveValue(
       "admin.activation_code_batch.created",
     );
-    expect(options("管理员强制下线")).toHaveValue("ADMIN_SESSION_LOGOUT");
+    expect(options("管理员下线")).toHaveValue("ADMIN_SESSION_LOGOUT");
   });
 
   it("offers the sensitive admin actions the server already records (P0-4)", async () => {
@@ -524,7 +524,7 @@ describe("AuditEventsPage", () => {
     render(<AuditEventsPage />);
 
     // 选项表里的具体标签优先于 ADMIN_SESSION_ 族回退。
-    expect(await screen.findByText("管理员强制下线")).toBeInTheDocument();
+    expect(await screen.findByText("管理员下线")).toBeInTheDocument();
     expect(screen.getByText("客服确认账号异常")).toBeInTheDocument();
     // 来源单列渲染成"类型 / 引用"的组合串（超长会截断），故用正则。
     expect(screen.getByText(/sess-7/)).toBeInTheDocument();

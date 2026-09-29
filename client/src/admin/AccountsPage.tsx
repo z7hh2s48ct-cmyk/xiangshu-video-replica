@@ -13,13 +13,14 @@ import { useAutoRefresh } from "./ui/useAutoRefresh";
 import {
   formatDateTime,
   ledgerExportMessage,
+  TRANSACTION_TYPE_LABELS,
   transactionTypeLabel,
 } from "./ui/vocabulary";
 
 const PAGE_SIZE = 20;
 
 /**
- * 账号与钱包页（从 AdminApp 内联表格抽出，2026-09-02 评估 §0.5）：
+ * 积分流水页（从 AdminApp 内联表格抽出，2026-09-02 评估 §0.5）：
  * 补上此前被忽略的分页——服务端一直返回 total 并支持 limit/offset。
  */
 export function AccountsPage() {
@@ -58,7 +59,7 @@ export function AccountsPage() {
       setError(
         cause instanceof Error && cause.message
           ? `加载失败：${cause.message}`
-          : "加载失败：读取账号与钱包失败。",
+          : "加载失败：读取积分流水失败。",
       );
     } finally {
       setLoading(false);
@@ -97,7 +98,7 @@ export function AccountsPage() {
   }
 
   return (
-    <section aria-label="账号与钱包" className="admin-panel">
+    <section aria-label="积分流水" className="admin-panel">
       <div className="admin-actions">
         <button
           type="button"
@@ -126,25 +127,28 @@ export function AccountsPage() {
         }}
       >
         <label>
-          账号
+          客户
           <input
-            aria-label="流水账号"
+            aria-label="流水客户"
             value={username}
             onChange={(event) => setUsername(event.target.value)}
           />
         </label>
         <label>
-          类型
+          业务类型
           <select
-            aria-label="流水类型"
+            aria-label="流水业务类型"
             value={typeFilter}
             onChange={(event) => setTypeFilter(event.target.value)}
           >
-            <option value="">全部类型</option>
-            <option value="CHARGE">充值</option>
-            <option value="RESERVE">预留</option>
-            <option value="SETTLE">结算</option>
-            <option value="RELEASE">释放</option>
+            <option value="">全部业务类型</option>
+            {/* P2-1：选项从词典生成——此前手写四项漏了退款扣减/历史转换，
+                运营在流水中能看到的类型却筛不出来。 */}
+            {Object.entries(TRANSACTION_TYPE_LABELS).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
           </select>
         </label>
         <label>
@@ -173,12 +177,12 @@ export function AccountsPage() {
           headers={
             <>
               <th>时间</th>
-              <th>账号</th>
-              <th>类型</th>
+              <th>客户</th>
+              <th>业务类型</th>
               <th>可用变动</th>
               <th>冻结变动</th>
               <th>变动后余额</th>
-              <th>关联订单 / 任务</th>
+              <th>关联业务</th>
             </>
           }
         >

@@ -487,7 +487,7 @@ export async function listAdminWalletTransactions(
     options.userId
       ? `/api/control/customers/${encodeURIComponent(options.userId)}/wallet-transactions?${params}`
       : `/api/control/wallet-transactions?${params}`,
-    "读取额度流水失败",
+    "读取积分流水失败",
   );
 }
 
@@ -1007,6 +1007,11 @@ export interface CustomerListItem {
   generation_in_progress?: number;
   generation_attention?: number;
   credits_spent?: number;
+  /** 客户标注（方案 P2-3）：空标注不落行，故缺省即「未标注」。 */
+  tags?: string[];
+  note?: string;
+  owner_user_id?: string;
+  owner_username?: string;
 }
 
 export interface CustomerListResponse {
@@ -1119,6 +1124,74 @@ export async function updateCustomerUnitPrice(
     throw await parseActivationError(response, "保存客户单价失败");
   }
   return response.json() as Promise<CustomerUnitPrice>;
+}
+
+// ---------------------------------------------------------------------------
+// P2-3 — Customer annotations (tags / note / owner)
+// ---------------------------------------------------------------------------
+
+/**
+ * 客户标注（方案 P2-3）。无行时服务端返回零值 payload（空标签 / 空备注 /
+ * 无负责人），前端不需要区分「没标过」与「被清空」。
+ */
+export interface CustomerAnnotation {
+  user_id: string;
+  tags: string[];
+  note: string;
+  owner_user_id: string;
+  owner_username: string;
+  updated_by_user_id: string;
+  updated_at: string;
+  request_id: string | null;
+}
+
+export interface CustomerOwnerCandidate {
+  user_id: string;
+  username: string;
+  display_name: string;
+}
+
+/** Read one customer's annotation; a missing row degrades to zero values. */
+export async function fetchCustomerAnnotation(
+  userId: string,
+): Promise<CustomerAnnotation> {
+  return adminRead<CustomerAnnotation>(
+    `/api/control/customers/${encodeURIComponent(userId)}/annotation`,
+    "读取客户标注失败",
+  );
+}
+
+/**
+ * 负责人候选：启用中的管理员账号（服务端排除审计员——审计员只读，
+ * 不成为负责人）。
+ */
+export async function listCustomerOwnerCandidates(): Promise<{
+  items: CustomerOwnerCandidate[];
+}> {
+  return adminRead<{ items: CustomerOwnerCandidate[] }>(
+    "/api/control/customers/owner-candidates",
+    "读取负责人候选失败",
+  );
+}
+
+/**
+ * 整体替换一条客户标注：三字段一律覆盖；全空收缩为删除整行（服务端语义，
+ * 空标注不落行）。reason 必填（写契约四段之一），旧值 / 新值一并入审计。
+ */
+export function updateCustomerAnnotation(
+  userId: string,
+  fields: { tags: string[]; note: string; owner_user_id: string | null },
+  reason: string,
+  idempotencyKey?: string,
+): Promise<CustomerAnnotation> {
+  return adminWrite<CustomerAnnotation>(
+    `/api/control/customers/${encodeURIComponent(userId)}/annotation`,
+    fields,
+    reason,
+    "保存客户标注失败",
+    idempotencyKey,
+    "PUT",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1612,6 +1685,25 @@ export async function getAdminGenerationRecordSummary(
   return response.json() as Promise<AdminGenerationRecordSummary>;
 }
 
+// ---------------------------------------------------------------------------
+// 失败率告警（方案 P1-5）—— GET /api/control/alerts/failure-rate
+// ---------------------------------------------------------------------------
+
+export type AdminFailureRateError = components["schemas"]["FailureRateError"];
+export type AdminFailureRateGroup = components["schemas"]["FailureRateGroup"];
+export type AdminFailureRateReport = components["schemas"]["FailureRateReport"];
+
+/**
+ * 近 1 小时失败率报告（「通知与告警」页）。只读端点（AdminReader），
+ * 不走写契约；`alerting` 为真表示已有类型越过阈值且样本量达标。
+ */
+export async function getFailureRateAlerts(): Promise<AdminFailureRateReport> {
+  return adminRead<AdminFailureRateReport>(
+    "/api/control/alerts/failure-rate",
+    "读取失败率告警失败",
+  );
+}
+
 export type AdminExternalCall = components["schemas"]["ExternalCallSummary"];
 export type AdminExternalCallList = components["schemas"]["ExternalCallList"];
 export type AdminExternalCallResponse =
@@ -1715,6 +1807,56 @@ export async function reconcileFirstFrameTask(
     reason,
     "首帧任务对账失败",
   );
+}
+
+export interface GenerationRetryResult {
+  task_id: string;
+  status: string;
+  archive_status: string;
+}
+
+/**
+ * 一键重试一条视频生成记录（方案 P1-4）。
+ *
+ * `POST /api/control/generation-records/{record_id}/retry` —— 能否原地重试
+ * 由服务端按既有业务规则裁决（任务状态 + 错误码），拒绝时返回具体原因，
+ * 前端不复制这套判断。reason 同时作为业务层 retry_reason 留痕；幂等键走
+ * adminWrite 的默认生成，网络歧义重试不会重复改状态或重复预扣。
+ */
+export function retryGenerationRecord(
+  recordId: string,
+  reason: string,
+): Promise<GenerationRetryResult> {
+  return adminWrite<GenerationRetryResult>(
+    `/api/control/generation-records/${encodeURIComponent(recordId)}/retry`,
+    {},
+    reason,
+    "重试生成任务失败",
+  );
+}
+
+/**
+ * 「查看成片 / 查看图片」：读取生成记录的原件（方案 P2-2）。
+ *
+ * `GET /api/control/generation-records/{record_type}/{record_id}/content` ——
+ * 客户生成内容是高敏数据，服务端每次查看都写
+ * `generation_record.content_view` 审计（与 external_call.response_view 同一
+ * 口径），所以只在运营显式点击时调用，不做预取、不做缓存。返回 Blob，由
+ * 调用方转 object URL 喂给 `<video>` / `<img>`（视频可拖动进度：服务端支持
+ * Range，整段拿到本地后由浏览器自行 seek）。
+ */
+export async function getGenerationRecordContent(
+  recordType: string,
+  recordId: string,
+): Promise<Blob> {
+  const response = await requestControl(
+    `/api/control/generation-records/${encodeURIComponent(recordType)}/${encodeURIComponent(recordId)}/content`,
+    { method: "GET" },
+  );
+  if (!response.ok) {
+    throw await parseActivationError(response, "读取生成记录内容失败");
+  }
+  return response.blob();
 }
 
 export type AdminAnalysisDiagnosticAttempt =

@@ -46,7 +46,7 @@ describe("SessionsPage", () => {
     vi.unstubAllGlobals();
   });
 
-  it("loads all live sessions on mount and renders the lease card", async () => {
+  it("loads all live sessions on mount and renders the session card", async () => {
     const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
       jsonResponse(sessionList()),
     );
@@ -56,13 +56,11 @@ describe("SessionsPage", () => {
     expect(await screen.findByText("customer_one")).toBeInTheDocument();
     expect(screen.queryByText(/办公室电脑/)).not.toBeInTheDocument();
     expect(screen.getByText("Windows")).toBeInTheDocument();
-    expect(screen.getByText("租约剩余 60 秒")).toBeInTheDocument();
-    expect(screen.getByText("心跳 30 秒前")).toBeInTheDocument();
-    expect(screen.getByText("Epoch 3")).toBeInTheDocument();
-    expect(screen.getByRole("progressbar")).toHaveAttribute(
-      "aria-valuenow",
-      "67",
-    );
+    // P2-1：租约 / 心跳 / Epoch 与每秒进度条从主视图移除。
+    expect(screen.queryByText(/租约/)).toBeNull();
+    expect(screen.queryByText(/心跳/)).toBeNull();
+    expect(screen.queryByText(/Epoch/)).toBeNull();
+    expect(screen.queryByRole("progressbar")).toBeNull();
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain(
       "/api/control/customer-sessions/live?limit=50&offset=0",
     );
@@ -221,12 +219,12 @@ describe("SessionsPage", () => {
 
     const { rerender } = render(<SessionsPage userId="customer-a" />);
     fireEvent.click(
-      await screen.findByRole("button", { name: "强制下线 customer_a" }),
+      await screen.findByRole("button", { name: "下线 customer_a" }),
     );
     fireEvent.change(screen.getByLabelText("操作原因"), {
       target: { value: "客户反馈异常登录" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "确认强制下线" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认下线" }));
 
     rerender(<SessionsPage userId="customer-b" />);
     await screen.findByText("customer_b");
@@ -259,17 +257,13 @@ describe("SessionsPage", () => {
 
     render(<SessionsPage />);
     await screen.findByText("customer_one");
-    fireEvent.click(
-      screen.getByRole("button", { name: "强制下线 customer_one" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "下线 customer_one" }));
     fireEvent.change(screen.getByLabelText("操作原因"), {
       target: { value: "客服确认账号异常" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "确认强制下线" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认下线" }));
 
-    expect(
-      await screen.findByText(/已强制下线 customer_one/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/已下线 customer_one/)).toBeInTheDocument();
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
     const revokeCall = fetchMock.mock.calls.find(([url]) =>
       String(url).includes("/revoke"),
@@ -301,20 +295,16 @@ describe("SessionsPage", () => {
 
     render(<SessionsPage />);
     await screen.findByText("customer_one");
-    fireEvent.click(
-      screen.getByRole("button", { name: "强制下线 customer_one" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "下线 customer_one" }));
     fireEvent.change(screen.getByLabelText("操作原因"), {
       target: { value: "网络失败后重试" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "确认强制下线" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认下线" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Failed to fetch",
     );
-    fireEvent.click(screen.getByRole("button", { name: "确认强制下线" }));
-    expect(
-      await screen.findByText(/已强制下线 customer_one/),
-    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认下线" }));
+    expect(await screen.findByText(/已下线 customer_one/)).toBeInTheDocument();
 
     const keys = fetchMock.mock.calls
       .filter(([url]) => String(url).includes("/revoke"))
@@ -346,7 +336,7 @@ describe("SessionsPage", () => {
 
     await screen.findByText("customer_one");
     expect(
-      screen.queryByRole("button", { name: /强制下线/ }),
+      screen.queryByRole("button", { name: /下线/ }),
     ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /后台调账/ }),

@@ -89,7 +89,7 @@ describe("CustomerDeviceSection", () => {
 
     await screen.findByText("办公室电脑");
     expect(screen.queryByRole("button", { name: /解绑设备/ })).toBeNull();
-    expect(screen.queryByRole("button", { name: /吊销设备凭据/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /永久禁用/ })).toBeNull();
     expect(screen.getByText(/（只读角色）/)).toBeInTheDocument();
   });
 
@@ -152,7 +152,7 @@ describe("CustomerDeviceSection", () => {
     await screen.findByText("办公室电脑");
 
     fireEvent.click(
-      screen.getByRole("button", { name: "吊销设备凭据 device-1" }),
+      screen.getByRole("button", { name: "永久禁用设备 device-1" }),
     );
     await screen.findByRole("dialog");
 
@@ -160,7 +160,7 @@ describe("CustomerDeviceSection", () => {
     fireEvent.change(screen.getByLabelText("操作原因"), {
       target: { value: "凭据疑似泄漏" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "吊销凭据" }));
+    fireEvent.click(screen.getByRole("button", { name: "永久禁用" }));
     expect(await screen.findByText("请先勾选确认操作")).toBeInTheDocument();
     expect(
       fetchMock.mock.calls.some(([url]) =>
@@ -169,9 +169,9 @@ describe("CustomerDeviceSection", () => {
     ).toBe(false);
 
     fireEvent.click(screen.getByLabelText("我已知晓该操作的影响"));
-    fireEvent.click(screen.getByRole("button", { name: "吊销凭据" }));
+    fireEvent.click(screen.getByRole("button", { name: "永久禁用" }));
 
-    expect(await screen.findByText(/已吊销凭据：device-1/)).toBeInTheDocument();
+    expect(await screen.findByText(/已永久禁用：device-1/)).toBeInTheDocument();
     const revokeCall = fetchMock.mock.calls.find(([url]) =>
       String(url).includes("/revoke-credential"),
     );

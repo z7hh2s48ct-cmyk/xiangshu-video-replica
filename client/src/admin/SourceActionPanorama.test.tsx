@@ -61,10 +61,8 @@ function mockPanorama(items: unknown[], detail: unknown) {
 test("folds one business action into a row and keeps unproven costs visible", async () => {
   mockPanorama([settled, uncertain], {});
   render(<AnalyticsPage />);
-  fireEvent.click(
-    await screen.findByRole("button", { name: "查看业务动作全景" }),
-  );
-  const table = await screen.findByRole("table", { name: "业务动作列表" });
+  fireEvent.click(await screen.findByRole("button", { name: "查看操作全景" }));
+  const table = await screen.findByRole("table", { name: "操作列表" });
   const headers = within(table)
     .getAllByRole("columnheader")
     .map((cell) => cell.textContent);
@@ -73,27 +71,25 @@ test("folds one business action into a row and keeps unproven costs visible", as
     .slice(1)
     .map((row) => within(row).getAllByRole("cell"));
   const settledCells = rows[0];
-  expect(settledCells[headers.indexOf("业务动作")]).toHaveTextContent(
+  expect(settledCells[headers.indexOf("操作编号")]).toHaveTextContent(
     "action-1",
   );
   expect(settledCells[headers.indexOf("用户")]).toHaveTextContent("测试用户");
-  expect(settledCells[headers.indexOf("请求与调用")]).toHaveTextContent(
-    "2 条请求 · 3 次调用",
+  expect(settledCells[headers.indexOf("生成与调用")]).toHaveTextContent(
+    "2 次生成 · 3 次调用",
   );
   expect(settledCells[headers.indexOf("积分")]).toHaveTextContent("5 积分");
-  expect(settledCells[headers.indexOf("供应商成本")]).toHaveTextContent(
-    "¥0.12",
-  );
+  expect(settledCells[headers.indexOf("成本")]).toHaveTextContent("¥0.12");
   expect(settledCells[headers.indexOf("质检成本")]).toHaveTextContent(
     "质检 ¥0.07 · 1 次",
   );
   // 证据不齐的动作不能把已知成本显示成最终成本。
   const uncertainCells = rows[1];
-  expect(uncertainCells[headers.indexOf("供应商成本")]).toHaveTextContent(
+  expect(uncertainCells[headers.indexOf("成本")]).toHaveTextContent(
     "待核对 · 已知 ¥0.12",
   );
   expect(uncertainCells[headers.indexOf("质检成本")]).toHaveTextContent("无");
-  expect(screen.getByText("共 2 个业务动作")).toBeInTheDocument();
+  expect(screen.getByText("共 2 次操作")).toBeInTheDocument();
 });
 
 test("opens one action panorama with its own requests and provider calls", async () => {
@@ -172,16 +168,14 @@ test("opens one action panorama with its own requests and provider calls", async
     ],
   });
   render(<AnalyticsPage />);
-  fireEvent.click(
-    await screen.findByRole("button", { name: "查看业务动作全景" }),
-  );
-  const table = await screen.findByRole("table", { name: "业务动作列表" });
-  fireEvent.click(within(table).getByRole("button", { name: "查看动作全景" }));
+  fireEvent.click(await screen.findByRole("button", { name: "查看操作全景" }));
+  const table = await screen.findByRole("table", { name: "操作列表" });
+  fireEvent.click(within(table).getByRole("button", { name: "查看操作明细" }));
   const detail = await screen.findByRole("complementary", {
-    name: "业务动作明细",
+    name: "操作明细",
   });
-  expect(detail).toHaveTextContent("2 条请求 · 3 次调用 · 净扣 5 积分");
-  const requests = within(detail).getByRole("table", { name: "动作内请求" });
+  expect(detail).toHaveTextContent("2 次生成 · 3 次调用 · 净扣 5 积分");
+  const requests = within(detail).getByRole("table", { name: "动作内生成" });
   expect(within(requests).getAllByRole("row").slice(1)).toHaveLength(2);
   const calls = within(detail).getByRole("table", {
     name: "first_frame 供应商调用",
@@ -212,13 +206,11 @@ test("scopes platform actions without a customer id", async () => {
     operations: [],
   });
   render(<AnalyticsPage />);
-  fireEvent.click(
-    await screen.findByRole("button", { name: "查看业务动作全景" }),
-  );
-  const table = await screen.findByRole("table", { name: "业务动作列表" });
+  fireEvent.click(await screen.findByRole("button", { name: "查看操作全景" }));
+  const table = await screen.findByRole("table", { name: "操作列表" });
   expect(within(table).getByText("平台后台")).toBeInTheDocument();
-  fireEvent.click(within(table).getByRole("button", { name: "查看动作全景" }));
-  await screen.findByRole("complementary", { name: "业务动作明细" });
+  fireEvent.click(within(table).getByRole("button", { name: "查看操作明细" }));
+  await screen.findByRole("complementary", { name: "操作明细" });
   expect(
     vi
       .mocked(adminRead)

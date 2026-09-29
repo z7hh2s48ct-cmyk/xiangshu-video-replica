@@ -126,6 +126,15 @@ PG_ONLY_TABLES: frozenset[str] = frozenset(
         # 20260916T1400）。T07 导入源无此表，目标库为空属预期；非空即 divergent，
         # 仍 fail closed。
         "customer_email_codes",
+        # 20260929T1000_customer_annotations: 客户标注（标签 / 备注 / 负责人，方案
+        # P2-3），PG-only（守卫同 20260916T1400）。T07 导入源无此表，目标库为空
+        # 属预期；非空即 divergent，仍 fail closed。
+        "customer_annotations",
+        # 20260929T1200_admin_team_and_alert_settings: 通知与告警单行配置表
+        # （方案 P2-4：接收人 + 失败率阈值 / 窗口 / 最小样本），PG-only
+        # （守卫同 20260916T1400）。T07 导入源无此表，目标库为空属预期；
+        # 非空即 divergent，仍 fail closed。
+        "alert_settings",
     }
 )
 
@@ -184,6 +193,8 @@ PG_ONLY_COLUMNS: dict[str, frozenset[str]] = {
     # T07 的 SQLite 源 schema 冻结于其前基线）。
     # 20260928T1200_customer_email_password_reset: 验证通过的邮箱与验证时间仅存在于
     # PG（T07 的 SQLite 源 schema 冻结于其前基线；待验证地址只活在验证码行里）。
+    # 20260929T1200_admin_team_and_alert_settings: 超级管理员标记列仅存在于 PG
+    # （守卫同 20260916T1400，SQLite lane 不加此列）。
     "users": frozenset(
         {
             "max_devices",
@@ -193,6 +204,7 @@ PG_ONLY_COLUMNS: dict[str, frozenset[str]] = {
             "parent_user_id",
             "email",
             "email_verified_at",
+            "is_super_admin",
         }
     ),
     # 20260912T1353_customer_discounts: wallet_transactions.discount_rate 仅存在于 PG

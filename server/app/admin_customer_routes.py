@@ -1046,7 +1046,11 @@ def list_customers(
                 "COALESCE(usage.generation_failed, 0) + COALESCE(oral_usage.failed, 0), "
                 "COALESCE(usage.generation_in_progress, 0) + COALESCE(oral_usage.in_progress, 0), "
                 "COALESCE(usage.generation_attention, 0) + COALESCE(oral_usage.attention, 0), "
-                "COALESCE(spend.credits_spent, 0) "
+                "COALESCE(spend.credits_spent, 0), "
+                "COALESCE(annotation.tags_json, '[]'::jsonb), "
+                "COALESCE(annotation.note, ''), "
+                "COALESCE(annotation.owner_user_id, ''), "
+                "COALESCE(owner.username, '') "
                 + CUSTOMER_ACCOUNT_FROM
                 + "LEFT JOIN (SELECT user_id, COUNT(*) AS slots_used FROM customer_devices "
                 "  WHERE status = 'BOUND' GROUP BY user_id) devices "
@@ -1088,6 +1092,11 @@ def list_customers(
                 "  SELECT user_id, COALESCE(SUM(-reserved_delta), 0) AS credits_spent "
                 "  FROM wallet_transactions WHERE type = 'SETTLE' GROUP BY user_id"
                 ") spend ON spend.user_id = aca.user_id "
+                # 客户标注（方案 P2-3）：标签/备注/负责人。空标注不落行，LEFT JOIN
+                # 天然给出零值；负责人是管理员账号，取用户名供列表直接展示。
+                "LEFT JOIN customer_annotations annotation "
+                "  ON annotation.user_id = aca.user_id "
+                "LEFT JOIN users owner ON owner.id = annotation.owner_user_id "
                 f"{where} "
                 "ORDER BY aca.activated_at DESC, aca.id DESC "
                 f"{PAGE_CLAUSE}",
@@ -1123,6 +1132,12 @@ def list_customers(
             "generation_in_progress": int(row[14]),
             "generation_attention": int(row[15]),
             "credits_spent": int(row[16]),
+            # 标注三件套（方案 P2-3）：无行即零值，前端不需要区分「没标过」与
+            # 「被清空」。tags_json 正常已是 list，坏值降级为空列表。
+            "tags": [str(tag) for tag in row[17]] if isinstance(row[17], list) else [],
+            "note": str(row[18]),
+            "owner_user_id": str(row[19]),
+            "owner_username": str(row[20]),
         }
         for row in rows
     ]

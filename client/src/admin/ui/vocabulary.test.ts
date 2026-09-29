@@ -6,11 +6,13 @@ import {
   deviceStatusLabel,
   formatDateTime,
   formatFen,
+  formatRelativeTime,
   formatYuanFromFen,
   labelFrom,
   ledgerExportMessage,
   rechargeOrderStatusLabel,
   shanghaiDate,
+  transactionTypeLabel,
 } from "./vocabulary";
 
 describe("vocabulary", () => {
@@ -58,6 +60,34 @@ describe("vocabulary", () => {
     expect(formatFen(10000)).toBe("¥100.00");
     expect(formatFen(5)).toBe("¥0.05");
     expect(formatFen(99)).toBe("¥0.99");
+  });
+
+  it("marks sub-cent amounts as < ¥0.01 instead of rounding them up", () => {
+    // 折合单价会出现 0.5 分这类值：四舍五入成 ¥0.01 是虚报，显示 ¥0.00 是谎称零。
+    expect(formatFen(0.5)).toBe("< ¥0.01");
+    expect(formatFen(0)).toBe("¥0.00");
+    expect(formatFen(1)).toBe("¥0.01");
+  });
+
+  it("names every transaction type with the P2-1 wording", () => {
+    expect(transactionTypeLabel("CHARGE")).toBe("充值到账");
+    expect(transactionTypeLabel("RESERVE")).toBe("生成冻结");
+    expect(transactionTypeLabel("SETTLE")).toBe("生成扣费");
+    expect(transactionTypeLabel("RELEASE")).toBe("失败退回");
+    expect(transactionTypeLabel("REFUND")).toBe("退款扣减");
+    expect(transactionTypeLabel("CONVERSION")).toBe("历史转换");
+  });
+
+  it("formats recent activity as relative time and falls back past a week", () => {
+    const now = Date.parse("2026-09-29T12:00:00Z");
+    expect(formatRelativeTime("2026-09-29T11:59:30Z", now)).toBe("刚刚");
+    expect(formatRelativeTime("2026-09-29T11:30:00Z", now)).toBe("30 分钟前");
+    expect(formatRelativeTime("2026-09-29T06:00:00Z", now)).toBe("6 小时前");
+    expect(formatRelativeTime("2026-09-26T12:00:00Z", now)).toBe("3 天前");
+    // 超过 7 天回退绝对时间，避免"89 天前"这类无意义数字。
+    expect(formatRelativeTime("2026-09-01T12:00:00Z", now)).toContain("2026");
+    expect(formatRelativeTime(null, now)).toBe("—");
+    expect(formatRelativeTime("not-a-date", now)).toBe("—");
   });
 
   it("keeps the yuan input helpers exact too", () => {

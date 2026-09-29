@@ -387,47 +387,92 @@
 .customer-cell-generation small {
   color: var(--admin-muted);
 }
+/* 方案 P2-3：列表标签列与详情标注区共用的小 pill / 空占位。 */
+.customer-cell-tags {
+  display: inline-flex;
+  gap: 4px;
+  max-width: 100%;
+  overflow: hidden;
+  vertical-align: middle;
+}
+.customer-tag-pill {
+  background: #0e0e12;
+  border: 1px solid #26262e;
+  border-radius: 999px;
+  color: #a49db0;
+  font-size: var(--font-caption);
+  line-height: 1.5;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+.customer-cell-muted {
+  color: var(--admin-muted);
+}
+.customer-annotation-view {
+  display: grid;
+  gap: 8px;
+}
+.customer-annotation-view p {
+  align-items: baseline;
+  display: flex;
+  gap: 10px;
+  margin: 0;
+}
+.customer-annotation-label {
+  color: var(--admin-muted);
+  flex: none;
+  min-width: 3.5em;
+}
+.customer-annotation-note {
+  white-space: pre-wrap;
+}
 @media (min-width: 761px) {
   .customers-table {
     table-layout: fixed;
-    min-width: 1040px;
+    min-width: 1200px;
   }
   .customers-table :is(th, td) {
     padding: 14px 10px;
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
   }
-  /* 列序（9 列，宽度合计 100%）：用户名 / 公司名称 / 客户 ID / 注册时间 /
-     状态 / 可用额度 / 累计消耗 / 生成情况 / 操作。
+  /* 列序（11 列，宽度合计 100%）：用户名 / 公司名称 / 标签 / 负责人 / 客户 ID /
+     注册时间 / 状态 / 可用积分 / 累计消耗 / 生成情况 / 操作。
      table-layout: fixed 下宽度按位置生效 —— 增删列必须同步这里的 nth-child
      编号，否则从插入点起宽度整体错位、末列拿不到宽度（「公司名称」插入第 2 位
-     时正是如此）。 */
+     时正是如此；「标签/负责人」插入第 3/4 位时同理，编号一并后移）。 */
   .customers-table th:nth-child(1) {
-    width: 11%;
-  }
-  .customers-table th:nth-child(2) {
-    width: 15%;
-  }
-  .customers-table th:nth-child(3) {
-    width: 11%;
-  }
-  .customers-table th:nth-child(4) {
-    width: 12%;
-  }
-  .customers-table th:nth-child(5) {
     width: 8%;
   }
-  .customers-table th:nth-child(6) {
+  .customers-table th:nth-child(2) {
     width: 10%;
+  }
+  .customers-table th:nth-child(3) {
+    width: 10%;
+  }
+  .customers-table th:nth-child(4) {
+    width: 9%;
+  }
+  .customers-table th:nth-child(5) {
+    width: 9%;
+  }
+  .customers-table th:nth-child(6) {
+    width: 9%;
   }
   .customers-table th:nth-child(7) {
-    width: 10%;
+    width: 7%;
   }
   .customers-table th:nth-child(8) {
-    width: 13%;
+    width: 8%;
   }
   .customers-table th:nth-child(9) {
-    width: 10%;
+    width: 8%;
+  }
+  .customers-table th:nth-child(10) {
+    width: 13%;
+  }
+  .customers-table th:nth-child(11) {
+    width: 9%;
   }
 }
 /* 任务书 C（2026-09-18）：客户详情设备视图 CustomerDeviceSection。

@@ -81,6 +81,7 @@ def api(
         username="admin_u",
         display_name="Admin",
         role="admin",
+        is_super_admin=False,
         auth_method="password",
         session_id="sess-1",
         session_expires_at="2030-01-01T00:00:00Z",

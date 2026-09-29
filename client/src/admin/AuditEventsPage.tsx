@@ -14,7 +14,7 @@ const EVENT_OPTIONS = [
   ["billing.tariff.update", "API 成本与售价调整"],
   ["customer_pricing.update", "客户报价调整"],
   ["h3.account.update", "视频账号配置"],
-  ["payment.provider.update", "默认支付通道调整"],
+  ["payment.provider.update", "默认支付方式调整"],
   ["payment.wechat.update", "微信商户配置"],
   ["customer_unit_price.update", "客户单价调整"],
   ["customer_unit_price.reset", "客户单价恢复默认"],
@@ -27,8 +27,8 @@ const EVENT_OPTIONS = [
   ["admin.activation_code.revealed_replay", "查看激活码明文（幂等重放）"],
   ["admin.activation_code.archived", "归档激活码"],
   ["admin.activation_code_batch.created", "创建激活码批次"],
-  // 管理员强制下线：customer_session_events 中 actor 非会话属主的行。
-  ["ADMIN_SESSION_LOGOUT", "管理员强制下线"],
+  // 管理员下线：customer_session_events 中 actor 非会话属主的行。
+  ["ADMIN_SESSION_LOGOUT", "管理员下线"],
   // 方案 P0-4：服务端早已写这些 audit_logs 动作，但下拉里没有，运营筛不出来——
   // 其中查看密钥、数据导出、线下开通套餐都是高敏操作。
   ["admin_session.password_login", "管理员密码登录"],

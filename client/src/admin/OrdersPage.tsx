@@ -224,23 +224,23 @@ export function OrdersPage({ readOnly = false }: { readOnly?: boolean }) {
           </select>
         </label>
         <label>
-          账号
+          客户
           <input
-            aria-label="订单账号"
+            aria-label="订单客户"
             value={usernameFilter}
             onChange={(event) => setUsernameFilter(event.target.value)}
           />
         </label>
         <label>
-          支付渠道
+          支付方式
           <select
-            aria-label="支付渠道"
+            aria-label="支付方式"
             value={channelFilter}
             onChange={(event) => setChannelFilter(event.target.value)}
           >
-            <option value="">全部渠道</option>
+            <option value="">全部方式</option>
             <option value="alipay">支付宝</option>
-            <option value="wxpay">微信支付</option>
+            <option value="wxpay">微信</option>
           </select>
         </label>
         <label>
@@ -274,12 +274,11 @@ export function OrdersPage({ readOnly = false }: { readOnly?: boolean }) {
           headers={
             <>
               <th>订单号</th>
-              <th>账号</th>
+              <th>客户</th>
               <th>金额</th>
-              <th>额度</th>
+              <th>到账积分</th>
               <th>状态</th>
-              <th>支付通道</th>
-              <th>支付渠道</th>
+              <th>支付方式</th>
               <th>第三方单号</th>
               <th>下单时间</th>
               <th>支付时间</th>
@@ -298,8 +297,7 @@ export function OrdersPage({ readOnly = false }: { readOnly?: boolean }) {
               <td>
                 <OrderStatusBadge status={order.status} />
               </td>
-              <td>{providerLabel(order.provider)}</td>
-              <td>{order.channel || "—"}</td>
+              <td>{paymentMethodLabel(order)}</td>
               <td>
                 {/* WeChat Native keeps provider_trade_no NULL and settles into
                     transaction_id, so both columns must be read to show a trade
@@ -355,13 +353,27 @@ export function OrdersPage({ readOnly = false }: { readOnly?: boolean }) {
   );
 }
 
-const PROVIDER_LABELS: Record<string, string> = {
-  zpay: "ZPay",
-  wechat_native: "微信官方",
-  activation_code: "激活码",
-  admin_adjustment: "管理员调整",
-};
-
-function providerLabel(provider: string): string {
-  return PROVIDER_LABELS[provider] ?? provider;
+/**
+ * 支付方式只回答“客户怎么付的钱”（P2-1）：渠道值优先（alipay / wxpay），
+ * 无渠道的历史单按 provider 换算；两个技术列（支付通道 / 支付渠道）合并为一列，
+ * 运营不再需要理解 provider 与 channel 的区别。
+ */
+function paymentMethodLabel(order: AdminRechargeOrder): string {
+  const byChannel: Record<string, string> = {
+    alipay: "支付宝",
+    wxpay: "微信",
+  };
+  const byProvider: Record<string, string> = {
+    zpay: "支付宝",
+    wechat_native: "微信",
+    activation_code: "激活码",
+    admin_adjustment: "线下转账",
+  };
+  return (
+    byChannel[order.channel ?? ""] ??
+    byProvider[order.provider] ??
+    order.channel ??
+    order.provider ??
+    "—"
+  );
 }

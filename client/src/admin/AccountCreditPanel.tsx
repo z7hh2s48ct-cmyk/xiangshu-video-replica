@@ -88,8 +88,8 @@ export function AccountCreditPanel({
             <table className="admin-data-table">
               <thead>
                 <tr>
-                  <th>Token 名称</th>
-                  <th>凭据版本</th>
+                  <th>接口密钥</th>
+                  <th>版本</th>
                   <th>状态</th>
                   <th>累计消费</th>
                 </tr>
@@ -97,7 +97,7 @@ export function AccountCreditPanel({
               <tbody>
                 {data.tokens.map((token) => (
                   <tr key={token.id}>
-                    <td>{token.label || "未命名 Token"}</td>
+                    <td>{token.label || "未命名密钥"}</td>
                     <td>V{token.credential_version}</td>
                     <td>{token.revoked_at ? "已撤销" : "有效"}</td>
                     <td>{token.total_consumed_credits} 积分</td>

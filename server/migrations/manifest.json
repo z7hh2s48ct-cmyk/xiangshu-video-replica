@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20260928T1000_external_call_response_log"
+      "20260929T1200_admin_team_and_alert_settings"
     ],
     "parents": {
       "001_core": null,
@@ -145,9 +145,11 @@
       "20260927T0000_oral_voice_language_settings": "20260927T1200_admin_offline_payment_source",
       "20260927T1200_admin_offline_payment_source": "20260925T1400_api_metadata_pending_write",
       "20260928T1000_external_call_response_log": "20260928T1200_customer_email_password_reset",
-      "20260928T1200_customer_email_password_reset": "20260927T0000_oral_voice_language_settings"
+      "20260928T1200_customer_email_password_reset": "20260927T0000_oral_voice_language_settings",
+      "20260929T1000_customer_annotations": "20260928T1000_external_call_response_log",
+      "20260929T1200_admin_team_and_alert_settings": "20260929T1000_customer_annotations"
     },
-    "revision_count": 129
+    "revision_count": 131
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -677,6 +679,14 @@
     "20260928T1200_customer_email_password_reset": {
       "file": "versions/20260928T1200_customer_email_password_reset.py",
       "sha256": "9bab578c58459367ede0ce1fef0360396703c7adec6b362c95d494da01975327"
+    },
+    "20260929T1000_customer_annotations": {
+      "file": "versions/20260929T1000_customer_annotations.py",
+      "sha256": "1f363461a5e42e7f727ad1031804256932af6f64118a02e14c39ea57cf79e68d"
+    },
+    "20260929T1200_admin_team_and_alert_settings": {
+      "file": "versions/20260929T1200_admin_team_and_alert_settings.py",
+      "sha256": "e514d0413df5ec1d6fca4df3fa07b6b9522a8979a568789e202fb2ccbd84b072"
     }
   },
   "task": "MIGRATION-GUARD-20260912"

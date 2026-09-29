@@ -1,9 +1,9 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, type ReactNode, useEffect, useRef, useState } from "react";
 import { adminRead, adminWrite } from "../api.admin";
 import { costInCredits, creditsToCost } from "./billingAmounts";
 import { type BillingService, billingUnit } from "./billingTypes";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
-import { formatDateTime } from "./ui/vocabulary";
+import { formatDateTime, formatFen } from "./ui/vocabulary";
 
 /**
  * 一次已通过校验、等待运营确认的费率写入。
@@ -36,13 +36,35 @@ function describeTariff(
     unit_cost_fen: string | null;
     enabled: boolean;
   },
-  currentCostCredits: string,
 ): string {
   const before = service.tariff.unit_credits ?? "未配置";
   const after = next.unit_credits ?? "未配置";
-  const beforeCost = currentCostCredits || "未配置";
-  const afterCost = next.unit_cost_fen ?? "未配置";
-  return `售价（积分）：${before} → ${after}；成本（积分）：${beforeCost} → ${afterCost}；收费状态：${next.enabled ? "启用" : "停用"}。`;
+  // P2-1：成本统一按元展示（此前 before 是积分、after 是分的混合单位，
+  // 摘要里两个数字各说各话）。
+  const beforeCost = formatCostYuan(service.tariff.unit_cost_fen);
+  const afterCost = formatCostYuan(next.unit_cost_fen);
+  return `售价（积分）：${before} → ${after}；成本（元）：${beforeCost} → ${afterCost}；收费状态：${next.enabled ? "启用" : "停用"}。`;
+}
+
+/** 成本以“分”存储，展示时统一换算成元；未配置显示“未配置”。 */
+function formatCostYuan(value: string | null): string {
+  return value === null ? "未配置" : formatFen(Number(value));
+}
+
+/**
+ * 成本单元格（P2-1）：主值按元，旁注积分（按充值换算，便于与钱包对账）。
+ * 未配置与缺换算各给一个中文说明，不再输出裸数字。
+ */
+function costDisplay(costFen: string | null, costCredits: string): ReactNode {
+  if (costFen === null) return "待配置";
+  return (
+    <>
+      <span>{formatFen(Number(costFen))}</span>
+      <small>
+        （{costCredits ? `${costCredits} 积分` : "请设置充值换算"}）
+      </small>
+    </>
+  );
 }
 
 type Catalog = {
@@ -238,15 +260,11 @@ export function BillingRatesManager({
         ? `配置${selected.name}成本与售价`
         : `配置${selected.name}成本`,
       costRounded,
-      summary: describeTariff(
-        selected,
-        {
-          unit_credits: storedPrice,
-          unit_cost_fen: storedCost,
-          enabled: payload.tariff.enabled,
-        },
-        originalCredits,
-      ),
+      summary: describeTariff(selected, {
+        unit_credits: storedPrice,
+        unit_cost_fen: storedCost,
+        enabled: payload.tariff.enabled,
+      }),
     });
   }
 
@@ -312,7 +330,7 @@ export function BillingRatesManager({
                     <th>版本</th>
                     <th>调整时间</th>
                     <th>售价（积分 / {unit}）</th>
-                    <th>成本（积分 / {unit}）</th>
+                    <th>成本（元 / {unit}）</th>
                     <th>用户扣分</th>
                     <th>操作人</th>
                     <th>调整原因</th>
@@ -333,10 +351,12 @@ export function BillingRatesManager({
                       </td>
                       <td>{item.unit_credits ?? "未配置"}</td>
                       <td>
-                        {costInCredits(item.unit_cost_fen, pointsPerYuan) ||
-                          (item.unit_cost_fen === null
-                            ? "待配置"
-                            : "请设置充值换算")}
+                        {costDisplay(
+                          item.unit_cost_fen,
+                          roundToOneDecimal(
+                            costInCredits(item.unit_cost_fen, pointsPerYuan),
+                          ),
+                        )}
                       </td>
                       <td>
                         {item.enabled && Number(item.unit_credits) > 0
@@ -364,7 +384,7 @@ export function BillingRatesManager({
     const editing = selected?.service === service.service;
     const historyOpen = historyService === service.service;
     const unit = billingUnit[service.unit];
-    // 云存储与支付通道按零费用核算，成本与保存入口都由平台锁定。
+    // 云存储与支付服务按零费用核算，成本与保存入口都由平台锁定。
     const locked = service.zero_cost_platform;
     const displayedCost = costInCredits(
       service.tariff.unit_cost_fen,
@@ -394,10 +414,10 @@ export function BillingRatesManager({
             ) : locked ? (
               "按零费用核算"
             ) : (
-              roundToOneDecimal(displayedCost) ||
-              (service.tariff.unit_cost_fen === null
-                ? "待配置"
-                : "请设置充值换算")
+              costDisplay(
+                service.tariff.unit_cost_fen,
+                roundToOneDecimal(displayedCost),
+              )
             )}
           </td>
           <td>不向客户收费</td>
@@ -472,7 +492,7 @@ export function BillingRatesManager({
       </p>
       <div className="billing-rates-toolbar">
         <span>
-          单位：积分
+          售价按积分、成本按元
           {catalog?.pricing?.points_per_yuan
             ? ` · 1 元 = ${catalog.pricing.points_per_yuan} 积分`
             : ""}
@@ -514,7 +534,7 @@ export function BillingRatesManager({
                 <tr>
                   <th>费用科目 / API</th>
                   <th>单位</th>
-                  <th>成本（积分）</th>
+                  <th>成本（元）</th>
                   <th>售价（积分）</th>
                   <th>收费设置</th>
                   <th>最后修改</th>
@@ -558,10 +578,10 @@ export function BillingRatesManager({
                                 }
                               />
                             ) : (
-                              roundToOneDecimal(displayedCost) ||
-                              (service.tariff.unit_cost_fen === null
-                                ? "待配置"
-                                : "请设置充值换算")
+                              costDisplay(
+                                service.tariff.unit_cost_fen,
+                                roundToOneDecimal(displayedCost),
+                              )
                             )}
                           </td>
                           <td>
@@ -699,7 +719,7 @@ export function BillingRatesManager({
             <div className="admin-table-scroll admin-table-card billing-rates-table">
               <p>
                 平台科目（不向客户收费）：质量检查等科目只核算服务商成本，不向客户扣分；
-                云存储与支付通道按零费用核算。
+                云存储与支付服务按零费用核算。
               </p>
               <table
                 className="admin-data-table"
@@ -709,7 +729,7 @@ export function BillingRatesManager({
                   <tr>
                     <th>费用科目 / API</th>
                     <th>单位</th>
-                    <th>成本（积分）</th>
+                    <th>成本（元）</th>
                     <th>售价（积分）</th>
                     <th>收费设置</th>
                     <th>最后修改</th>

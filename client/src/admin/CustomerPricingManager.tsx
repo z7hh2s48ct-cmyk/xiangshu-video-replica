@@ -8,10 +8,10 @@ import {
 } from "../api.admin";
 import { formatDateTime } from "./ui/vocabulary";
 
-/** 万分比折扣 → 百分比输入回显（9500 → "95"，8750 → "87.5"）。 */
-function percentFromBasisPoints(basisPoints: number | undefined): string {
-  if (!basisPoints || basisPoints >= 10_000) return "100";
-  return String(Number((basisPoints / 100).toFixed(2)));
+/** 万分比折扣 → 折数回显（10000 → "10"，9500 → "9.5"，8750 → "8.75"）。 */
+function foldsFromBasisPoints(basisPoints: number | undefined): string {
+  if (!basisPoints || basisPoints >= 10_000) return "10";
+  return String(Number((basisPoints / 1000).toFixed(3)));
 }
 
 function roundingLabel(value: string | undefined): string {
@@ -44,7 +44,7 @@ export function CustomerPricingManager({
 }) {
   const [data, setData] = useState<CustomerPricing | null>(null);
   const [pointsPerYuan, setPointsPerYuan] = useState("");
-  const [discountPercent, setDiscountPercent] = useState("100");
+  const [discountFolds, setDiscountFolds] = useState("10");
   const [rounding, setRounding] = useState<"ceil" | "floor">("ceil");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -68,8 +68,8 @@ export function CustomerPricingManager({
         setData(value);
         if (value.config) {
           setPointsPerYuan(String(value.config.points_per_yuan));
-          setDiscountPercent(
-            percentFromBasisPoints(value.config.discount_basis_points),
+          setDiscountFolds(
+            foldsFromBasisPoints(value.config.discount_basis_points),
           );
           setRounding(value.config.consumption_rounding ?? "ceil");
         }
@@ -116,18 +116,20 @@ export function CustomerPricingManager({
   async function save(event: React.FormEvent) {
     event.preventDefault();
     if (!data || readOnly || saving.current) return;
-    const discountValue = Number(discountPercent.trim());
+    const discountValue = Number(discountFolds.trim());
     if (
-      !/^\d{1,3}(\.\d{1,2})?$/.test(discountPercent.trim()) ||
-      discountValue < 0.01 ||
-      discountValue > 100
+      !/^\d{1,2}(\.\d{1,3})?$/.test(discountFolds.trim()) ||
+      discountValue <= 0 ||
+      discountValue > 10
     ) {
-      setError("折扣请输入 0.01–100 的百分比，最多两位小数（100 表示原价）。");
+      setError(
+        "折扣请输入大于 0 且不超过 10 的折数，最多三位小数（10 折表示原价）。",
+      );
       return;
     }
     const config: CustomerCreditConfig = {
       points_per_yuan: Number(pointsPerYuan),
-      discount_basis_points: Math.round(discountValue * 100),
+      discount_basis_points: Math.round(discountValue * 1000),
       consumption_rounding: rounding,
     };
     if (
@@ -210,17 +212,17 @@ export function CustomerPricingManager({
             />
           </label>
           <label>
-            全科目折扣（%）
+            全科目折扣（折）
             <input
               type="number"
-              min="0.01"
-              max="100"
-              step="0.01"
+              min="0.001"
+              max="10"
+              step="0.001"
               required
               disabled={readOnly || busy}
-              value={discountPercent}
-              placeholder="100 表示原价"
-              onChange={(event) => setDiscountPercent(event.target.value)}
+              value={discountFolds}
+              placeholder="10 表示原价"
+              onChange={(event) => setDiscountFolds(event.target.value)}
             />
           </label>
           <label>
@@ -300,7 +302,7 @@ export function CustomerPricingManager({
                           <td>
                             {snapshot.discount_basis_points === undefined
                               ? "—"
-                              : `${percentFromBasisPoints(snapshot.discount_basis_points)}%`}
+                              : `${foldsFromBasisPoints(snapshot.discount_basis_points)} 折`}
                           </td>
                           <td>
                             {roundingLabel(snapshot.consumption_rounding)}

@@ -9,7 +9,11 @@ import {
 } from "../api.admin";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { PageBanner } from "./ui/PageBanner";
-import { formatDateTime, platformLabel } from "./ui/vocabulary";
+import {
+  formatDateTime,
+  formatRelativeTime,
+  platformLabel,
+} from "./ui/vocabulary";
 
 // 任务书 C（2026-09-18）第 2 项：客户详情设备视图。
 // 只接 unbind 与 revoke-credential —— approve/replace-device 属旧配对审批链，
@@ -41,12 +45,12 @@ const ACTION_COPY: Record<
       `解绑后 ${device.device_id} 的在线会话会被立即结束；该设备重新登录需重新绑定。`,
   },
   revoke: {
-    title: "吊销设备凭据",
-    confirmLabel: "吊销凭据",
-    // 吊销是终态不可逆（后端 REVOKED），比解绑更强，故要走 reasonAndAck。
+    title: "永久禁用该设备",
+    confirmLabel: "永久禁用",
+    // 永久禁用是终态不可逆（后端 REVOKED），比解绑更强，故要走 reasonAndAck。
     level: "reasonAndAck",
     description: (device) =>
-      `吊销后 ${device.device_id} 的凭据永久失效且不可恢复（后端置为 REVOKED 终态）。`,
+      `永久禁用后 ${device.device_id} 的凭据永久失效且不可恢复（后端置为 REVOKED 终态）。`,
   },
 };
 
@@ -128,7 +132,7 @@ export function CustomerDeviceSection({
           : await revokeDeviceCredential(device.device_id, reason);
       if (contextIdRef.current !== actionContextId) return;
       setNotice(
-        `${kind === "unbind" ? "已解绑并踢出会话" : "已吊销凭据"}：${result.device_id}`,
+        `${kind === "unbind" ? "已解绑并踢出会话" : "已永久禁用"}：${result.device_id}`,
       );
       setPending(null);
       await load();
@@ -177,9 +181,8 @@ export function CustomerDeviceSection({
               <tr>
                 <th scope="col">设备</th>
                 <th scope="col">平台</th>
-                <th scope="col">槽位</th>
                 <th scope="col">绑定时间</th>
-                <th scope="col">最后心跳</th>
+                <th scope="col">最近活动</th>
                 {!readOnly ? <th scope="col">操作</th> : null}
               </tr>
             </thead>
@@ -193,12 +196,11 @@ export function CustomerDeviceSection({
                     ) : null}
                   </td>
                   <td>{platformLabel(device.platform)}</td>
-                  <td>{device.slot_no}</td>
                   <td>{formatDateTime(device.bound_at)}</td>
                   <td>
                     {device.online
                       ? "在线"
-                      : formatDateTime(device.last_heartbeat_at)}
+                      : formatRelativeTime(device.last_heartbeat_at)}
                   </td>
                   {!readOnly ? (
                     <td className="customer-devices__actions">
@@ -211,12 +213,12 @@ export function CustomerDeviceSection({
                         解绑
                       </button>
                       <button
-                        aria-label={`吊销设备凭据 ${device.device_id}`}
+                        aria-label={`永久禁用设备 ${device.device_id}`}
                         className="customer-devices__revoke"
                         type="button"
                         onClick={() => beginAction("revoke", device)}
                       >
-                        吊销凭据
+                        永久禁用
                       </button>
                     </td>
                   ) : null}
