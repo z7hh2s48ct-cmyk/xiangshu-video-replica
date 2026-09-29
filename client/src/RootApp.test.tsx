@@ -77,6 +77,13 @@ function stubCustomerWorkspaceFetch() {
       return jsonResponse({ items: [], total: 0 });
     if (url.endsWith("/api/customer/api-keys/default"))
       return jsonResponse({ plaintext: null }, 201);
+    // 显式回答浏览器凭据探测：本文件的前提是「浏览器无凭据」。契约
+    // （api.ts 的 customerBrowserCredentials）要的是两个可空字段，返回数组
+    // 会被解析成 undefined 而被当成另一种形状——显式给 null 才真的表达
+    // 「没有会话」，也免得它继续落到下面那条数组兜底里。
+    if (url.endsWith("/api/customer/browser-session")) {
+      return jsonResponse({ device_token: null, session_token: null });
+    }
     return jsonResponse([]);
   });
 }
@@ -96,13 +103,38 @@ async function loginThroughAccountForm() {
 }
 
 describe("RootApp", () => {
+  /** 用例之间必须把浏览器侧的身份痕迹清干净。
+   *
+   * 浏览器通道的凭据是 HttpOnly cookie（`browserCookieCredentialStore`），
+   * 由同源端点 /api/customer/browser-session 还原；cookie 在 jsdom 里跨用例
+   * 保留，而下面有用例会真的走一次登录。上一个用例留下的 cookie 会让下一个
+   * 用例以为自己已登录，于是「认证前不得触达私有接口」这条用例里工作台被挂上、
+   * 发出真实业务请求——表现为间歇性假红（2026-09-29 定位：全量跑才复现，
+   * 单文件跑必过）。
+   *
+   * 这里同时清 cookie 与 Web Storage，并复位 URL：三者任何一个残留都会让
+   * 结果取决于同文件内的执行顺序。 */
+  function resetBrowserIdentity() {
+    for (const entry of document.cookie.split(";")) {
+      const name = entry.split("=")[0]?.trim();
+      if (name) {
+        // biome-ignore lint/suspicious/noDocumentCookie: vitest 的 jsdom 不提供 Cookie Store API，删除陈旧 cookie 只能走 document.cookie。
+        document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/`;
+      }
+    }
+    window.localStorage.clear();
+    window.sessionStorage.clear();
+    window.history.replaceState(null, "", "/");
+  }
+
   beforeEach(() => {
+    resetBrowserIdentity();
     vi.stubGlobal("crypto", webcrypto);
   });
   afterEach(() => {
     vi.unstubAllGlobals();
     Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
-    window.history.replaceState(null, "", "/");
+    resetBrowserIdentity();
   });
 
   // CW-019: /admin 由独立管理制品（client/dist-admin）提供，客户入口不再认识
