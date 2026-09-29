@@ -44,6 +44,7 @@ from app.credit_conversion import router as credit_conversion_router
 from app.customer_auth_routes import CustomerBrowserTransport
 from app.customer_auth_routes import router as customer_auth_router
 from app.customer_device_routes import router as customer_device_router
+from app.customer_email_routes import router as customer_email_router
 from app.customer_pricing_routes import router as customer_pricing_router
 from app.customer_security_routes import router as customer_security_router
 from app.customer_session_routes import router as customer_session_router
@@ -401,6 +402,7 @@ app.include_router(customer_device_router)
 app.include_router(customer_session_router)
 app.include_router(customer_sub_account_router)
 app.include_router(customer_security_router)
+app.include_router(customer_email_router)
 app.include_router(api_key_router)
 app.include_router(admin_activation_router)
 app.include_router(admin_device_router)

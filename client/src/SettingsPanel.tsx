@@ -192,6 +192,26 @@ const PROVIDER_FORMS: Record<ProviderName, ProviderFormSpec> = {
       { name: "app_secret", label: "App Secret", secret: true },
     ],
   },
+  ses: {
+    title: "邮件推送",
+    note: "客户绑定邮箱与找回密码的验证码邮件。只按审核过的模板发送；验证码模板必填，通知模板留空时重置成功不发通知。测试连接仅核对凭据与模板，不发信。",
+    fields: [
+      { name: "secret_id", label: "SecretId", secret: true },
+      { name: "secret_key", label: "SecretKey", secret: true },
+      {
+        name: "from_address",
+        label: "发信地址",
+        placeholder: "名称 <noreply@example.com>",
+      },
+      { name: "code_template_id", label: "验证码模板 ID" },
+      { name: "notice_template_id", label: "通知模板 ID（可选）" },
+      {
+        name: "region",
+        label: "地域（可选）",
+        placeholder: "ap-guangzhou",
+      },
+    ],
+  },
 };
 
 const PROVIDER_ORDER: ProviderName[] = [
@@ -203,6 +223,7 @@ const PROVIDER_ORDER: ProviderName[] = [
   "tikhub",
   "dashscope",
   "douyidou",
+  "ses",
 ];
 
 export function SettingsPanel(props: SettingsPanelProps) {

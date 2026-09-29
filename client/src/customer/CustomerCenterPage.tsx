@@ -43,6 +43,7 @@ import { useCustomerConfirm } from "./CustomerConfirmDialog";
 import { CustomerPricesPage } from "./CustomerPricesPage";
 import { CustomerRechargeDialog } from "./CustomerRechargeDialog";
 import { DeviceSection } from "./DeviceSection";
+import { EmailBindingSection } from "./EmailBindingSection";
 import { ErrorNote } from "./ErrorNote";
 import { HelpDialog, TermHint } from "./HelpDialog";
 import { LedgerPairingSummary } from "./LedgerPairingSummary";
@@ -1592,6 +1593,7 @@ export function CustomerCenterPage({
                   </div>
                 )}
               </section>
+              <EmailBindingSection credential={credential} />
               <SecuritySection
                 activeTokenCount={
                   // 列表没读到就不要报「0 枚」——那会和实际撤销掉的枚数对不上。
