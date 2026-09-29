@@ -103,12 +103,13 @@ test("rejects discount folds outside the allowed range before saving", async () 
   expect(updateCustomerPricing).not.toHaveBeenCalled();
 });
 
-test("states that per-customer discounts are not wired into billing yet", async () => {
+test("states that per-customer discounts are wired into billing and merged with the global discount", async () => {
   vi.mocked(getCustomerPricing).mockResolvedValue(payload);
   render(<CustomerPricingManager />);
   expect(
-    await screen.findByText(/按客户单独定制的折扣.*尚未接入扣费链路/),
+    await screen.findByText(/客户专项折扣与套餐权益已接入扣费链路.*取更优/),
   ).toBeInTheDocument();
+  expect(screen.queryByText(/尚未接入扣费链路/)).not.toBeInTheDocument();
 });
 
 const pricingHistory = {
