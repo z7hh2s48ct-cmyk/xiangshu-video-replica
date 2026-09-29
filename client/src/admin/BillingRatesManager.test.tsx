@@ -339,8 +339,9 @@ test("saving unchanged credit displays preserves the original sub-cent cost", as
     ],
   });
   render(<BillingRatesManager />);
-  // 成本展示四舍五入到 1 位小数；亚分成本在点击「配置」后的输入框里仍保留全精度。
-  await screen.findByText("0.0");
+  // 成本按元展示（不足 1 分显示“< ¥0.01”，不虚报为 ¥0.00）；亚分成本在
+  // 点击「配置」后的输入框里仍保留全精度。
+  await screen.findByText("< ¥0.01");
   fireEvent.click(screen.getByRole("button", { name: "配置 视频生成 · 768P" }));
   expect(screen.getByLabelText("售价（积分 / 秒）")).toHaveValue("1");
   fireEvent.click(screen.getByRole("button", { name: "保存" }));
@@ -451,7 +452,8 @@ test("history button reads the subject price-version sequence and flags the curr
   expect(within(latest).getByText("V2")).toBeInTheDocument();
   expect(within(latest).getByText("当前")).toBeInTheDocument();
   expect(within(latest).getByText("0.25")).toBeInTheDocument();
-  expect(within(latest).getByText("0.000125")).toBeInTheDocument();
+  // P2-1：价目历史成本同样按元展示（不足 1 分显示“< ¥0.01”）。
+  expect(within(latest).getByText("< ¥0.01")).toBeInTheDocument();
   expect(within(latest).getByText("用户承担")).toBeInTheDocument();
   expect(within(latest).getByText("price_admin")).toBeInTheDocument();
   expect(within(latest).getByText("首页活动价调整")).toBeInTheDocument();

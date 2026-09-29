@@ -30,6 +30,9 @@ vi.mock("../api.admin", () => ({
   listCustomers: vi.fn(),
   fetchCustomerUnitPrice: vi.fn(),
   updateCustomerUnitPrice: vi.fn(),
+  fetchCustomerAnnotation: vi.fn(),
+  listCustomerOwnerCandidates: vi.fn(),
+  updateCustomerAnnotation: vi.fn(),
   createCustomerAdjustment: vi.fn(),
   listAdminRechargeOrders: vi.fn(),
   listAdminWalletTransactions: vi.fn(),
@@ -88,6 +91,20 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       recharge_step_fen: 1000,
       updated_at: null,
       request_id: "request-price-read",
+    });
+    // P2-3：详情展开即读标注 + 负责人候选；未显式叠加的用例走零值默认。
+    vi.mocked(adminApi.fetchCustomerAnnotation).mockResolvedValue({
+      user_id: "user-1",
+      tags: [],
+      note: "",
+      owner_user_id: "",
+      owner_username: "",
+      updated_by_user_id: "",
+      updated_at: "",
+      request_id: "request-annotation-read",
+    });
+    vi.mocked(adminApi.listCustomerOwnerCandidates).mockResolvedValue({
+      items: [],
     });
     vi.mocked(adminApi.listAdminRechargeOrders).mockResolvedValue({
       items: [],
@@ -174,10 +191,12 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     expect(headers).toEqual([
       "用户名",
       "公司名称",
+      "标签",
+      "负责人",
       "客户 ID",
       "注册时间",
       "状态",
-      "可用额度",
+      "可用积分",
       "累计消耗",
       "生成情况",
       "操作",
@@ -196,6 +215,9 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     ).toEqual([
       "customer-1",
       "乡墅装饰有限公司",
+      // 未标注 / 未指定负责人走显式占位，不是空白（P2-3）。
+      "—",
+      "未指定",
       "user-1",
       // 与 formatDateTime 的展示契约一致：固定 Asia/Shanghai，
       // 否则期望值随 runner 时区漂移（CI 为 UTC，本地为 +8）。
@@ -245,6 +267,392 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     await waitFor(() => {
       expect(screen.getAllByText("未填写").length).toBeGreaterThan(0);
     });
+  });
+
+  it("列表展示客户标签与负责人，标签超出 3 个折叠为 +N（P2-3）", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [
+        {
+          user_id: "user-1",
+          username: "customer-1",
+          display_name: "乡墅装饰有限公司",
+          created_at: "2026-08-24T10:00:00Z",
+          activation_code: "ABC-123",
+          status: "active",
+          tags: ["VIP", "重点客户", "已回访", "待续费"],
+          owner_user_id: "admin-9",
+          owner_username: "ops-chen",
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+
+    render(<CustomersPage />);
+
+    const row = await screen.findByRole("row", { name: /customer-1/ });
+    // 列窄：只摆前 3 个 pill，余量收成 +N；完整清单在 title 里悬浮可见。
+    const tagsCell = within(row).getByText("VIP").closest("td");
+    expect(tagsCell).toHaveTextContent("重点客户");
+    expect(tagsCell).toHaveTextContent("已回访");
+    expect(tagsCell).not.toHaveTextContent("待续费");
+    expect(tagsCell).toHaveTextContent("+1");
+    expect(tagsCell?.querySelector(".customer-cell-tags")).toHaveAttribute(
+      "title",
+      "VIP、重点客户、已回访、待续费",
+    );
+    expect(within(row).getByText("ops-chen")).toBeInTheDocument();
+  });
+
+  it("详情标注区：审计员只读展示，无编辑表单（P2-3）", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [
+        {
+          user_id: "user-1",
+          username: "customer-1",
+          created_at: "2026-08-24T10:00:00Z",
+          activation_code: "ABC-123",
+          status: "active",
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+    vi.mocked(adminApi.fetchCustomerAnnotation).mockResolvedValue({
+      user_id: "user-1",
+      tags: ["VIP"],
+      note: "老客户，续费前先电话回访。",
+      owner_user_id: "admin-9",
+      owner_username: "ops-chen",
+      updated_by_user_id: "admin-1",
+      updated_at: "2026-09-28T10:00:00Z",
+      request_id: "request-annotation-read",
+    });
+
+    render(<CustomersPage readOnly />);
+    fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+
+    const section = await screen.findByRole("region", { name: "客户标注" });
+    expect(within(section).getByText("VIP")).toBeInTheDocument();
+    expect(within(section).getByText("ops-chen")).toBeInTheDocument();
+    expect(
+      within(section).getByText("老客户，续费前先电话回访。"),
+    ).toBeInTheDocument();
+    expect(within(section).getByText(/审计员仅可查看/)).toBeInTheDocument();
+    expect(
+      within(section).queryByRole("button", { name: "保存标注" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("详情标注区：整体替换保存后提示并刷新列表（P2-3）", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [
+        {
+          user_id: "user-1",
+          username: "customer-1",
+          created_at: "2026-08-24T10:00:00Z",
+          activation_code: "ABC-123",
+          status: "active",
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+    vi.mocked(adminApi.fetchCustomerAnnotation).mockResolvedValue({
+      user_id: "user-1",
+      tags: ["VIP"],
+      note: "老客户",
+      owner_user_id: "",
+      owner_username: "",
+      updated_by_user_id: "admin-1",
+      updated_at: "2026-09-28T10:00:00Z",
+      request_id: "request-annotation-read",
+    });
+    vi.mocked(adminApi.listCustomerOwnerCandidates).mockResolvedValue({
+      items: [
+        { user_id: "admin-9", username: "ops-chen", display_name: "陈运营" },
+      ],
+    });
+    vi.mocked(adminApi.updateCustomerAnnotation).mockResolvedValue({
+      user_id: "user-1",
+      tags: ["VIP", "重点"],
+      note: "已回访",
+      owner_user_id: "admin-9",
+      owner_username: "ops-chen",
+      updated_by_user_id: "admin-1",
+      updated_at: "2026-09-29T02:00:00Z",
+      request_id: "request-annotation-write",
+    });
+
+    render(<CustomersPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+
+    const section = await screen.findByRole("region", { name: "客户标注" });
+    const tagsInput = within(section).getByLabelText(
+      "标签（逗号分隔，最多 10 个）",
+    );
+    expect(tagsInput).toHaveValue("VIP");
+    // 中文逗号分隔、去空白保序——提交前前端与服务端同口径拆分。
+    fireEvent.change(tagsInput, { target: { value: "VIP，重点" } });
+    fireEvent.change(
+      within(section).getByLabelText("备注（最多 2000 字，仅运营可见）"),
+      { target: { value: "已回访" } },
+    );
+    fireEvent.change(within(section).getByLabelText("负责人"), {
+      target: { value: "admin-9" },
+    });
+    fireEvent.click(within(section).getByRole("button", { name: "保存标注" }));
+
+    await screen.findByRole("dialog", { name: "保存客户标注" });
+    fireEvent.click(screen.getByRole("button", { name: "确认保存" }));
+
+    await waitFor(() => {
+      expect(adminApi.updateCustomerAnnotation).toHaveBeenCalledWith(
+        "user-1",
+        { tags: ["VIP", "重点"], note: "已回访", owner_user_id: "admin-9" },
+        "更新客户标注",
+      );
+    });
+    expect(await screen.findByText("客户标注已保存")).toBeInTheDocument();
+    // 列表带标注列，保存后必须重新拉列表（onChanged）：初次 1 次 + 刷新 ≥1 次。
+    expect(vi.mocked(adminApi.listCustomers).mock.calls.length).toBeGreaterThan(
+      1,
+    );
+  });
+
+  it("详情标注区：标签超过 10 个本地拦截，不发请求（P2-3）", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [
+        {
+          user_id: "user-1",
+          username: "customer-1",
+          created_at: "2026-08-24T10:00:00Z",
+          activation_code: "ABC-123",
+          status: "active",
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+
+    render(<CustomersPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+
+    const section = await screen.findByRole("region", { name: "客户标注" });
+    fireEvent.change(
+      within(section).getByLabelText("标签（逗号分隔，最多 10 个）"),
+      {
+        target: {
+          value: "t1，t2，t3，t4，t5，t6，t7，t8，t9，t10，t11",
+        },
+      },
+    );
+    fireEvent.click(within(section).getByRole("button", { name: "保存标注" }));
+
+    expect(
+      await within(section).findByText("标签最多 10 个"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("dialog", { name: "保存客户标注" }),
+    ).not.toBeInTheDocument();
+    expect(adminApi.updateCustomerAnnotation).not.toHaveBeenCalled();
+  });
+
+  it("列表展示客户标签与负责人，标签超出 3 个折叠为 +N（P2-3）", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [
+        {
+          user_id: "user-1",
+          username: "customer-1",
+          display_name: "乡墅装饰有限公司",
+          created_at: "2026-08-24T10:00:00Z",
+          activation_code: "ABC-123",
+          status: "active",
+          tags: ["VIP", "重点客户", "已回访", "待续费"],
+          owner_user_id: "admin-9",
+          owner_username: "ops-chen",
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+
+    render(<CustomersPage />);
+
+    const row = await screen.findByRole("row", { name: /customer-1/ });
+    // 列窄：只摆前 3 个 pill，余量收成 +N；完整清单在 title 里悬浮可见。
+    const tagsCell = within(row).getByText("VIP").closest("td");
+    expect(tagsCell).toHaveTextContent("重点客户");
+    expect(tagsCell).toHaveTextContent("已回访");
+    expect(tagsCell).not.toHaveTextContent("待续费");
+    expect(tagsCell).toHaveTextContent("+1");
+    expect(tagsCell?.querySelector(".customer-cell-tags")).toHaveAttribute(
+      "title",
+      "VIP、重点客户、已回访、待续费",
+    );
+    expect(within(row).getByText("ops-chen")).toBeInTheDocument();
+  });
+
+  it("详情标注区：审计员只读展示，无编辑表单（P2-3）", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [
+        {
+          user_id: "user-1",
+          username: "customer-1",
+          created_at: "2026-08-24T10:00:00Z",
+          activation_code: "ABC-123",
+          status: "active",
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+    vi.mocked(adminApi.fetchCustomerAnnotation).mockResolvedValue({
+      user_id: "user-1",
+      tags: ["VIP"],
+      note: "老客户，续费前先电话回访。",
+      owner_user_id: "admin-9",
+      owner_username: "ops-chen",
+      updated_by_user_id: "admin-1",
+      updated_at: "2026-09-28T10:00:00Z",
+      request_id: "request-annotation-read",
+    });
+
+    render(<CustomersPage readOnly />);
+    fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+
+    const section = await screen.findByRole("region", { name: "客户标注" });
+    expect(within(section).getByText("VIP")).toBeInTheDocument();
+    expect(within(section).getByText("ops-chen")).toBeInTheDocument();
+    expect(
+      within(section).getByText("老客户，续费前先电话回访。"),
+    ).toBeInTheDocument();
+    expect(within(section).getByText(/审计员仅可查看/)).toBeInTheDocument();
+    expect(
+      within(section).queryByRole("button", { name: "保存标注" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("详情标注区：整体替换保存后提示并刷新列表（P2-3）", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [
+        {
+          user_id: "user-1",
+          username: "customer-1",
+          created_at: "2026-08-24T10:00:00Z",
+          activation_code: "ABC-123",
+          status: "active",
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+    vi.mocked(adminApi.fetchCustomerAnnotation).mockResolvedValue({
+      user_id: "user-1",
+      tags: ["VIP"],
+      note: "老客户",
+      owner_user_id: "",
+      owner_username: "",
+      updated_by_user_id: "admin-1",
+      updated_at: "2026-09-28T10:00:00Z",
+      request_id: "request-annotation-read",
+    });
+    vi.mocked(adminApi.listCustomerOwnerCandidates).mockResolvedValue({
+      items: [
+        { user_id: "admin-9", username: "ops-chen", display_name: "陈运营" },
+      ],
+    });
+    vi.mocked(adminApi.updateCustomerAnnotation).mockResolvedValue({
+      user_id: "user-1",
+      tags: ["VIP", "重点"],
+      note: "已回访",
+      owner_user_id: "admin-9",
+      owner_username: "ops-chen",
+      updated_by_user_id: "admin-1",
+      updated_at: "2026-09-29T02:00:00Z",
+      request_id: "request-annotation-write",
+    });
+
+    render(<CustomersPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+
+    const section = await screen.findByRole("region", { name: "客户标注" });
+    const tagsInput = within(section).getByLabelText(
+      "标签（逗号分隔，最多 10 个）",
+    );
+    expect(tagsInput).toHaveValue("VIP");
+    // 中文逗号分隔、去空白保序——提交前前端与服务端同口径拆分。
+    fireEvent.change(tagsInput, { target: { value: "VIP，重点" } });
+    fireEvent.change(
+      within(section).getByLabelText("备注（最多 2000 字，仅运营可见）"),
+      { target: { value: "已回访" } },
+    );
+    fireEvent.change(within(section).getByLabelText("负责人"), {
+      target: { value: "admin-9" },
+    });
+    fireEvent.click(within(section).getByRole("button", { name: "保存标注" }));
+
+    await screen.findByRole("dialog", { name: "保存客户标注" });
+    fireEvent.click(screen.getByRole("button", { name: "确认保存" }));
+
+    await waitFor(() => {
+      expect(adminApi.updateCustomerAnnotation).toHaveBeenCalledWith(
+        "user-1",
+        { tags: ["VIP", "重点"], note: "已回访", owner_user_id: "admin-9" },
+        "更新客户标注",
+      );
+    });
+    expect(await screen.findByText("客户标注已保存")).toBeInTheDocument();
+    // 列表带标注列，保存后必须重新拉列表（onChanged）：初次 1 次 + 刷新 ≥1 次。
+    expect(vi.mocked(adminApi.listCustomers).mock.calls.length).toBeGreaterThan(
+      1,
+    );
+  });
+
+  it("详情标注区：标签超过 10 个本地拦截，不发请求（P2-3）", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [
+        {
+          user_id: "user-1",
+          username: "customer-1",
+          created_at: "2026-08-24T10:00:00Z",
+          activation_code: "ABC-123",
+          status: "active",
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+
+    render(<CustomersPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+
+    const section = await screen.findByRole("region", { name: "客户标注" });
+    fireEvent.change(
+      within(section).getByLabelText("标签（逗号分隔，最多 10 个）"),
+      {
+        target: {
+          value: "t1，t2，t3，t4，t5，t6，t7，t8，t9，t10，t11",
+        },
+      },
+    );
+    fireEvent.click(within(section).getByRole("button", { name: "保存标注" }));
+
+    expect(
+      await within(section).findByText("标签最多 10 个"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("dialog", { name: "保存客户标注" }),
+    ).not.toBeInTheDocument();
+    expect(adminApi.updateCustomerAnnotation).not.toHaveBeenCalled();
   });
 
   it("筛选框说明关键字同时覆盖用户名与公司名称", async () => {

@@ -497,10 +497,13 @@ def provision_empty_customer(
             key_version=_latest_admin_key_version(),
         )
 
+        # 首个 admin 直接带超管标记（方案 P2-4）：否则新部署升级后会卡在
+        # 「没有任何账号能进入团队页」的状态（迁移里的引导只覆盖升级前
+        # 已有 admin 的部署）。
         conn.execute(
             """
-            INSERT INTO users (id, username, display_name, role)
-            VALUES (%s, %s, %s, 'admin')
+            INSERT INTO users (id, username, display_name, role, is_super_admin)
+            VALUES (%s, %s, %s, 'admin', 1)
             """,
             (admin_user_id, username, display_name),
         )

@@ -4,10 +4,10 @@ import { expect, test, vi } from "vitest";
 
 import { SystemSettingsPage } from "./SystemSettingsPage";
 
-// 系统设置是「v4 导航合并」后的容器页：三个页签、服务配置下还套一层子页签，
+// 系统设置是「v4 导航合并」后的容器页：四个页签、服务配置下还套一层子页签，
 // 并把只读态与**控制面设置后端**注入给共用组件 SettingsPanel（CW-019：客户
 // 构建制品的依赖图不可达，控制面 API 只出现在管理制品里）。
-// 九个区块各自已有独立测试，这里只钉这层接线 —— 它此前完全无覆盖。
+// 各区块各自已有独立测试，这里只钉这层接线 —— 它此前完全无覆盖。
 vi.mock("./CustomerPricingManager", () => ({
   CustomerPricingManager: ({ readOnly }: { readOnly?: boolean }) => (
     <div data-testid="customer-pricing">{`ro=${String(readOnly)}`}</div>
@@ -41,6 +41,9 @@ vi.mock("./QueueModeSection", () => ({
 }));
 vi.mock("./ViralRuntimeSection", () => ({
   ViralRuntimeSection: () => <div data-testid="viral-runtime">爆款运行时</div>,
+}));
+vi.mock("./AdminAlertsSection", () => ({
+  AdminAlertsSection: () => <div data-testid="admin-alerts">失败率告警</div>,
 }));
 vi.mock("../SettingsPanel", () => ({
   SettingsPanel: ({
@@ -78,6 +81,14 @@ test("honours the initialTab prop", () => {
 
   expect(screen.getByTestId("billing-rates")).toBeInTheDocument();
   expect(screen.queryByTestId("customer-pricing")).toBeNull();
+});
+
+test("mounts the alerts tab only when selected", () => {
+  render(<SystemSettingsPage initialTab="alerts" />);
+
+  expect(screen.getByTestId("admin-alerts")).toBeInTheDocument();
+  expect(screen.queryByTestId("customer-pricing")).toBeNull();
+  expect(screen.queryByTestId("settings-panel")).toBeNull();
 });
 
 test("forwards readOnly into the payment blocks", () => {

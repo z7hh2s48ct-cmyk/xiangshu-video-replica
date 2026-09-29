@@ -89,6 +89,9 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
         "t12_admin_activation_test",
         "t34_admin_audit_test",
         "t23_admin_adjustments_test",
+        # P2-3 customer annotations (tags / note / owner) dedicated migrated
+        # database, truncated per test (test_admin_customer_annotations.py).
+        "customer_annotations_test",
         "w15_dashboard_test",
         "w08_profit_test",
         "w10_rates_test",
@@ -220,6 +223,27 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
         # (test_character_image_provider.py), migrated to alembic head and
         # truncated per test.
         "character_generation_test",
+        # 方案 P1-4 管理端一键重试：dedicated database for the
+        # /api/control/generation-records/{record_id}/retry 写契约 / 中文错误
+        # 映射 / PRE_PROVIDER 重扣与同键重放矩阵
+        # (test_admin_generation_retry.py), migrated to alembic head and
+        # truncated per test.
+        "admin_gen_retry_test",
+        # 方案 P1-5 失败率告警：dedicated database for the
+        # /api/control/alerts/failure-rate 统计口径（终局/窗口/最小样本/
+        # 口播展示码映射/runbook 挂载）矩阵 (test_failure_rate_alerts.py),
+        # migrated to alembic head and truncated per test.
+        "failure_rate_alerts_test",
+        # 方案 P2-2 生成记录成片预览：dedicated database for the
+        # 缩略图 / content(Range+审计) / 审计员拒绝 / has_preview 列表矩阵
+        # (test_admin_generation_media.py), migrated to alembic head and
+        # truncated per test.
+        "admin_gen_media_test",
+        # 方案 P2-4 团队与权限：dedicated database for the 超管成员管理
+        # （列表/新增/停用启用/重置密码 + 自我保护 + 最后超管兜底）矩阵
+        # (test_admin_team_routes.py), migrated to alembic head and
+        # truncated per test.
+        "admin_team_test",
     }
 )
 

@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as adminApi from "../api.admin";
@@ -8,9 +14,13 @@ vi.mock("../api.admin", () => ({
   getAdminGenerationRecords: vi.fn(),
   getAdminGenerationRecordSummary: vi.fn(),
   getAdminGenerationRecordCalls: vi.fn(),
+  getGenerationRecordContent: vi.fn(),
+  getGenerationRecordThumbnail: vi.fn(),
   getExternalCallResponse: vi.fn(),
   getAdminAnalysisDiagnostics: vi.fn(),
   reconcileFirstFrameTask: vi.fn(),
+  retryGenerationRecord: vi.fn(),
+  createCustomerAdjustment: vi.fn(),
 }));
 
 /** 首帧记录行：默认"提交结果待核对"，正是可对账的那一档。 */
@@ -39,6 +49,73 @@ function firstFrameRecord(
     error_message: null,
     created_at: "2026-09-02T10:00:00Z",
     completed_at: null,
+    has_preview: false,
+    ...overrides,
+  } as adminApi.AdminGenerationRecord;
+}
+
+/** 视频失败记录行：默认「未触达服务商的失败」，可原地重试、需补偿的那一档。 */
+function videoFailureRecord(
+  overrides: Partial<adminApi.AdminGenerationRecord> = {},
+): adminApi.AdminGenerationRecord {
+  return {
+    record_id: "video-failed-1",
+    record_type: "VIDEO",
+    operation: "I2V",
+    user_id: "user-1",
+    username: "customer-1",
+    display_name: "客户一",
+    project_id: "project-1",
+    project_name: "演示项目",
+    status: "FAILED",
+    provider: null,
+    model: null,
+    provider_cost: null,
+    provider_cost_status: "UNAVAILABLE",
+    record_data_status: "VALID",
+    charged_credits: 6,
+    result_reference: null,
+    provider_reference: null,
+    error_code: "H3_SETTINGS_UNAVAILABLE",
+    error_message: "生成服务配置不可用",
+    created_at: "2026-09-29T10:00:00Z",
+    completed_at: "2026-09-29T10:00:05Z",
+    failure_category: "配置问题",
+    failure_owner: "技术处理",
+    advice: "到管理端检查生成服务设置并测试连接后重试。",
+    credits_refunded: false,
+    has_preview: false,
+    ...overrides,
+  } as adminApi.AdminGenerationRecord;
+}
+
+/** 成功出片的视频记录：有可预览的成片与缩略图（P2-2）。 */
+function videoSuccessRecord(
+  overrides: Partial<adminApi.AdminGenerationRecord> = {},
+): adminApi.AdminGenerationRecord {
+  return {
+    record_id: "video-done-1",
+    record_type: "VIDEO",
+    operation: "I2V",
+    user_id: "user-1",
+    username: "customer-1",
+    display_name: "客户一",
+    project_id: "project-1",
+    project_name: "演示项目",
+    status: "SUCCEEDED",
+    provider: "minimax",
+    model: "Hailuo-02",
+    provider_cost: 1.25,
+    provider_cost_status: "ESTIMATED",
+    record_data_status: "VALID",
+    charged_credits: 6,
+    result_reference: "asset-1",
+    provider_reference: "provider-task-1",
+    error_code: null,
+    error_message: null,
+    created_at: "2026-09-29T10:00:00Z",
+    completed_at: "2026-09-29T10:05:00Z",
+    has_preview: true,
     ...overrides,
   } as adminApi.AdminGenerationRecord;
 }
@@ -86,6 +163,7 @@ describe("GenerationRecordsPage", () => {
           provider_reference: null,
           error_code: null,
           error_message: null,
+          has_preview: false,
           created_at: "2026-09-02T11:00:00Z",
           completed_at: null,
         },
@@ -109,6 +187,7 @@ describe("GenerationRecordsPage", () => {
           provider_reference: null,
           error_code: null,
           error_message: null,
+          has_preview: false,
           created_at: "2026-09-02T10:00:00Z",
           completed_at: "2026-09-02T10:01:00Z",
         },
@@ -132,6 +211,7 @@ describe("GenerationRecordsPage", () => {
           provider_reference: null,
           error_code: null,
           error_message: null,
+          has_preview: false,
           created_at: "2026-09-02T09:00:00Z",
           completed_at: "2026-09-02T09:01:00Z",
         },
@@ -145,15 +225,22 @@ describe("GenerationRecordsPage", () => {
   it("shows image generation and AI scoring with honest cost status", async () => {
     render(<GenerationRecordsPage />);
 
-    expect(await screen.findByText("人物置换首帧")).toBeInTheDocument();
-    expect(screen.getByText("源画面 AI 评分")).toBeInTheDocument();
-    expect(screen.getAllByText("上游未回传")).toHaveLength(2);
-    expect(screen.getByText("估算 1.25")).toBeInTheDocument();
+    // P2-1：类型下拉从词典生成后，“人物置换首帧/源画面 AI 评分”
+    // 同时出现在下拉选项与表格单元格，断言限定到表格内。
+    const table = await screen.findByRole("table", {
+      name: "用户生成记录列表",
+    });
+    expect(within(table).getByText("人物置换首帧")).toBeInTheDocument();
+    expect(within(table).getByText("源画面 AI 评分")).toBeInTheDocument();
+    expect(within(table).getAllByText("成本待核对")).toHaveLength(2);
+    expect(within(table).getByText("估算 ¥1.25")).toBeInTheDocument();
     expect(screen.getByText("apilio / gpt-image-2")).toBeInTheDocument();
     expect(
       screen.getByText("apilio_gemini / gemini-2.5-flash"),
     ).toBeInTheDocument();
     expect(screen.getAllByText("customer-1")).toHaveLength(3);
+    // P2-2：这三条都没有产物，预览列如实占位而不是留空。
+    expect(within(table).getAllByText("无产物")).toHaveLength(3);
   });
 
   it("shows the calls panel total with a truncation note (P0-9 #27)", async () => {
@@ -276,6 +363,7 @@ describe("GenerationRecordsPage", () => {
           error_message: "视频拆解服务拒绝了请求（HTTP 400）",
           created_at: "2026-09-21T10:00:00Z",
           completed_at: "2026-09-21T10:00:05Z",
+          has_preview: false,
           failure_phase: "http",
           retryable: false,
           upstream_status: 400,
@@ -291,6 +379,7 @@ describe("GenerationRecordsPage", () => {
       counts: [{ record_type: "ANALYSIS", status: "FAILED", count: 1 }],
       failure_reasons: [
         {
+          record_type: "ANALYSIS",
           error_code: "ANALYSIS_PROVIDER_FAILED",
           failure_phase: "http",
           reason: upstreamReason,
@@ -298,12 +387,14 @@ describe("GenerationRecordsPage", () => {
           count: 1,
           advice: fixAdvice,
         },
-        // 旧数据没有错误码，runbook 也给不出建议：这一行不该凭空长出一句建议。
+        // 旧数据没有错误码与可重试判定，runbook 也给不出建议：这一行不该凭空
+        // 长出一句建议，也不该把「未判定」写成「不可重试」。
         {
+          record_type: "ANALYSIS",
           error_code: null,
           failure_phase: null,
           reason: null,
-          retryable: true,
+          retryable: null,
           count: 2,
           advice: null,
         },
@@ -338,12 +429,16 @@ describe("GenerationRecordsPage", () => {
         failurePhase: "http",
       }),
     );
-    // 聚合块把「哪一步失败、能不能重试、上游怎么说」摆在列表之前。
+    // 聚合块把「哪个任务、哪一步失败、谁来处理、上游怎么说」摆在列表之前。
     expect(screen.getByText("视频拆解 失败 1")).toBeInTheDocument();
     expect(
       screen.getByText(
-        "上游拒绝（HTTP） · ANALYSIS_PROVIDER_FAILED · 不可重试 · 1 条",
+        "视频拆解 · 上游拒绝（HTTP） · ANALYSIS_PROVIDER_FAILED · 不可重试 · 1 条",
       ),
+    ).toBeInTheDocument();
+    // retryable 缺失的历史行省掉重试判定，只说事实。
+    expect(
+      screen.getByText("视频拆解 · 未知阶段 · 未记录错误码 · 2 条"),
     ).toBeInTheDocument();
     expect(screen.getByText(`上游说明：${upstreamReason}`)).toBeInTheDocument();
     // P2-2：聚合行直接把错误码译成下一步动作；没有映射的旧行不多说一句。
@@ -379,6 +474,7 @@ describe("GenerationRecordsPage", () => {
           provider_reference: "hifly-task-1",
           error_code: "ORAL_TASK_FAILED",
           error_message: "数字人服务生成失败",
+          has_preview: false,
           created_at: "2026-09-02T11:00:00Z",
           completed_at: "2026-09-02T11:01:00Z",
         },
@@ -471,6 +567,7 @@ describe("GenerationRecordsPage", () => {
           provider_reference: null,
           error_code: null,
           error_message: null,
+          has_preview: false,
           created_at: "2026-09-01T00:00:00Z",
           completed_at: null,
         },
@@ -518,6 +615,7 @@ describe("GenerationRecordsPage", () => {
           error_message: "视频拆解服务拒绝了请求（HTTP 400）",
           created_at: "2026-09-21T10:00:00Z",
           completed_at: "2026-09-21T10:00:05Z",
+          has_preview: false,
           failure_phase: "http",
           retryable: true,
           upstream_status: 400,
@@ -653,5 +751,260 @@ describe("GenerationRecordsPage", () => {
       ),
     ).toBeInTheDocument();
     expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("retries a failed video task in place and reports the queue verdict", async () => {
+    vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
+      items: [videoFailureRecord()],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+    vi.mocked(adminApi.retryGenerationRecord).mockResolvedValue({
+      task_id: "video-failed-1",
+      status: "PENDING",
+      archive_status: "PENDING",
+    });
+
+    render(<GenerationRecordsPage initialStatus="FAILED" />);
+    fireEvent.click(await screen.findByText("查看详情"));
+
+    // P1-1：详情给出失败分类、处理人与积分退回状态。
+    expect(screen.getByText("配置问题")).toBeInTheDocument();
+    expect(screen.getByText("技术处理")).toBeInTheDocument();
+    expect(screen.getByText("未退回")).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "重试任务 video-failed-1" }),
+    );
+    await screen.findByRole("dialog");
+    fireEvent.change(screen.getByLabelText("操作原因"), {
+      target: { value: "运营手动重试" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "重新入队" }));
+
+    await waitFor(() =>
+      expect(adminApi.retryGenerationRecord).toHaveBeenCalledWith(
+        "video-failed-1",
+        "运营手动重试",
+      ),
+    );
+    expect(
+      await screen.findByText(/已重新入队：任务 video-failed-1/),
+    ).toBeInTheDocument();
+    // 重试后重新拉取列表：状态已被服务端改写，旧行不该留在页面上。
+    await waitFor(() =>
+      expect(adminApi.getAdminGenerationRecords).toHaveBeenCalledTimes(2),
+    );
+  });
+
+  it("compensates a failed record through the audited adjustment", async () => {
+    vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
+      items: [videoFailureRecord()],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+    vi.mocked(adminApi.createCustomerAdjustment).mockResolvedValue({
+      adjustment_id: "adj-1",
+      order_id: "order-1",
+      credits: "8",
+      amount_fen: "0",
+      pricing_scope: "COMPENSATION",
+      wallet_balance_after: 106,
+      source_document_type: "CREDIT_COMPENSATION",
+      source_document_ref: "video-failed-1",
+      request_id: "req-1",
+    });
+
+    render(<GenerationRecordsPage initialStatus="FAILED" />);
+    fireEvent.click(await screen.findByText("查看详情"));
+    fireEvent.click(
+      screen.getByRole("button", { name: "补偿积分 video-failed-1" }),
+    );
+    await screen.findByRole("dialog");
+
+    // 默认填该条被扣的积分，运营可改。
+    const creditsInput = screen.getByLabelText("补偿积分数量");
+    expect(creditsInput).toHaveValue("6");
+    fireEvent.change(creditsInput, { target: { value: "8" } });
+    fireEvent.change(screen.getByLabelText("操作原因"), {
+      target: { value: "客服补偿" },
+    });
+    // reasonAndAck 级：确认后直接进客户钱包，必须勾选知晓。
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: "发放补偿" }));
+
+    await waitFor(() =>
+      expect(adminApi.createCustomerAdjustment).toHaveBeenCalledWith(
+        "user-1",
+        {
+          sourceDocumentType: "CREDIT_COMPENSATION",
+          sourceDocumentRef: "video-failed-1",
+          credits: 8,
+        },
+        "客服补偿",
+        expect.any(String),
+      ),
+    );
+    expect(
+      await screen.findByText("已补偿 8 积分：客户余额现为 106 积分。"),
+    ).toBeInTheDocument();
+  });
+
+  it("copies a customer-facing note with category, advice and credit status", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
+      items: [videoFailureRecord()],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+
+    render(<GenerationRecordsPage initialStatus="FAILED" />);
+    fireEvent.click(await screen.findByText("查看详情"));
+    fireEvent.click(
+      screen.getByRole("button", { name: "复制客户说明 video-failed-1" }),
+    );
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    const note = writeText.mock.calls[0][0] as string;
+    expect(note).toContain("任务编号：video-failed-1");
+    expect(note).toContain("业务类型：视频生成");
+    expect(note).toContain("失败分类：配置问题");
+    expect(note).toContain(
+      "处理建议：到管理端检查生成服务设置并测试连接后重试。",
+    );
+    expect(note).toContain(
+      "积分处理：本次消耗的积分将按流程退回或补偿，请留意后续通知。",
+    );
+    expect(
+      await screen.findByText(/已复制任务 video-failed-1 的客户说明/),
+    ).toBeInTheDocument();
+  });
+
+  it("shows a derived thumbnail and opens the audited video preview (P2-2)", async () => {
+    const createObjectURL = vi
+      .spyOn(URL, "createObjectURL")
+      .mockReturnValueOnce("blob:thumb")
+      .mockReturnValueOnce("blob:content");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
+      items: [videoSuccessRecord()],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+    vi.mocked(adminApi.getGenerationRecordThumbnail).mockResolvedValue(
+      new Blob(["jpeg"], { type: "image/jpeg" }),
+    );
+    vi.mocked(adminApi.getGenerationRecordContent).mockResolvedValue(
+      new Blob(["mp4"], { type: "video/mp4" }),
+    );
+
+    render(<GenerationRecordsPage />);
+
+    // 缩略图按记录类型 + 编号拉取，嵌在「查看成片」按钮里。
+    await waitFor(() =>
+      expect(adminApi.getGenerationRecordThumbnail).toHaveBeenCalledWith(
+        "VIDEO",
+        "video-done-1",
+      ),
+    );
+    expect(
+      await screen.findByRole("img", { name: "任务 video-done-1 缩略图" }),
+    ).toHaveAttribute("src", "blob:thumb");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "查看成片 video-done-1" }),
+    );
+
+    // content 是高敏读取（服务端写审计）：只在显式点击时拉取一次。
+    const dialog = await screen.findByRole("dialog", { name: "成片预览" });
+    await waitFor(() =>
+      expect(adminApi.getGenerationRecordContent).toHaveBeenCalledWith(
+        "VIDEO",
+        "video-done-1",
+      ),
+    );
+    expect(
+      within(dialog).getByText("任务 video-done-1 · customer-1 · 视频生成"),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("成片 video-done-1")).toHaveAttribute(
+      "src",
+      "blob:content",
+    );
+    expect(createObjectURL).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "关闭" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "成片预览" })).toBeNull(),
+    );
+    // 关闭即释放预览 object URL，不禁锢内存。
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:content");
+  });
+
+  it("previews image-kind results and degrades a missing thumbnail (P2-2)", async () => {
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:image");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
+      items: [
+        firstFrameRecord({
+          record_id: "ff-done",
+          status: "SUCCEEDED",
+          has_preview: true,
+        }),
+      ],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+    // 缩略图派生失败（404）：降级占位，但不挡住「查看图片」入口。
+    vi.mocked(adminApi.getGenerationRecordThumbnail).mockRejectedValue(
+      new Error("读取生成记录缩略图失败（404）"),
+    );
+    vi.mocked(adminApi.getGenerationRecordContent).mockResolvedValue(
+      new Blob(["png"], { type: "image/png" }),
+    );
+
+    render(<GenerationRecordsPage />);
+
+    expect(await screen.findByText("缩略图不可用")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "查看图片 ff-done" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "生成图预览" });
+    expect(
+      await within(dialog).findByRole("img", { name: "生成图 ff-done" }),
+    ).toHaveAttribute("src", "blob:image");
+
+    // Esc 与「关闭」同一口径：关层并释放 object URL。
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "生成图预览" })).toBeNull(),
+    );
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:image");
+  });
+
+  it("hides the whole preview column from the read-only auditor role (P2-2)", async () => {
+    vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
+      items: [videoSuccessRecord()],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+
+    render(<GenerationRecordsPage readOnly />);
+
+    const table = await screen.findByRole("table", {
+      name: "用户生成记录列表",
+    });
+    // 媒体端点对 auditor 一律 403：整列（含缩略图请求）都不该出现。
+    expect(within(table).queryByText("结果预览")).toBeNull();
+    expect(screen.queryByRole("button", { name: /查看成片/ })).toBeNull();
+    expect(adminApi.getGenerationRecordThumbnail).not.toHaveBeenCalled();
   });
 });

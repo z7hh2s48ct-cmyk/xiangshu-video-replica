@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { adminRead } from "../api.admin";
 import { billingStates, billingUnit } from "./billingTypes";
+import { formatFen, formatRelativeTime } from "./ui/vocabulary";
 
 type Action = {
   source_id: string;
@@ -45,10 +46,10 @@ type Operation = {
 type Panorama = { action: Action; operations: Operation[] };
 type Page = { items: Action[]; total: number };
 
+// P2-1：金额统一走 formatFen——两位小数，不足 1 分显示 < ¥0.01；
+// 原实现除以 100 后留 10 位小数，运营对账得自己数字符。
 const money = (value: string | number | null | undefined) =>
-  value == null
-    ? "待核对"
-    : `¥${(Number(value) / 100).toFixed(10).replace(/0+$/, "").replace(/\.$/, ".00")}`;
+  value == null ? "待核对" : formatFen(Number(value));
 const pageSize = 50;
 
 export function SourceActionPanorama({
@@ -71,16 +72,14 @@ export function SourceActionPanorama({
     setError("");
     void adminRead<Page>(
       `/api/control/billing/source-actions?${query}&limit=${pageSize}&offset=${offset}`,
-      "读取业务动作全景失败",
+      "读取操作全景失败",
     )
       .then((result) => {
         if (active) setList(result);
       })
       .catch((cause: unknown) => {
         if (active)
-          setError(
-            cause instanceof Error ? cause.message : "读取业务动作全景失败",
-          );
+          setError(cause instanceof Error ? cause.message : "读取操作全景失败");
       });
     return () => {
       active = false;
@@ -91,13 +90,13 @@ export function SourceActionPanorama({
     let active = true;
     setDetail(undefined);
     if (selected) {
-      // 同一动作编号可能分属不同账号：明细必须带明确作用域，平台行走 platform。
+      // 同一操作编号可能分属不同账号：明细必须带明确作用域，平台行走 platform。
       const scope = selected.user_id
         ? `user_id=${encodeURIComponent(selected.user_id)}`
         : "platform=true";
       void adminRead<Panorama>(
         `/api/control/billing/source-actions/${encodeURIComponent(selected.source_id)}?${scope}`,
-        "读取业务动作明细失败",
+        "读取操作明细失败",
       )
         .then((result) => {
           if (active) setDetail(result);
@@ -105,7 +104,7 @@ export function SourceActionPanorama({
         .catch((cause: unknown) => {
           if (active)
             setError(
-              cause instanceof Error ? cause.message : "读取业务动作明细失败",
+              cause instanceof Error ? cause.message : "读取操作明细失败",
             );
         });
     }
@@ -114,12 +113,12 @@ export function SourceActionPanorama({
     };
   }, [selected, revision]);
   return (
-    <section aria-label="业务动作全景">
-      <h3>业务动作全景</h3>
+    <section aria-label="操作全景">
+      <h3>操作全景</h3>
       <p>
-        一次业务动作 =
-        同一动作编号下的所有科目请求与供应商调用，含内部质检。客户只为用户科目被扣分；
-        内部科目与质检成本单独列出，证据不齐时按待核对显示，不计成零成本。
+        一次操作 =
+        同一操作编号下的所有生成与供应商调用，含内部质检。客户只为用户业务被扣分；
+        内部业务与质检成本单独列出，证据不齐时按待核对显示，不计成零成本。
       </p>
       <button
         type="button"
@@ -129,23 +128,23 @@ export function SourceActionPanorama({
           setRevision((value) => value + 1);
         }}
       >
-        刷新业务动作
+        刷新操作
       </button>
       {error && <p role="alert">{error}</p>}
-      {!list && !error && <p role="status">正在读取业务动作…</p>}
+      {!list && !error && <p role="status">正在读取操作…</p>}
       {list && (
         <>
           <div className="admin-table-scroll">
-            <table className="admin-data-table" aria-label="业务动作列表">
+            <table className="admin-data-table" aria-label="操作列表">
               <thead>
                 <tr>
-                  <th>业务动作</th>
+                  <th>操作编号</th>
                   <th>用户</th>
-                  <th>请求与调用</th>
+                  <th>生成与调用</th>
                   <th>积分</th>
-                  <th>供应商成本</th>
+                  <th>成本</th>
                   <th>质检成本</th>
-                  <th>最近发生</th>
+                  <th>最近活动</th>
                   <th>明细</th>
                 </tr>
               </thead>
@@ -157,7 +156,7 @@ export function SourceActionPanorama({
                     </td>
                     <td>{item.username}</td>
                     <td>
-                      {item.operation_count} 条请求 · {item.attempt_count}{" "}
+                      {item.operation_count} 次生成 · {item.attempt_count}{" "}
                       次调用
                       {item.pending_count > 0 &&
                         ` · 处理中 ${item.pending_count}`}
@@ -182,14 +181,10 @@ export function SourceActionPanorama({
                         ? "无"
                         : `质检 ${money(item.inspection_cost_fen)} · ${item.inspection_attempt_count} 次`}
                     </td>
-                    <td>
-                      {new Date(item.last_at).toLocaleString("zh-CN", {
-                        timeZone: "Asia/Shanghai",
-                      })}
-                    </td>
+                    <td>{formatRelativeTime(item.last_at)}</td>
                     <td>
                       <button type="button" onClick={() => setSelected(item)}>
-                        查看动作全景
+                        查看操作明细
                       </button>
                     </td>
                   </tr>
@@ -197,40 +192,40 @@ export function SourceActionPanorama({
               </tbody>
             </table>
           </div>
-          {list.items.length === 0 && <p>该范围内没有业务动作。</p>}
+          {list.items.length === 0 && <p>该范围内没有操作记录。</p>}
           <button
             type="button"
             disabled={offset === 0}
             onClick={() => setOffset((value) => Math.max(0, value - pageSize))}
           >
-            上一动作页
+            上一页
           </button>
-          <span>共 {list.total} 个业务动作</span>
+          <span>共 {list.total} 次操作</span>
           <button
             type="button"
             disabled={offset + pageSize >= list.total}
             onClick={() => setOffset((value) => value + pageSize)}
           >
-            下一动作页
+            下一页
           </button>
         </>
       )}
       {selected && (
-        <aside aria-label="业务动作明细">
-          <h4>业务动作明细</h4>
+        <aside aria-label="操作明细">
+          <h4>操作明细</h4>
           <p>
-            动作编号 {selected.source_id}；{selected.username}。
+            操作编号 {selected.source_id}；{selected.username}。
           </p>
           <button type="button" onClick={() => setSelected(undefined)}>
             关闭明细
           </button>
-          {!detail && !error && <p role="status">正在读取业务动作明细…</p>}
+          {!detail && !error && <p role="status">正在读取操作明细…</p>}
           {detail && (
             <>
               <p>
-                {detail.action.operation_count} 条请求 ·{" "}
+                {detail.action.operation_count} 次生成 ·{" "}
                 {detail.action.attempt_count} 次调用 · 净扣{" "}
-                {detail.action.charged_credits} 积分；供应商成本{" "}
+                {detail.action.charged_credits} 积分；成本{" "}
                 {money(detail.action.cost_fen)}（已知{" "}
                 {money(detail.action.known_cost_fen)}）；质检成本{" "}
                 {detail.action.inspection_attempt_count === 0
@@ -238,16 +233,16 @@ export function SourceActionPanorama({
                   : money(detail.action.inspection_cost_fen)}
                 。
               </p>
-              <h5>动作内请求</h5>
+              <h5>动作内生成</h5>
               <div className="admin-table-scroll">
-                <table className="admin-data-table" aria-label="动作内请求">
+                <table className="admin-data-table" aria-label="动作内生成">
                   <thead>
                     <tr>
-                      <th>科目</th>
+                      <th>业务</th>
                       <th>状态</th>
                       <th>用量</th>
                       <th>积分</th>
-                      <th>供应商成本</th>
+                      <th>成本</th>
                       <th>调用</th>
                     </tr>
                   </thead>
@@ -277,7 +272,7 @@ export function SourceActionPanorama({
                   >
                     <thead>
                       <tr>
-                        <th>科目</th>
+                        <th>业务</th>
                         <th>服务商</th>
                         <th>用量</th>
                         <th>成本</th>

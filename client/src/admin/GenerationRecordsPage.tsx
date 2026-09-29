@@ -3,9 +3,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type AdminGenerationRecord,
   type AdminGenerationRecordSummary,
+  createCustomerAdjustment,
   getAdminGenerationRecordSummary,
   getAdminGenerationRecords,
+  getGenerationRecordContent,
+  getGenerationRecordThumbnail,
   reconcileFirstFrameTask,
+  retryGenerationRecord,
 } from "../api.admin";
 import { AnalysisDiagnosticPanel } from "./AnalysisDiagnosticPanel";
 import { RecordCallsPanel } from "./RecordCallsPanel";
@@ -18,6 +22,7 @@ import { TabBar } from "./ui/TabBar";
 import {
   FAILURE_PHASE_LABELS,
   formatDateTime,
+  formatFen,
   GENERATION_RECORD_TYPE_LABELS,
   GENERATION_STATUS_FILTERS,
   GENERATION_STATUS_LABELS,
@@ -34,6 +39,25 @@ const ANALYSIS_RECORD_TYPE = "ANALYSIS";
 // 避免点开就是错。
 const FIRST_FRAME_RECORD_TYPE = "FIRST_FRAME_IMAGE";
 const SUBMISSION_UNCERTAIN = "SUBMISSION_UNCERTAIN";
+// 一键重试仅支持视频任务（服务端 retry_generation_task 只覆盖 generation_tasks）。
+const VIDEO_RECORD_TYPE = "VIDEO";
+// 显示一键处理的失败终局：与服务端 _EXPLAINED_STATUSES 对齐——这些状态
+// 会带失败分类/处理人/积分退回信息。
+const FAILURE_STATUSES = new Set([
+  "FAILED",
+  SUBMISSION_UNCERTAIN,
+  "UNKNOWN",
+  "ARCHIVE_FAILED",
+  "CANCELED",
+  "CANCELLED",
+]);
+// 重试入口只给「可能被服务端放行」的两种终局：普通失败（PRE_PROVIDER 路径）
+// 与提交结果待核对（点击即得「先核对再重试」的中文指引）。用户主动取消无需
+// 重试，UNKNOWN 该先完成核对，都不给入口。
+const RETRY_ENTRY_STATUSES = new Set(["FAILED", SUBMISSION_UNCERTAIN]);
+// 有产物可预览的记录类型里，视频类用 <video> 播放成片，其余用 <img> 展示
+// 生成图（与服务端媒体端点的「有内容可读」类型一致）。
+const VIDEO_PREVIEW_TYPES = new Set([VIDEO_RECORD_TYPE, "ORAL_VIDEO"]);
 
 export function GenerationRecordsPage({
   initialStatus = "",
@@ -77,10 +101,38 @@ export function GenerationRecordsPage({
     useState<AdminGenerationRecord | null>(null);
   const [reconcileBusy, setReconcileBusy] = useState(false);
   const [reconcileError, setReconcileError] = useState("");
+  // 一键处理（方案 P1-4）：重试与补偿各自独立的确认框状态，互不干扰。
+  const [pendingRetry, setPendingRetry] =
+    useState<AdminGenerationRecord | null>(null);
+  const [retryBusy, setRetryBusy] = useState(false);
+  const [retryError, setRetryError] = useState("");
+  const [pendingCompensation, setPendingCompensation] =
+    useState<AdminGenerationRecord | null>(null);
+  const [compensationBusy, setCompensationBusy] = useState(false);
+  const [compensationError, setCompensationError] = useState("");
+  const [compensationCredits, setCompensationCredits] = useState("");
+  // 补偿的幂等键按「客户 + 记录 + 数量」指纹复用：内容没变的重试沿用同一键
+  // （服务端重放不重复调账），运营改了数量则按新请求换键。
+  const compensationRetryRef = useRef<{
+    fingerprint: string;
+    key: string;
+  } | null>(null);
   // 展开过详情的记录行：第三方调用记录只在首次展开时懒加载，
   // 避免为一屏记录白拉一屏接口。
   const [openedDetails, setOpenedDetails] = useState<Set<string>>(new Set());
   const requestIdRef = useRef(0);
+  // 预览层（P2-2「查看成片」）：content 是高敏读取（服务端每次查看都写
+  // generation_record.content_view 审计），只在显式点击时拉取。url 为
+  // object URL，关闭 / 切换记录 / 卸载时释放，避免泄漏。
+  const [preview, setPreview] = useState<{
+    record: AdminGenerationRecord;
+    /** object URL；空串表示还在拉取中。 */
+    url: string;
+    /** 拉取失败的可读说明；非空即终态。 */
+    error: string;
+  } | null>(null);
+  const previewGenerationRef = useRef(0);
+  const previewUrlRef = useRef("");
 
   const loadRecords = useCallback(async () => {
     const requestId = requestIdRef.current + 1;
@@ -129,6 +181,24 @@ export function GenerationRecordsPage({
     void loadRecords();
   }, [loadRecords]);
 
+  // Esc 关闭预览层：与 ConfirmDialog 同一键盘口径。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: closePreview 只读写 object URL ref 与 setState，引用等价稳定；开合由 preview 驱动。
+  useEffect(() => {
+    if (!preview) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closePreview();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [preview]);
+
+  // 卸载（切走页签 / 退出管理端）时释放未关闭的预览 object URL。
+  useEffect(() => {
+    return () => {
+      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+    };
+  }, []);
+
   async function submitReconcile(reason: string) {
     if (!pendingReconcile || reconcileBusy) return;
     const target = pendingReconcile;
@@ -154,6 +224,133 @@ export function GenerationRecordsPage({
     } finally {
       setReconcileBusy(false);
     }
+  }
+
+  async function submitRetry(reason: string) {
+    if (!pendingRetry || retryBusy) return;
+    const target = pendingRetry;
+    setRetryBusy(true);
+    setRetryError("");
+    setNotice("");
+    try {
+      const result = await retryGenerationRecord(target.record_id, reason);
+      // 两条重试路径的运营含义不同：重新入队（PENDING）会再次预扣积分，
+      // 恢复存档（SUCCEEDED）沿用原有计费——分开说清，避免误读成重复扣费。
+      setNotice(
+        result.status === "PENDING"
+          ? `已重新入队：任务 ${result.task_id} 将重新生成，并按规则再次预扣积分。`
+          : `已恢复存档：任务 ${result.task_id} 将重试归档，沿用原有结果与计费。`,
+      );
+      setPendingRetry(null);
+      await loadRecords();
+    } catch (cause) {
+      setRetryError(
+        cause instanceof Error && cause.message
+          ? cause.message
+          : "重试生成任务失败：未知错误",
+      );
+    } finally {
+      setRetryBusy(false);
+    }
+  }
+
+  async function submitCompensation(reason: string) {
+    if (!pendingCompensation || compensationBusy) return;
+    const target = pendingCompensation;
+    const credits = Number(compensationCredits.trim());
+    if (!Number.isInteger(credits) || credits <= 0) {
+      setCompensationError("补偿积分需为正整数");
+      return;
+    }
+    const fingerprint = JSON.stringify({
+      userId: target.user_id,
+      recordId: target.record_id,
+      credits,
+    });
+    if (compensationRetryRef.current?.fingerprint !== fingerprint) {
+      compensationRetryRef.current = { fingerprint, key: crypto.randomUUID() };
+    }
+    setCompensationBusy(true);
+    setCompensationError("");
+    setNotice("");
+    try {
+      const result = await createCustomerAdjustment(
+        target.user_id,
+        {
+          sourceDocumentType: "CREDIT_COMPENSATION",
+          sourceDocumentRef: target.record_id,
+          credits,
+        },
+        reason,
+        compensationRetryRef.current.key,
+      );
+      setNotice(
+        `已补偿 ${credits} 积分：客户余额现为 ${result.wallet_balance_after} 积分。`,
+      );
+      compensationRetryRef.current = null;
+      setPendingCompensation(null);
+      await loadRecords();
+    } catch (cause) {
+      setCompensationError(
+        cause instanceof Error && cause.message
+          ? cause.message
+          : "积分补偿失败：未知错误",
+      );
+    } finally {
+      setCompensationBusy(false);
+    }
+  }
+
+  async function copyCustomerNote(item: AdminGenerationRecord) {
+    setNotice("");
+    try {
+      await navigator.clipboard.writeText(customerNoteFor(item));
+      setNotice(`已复制任务 ${item.record_id} 的客户说明，可直接转发。`);
+    } catch {
+      setNotice("复制失败：浏览器拒绝了剪贴板访问，请手动记录说明。");
+    }
+  }
+
+  /** 释放当前预览的 object URL（若有）。 */
+  function releasePreviewUrl() {
+    if (!previewUrlRef.current) return;
+    URL.revokeObjectURL(previewUrlRef.current);
+    previewUrlRef.current = "";
+  }
+
+  /** 打开成片 / 生成图预览：先展示空壳，内容拉取成功后再点亮播放器。 */
+  async function openPreview(item: AdminGenerationRecord) {
+    const generation = ++previewGenerationRef.current;
+    releasePreviewUrl();
+    setPreview({ record: item, url: "", error: "" });
+    try {
+      const blob = await getGenerationRecordContent(
+        item.record_type,
+        item.record_id,
+      );
+      // 迟到的响应可能属于已关闭 / 已切换的预览：按代号丢弃，不点亮旧层。
+      if (generation !== previewGenerationRef.current) return;
+      const url = URL.createObjectURL(blob);
+      previewUrlRef.current = url;
+      setPreview({ record: item, url, error: "" });
+    } catch (cause) {
+      if (generation !== previewGenerationRef.current) return;
+      setPreview({
+        record: item,
+        url: "",
+        error:
+          cause instanceof Error && cause.message
+            ? cause.message
+            : "读取生成内容失败：未知错误",
+      });
+    }
+  }
+
+  function closePreview() {
+    // 作废在途请求：响应回来时不该再点亮已关闭的预览层。
+    previewGenerationRef.current += 1;
+    releasePreviewUrl();
+    setPreview(null);
   }
 
   return (
@@ -238,14 +435,15 @@ export function GenerationRecordsPage({
                 }}
               >
                 <option value="">全部类型</option>
-                <option value="VIDEO">视频</option>
-                <option value="ORAL_VIDEO">口播视频</option>
-                <option value="FIRST_FRAME_IMAGE">首帧图片</option>
-                <option value="CHARACTER_SHEET_IMAGE">人物表</option>
-                <option value="CHARACTER_VIEW_IMAGE">人物视图</option>
-                <option value="SOURCE_FRAME_PROCESS">素材处理</option>
-                <option value="SOURCE_FRAME_AI_SCORE">AI 评分</option>
-                <option value={ANALYSIS_RECORD_TYPE}>视频拆解</option>
+                {/* P2-1：类型下拉从词典生成——此前手写列表漏了口播分身/声音克隆，
+                    且"首帧图片/人物表"与记录表里的类型列各说各话。 */}
+                {Object.entries(GENERATION_RECORD_TYPE_LABELS).map(
+                  ([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ),
+                )}
               </select>
             </label>
             {recordType === ANALYSIS_RECORD_TYPE ? (
@@ -327,9 +525,14 @@ export function GenerationRecordsPage({
                 <ul>
                   {summary.failure_reasons.map((reason) => (
                     <li
-                      key={`${reason.error_code}-${reason.failure_phase}-${reason.reason}`}
+                      key={`${reason.record_type}-${reason.error_code}-${reason.failure_phase}-${reason.reason}`}
                     >
                       <span>
+                        {labelFrom(
+                          GENERATION_RECORD_TYPE_LABELS,
+                          reason.record_type,
+                        )}
+                        {" · "}
                         {reason.failure_phase
                           ? labelFrom(
                               FAILURE_PHASE_LABELS,
@@ -338,11 +541,20 @@ export function GenerationRecordsPage({
                           : "未知阶段"}
                         {" · "}
                         {reason.error_code ?? "未记录错误码"}
-                        {" · "}
-                        {reason.retryable ? "可重试" : "不可重试"}
+                        {/* retryable 缺失（如取帧/评分族无此语义）时省掉这段，
+                            不能把「未判定」写成「不可重试」。 */}
+                        {reason.retryable != null
+                          ? ` · ${reason.retryable ? "可重试" : "不可重试"}`
+                          : ""}
                         {" · "}
                         {reason.count} 条
                       </span>
+                      {reason.category || reason.owner ? (
+                        <small>
+                          失败分类：{reason.category ?? "未分类"}
+                          {reason.owner ? ` · 处理人：${reason.owner}` : ""}
+                        </small>
+                      ) : null}
                       {reason.reason ? (
                         <small>上游说明：{reason.reason}</small>
                       ) : null}
@@ -373,8 +585,10 @@ export function GenerationRecordsPage({
                   <th>服务 / 模型</th>
                   <th>状态</th>
                   <th>耗时</th>
-                  <th>扣减额度</th>
-                  <th>上游成本（元）</th>
+                  <th>扣减积分</th>
+                  <th>成本</th>
+                  {/* 预览列随审计员整体隐藏：媒体端点对 auditor 一律 403。 */}
+                  {!readOnly ? <th>结果预览</th> : null}
                   <th>结果 / 错误</th>
                 </>
               }
@@ -408,6 +622,25 @@ export function GenerationRecordsPage({
                       : "0 积分"}
                   </td>
                   <td>{formatProviderCost(item)}</td>
+                  {!readOnly ? (
+                    <td className="admin-generation-records__preview-cell">
+                      {item.has_preview ? (
+                        <button
+                          aria-label={`${previewActionLabel(item)} ${item.record_id}`}
+                          className="admin-generation-records__preview"
+                          type="button"
+                          onClick={() => void openPreview(item)}
+                        >
+                          <RecordThumbnail item={item} />
+                          <small>{previewActionLabel(item)}</small>
+                        </button>
+                      ) : (
+                        <span className="admin-generation-records__preview-empty">
+                          无产物
+                        </span>
+                      )}
+                    </td>
+                  ) : null}
                   <td>
                     <details>
                       {/* biome-ignore lint/a11y/noStaticElementInteractions: summary 是 details 的固有开关（原生可聚焦、可键盘切换），这里只借用它的点击做懒加载登记。 */}
@@ -445,6 +678,18 @@ export function GenerationRecordsPage({
                         <dd>{item.error_code ?? "—"}</dd>
                         <dt>错误说明</dt>
                         <dd>{item.error_message ?? "—"}</dd>
+                        {item.failure_category ? (
+                          <>
+                            <dt>失败分类</dt>
+                            <dd>{item.failure_category}</dd>
+                          </>
+                        ) : null}
+                        {item.failure_owner ? (
+                          <>
+                            <dt>处理人</dt>
+                            <dd>{item.failure_owner}</dd>
+                          </>
+                        ) : null}
                         {item.provider_error_code ? (
                           <>
                             <dt>服务商错误码</dt>
@@ -478,6 +723,14 @@ export function GenerationRecordsPage({
                           <>
                             <dt>可否重试</dt>
                             <dd>{item.retryable ? "可重试" : "不可重试"}</dd>
+                          </>
+                        ) : null}
+                        {item.credits_refunded != null ? (
+                          <>
+                            <dt>积分退回</dt>
+                            <dd>
+                              {item.credits_refunded ? "已退回" : "未退回"}
+                            </dd>
                           </>
                         ) : null}
                         {item.upstream_status != null ? (
@@ -532,6 +785,44 @@ export function GenerationRecordsPage({
                           重新对账
                         </button>
                       ) : null}
+                      {!readOnly && FAILURE_STATUSES.has(item.status) ? (
+                        <div className="admin-generation-records__actions">
+                          {item.record_type === VIDEO_RECORD_TYPE &&
+                          RETRY_ENTRY_STATUSES.has(item.status) ? (
+                            <button
+                              aria-label={`重试任务 ${item.record_id}`}
+                              type="button"
+                              onClick={() => {
+                                setPendingRetry(item);
+                                setRetryError("");
+                              }}
+                            >
+                              重试任务
+                            </button>
+                          ) : null}
+                          <button
+                            aria-label={`补偿积分 ${item.record_id}`}
+                            type="button"
+                            onClick={() => {
+                              setPendingCompensation(item);
+                              setCompensationError("");
+                              setCompensationCredits(
+                                String(Math.max(0, item.charged_credits)),
+                              );
+                              compensationRetryRef.current = null;
+                            }}
+                          >
+                            补偿积分
+                          </button>
+                          <button
+                            aria-label={`复制客户说明 ${item.record_id}`}
+                            type="button"
+                            onClick={() => void copyCustomerNote(item)}
+                          >
+                            复制客户说明
+                          </button>
+                        </div>
+                      ) : null}
                     </details>
                   </td>
                 </tr>
@@ -557,7 +848,7 @@ export function GenerationRecordsPage({
         confirmLabel="重新对账"
         description={
           pendingReconcile
-            ? `将向图像供应商核对任务 ${pendingReconcile.record_id} 的真实提交结果：已受理则回到生成队列继续处理；未成功则置为失败并释放预扣额度。同一任务重复对账会被拒绝。`
+            ? `将向图像供应商核对任务 ${pendingReconcile.record_id} 的真实提交结果：已受理则回到生成队列继续处理；未成功则置为失败并退回预扣积分。同一任务重复对账会被拒绝。`
             : undefined
         }
         error={reconcileError}
@@ -571,6 +862,117 @@ export function GenerationRecordsPage({
         }}
         onConfirm={(reason) => void submitReconcile(reason)}
       />
+
+      <ConfirmDialog
+        busy={retryBusy}
+        confirmLabel="重新入队"
+        description={
+          pendingRetry
+            ? `将按现有规则尝试原地重试任务 ${pendingRetry.record_id}：未触达服务商的失败会重新生成并再次预扣积分；已付款结果会改为重试归档、不重新计费。服务端不满足条件时会拒绝并说明原因。`
+            : undefined
+        }
+        error={retryError}
+        level="reason"
+        open={pendingRetry !== null && !readOnly}
+        title="重试生成任务"
+        onClose={() => {
+          if (retryBusy) return;
+          setPendingRetry(null);
+          setRetryError("");
+        }}
+        onConfirm={(reason) => void submitRetry(reason)}
+      />
+
+      {/* 补偿积分走既有调账通道（CREDIT_COMPENSATION）：数量默认填该条被扣的
+          积分、可改；确认后直接进客户钱包，因此是 reasonAndAck 级。 */}
+      <ConfirmDialog
+        busy={compensationBusy}
+        confirmLabel="发放补偿"
+        description={
+          pendingCompensation
+            ? `将向客户 ${pendingCompensation.username} 发放一笔积分补偿（来源单据：记录 ${pendingCompensation.record_id}）。`
+            : undefined
+        }
+        error={compensationError}
+        level="reasonAndAck"
+        open={pendingCompensation !== null && !readOnly}
+        title="补偿积分"
+        onClose={() => {
+          if (compensationBusy) return;
+          setPendingCompensation(null);
+          setCompensationError("");
+        }}
+        onConfirm={(reason) => void submitCompensation(reason)}
+      >
+        <label>
+          补偿积分
+          <input
+            aria-label="补偿积分数量"
+            inputMode="numeric"
+            value={compensationCredits}
+            onChange={(event) => setCompensationCredits(event.target.value)}
+          />
+        </label>
+      </ConfirmDialog>
+
+      {/* 成片 / 生成图预览（P2-2）：content 端点为高敏读取（服务端写审计），
+          只在显式点击时拉取；遮罩点击或 Esc 关闭并释放 object URL。 */}
+      {preview ? (
+        // biome-ignore lint/a11y/noStaticElementInteractions: 遮罩是 aria-modal dialog 模式的标准视觉层，键盘经 Esc 与对话框内控件交互
+        <div
+          className="admin-dialog-overlay"
+          onClick={closePreview}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") closePreview();
+          }}
+          role="presentation"
+        >
+          <section
+            aria-label={previewTitle(preview.record)}
+            aria-modal="true"
+            className="admin-dialog admin-generation-records__preview-dialog"
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
+            role="dialog"
+          >
+            <h2>{previewTitle(preview.record)}</h2>
+            <p className="admin-hint admin-dialog__description">
+              {`任务 ${preview.record.record_id} · ${preview.record.username} · ${labelFrom(
+                GENERATION_RECORD_TYPE_LABELS,
+                preview.record.record_type,
+              )}`}
+            </p>
+            {preview.error ? (
+              <p className="settings-error" role="alert">
+                {preview.error}
+              </p>
+            ) : preview.url ? (
+              VIDEO_PREVIEW_TYPES.has(preview.record.record_type) ? (
+                <video
+                  aria-label={`成片 ${preview.record.record_id}`}
+                  className="admin-generation-records__preview-media"
+                  controls
+                  muted
+                  src={preview.url}
+                />
+              ) : (
+                <img
+                  alt={`生成图 ${preview.record.record_id}`}
+                  className="admin-generation-records__preview-media"
+                  src={preview.url}
+                />
+              )
+            ) : (
+              <p className="admin-hint">正在读取生成结果…</p>
+            )}
+            <div className="admin-actions">
+              <button type="button" onClick={closePreview}>
+                关闭
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -587,12 +989,15 @@ function formatProviderCost(item: AdminGenerationRecord): string {
     item.provider_cost_status === "UNAVAILABLE" ||
     item.provider_cost === null
   ) {
-    return "上游未回传";
+    return "成本待核对";
   }
+  // provider_cost 是元（float），先换算成分为整数再走 formatFen，
+  // 避免 1.25 * 100 = 125.00000000000001 这类浮点尾数。
+  const fen = Math.round(item.provider_cost * 100);
   if (item.provider_cost_status === "ESTIMATED") {
-    return `估算 ${item.provider_cost}`;
+    return `估算 ${formatFen(fen)}`;
   }
-  return String(item.provider_cost);
+  return formatFen(fen);
 }
 
 function formatResult(item: AdminGenerationRecord): string {
@@ -600,6 +1005,32 @@ function formatResult(item: AdminGenerationRecord): string {
     return "记录数据损坏";
   }
   return item.error_code ?? item.result_reference ?? "—";
+}
+
+/** 失败记录的客户说明文案（方案 P1-4「复制给客户的说明」）。
+ *
+ *  面向客户/客服的口吻：只说发生了什么、怎么处理、积分怎么算，不出现内部
+ *  错误码与处理人角色——那些是运营自己看的。 */
+function customerNoteFor(item: AdminGenerationRecord): string {
+  const lines = [
+    "【生成任务处理说明】",
+    `任务编号：${item.record_id}`,
+    `业务类型：${labelFrom(GENERATION_RECORD_TYPE_LABELS, item.record_type)}`,
+  ];
+  if (item.failure_category) {
+    lines.push(`失败分类：${item.failure_category}`);
+  }
+  if (item.advice) {
+    lines.push(`处理建议：${item.advice}`);
+  }
+  lines.push(
+    item.credits_refunded === true
+      ? "积分处理：本次消耗的积分已退回，请查收。"
+      : item.credits_refunded === false
+        ? "积分处理：本次消耗的积分将按流程退回或补偿，请留意后续通知。"
+        : "积分处理：请与客服核对本次消耗的积分。",
+  );
+  return lines.join("\n");
 }
 
 function formatDuration(createdAt: string, completedAt: string | null): string {
@@ -617,4 +1048,59 @@ function formatDuration(createdAt: string, completedAt: string | null): string {
 
 function recordKey(item: AdminGenerationRecord): string {
   return `${item.record_type}-${item.record_id}`;
+}
+
+/** 预览动作文案：视频类看的是成片，图片类看的是生成图。 */
+function previewActionLabel(item: AdminGenerationRecord): string {
+  return VIDEO_PREVIEW_TYPES.has(item.record_type) ? "查看成片" : "查看图片";
+}
+
+function previewTitle(item: AdminGenerationRecord): string {
+  return VIDEO_PREVIEW_TYPES.has(item.record_type) ? "成片预览" : "生成图预览";
+}
+
+/** 行内缩略图（P2-2）：只有 has_preview 的记录才拉取；404 / 派生失败时降级
+ *  为占位文案，不打断整行渲染，也不挡住「查看成片」入口（原件可能仍在）。 */
+function RecordThumbnail({ item }: { item: AdminGenerationRecord }) {
+  const [url, setUrl] = useState("");
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    let objectUrl = "";
+    getGenerationRecordThumbnail(item.record_type, item.record_id)
+      .then((blob) => {
+        if (!active) return;
+        objectUrl = URL.createObjectURL(blob);
+        setUrl(objectUrl);
+      })
+      .catch(() => {
+        if (active) setFailed(true);
+      });
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+    // 行以 record_type + record_id 为键，两者变化即另一条记录。
+  }, [item.record_id, item.record_type]);
+
+  if (failed) {
+    return (
+      <span className="admin-generation-records__preview-empty">
+        缩略图不可用
+      </span>
+    );
+  }
+  if (!url) {
+    return (
+      <span className="admin-generation-records__preview-empty">载入中…</span>
+    );
+  }
+  return (
+    <img
+      alt={`任务 ${item.record_id} 缩略图`}
+      className="admin-generation-records__thumb"
+      src={url}
+    />
+  );
 }

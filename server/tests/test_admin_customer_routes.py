@@ -1260,6 +1260,7 @@ def test_missing_pg_runtime_fails_closed(monkeypatch: pytest.MonkeyPatch, route_
         username="admin_u",
         display_name="Admin User",
         role="admin",
+        is_super_admin=False,
         auth_method="password",
         session_id="sess-nopg",
         session_expires_at="2099-01-01T00:00:00+00:00",

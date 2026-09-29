@@ -20,7 +20,14 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from app.failure_runbook import FAILURE_RUNBOOK, failure_advice
+from app.failure_runbook import (
+    FAILURE_CATEGORY_LABELS,
+    FAILURE_CLASSIFICATION,
+    FAILURE_OWNER_LABELS,
+    FAILURE_RUNBOOK,
+    failure_advice,
+    failure_explanation,
+)
 
 APP_DIR = Path(__file__).resolve().parents[1] / "app"
 
@@ -149,3 +156,46 @@ def test_lookup_normalizes_and_fails_open() -> None:
     assert failure_advice("no-such-code") is None
     assert failure_advice("") is None
     assert failure_advice(None) is None
+
+
+def test_classification_covers_every_runbook_entry() -> None:
+    """方案 P1-1：每个登记建议的码必须同时有（分类 + 处理人）。
+
+    键集合双向相等：漏分类或分类表多出孤儿码都会在这里失败。
+    """
+    assert set(FAILURE_CLASSIFICATION) == set(FAILURE_RUNBOOK)
+    for code, (category, owner) in FAILURE_CLASSIFICATION.items():
+        assert category in FAILURE_CATEGORY_LABELS, f"{code} 的分类未登记标签"
+        assert owner in FAILURE_OWNER_LABELS, f"{code} 的处理人未登记标签"
+
+
+def test_explanation_returns_labels_and_advice() -> None:
+    explanation = failure_explanation("analysis_provider_rate_limited")
+    assert explanation is not None
+    assert explanation.category == "SYSTEM_BUSY"
+    assert explanation.category_label == "系统繁忙"
+    assert explanation.owner == "OPERATIONS"
+    assert explanation.owner_label == "运营重试"
+    assert explanation.advice == FAILURE_RUNBOOK["ANALYSIS_PROVIDER_RATE_LIMITED"]
+    assert failure_explanation("no-such-code") is None
+    assert failure_explanation(None) is None
+
+
+def test_content_review_upgrade_uses_provider_message() -> None:
+    """审核拒绝无专属错误码，凭服务商原话升级分类且只对扫描族生效。"""
+    upgraded = failure_explanation(
+        "PROVIDER_TERMINAL", provider_message="Rejected: content policy violation"
+    )
+    assert upgraded is not None
+    assert upgraded.category == "CONTENT_REVIEW"
+    assert upgraded.owner == "SUPPORT"
+    # 非扫描族的码不参与升级（限流原话里出现关键词是误报温床）。
+    not_scanned = failure_explanation(
+        "ANALYSIS_PROVIDER_RATE_LIMITED", provider_message="content policy violation"
+    )
+    assert not_scanned is not None
+    assert not_scanned.category == "SYSTEM_BUSY"
+    # 扫描族但原话无关时保持原分类。
+    plain = failure_explanation("PROVIDER_TERMINAL", provider_message="connection reset by peer")
+    assert plain is not None
+    assert plain.category == "PROVIDER_FAULT"

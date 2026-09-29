@@ -453,7 +453,7 @@ def _signed_object_response(
         asset = _validate_signed_object_request(conn, object_key=object_key, request=request)
     reference = storage_object_ref_from_uri(str(asset["storage_uri"]))
     require_storage_match(storage, reference)
-    return _read_stored_object(
+    return read_stored_object(
         storage, object_key=object_key, range_header=request.headers.get("range")
     )
 
@@ -538,13 +538,19 @@ def _prefetched_object_chunks(first: bytes, source: Iterator[bytes]) -> Iterator
             close()
 
 
-def _read_stored_object(
+def read_stored_object(
     storage: StorageAdapter,
     *,
     object_key: str,
     range_header: str | None = None,
     cache_control: str | None = None,
+    disposition: Literal["attachment", "inline"] = "attachment",
 ) -> Response:
+    """Read one stored object with range support.
+
+    ``disposition`` 默认 ``attachment``（客户素材下载的既有行为）；管理端
+    「查看成片」（方案 P2-2）走 ``inline``，让浏览器在页内展示而不是另存。
+    """
     try:
         stored = storage.head_object(object_key)
         if stored is None:
@@ -561,7 +567,7 @@ def _read_stored_object(
     filename = quote(Path(object_key).name, safe="")
     headers = {
         "X-Content-Type-Options": "nosniff",
-        "Content-Disposition": f"attachment; filename*=UTF-8''{filename}",
+        "Content-Disposition": f"{disposition}; filename*=UTF-8''{filename}",
         "Accept-Ranges": "bytes",
         "Content-Length": str(length),
         "Cache-Control": cache_control or "private, no-store",
@@ -850,7 +856,7 @@ def get_signed_object(
         # 只是这条没有缩略图，继续走下面的读取并以 404 收场，由前端降级占位。
         if not ensure_thumbnail_object(storage, object_key):
             logger.info("thumbnail derivation unavailable for %s", object_key)
-    return _read_stored_object(
+    return read_stored_object(
         storage,
         object_key=object_key,
         range_header=request.headers.get("range"),

@@ -49,13 +49,13 @@ test("shows and saves exchange, discount and consumption rounding without publis
   await waitFor(() =>
     expect(screen.getByLabelText("每 1 元充值获得积分")).toHaveValue(100),
   );
-  expect(screen.getByLabelText("全科目折扣（%）")).toHaveValue(95);
+  expect(screen.getByLabelText("全科目折扣（折）")).toHaveValue(9.5);
   expect(screen.getByLabelText("消费取整方式")).toHaveValue("floor");
   fireEvent.change(screen.getByLabelText("每 1 元充值获得积分"), {
     target: { value: "5" },
   });
-  fireEvent.change(screen.getByLabelText("全科目折扣（%）"), {
-    target: { value: "87.5" },
+  fireEvent.change(screen.getByLabelText("全科目折扣（折）"), {
+    target: { value: "8.75" },
   });
   fireEvent.change(screen.getByLabelText("消费取整方式"), {
     target: { value: "ceil" },
@@ -76,28 +76,28 @@ test("shows and saves exchange, discount and consumption rounding without publis
   );
 });
 
-test("rejects discount percentages outside 0.01-100 before saving", async () => {
+test("rejects discount folds outside the allowed range before saving", async () => {
   vi.mocked(getCustomerPricing).mockResolvedValue(payload);
   render(<CustomerPricingManager />);
   await waitFor(() =>
-    expect(screen.getByLabelText("全科目折扣（%）")).toHaveValue(95),
+    expect(screen.getByLabelText("全科目折扣（折）")).toHaveValue(9.5),
   );
   // 直接派发 submit：浏览器原生校验（min/step）会先拦住非法值，这里验证 JS 兜底层。
   const form = screen
     .getByRole("button", { name: "保存价格配置" })
     .closest("form") as HTMLFormElement;
 
-  fireEvent.change(screen.getByLabelText("全科目折扣（%）"), {
+  fireEvent.change(screen.getByLabelText("全科目折扣（折）"), {
     target: { value: "0" },
   });
   fireEvent.submit(form);
   expect(await screen.findByRole("alert")).toHaveTextContent(
-    "折扣请输入 0.01–100 的百分比",
+    "折扣请输入大于 0 且不超过 10 的折数",
   );
   expect(updateCustomerPricing).not.toHaveBeenCalled();
 
-  fireEvent.change(screen.getByLabelText("全科目折扣（%）"), {
-    target: { value: "100.001" },
+  fireEvent.change(screen.getByLabelText("全科目折扣（折）"), {
+    target: { value: "10.001" },
   });
   fireEvent.submit(form);
   expect(updateCustomerPricing).not.toHaveBeenCalled();
@@ -160,7 +160,7 @@ test("configuration history lists versions with operator, reason and snapshot", 
   expect(within(rows[0]).getByText("当前")).toBeInTheDocument();
   expect(within(rows[0]).getByText("price_admin")).toBeInTheDocument();
   expect(within(rows[0]).getByText("下调活动折扣")).toBeInTheDocument();
-  expect(within(rows[0]).getByText("95%")).toBeInTheDocument();
+  expect(within(rows[0]).getByText("9.5 折")).toBeInTheDocument();
   expect(within(rows[0]).getByText("向下取整")).toBeInTheDocument();
   expect(within(rows[0]).getByText("审计记录")).toBeInTheDocument();
   expect(within(rows[1]).getByText("当前行（无审计）")).toBeInTheDocument();

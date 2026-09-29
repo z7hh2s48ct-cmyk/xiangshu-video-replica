@@ -17,13 +17,16 @@ from app.activation_code_routes import router as customer_activation_router
 from app.admin_activation_routes import router as admin_activation_router
 from app.admin_audit_routes import router as admin_audit_router
 from app.admin_auth_routes import router as admin_auth_router
+from app.admin_customer_annotation_routes import router as admin_customer_annotation_router
 from app.admin_customer_benefit_routes import router as admin_customer_benefit_router
 from app.admin_customer_routes import router as admin_customer_router
 from app.admin_dashboard_routes import router as admin_dashboard_router
 from app.admin_device_routes import router as admin_device_router
 from app.admin_first_frame_routes import router as admin_first_frame_router
+from app.admin_generation_routes import router as admin_generation_router
 from app.admin_runtime_routes import router as admin_runtime_router
 from app.admin_session_routes import router as admin_session_router
+from app.admin_team_routes import router as admin_team_router
 from app.analysis_routes import router as analysis_router
 from app.api_key_routes import router as api_key_router
 from app.billing_routes import router as itemized_billing_router
@@ -51,6 +54,7 @@ from app.customer_session_routes import router as customer_session_router
 from app.customer_sub_account_routes import router as customer_sub_account_router
 from app.db_pg import DATABASE_URL_ENV, SQLITE_URL_SCHEMES, close_pg_pool
 from app.export_controller import router as export_router
+from app.failure_rate_alerts import router as admin_alerts_router
 from app.first_frame_routes import router as first_frame_router
 from app.generation_routes import router as generation_router
 from app.independent_routes import router as independent_router
@@ -386,8 +390,12 @@ app.include_router(admin_auth_router)
 app.include_router(admin_dashboard_router)
 app.include_router(admin_customer_router)
 app.include_router(admin_customer_benefit_router)
+app.include_router(admin_customer_annotation_router)
 app.include_router(admin_session_router)
+app.include_router(admin_team_router)
 app.include_router(admin_first_frame_router)
+app.include_router(admin_generation_router)
+app.include_router(admin_alerts_router)
 app.include_router(customer_pricing_router)
 app.include_router(itemized_billing_router)
 app.include_router(billing_viral_router)

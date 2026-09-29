@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -624,7 +625,7 @@ describe("AdminApp", () => {
       ).toBe(true),
     );
     expect(screen.queryByRole("button", { name: /补单|改余额/ })).toBeNull();
-    fireEvent.click(screen.getByRole("tab", { name: "额度流水" }));
+    fireEvent.click(screen.getByRole("tab", { name: "积分流水" }));
     const walletExport = await screen.findByRole("button", {
       name: "导出账务流水 CSV",
     });
@@ -784,8 +785,13 @@ describe("AdminApp", () => {
     expect(
       await screen.findByRole("heading", { level: 1, name: "用户生成记录" }),
     ).toBeInTheDocument();
-    expect(await screen.findByText("人物置换首帧")).toBeInTheDocument();
-    expect(screen.getByText("上游未回传")).toBeInTheDocument();
+    // P2-1：类型下拉从词典生成后，「人物置换首帧 / 成本待核对」同时出现
+    // 在下拉选项与表格单元格，断言限定到表格内。
+    const table = await screen.findByRole("table", {
+      name: "用户生成记录列表",
+    });
+    expect(within(table).getByText("人物置换首帧")).toBeInTheDocument();
+    expect(within(table).getByText("成本待核对")).toBeInTheDocument();
   });
 
   it("opens failed generation records from the overview todo", async () => {
@@ -891,7 +897,7 @@ describe("AdminApp", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "资金流水" }));
     expect(screen.getByRole("tab", { name: "充值订单" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "额度流水" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "积分流水" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "经营分析" }));
     expect(screen.getByRole("tab", { name: "利润总览" })).toBeInTheDocument();
@@ -1240,7 +1246,7 @@ describe("AdminApp", () => {
     expect(
       screen.queryByRole("button", { name: "导出账务流水 CSV" }),
     ).toBeNull();
-    fireEvent.click(screen.getByRole("tab", { name: "额度流水" }));
+    fireEvent.click(screen.getByRole("tab", { name: "积分流水" }));
     expect(
       await screen.findByRole("button", { name: "导出账务流水 CSV" }),
     ).toBeInTheDocument();

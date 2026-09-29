@@ -8,6 +8,7 @@ import {
 } from "../api";
 import { paidTestControlProvider } from "../api.admin";
 import { type SettingsBackend, SettingsPanel } from "../SettingsPanel";
+import { AdminAlertsSection } from "./AdminAlertsSection";
 import { AdminEnvironmentSwitch } from "./AdminEnvironmentSwitch";
 import { BillingRatesManager } from "./BillingRatesManager";
 import { CustomerPricingManager } from "./CustomerPricingManager";
@@ -22,6 +23,7 @@ const tabs = [
   { id: "payment", label: "支付与价格" },
   { id: "rates", label: "API 端点与价格" },
   { id: "services", label: "服务配置" },
+  { id: "alerts", label: "通知与告警" },
 ];
 
 /**
@@ -51,7 +53,7 @@ export function SystemSettingsPage({
   initialTab = "payment",
 }: {
   readOnly?: boolean;
-  initialTab?: "payment" | "rates" | "services";
+  initialTab?: "payment" | "rates" | "services" | "alerts";
 }) {
   const [tab, setTab] = useState<string>(initialTab);
   const [serviceTab, setServiceTab] = useState("providers");
@@ -109,6 +111,7 @@ export function SystemSettingsPage({
           )}
         </div>
       ) : null}
+      {tab === "alerts" ? <AdminAlertsSection /> : null}
     </div>
   );
 }

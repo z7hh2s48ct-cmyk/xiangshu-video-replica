@@ -1,10 +1,19 @@
-"""失败码 runbook —— error_code → 修复建议的单一来源（BILLING-OBS P2-2）。
+"""失败码 runbook —— error_code → 修复建议 + 原因分类 + 处理人的单一来源。
+
+对应 BILLING-OBS P2-2 / 方案 P1-1。
 
 管理端的「生成记录」失败聚合与「任务诊断」尝试历史都会直接展示
 ``error_code``：客服/运维/客户看到 ``ANALYSIS_PROVIDER_UNREACHABLE`` 这类
 内部编号，没有这份映射就不知道下一步做什么。本模块是唯一来源——新增失败码
-时在这里登记一句可执行的建议，两个视图自动生效；漏登记会被
+时在这里登记（1）一句可执行的建议（``FAILURE_RUNBOOK``）、（2）原因分类与
+谁来处理（``FAILURE_CLASSIFICATION``），两个视图自动生效；漏登记会被
 ``server/tests/test_failure_runbook.py`` 的覆盖面契约拦截。
+
+方案 P1-1 的原因分类：客户素材 / 内容审核 / 系统繁忙 / 服务商故障 /
+配置问题 / 系统缺陷；客户主动取消单列「客户取消」——把它硬塞进上述任何
+一类都会误导处理方向（既不是素材问题，也不需要技术排查）。处理人只在
+客服告知客户（SUPPORT）/ 运营重试（OPERATIONS）/ 技术处理（TECHNICAL）
+三者中取值，管理端据此把失败分派到正确的角色。
 
 范围：只覆盖会写进任务行 ``error_code`` 的失败码（拆解/生成/取帧/脚本/
 口播/爆款/支付回调/设置自检）。请求入口的即时校验码（HTTP 422/404 的
@@ -12,6 +21,9 @@
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Literal
 
 # 文案规则：一句「这是什么、下一步做什么」，写给客服/运维/客户三方中
 # 最先看到它的人；不出现内部文件名、类名与密钥形态信息。
@@ -190,6 +202,213 @@ FAILURE_RUNBOOK: dict[str, str] = {
         "连接测试发生内部错误。重试；仍失败请下载诊断日志并检查服务端日志。"
     ),
 }
+
+
+# 方案 P1-1：原因分类的取值集合。字典键即后端返回给管理端的中文标签，
+# 前端不再自行翻译，分类规则与建议在同一处维护。
+FailureCategory = Literal[
+    "CUSTOMER_MATERIAL",
+    "CONTENT_REVIEW",
+    "SYSTEM_BUSY",
+    "PROVIDER_FAULT",
+    "CONFIGURATION",
+    "SYSTEM_DEFECT",
+    "CUSTOMER_CANCELLED",
+]
+
+# 谁来处理：客服告知客户 / 运营重试 / 技术处理。
+FailureOwner = Literal["SUPPORT", "OPERATIONS", "TECHNICAL"]
+
+FAILURE_CATEGORY_LABELS: dict[FailureCategory, str] = {
+    "CUSTOMER_MATERIAL": "客户素材",
+    "CONTENT_REVIEW": "内容审核",
+    "SYSTEM_BUSY": "系统繁忙",
+    "PROVIDER_FAULT": "服务商故障",
+    "CONFIGURATION": "配置问题",
+    "SYSTEM_DEFECT": "系统缺陷",
+    "CUSTOMER_CANCELLED": "客户取消",
+}
+
+FAILURE_OWNER_LABELS: dict[FailureOwner, str] = {
+    "SUPPORT": "客服告知客户",
+    "OPERATIONS": "运营重试",
+    "TECHNICAL": "技术处理",
+}
+
+# 分类规则：与 FAILURE_RUNBOOK 同一处维护，覆盖全部登记码（测试锁定两表
+# 键集合一致）。判定口径：
+# - 外部返回错误/结果不可用 → 服务商故障（运营重试）
+# - 限流/超时/繁忙       → 系统繁忙（运营重试）
+# - 我方配置缺失/错误（密钥、设置、对象存储、地址不可读）→ 配置问题（技术）
+# - 我方进程崩溃/中断/契约缺陷/租约/对账 → 系统缺陷（技术）
+# - 客户素材/提示词/文本/授权问题 → 客户素材（客服）
+# - 客户主动停止 → 客户取消（客服）
+FAILURE_CLASSIFICATION: dict[str, tuple[FailureCategory, FailureOwner]] = {
+    # ---- 视频拆解（analysis_tasks.error_code）----
+    "ANALYSIS_WORKER_FAILED": ("SYSTEM_DEFECT", "TECHNICAL"),
+    "ANALYSIS_WORKER_INTERRUPTED": ("SYSTEM_DEFECT", "TECHNICAL"),
+    "ANALYSIS_PROVIDER_FAILED": ("PROVIDER_FAULT", "OPERATIONS"),
+    "ANALYSIS_PROVIDER_UNREACHABLE": ("CONFIGURATION", "TECHNICAL"),
+    "ANALYSIS_PROVIDER_RATE_LIMITED": ("SYSTEM_BUSY", "OPERATIONS"),
+    "ANALYSIS_PROVIDER_SETTINGS_REQUIRED": ("CONFIGURATION", "TECHNICAL"),
+    "ANALYSIS_VIDEO_URL_UNAVAILABLE": ("CONFIGURATION", "TECHNICAL"),
+    "ANALYSIS_TASK_CANCELLED": ("CUSTOMER_CANCELLED", "SUPPORT"),
+    "APILIO_SETTINGS_REQUIRED": ("CONFIGURATION", "TECHNICAL"),
+    "APILIO_SETTINGS_UNAVAILABLE": ("CONFIGURATION", "TECHNICAL"),
+    # ---- 视频生成与首帧/图像（generation_tasks / image 任务）----
+    "PROVIDER_TERMINAL": ("PROVIDER_FAULT", "OPERATIONS"),
+    "H3_PROVIDER_FAILED": ("PROVIDER_FAULT", "OPERATIONS"),
+    "ARCHIVE_RETRY_EXHAUSTED": ("CONFIGURATION", "TECHNICAL"),
+    "FIRST_FRAME_URL_SIGN_FAILED": ("CONFIGURATION", "TECHNICAL"),
+    "H3_SETTINGS_UNAVAILABLE": ("CONFIGURATION", "TECHNICAL"),
+    "PROVIDER_REQUEST_CONTRACT": ("SYSTEM_DEFECT", "TECHNICAL"),
+    "VISUAL_VALIDATION_UNAVAILABLE": ("SYSTEM_BUSY", "OPERATIONS"),
+    "LEASE_EXPIRED_NEEDS_ATTENTION": ("SYSTEM_DEFECT", "TECHNICAL"),
+    "RECONCILE_ACTOR_UNAVAILABLE": ("CONFIGURATION", "TECHNICAL"),
+    "RECONCILE_OPERATION_FAILED": ("SYSTEM_DEFECT", "TECHNICAL"),
+    "PROMPT_WORKER_INTERRUPTED": ("SYSTEM_DEFECT", "TECHNICAL"),
+    "FIRST_FRAME_CHECKPOINT_RESUME": ("SYSTEM_BUSY", "OPERATIONS"),
+    "IMAGE_TASK_LEASE_EXPIRED": ("SYSTEM_DEFECT", "TECHNICAL"),
+    "IMAGE_TASK_PROVIDER_BUSY": ("SYSTEM_BUSY", "OPERATIONS"),
+    "IMAGE_TASK_RECONCILE_RESUMED": ("SYSTEM_BUSY", "OPERATIONS"),
+    "IMAGE_TASK_FAILED": ("PROVIDER_FAULT", "OPERATIONS"),
+    "IMAGE_TASK_PROVIDER_FAILED": ("PROVIDER_FAULT", "OPERATIONS"),
+    "IMAGE_TASK_STORAGE_UNAVAILABLE": ("CONFIGURATION", "TECHNICAL"),
+    "IMAGE_TASK_SUBMISSION_UNCERTAIN": ("PROVIDER_FAULT", "OPERATIONS"),
+    # ---- 人物视图（character_generation_tasks.error_code）----
+    "CHARACTER_PROVIDER_TIMEOUT": ("SYSTEM_BUSY", "OPERATIONS"),
+    "CHARACTER_PROVIDER_RATE_LIMITED": ("SYSTEM_BUSY", "OPERATIONS"),
+    "CHARACTER_PROVIDER_UNAVAILABLE": ("PROVIDER_FAULT", "OPERATIONS"),
+    "CHARACTER_PROVIDER_INVALID_RESPONSE": ("PROVIDER_FAULT", "OPERATIONS"),
+    "CHARACTER_PROVIDER_MISMATCH": ("CONFIGURATION", "TECHNICAL"),
+    "CHARACTER_PROVIDER_NOT_CONFIGURED": ("CONFIGURATION", "TECHNICAL"),
+    "CHARACTER_STORAGE_UNAVAILABLE": ("CONFIGURATION", "TECHNICAL"),
+    "CHARACTER_LEASE_EXPIRED": ("SYSTEM_DEFECT", "TECHNICAL"),
+    "CHARACTER_LEASE_LOST": ("SYSTEM_DEFECT", "TECHNICAL"),
+    "CHARACTER_VERSION_NOT_GENERATABLE": ("CUSTOMER_MATERIAL", "SUPPORT"),
+    "CHARACTER_VERSION_SOURCE_CHANGED": ("CUSTOMER_MATERIAL", "SUPPORT"),
+    "CHARACTER_VERSION_SOURCE_MISSING": ("CUSTOMER_MATERIAL", "SUPPORT"),
+    "IDENTITY_NOT_ACTIVE": ("CUSTOMER_MATERIAL", "SUPPORT"),
+    "FAKE_CHARACTER_PROVIDER_FORBIDDEN": ("CONFIGURATION", "TECHNICAL"),
+    # ---- 源画面取帧（source_frame_tasks.error_code）----
+    "SOURCE_FRAME_TASK_FAILED": ("CUSTOMER_MATERIAL", "SUPPORT"),
+    "SOURCE_FRAME_TASK_CANCELLED": ("CUSTOMER_CANCELLED", "SUPPORT"),
+    "SOURCE_FRAME_TASK_RECOVERY_REQUIRED": ("SYSTEM_DEFECT", "TECHNICAL"),
+    "SOURCE_FRAME_STORAGE_UNAVAILABLE": ("CONFIGURATION", "TECHNICAL"),
+    # ---- 口播稿生成与改写（script_from_audio / script_rewrite 任务）----
+    "SCRIPT_FROM_AUDIO_SUBMISSION_UNCERTAIN": ("PROVIDER_FAULT", "OPERATIONS"),
+    "SCRIPT_FROM_AUDIO_PIPELINE_FAILED": ("SYSTEM_DEFECT", "OPERATIONS"),
+    "SCRIPT_FROM_AUDIO_PROVIDER_FAILED": ("PROVIDER_FAULT", "OPERATIONS"),
+    "SCRIPT_REWRITE_SUBMISSION_UNCERTAIN": ("PROVIDER_FAULT", "OPERATIONS"),
+    "SCRIPT_REWRITE_TASK_FAILED": ("PROVIDER_FAULT", "OPERATIONS"),
+    "DEEPSEEK_NETWORK_FAILED": ("SYSTEM_BUSY", "OPERATIONS"),
+    "DEEPSEEK_REQUEST_FAILED": ("PROVIDER_FAULT", "OPERATIONS"),
+    "DEEPSEEK_RESPONSE_INVALID": ("PROVIDER_FAULT", "OPERATIONS"),
+    "DEEPSEEK_RESPONSE_TRUNCATED": ("CUSTOMER_MATERIAL", "SUPPORT"),
+    "DEEPSEEK_RESPONSE_EMPTY": ("PROVIDER_FAULT", "OPERATIONS"),
+    # ---- 口播视频（管理端按任务状态映射的展示码）----
+    "ORAL_TASK_FAILED": ("PROVIDER_FAULT", "OPERATIONS"),
+    "ORAL_SUBMISSION_UNCERTAIN": ("PROVIDER_FAULT", "OPERATIONS"),
+    "ORAL_ARCHIVE_FAILED": ("CONFIGURATION", "TECHNICAL"),
+    # ---- 爆款采集（viral 任务）----
+    "VIRAL_IMPORT_FAILED": ("PROVIDER_FAULT", "OPERATIONS"),
+    "VIRAL_MEDIA_PREPARATION_FAILED": ("SYSTEM_DEFECT", "OPERATIONS"),
+    "VIRAL_REFRESH_FAILED": ("PROVIDER_FAULT", "OPERATIONS"),
+    # ---- 支付回调（ZPAY）----
+    "ZPAY_INVALID_SIGN_TYPE": ("CONFIGURATION", "TECHNICAL"),
+    "ZPAY_SIGNATURE_MISMATCH": ("CONFIGURATION", "TECHNICAL"),
+    "ZPAY_PID_MISMATCH": ("CONFIGURATION", "TECHNICAL"),
+    "ZPAY_TRADE_NOT_SUCCESS": ("PROVIDER_FAULT", "OPERATIONS"),
+    "ZPAY_MISSING_FIELDS": ("CONFIGURATION", "TECHNICAL"),
+    "ZPAY_INVALID_AMOUNT": ("PROVIDER_FAULT", "TECHNICAL"),
+    # ---- 设置自检 ----
+    "DIAGNOSTIC_INTERNAL_ERROR": ("SYSTEM_DEFECT", "TECHNICAL"),
+}
+
+
+@dataclass(frozen=True)
+class FailureExplanation:
+    """一条失败码的完整解释：原因分类 + 处理人 + 修复建议。"""
+
+    category: FailureCategory
+    owner: FailureOwner
+    advice: str
+
+    @property
+    def category_label(self) -> str:
+        return FAILURE_CATEGORY_LABELS[self.category]
+
+    @property
+    def owner_label(self) -> str:
+        return FAILURE_OWNER_LABELS[self.owner]
+
+
+# 内容审核升级：上游审核拒绝与「上游以失败态终止」共用同一批错误码，
+# 静态映射看不出区别，只能凭服务商原话区分。只对「上游终止/结果不可用」
+# 族启用扫描——限流、网络、配置族的原话里出现这些词是误报温床。
+# 关键词故意收紧：``policy`` 单独会把隐私政策类文本拉进来；
+# ``blocked``/``refused`` 单独会把防火墙与连接拒绝拉进来，故都要求组合词。
+_CONTENT_REVIEW_SCAN_CODES = frozenset(
+    {
+        "PROVIDER_TERMINAL",
+        "H3_PROVIDER_FAILED",
+        "IMAGE_TASK_FAILED",
+        "IMAGE_TASK_PROVIDER_FAILED",
+        "CHARACTER_PROVIDER_INVALID_RESPONSE",
+        "ORAL_TASK_FAILED",
+    }
+)
+
+_CONTENT_REVIEW_HINTS = (
+    "violation",
+    "policy_violation",
+    "content policy",
+    "content_policy",
+    "moderation",
+    "prohibited",
+    "inappropriate",
+    "nsfw",
+    "sensitive content",
+    "sensitive_content",
+    "content filter",
+    "content_filter",
+    "审核",
+    "违规",
+    "不合规",
+    "敏感词",
+)
+
+
+def _content_review_message(provider_message: str | None) -> bool:
+    if not provider_message:
+        return False
+    lowered = provider_message.casefold()
+    return any(hint in lowered for hint in _CONTENT_REVIEW_HINTS)
+
+
+def failure_explanation(
+    error_code: str | None, *, provider_message: str | None = None
+) -> FailureExplanation | None:
+    """查回完整解释；大小写/空白归一，未知码返回 None（fail-open）。
+
+    两表键集合由测试锁定一致，因此查得到建议就查得到分类；这里的防御性
+    None 只针对未登记码，与 ``failure_advice`` 的行为保持一致。
+
+    ``provider_message``（服务商原话，已脱敏）只用于内容审核升级：上游
+    审核拒绝没有专属错误码，原话命中审核关键词时把分类升为「内容审核」，
+    处理人相应改为客服（告知客户修改素材后重试）。
+    """
+    if not error_code:
+        return None
+    code = error_code.strip().upper()
+    advice = FAILURE_RUNBOOK.get(code)
+    classification = FAILURE_CLASSIFICATION.get(code)
+    if advice is None or classification is None:
+        return None
+    category, owner = classification
+    if code in _CONTENT_REVIEW_SCAN_CODES and _content_review_message(provider_message):
+        category, owner = "CONTENT_REVIEW", "SUPPORT"
+    return FailureExplanation(category=category, owner=owner, advice=advice)
 
 
 def failure_advice(error_code: str | None) -> str | None:

@@ -4084,6 +4084,24 @@ button.activation-generator__submit {
   flex-wrap: wrap;
 }
 
+/* 失败率告警（方案 P1-5）：「通知与告警」页签的页头与错误码明细。 */
+.admin-alerts__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+.admin-alerts__header h2 {
+  margin: 0;
+}
+.admin-alerts__error {
+  display: grid;
+  gap: 2px;
+}
+.admin-alerts__error small {
+  color: var(--admin-muted, #a49e95);
+}
+
 .admin-page-tabs {
   display: flex;
   align-items: center;
@@ -4420,6 +4438,60 @@ button.activation-generator__submit {
    两者按 record_type 互斥，间距口径保持一致）。 */
 .admin-shell--control .admin-generation-records__reconcile {
   margin-top: 12px;
+}
+
+/* 失败记录的一键处理按钮组（P1-4）：与对账入口同样的 12px 区块间距；
+   窄屏放不下时换行，不挤压按钮文字。 */
+.admin-shell--control .admin-generation-records__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+/* 结果预览列（P2-2）：缩略图与「查看成片 / 查看图片」合成一个按钮块；
+   缩略图缺失时同一位置降级为占位文案。 */
+.admin-shell--control .admin-generation-records__preview {
+  display: grid;
+  gap: 6px;
+  justify-items: center;
+  border: 1px solid var(--admin-line, #2e2c29);
+  border-radius: 10px;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.admin-shell--control .admin-generation-records__preview small {
+  color: var(--admin-muted, #a49e95);
+  font-size: var(--admin-font-caption);
+}
+
+.admin-shell--control .admin-generation-records__thumb {
+  display: block;
+  width: 96px;
+  height: 54px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: #0d0c0b;
+}
+
+.admin-shell--control .admin-generation-records__preview-empty {
+  color: var(--admin-muted, #a49e95);
+  font-size: var(--admin-font-caption);
+}
+
+/* 预览对话框：视频铺满容器高度受限，图片等高显示（保持原始比例）。 */
+.admin-shell--control .admin-generation-records__preview-dialog {
+  width: min(720px, 100%);
+}
+
+.admin-shell--control .admin-generation-records__preview-media {
+  display: block;
+  width: 100%;
+  max-height: 60vh;
+  border-radius: 10px;
+  object-fit: contain;
+  background: #0d0c0b;
 }
 
 /* 生成记录详情里的第三方调用留痕（P0-9）：与外层详情字段保持同样的

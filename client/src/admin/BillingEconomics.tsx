@@ -7,6 +7,7 @@ import {
   billingUnit,
 } from "./billingTypes";
 import { SourceActionPanorama } from "./SourceActionPanorama";
+import { formatDateTime, formatFen } from "./ui/vocabulary";
 import { ViralCollectionBilling } from "./ViralCollectionBilling";
 
 type Metric = {
@@ -69,10 +70,10 @@ type Attempt = {
   cost_fen: string | null;
   state: string;
 };
+// P2-1：金额统一走 formatFen——两位小数，不足 1 分显示 < ¥0.01；
+// 原实现除以 100 后留 10 位小数，运营对账得自己数字符。
 const money = (value: string | number | null | undefined) =>
-  value == null
-    ? "待核对"
-    : `¥${(Number(value) / 100).toFixed(10).replace(/0+$/, "").replace(/\.$/, ".00")}`;
+  value == null ? "待核对" : formatFen(Number(value));
 const usageFormat = new Intl.NumberFormat("zh-CN", {
   minimumFractionDigits: 1,
   maximumFractionDigits: 1,
@@ -177,14 +178,14 @@ export function BillingEconomics({
     let active = true;
     void adminRead<{ services: BillingService[] }>(
       "/api/control/billing/catalog",
-      "读取科目失败",
+      "读取业务失败",
     )
       .then((result) => {
         if (active) setCatalog(result.services);
       })
       .catch((cause: unknown) => {
         if (active)
-          setError(cause instanceof Error ? cause.message : "读取科目失败");
+          setError(cause instanceof Error ? cause.message : "读取业务失败");
       });
     return () => {
       active = false;
@@ -204,7 +205,7 @@ export function BillingEconomics({
       ),
       adminRead<{ items: Operation[]; total: number }>(
         `/api/control/billing/operations?${query}&limit=100&offset=${offset}`,
-        "读取请求明细失败",
+        "读取生成明细失败",
       ),
     ])
       .then(([summary, items]) => {
@@ -232,7 +233,7 @@ export function BillingEconomics({
     try {
       const result = await adminRead<Operation>(
         `/api/control/billing/operations/${encodeURIComponent(id)}`,
-        "读取请求详情失败",
+        "读取生成详情失败",
       );
       if (sequence === detailRequest.current) setDetail(result);
     } catch (cause) {
@@ -269,7 +270,7 @@ export function BillingEconomics({
       </button>
       {showCollections && <ViralCollectionBilling key={query} query={query} />}
       <button type="button" onClick={() => setShowActions((value) => !value)}>
-        {showActions ? "收起业务动作全景" : "查看业务动作全景"}
+        {showActions ? "收起操作全景" : "查看操作全景"}
       </button>
       {showActions && (
         <SourceActionPanorama key={query} query={query} name={name} />
@@ -331,14 +332,14 @@ export function BillingEconomics({
           />
         </label>
         <label>
-          科目
+          业务
           <select
             value={filters.service}
             onChange={(event) =>
               setFilters({ ...filters, service: event.target.value })
             }
           >
-            <option value="">全部科目</option>
+            <option value="">全部业务</option>
             {catalog.map((item) => (
               <option key={item.service} value={item.service}>
                 {item.name}
@@ -387,7 +388,7 @@ export function BillingEconomics({
               })
             }
           >
-            <option value="">全部请求</option>
+            <option value="">全部生成</option>
             <option value="pending">待结算</option>
             <option value="unknown_cost">成本待核对</option>
           </select>
@@ -434,10 +435,10 @@ export function BillingEconomics({
                   ["已确认成本", money(report.totals.known_cost_fen ?? 0)],
                   ["平台承担成本", money(report.totals.platform_cost_fen ?? 0)],
                   ["待核对成本", `${report.totals.unknown_cost_count} 项`],
-                  ["请求数", `${report.totals.operation_count} 次`],
+                  ["生成次数", `${report.totals.operation_count} 次`],
                 ]
               : [
-                  ["实付收入", money(report.totals.known_revenue_fen ?? 0)],
+                  ["确认收入", money(report.totals.known_revenue_fen ?? 0)],
                   ["已确认成本", money(report.totals.known_cost_fen ?? 0)],
                   ["利润", money(report.totals.profit_fen)],
                   ["净扣积分", String(report.totals.charged_credits ?? 0)],
@@ -464,7 +465,7 @@ export function BillingEconomics({
                   <th>周期起始</th>
                   <th>账务记录数</th>
                   <th>{costView ? "秒 / 张 / 次" : "净扣积分"}</th>
-                  {!costView && <th>实付收入</th>}
+                  {!costView && <th>确认收入</th>}
                   <th>已确认成本</th>
                   <th>{costView ? "平台承担成本" : "利润"}</th>
                 </tr>
@@ -497,29 +498,29 @@ export function BillingEconomics({
       )}
       {operations && (
         <>
-          <h3>请求账务明细（共 {operations.total} 条）</h3>
+          <h3>生成账务明细（共 {operations.total} 条）</h3>
           {!costView && (
             <p className="admin-hint">
-              消费折合按受理时的积分售价计算；实付收入按所消费积分对应的实际充值金额分摊，
-              赠送或免费加款不产生实付收入。利润按实付收入减成本计算。
+              按售价折合以受理时的积分售价计算；确认收入按所消费积分对应的实际充值金额分摊，
+              赠送或免费加款不产生确认收入。利润按确认收入减成本计算。
             </p>
           )}
           <div className="admin-table-scroll">
             <table
               className="admin-data-table billing-economics-table"
-              aria-label="请求明细"
+              aria-label="生成明细"
             >
               <thead>
                 <tr>
                   <th>用户</th>
-                  <th>科目</th>
+                  <th>业务</th>
                   <th>状态</th>
                   <th>用量</th>
                   {!costView && (
                     <>
                       <th>积分</th>
-                      <th>消费折合</th>
-                      <th>实付收入</th>
+                      <th>按售价折合</th>
+                      <th>确认收入</th>
                     </>
                   )}
                   <th>成本</th>
@@ -551,7 +552,7 @@ export function BillingEconomics({
                         type="button"
                         onClick={() => void inspect(row.id)}
                       >
-                        查看请求
+                        查看详情
                       </button>
                     </td>
                   </tr>
@@ -559,7 +560,7 @@ export function BillingEconomics({
               </tbody>
             </table>
           </div>
-          {operations.total === 0 && <p>这个时间范围没有请求记录。</p>}
+          {operations.total === 0 && <p>这个时间范围没有生成记录。</p>}
           <button
             type="button"
             disabled={busy || offset === 0}
@@ -578,7 +579,7 @@ export function BillingEconomics({
         </>
       )}
       {detail && snapshot && (
-        <aside aria-label="请求核算详情">
+        <aside aria-label="生成核算详情">
           <button
             type="button"
             onClick={() => {
@@ -592,19 +593,19 @@ export function BillingEconomics({
             {name(detail.service)} · {detail.username}
           </h3>
           <p>
-            请求编号：{detail.id} · {billingStates[detail.state]}
+            生成编号：{detail.id} · {billingStates[detail.state]}
           </p>
           {detail.collection_batch_id && (
             <p>
               采集批次：{detail.collection_batch_id}
-              。公共成本记录在平台请求，客户明细仅记录其扣分收入；批次账单汇总成本与利润。
+              。公共成本记在平台生成记录，客户明细仅记录其扣分收入；批次账单汇总成本与利润。
             </p>
           )}
           <p>
             受理时售价：{snapshot.enabled ? snapshot.unit_credits : "0"} 积分 /{" "}
             {billingUnit[detail.unit]}；折扣{" "}
-            {snapshot.discount_basis_points / 100}%；价格版本 {snapshot.version}
-            。
+            {snapshot.discount_basis_points / 1000} 折；价格版本{" "}
+            {snapshot.version}。
           </p>
           <p>
             预算 {usage(detail.budget_units)} {billingUnit[detail.unit]}，实际{" "}
@@ -612,9 +613,9 @@ export function BillingEconomics({
             {detail.reserved_credits}，净扣 {detail.charged_credits} 积分。
           </p>
           <p>
-            消费折合 {money(detail.nominal_revenue_fen)} · 实付收入{" "}
-            {money(detail.revenue_fen)} · 供应商成本 {money(detail.cost_fen)} ·
-            利润 {money(detail.profit_fen)}
+            按售价折合 {money(detail.nominal_revenue_fen)} · 确认收入{" "}
+            {money(detail.revenue_fen)} · 成本 {money(detail.cost_fen)} · 利润{" "}
+            {money(detail.profit_fen)}
           </p>
           {!readOnly &&
             detail.state === "PENDING" &&
@@ -631,7 +632,7 @@ export function BillingEconomics({
           <table>
             <thead>
               <tr>
-                <th>科目</th>
+                <th>业务</th>
                 <th>服务商</th>
                 <th>用量</th>
                 <th>成本单价</th>
@@ -678,7 +679,8 @@ export function BillingEconomics({
               ))}
           {detail.evidence?.map((item) => (
             <p key={item.id}>
-              核对记录：{item.reference} · {item.reason} · {item.created_at}
+              核对记录：{item.reference} · {item.reason} ·{" "}
+              {formatDateTime(item.created_at)}
             </p>
           ))}
         </aside>
