@@ -14,6 +14,7 @@ import json
 import secrets
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 
 import psycopg
 import pytest
@@ -30,7 +31,13 @@ from pg_test_kit import (
 from app.auth import CurrentUser
 from app.db_pg import DATABASE_URL_ENV, close_pg_pool
 from app.db_portable import BusinessConnection
-from app.external_calls import external_call_context, external_call_model, record_external_call
+from app.external_calls import (
+    count_expired_calls,
+    external_call_context,
+    external_call_model,
+    purge_expired_call_batch,
+    record_external_call,
+)
 
 DATABASE = "external_calls_test"
 
@@ -597,3 +604,101 @@ def test_thumbnail_route_signs_object_storage_and_writes_audit(
     body = response.json()
     assert isinstance(body["url"], str) and body["url"]
     assert _audit_count(pg_env, "generation_record.thumbnail_view") == 1
+
+
+# ---------------------------------------------------------------------------
+# 保留期清理（P0-9）：失败调用 180 天、成功调用 30 天，超期删行。
+# ---------------------------------------------------------------------------
+
+_NOW = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
+
+
+def _reset_call_logs(dsn: str) -> None:
+    # 同库里其它用例留下的行时间都是「现在」，不会超期；清空只是让断言按
+    # 「本用例造的行」精确比对，不受行数累计影响。
+    with psycopg.connect(dsn, autocommit=True) as raw:
+        raw.execute("DELETE FROM external_call_logs")
+
+
+def _insert_call_row(
+    dsn: str, call_id: str, *, outcome: str | None, age_days: int, now: datetime = _NOW
+) -> None:
+    with psycopg.connect(dsn, autocommit=True) as raw:
+        raw.execute(
+            "INSERT INTO external_call_logs (id, provider, endpoint_name, outcome, created_at) "
+            "VALUES (%s, 'retention_test', 'probe', %s, %s)",
+            (call_id, outcome, (now - timedelta(days=age_days)).isoformat()),
+        )
+
+
+def _surviving_call_ids(dsn: str) -> set[str]:
+    with psycopg.connect(dsn, autocommit=True) as raw:
+        return {row[0] for row in raw.execute("SELECT id FROM external_call_logs").fetchall()}
+
+
+def test_retention_keeps_failures_longer_than_successes(pg_env: str) -> None:
+    _reset_call_logs(pg_env)
+    # 同样 100 天：成功的该删，失败的要留——这才证明按成败分了两档。
+    _insert_call_row(pg_env, "succ-31d", outcome="SUCCEEDED", age_days=31)
+    _insert_call_row(pg_env, "succ-29d", outcome="SUCCEEDED", age_days=29)
+    _insert_call_row(pg_env, "succ-100d", outcome="SUCCEEDED", age_days=100)
+    _insert_call_row(pg_env, "fail-100d", outcome="PROVIDER_ERROR", age_days=100)
+    _insert_call_row(pg_env, "fail-179d", outcome="TIMEOUT", age_days=179)
+    _insert_call_row(pg_env, "fail-181d", outcome="NETWORK_ERROR", age_days=181)
+    # P0-9 之前的旧行没有 outcome：无法判断成败，按失败对待，宁可多留。
+    _insert_call_row(pg_env, "legacy-100d", outcome=None, age_days=100)
+    _insert_call_row(pg_env, "legacy-181d", outcome=None, age_days=181)
+
+    with psycopg.connect(pg_env, autocommit=True) as conn:
+        assert count_expired_calls(conn, now=_NOW) == 4
+        # 统计不改数据。
+        assert len(_surviving_call_ids(pg_env)) == 8
+        with conn.transaction():
+            deleted = purge_expired_call_batch(conn, now=_NOW)
+    assert deleted == 4
+    assert _surviving_call_ids(pg_env) == {"succ-29d", "fail-100d", "fail-179d", "legacy-100d"}
+
+
+def test_retention_batches_until_nothing_is_left_and_is_idempotent(pg_env: str) -> None:
+    _reset_call_logs(pg_env)
+    for index in range(5):
+        _insert_call_row(pg_env, f"old-{index}", outcome="SUCCEEDED", age_days=45)
+    _insert_call_row(pg_env, "fresh", outcome="SUCCEEDED", age_days=1)
+
+    with psycopg.connect(pg_env, autocommit=True) as conn:
+        sizes = []
+        while True:
+            with conn.transaction():
+                batch = purge_expired_call_batch(conn, now=_NOW, batch_size=2)
+            sizes.append(batch)
+            if batch == 0:
+                break
+        # 分批：2 + 2 + 1，最后一次返回 0 表示已清完；重复执行不再删任何行。
+        assert sizes == [2, 2, 1, 0]
+        with conn.transaction():
+            assert purge_expired_call_batch(conn, now=_NOW) == 0
+    assert _surviving_call_ids(pg_env) == {"fresh"}
+
+
+def test_purge_cli_dry_run_changes_nothing_and_real_run_deletes_only_expired(
+    pg_env: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from scripts.purge_external_call_logs import main as purge_main
+
+    _reset_call_logs(pg_env)
+    real_now = datetime.now(UTC)
+    _insert_call_row(pg_env, "cli-old", outcome="SUCCEEDED", age_days=40, now=real_now)
+    _insert_call_row(pg_env, "cli-fail-old", outcome="PROVIDER_ERROR", age_days=200, now=real_now)
+    _insert_call_row(pg_env, "cli-keep", outcome="PROVIDER_ERROR", age_days=40, now=real_now)
+
+    assert purge_main(["--database-url", pg_env, "--dry-run"]) == 0
+    assert "eligible for purge: 2" in capsys.readouterr().out
+    assert _surviving_call_ids(pg_env) == {"cli-old", "cli-fail-old", "cli-keep"}
+
+    assert purge_main(["--database-url", pg_env]) == 0
+    assert "purged 2 external call log row(s)" in capsys.readouterr().out
+    assert _surviving_call_ids(pg_env) == {"cli-keep"}
+
+    # 再跑一遍：没有可删的行，输出仍只有计数。
+    assert purge_main(["--database-url", pg_env]) == 0
+    assert "purged 0 external call log row(s)" in capsys.readouterr().out

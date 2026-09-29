@@ -51,6 +51,13 @@ ExecStart=/opt/video-replica/app/server/.venv/bin/python -m scripts.reconcile_pe
 # from sitting in the orders page and the reconciliation reports as PENDING.
 # Counts only in the output.
 ExecStart=/opt/video-replica/app/server/.venv/bin/python -m scripts.close_expired_native_orders
+# P0-9: third-party call logs hold the provider's raw response for
+# troubleshooting — diagnostic evidence, not an accounting fact. Failed calls
+# are kept 180 days, successful ones 30 days; older rows are deleted in
+# committed batches. Kept LAST on purpose: it is housekeeping, so a failure
+# here must never block the billing reconciliation and order sweeps above.
+# Counts only in the output.
+ExecStart=/opt/video-replica/app/server/.venv/bin/python -m scripts.purge_external_call_logs
 Restart=on-failure
 RestartSec=30
 UMask=0077

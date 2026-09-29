@@ -90,6 +90,14 @@ CURRENT_CLI_MODULES: tuple[CommandRow, ...] = tuple(
             "write; window-based re-run is a no-op; append-only audit untouched",
         ),
         (
+            "python -m scripts.purge_external_call_logs",
+            "scripts/purge_external_call_logs.py",
+            "current-pg",
+            "PostgreSQL (business)",
+            "maintenance timer",
+            "write; retention-window re-run is a no-op; counts-only output",
+        ),
+        (
             "python -m scripts.reconcile_dangling_billing_reservations",
             "scripts/reconcile_dangling_billing_reservations.py",
             "current-pg",
@@ -342,6 +350,7 @@ _TIMER_CLI_MAINS: tuple[str, ...] = (
     "scripts.purge_idempotency_envelopes",
     "scripts.purge_expired_export_ciphertexts",
     "scripts.purge_stale_rate_limit_counters",
+    "scripts.purge_external_call_logs",
     "scripts.reconcile_dangling_billing_reservations",
     "scripts.close_expired_native_orders",
     "scripts.reconcile_pending_native_orders",

@@ -1267,3 +1267,210 @@ def test_stale_certificate_is_served_when_the_refresh_fails(
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# --- 第三方调用日志（P0-9）：所有微信请求都落一条，且不带敏感信息 ------------------
+
+
+@pytest.fixture()
+def captured_calls(monkeypatch: pytest.MonkeyPatch) -> list:
+    """截住落库前的调用记录（不需要 PG）；`_insert` 是记录入口的唯一出口。"""
+    from app import external_calls
+
+    calls: list = []
+    monkeypatch.setattr(external_calls, "_insert", calls.append)
+    return calls
+
+
+def _calls_for(captured: list, endpoint: str) -> list:
+    return [call for call in captured if call.endpoint == endpoint]
+
+
+def test_create_order_is_logged_under_the_order_and_keeps_the_customer_ip_out(
+    captured_calls: list,
+    platform_key: rsa.RSAPrivateKey,
+    platform_cert_pem: bytes,
+    platform_serial: str,
+    merchant_config: WeChatMerchantConfig,
+    deployment: WeChatDeploymentConfig,
+) -> None:
+    body = json.dumps({"code_url": "weixin://wxpay/bizpayurl?pr=LOGGED"}).encode()
+    signed = _signed_response(platform_key, body, platform_serial)
+    opener = _RouteOpener(_native_routes(signed, platform_cert_pem, platform_serial))
+    WeChatNativeClient(opener=opener).create_native_order(
+        merchant=merchant_config,
+        deployment=deployment,
+        out_trade_no="OUT_LOG_001",
+        description="内部视频充值",
+        amount_fen=1000,
+        client_ip="203.0.113.77",
+    )
+
+    [call] = _calls_for(captured_calls, "native_order")
+    assert call.provider == "wechat_pay"
+    assert call.method == "POST"
+    assert call.outcome == "SUCCEEDED"
+    assert call.http_status == 200
+    # 归到这笔订单的商户单号下，客服拿订单号就能翻到应答原文。
+    assert call.context is not None
+    assert (call.context.task_type, call.context.task_id) == ("RECHARGE_ORDER", "OUT_LOG_001")
+    assert call.request_summary["out_trade_no"] == "OUT_LOG_001"
+    assert call.request_summary["amount"] == {"total": 1000, "currency": "CNY"}
+    assert "LOGGED" in (call.response_body or "")
+    # 客户 IP 是个人信息，排查用不上；鉴权头根本不在记录范围内。
+    assert "203.0.113.77" not in repr(call)
+    assert "WECHATPAY2" not in repr(call)
+
+
+def test_certificate_downloads_are_logged_without_the_encrypted_payload(
+    captured_calls: list,
+    platform_key: rsa.RSAPrivateKey,
+    platform_cert_pem: bytes,
+    platform_serial: str,
+    merchant_config: WeChatMerchantConfig,
+    deployment: WeChatDeploymentConfig,
+) -> None:
+    body = json.dumps({"code_url": "weixin://x"}).encode()
+    signed = _signed_response(platform_key, body, platform_serial)
+    opener = _RouteOpener(_native_routes(signed, platform_cert_pem, platform_serial))
+    WeChatNativeClient(opener=opener).create_native_order(
+        merchant=merchant_config,
+        deployment=deployment,
+        out_trade_no="OUT_LOG_CERT",
+        description="d",
+        amount_fen=100,
+    )
+
+    [download] = _calls_for(captured_calls, "certificates")
+    assert download.outcome == "SUCCEEDED"
+    # 证书密文对排查没有价值：只留元数据，不留响应体；下载也不属于任何订单。
+    assert download.response_body is None
+    assert download.context is None
+
+
+def test_wechat_rejection_is_logged_with_the_raw_error_and_still_raises_as_before(
+    captured_calls: list,
+    platform_cert_pem: bytes,
+    platform_serial: str,
+    merchant_config: WeChatMerchantConfig,
+    deployment: WeChatDeploymentConfig,
+) -> None:
+    body = json.dumps({"code": "NOAUTH", "message": "商户无权限"}).encode()
+    error = HTTPError(
+        WECHAT_API_BASE + NATIVE_ORDER_PATH,
+        403,
+        "Forbidden",
+        {"Request-ID": "wx-req-9"},
+        io.BytesIO(body),
+    )
+    opener = _RouteOpener(_native_routes(error, platform_cert_pem, platform_serial))
+
+    with pytest.raises(WeChatNativeError, match="NOAUTH") as caught:
+        WeChatNativeClient(opener=opener).create_native_order(
+            merchant=merchant_config,
+            deployment=deployment,
+            out_trade_no="OUT_LOG_NOAUTH",
+            description="d",
+            amount_fen=100,
+        )
+
+    # 业务侧的异常与错误码不因记录而改变。
+    assert caught.value.wechat_code == "NOAUTH"
+    [call] = _calls_for(captured_calls, "native_order")
+    assert call.outcome == "PROVIDER_ERROR"
+    assert call.http_status == 403
+    assert "NOAUTH" in (call.response_body or "")
+    assert call.provider_error_code == "NOAUTH"
+    assert call.provider_message == "商户无权限"
+    assert call.provider_request_id == "wx-req-9"
+
+
+def test_query_order_is_logged_under_the_order(
+    captured_calls: list,
+    platform_key: rsa.RSAPrivateKey,
+    platform_cert_pem: bytes,
+    platform_serial: str,
+    merchant_config: WeChatMerchantConfig,
+) -> None:
+    body = json.dumps({"trade_state": "NOTPAY", "out_trade_no": "OUT_LOG_Q"}).encode()
+    signed = _signed_response(platform_key, body, platform_serial)
+    opener = _RouteOpener(_query_routes(signed, platform_cert_pem, platform_serial))
+    WeChatNativeClient(opener=opener).query_order(
+        merchant=merchant_config, out_trade_no="OUT_LOG_Q"
+    )
+
+    [call] = _calls_for(captured_calls, "order_query")
+    assert call.method == "GET"
+    assert call.outcome == "SUCCEEDED"
+    assert call.context is not None
+    assert (call.context.task_type, call.context.task_id) == ("RECHARGE_ORDER", "OUT_LOG_Q")
+    assert "NOTPAY" in (call.response_body or "")
+
+
+def test_credential_probe_is_logged_without_a_fake_order_attribution(
+    captured_calls: list, public_key_merchant: WeChatMerchantConfig
+) -> None:
+    """自检用的订单号是编的：不能被记成某笔真实充值订单的调用。"""
+    body = json.dumps({"code": "ORDER_NOT_EXIST", "message": "订单不存在"}).encode()
+
+    def not_found(request: Request) -> HTTPError:
+        return HTTPError(request.full_url, 404, "Not Found", {}, io.BytesIO(body))
+
+    opener = _RouteOpener({"/out-trade-no/SELFCHECK": not_found})
+    WeChatNativeClient(opener=opener).check_public_key_credentials(public_key_merchant)
+
+    [call] = _calls_for(captured_calls, "order_query")
+    assert call.http_status == 404
+    assert call.context is None
+
+
+def test_a_timeout_is_logged_as_a_timeout_and_keeps_the_gateway_status(
+    captured_calls: list,
+    merchant_config: WeChatMerchantConfig,
+    deployment: WeChatDeploymentConfig,
+) -> None:
+    opener = _RouteOpener({NATIVE_ORDER_PATH: TimeoutError("timed out")})
+
+    with pytest.raises(WeChatNativeError) as caught:
+        WeChatNativeClient(opener=opener).create_native_order(
+            merchant=merchant_config,
+            deployment=deployment,
+            out_trade_no="OUT_LOG_TIMEOUT",
+            description="d",
+            amount_fen=100,
+        )
+
+    assert caught.value.status_code == 504
+    [call] = _calls_for(captured_calls, "native_order")
+    assert call.outcome == "TIMEOUT"
+    assert call.http_status is None
+    assert call.response_body is None
+
+
+def test_a_failing_call_log_never_breaks_the_payment_flow(
+    monkeypatch: pytest.MonkeyPatch,
+    platform_key: rsa.RSAPrivateKey,
+    platform_cert_pem: bytes,
+    platform_serial: str,
+    merchant_config: WeChatMerchantConfig,
+    deployment: WeChatDeploymentConfig,
+) -> None:
+    from app import external_calls
+
+    def broken(_call: object) -> None:
+        raise RuntimeError("log store is down")
+
+    monkeypatch.setattr(external_calls, "_insert", broken)
+    body = json.dumps({"code_url": "weixin://wxpay/bizpayurl?pr=STILLOK"}).encode()
+    signed = _signed_response(platform_key, body, platform_serial)
+    opener = _RouteOpener(_native_routes(signed, platform_cert_pem, platform_serial))
+
+    result = WeChatNativeClient(opener=opener).create_native_order(
+        merchant=merchant_config,
+        deployment=deployment,
+        out_trade_no="OUT_LOG_BROKEN",
+        description="d",
+        amount_fen=100,
+    )
+
+    assert result.code_url == "weixin://wxpay/bizpayurl?pr=STILLOK"
