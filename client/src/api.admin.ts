@@ -1994,18 +1994,23 @@ export interface GenerationRetryResult {
  *
  * `POST /api/control/generation-records/{record_id}/retry` —— 能否原地重试
  * 由服务端按既有业务规则裁决（任务状态 + 错误码），拒绝时返回具体原因，
- * 前端不复制这套判断。reason 同时作为业务层 retry_reason 留痕；幂等键走
- * adminWrite 的默认生成，网络歧义重试不会重复改状态或重复预扣。
+ * 前端不复制这套判断。reason 同时作为业务层 retry_reason 留痕。
+ *
+ * 幂等键由调用方传入并在「请求可能已提交但响应丢了」的失败后沿用同一个：
+ * 每次都自动换新键，第二次确认服务端就认不出这是同一次操作，任务已经变成
+ * PENDING 之后只会被回一句「不可重试」。不传时才自动生成。
  */
 export function retryGenerationRecord(
   recordId: string,
   reason: string,
+  idempotencyKey?: string,
 ): Promise<GenerationRetryResult> {
   return adminWrite<GenerationRetryResult>(
     `/api/control/generation-records/${encodeURIComponent(recordId)}/retry`,
     {},
     reason,
     "重试生成任务失败",
+    idempotencyKey,
   );
 }
 

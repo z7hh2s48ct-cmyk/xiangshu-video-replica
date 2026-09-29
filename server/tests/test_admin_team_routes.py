@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import os
 import secrets
+import time
 import uuid
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import psycopg
@@ -402,6 +404,23 @@ def test_create_member_rejects_short_password(client: TestClient) -> None:
     assert rejected.status_code == 422  # pydantic 长度下限（12）
 
 
+@pytest.mark.parametrize(
+    ("username", "display_name"),
+    [(" ", "New Ops"), ("new_ops", " "), (chr(9), chr(10))],
+)
+def test_create_member_rejects_names_that_are_blank_after_trimming(
+    client: TestClient, route_state: str, username: str, display_name: str
+) -> None:
+    """``min_length`` 在去空白之前判定，纯空白会被裁成空串写入并永久占住唯一键。"""
+    session = _admin_session(client, "super_u")
+    rejected = _create_member(client, session, username=username, display_name=display_name)
+    assert rejected.status_code == 400, rejected.text
+    assert rejected.json()["detail"]["code"] == "TEAM_MEMBER_VALIDATION_FAILED"
+    with psycopg.connect(route_state) as conn:
+        row = conn.execute("SELECT count(*) FROM users").fetchone()
+    assert row is not None and row[0] == 4  # 夹具里的 4 个账号，没有新增
+
+
 # ---------------------------------------------------------------------------
 # 更新成员：显示名 / 停用吊销会话 / 自我保护 / 最后超管兜底
 # ---------------------------------------------------------------------------
@@ -524,6 +543,49 @@ def test_super_admin_can_demote_another_super_admin_when_one_remains(
     demoted = _patch_member(client, session, "staff_u", is_super_admin=False)
     assert demoted.status_code == 200, demoted.text
     assert demoted.json()["is_super_admin"] is False
+
+
+def test_update_rejects_display_name_that_is_blank_after_trimming(
+    client: TestClient, route_state: str
+) -> None:
+    session = _admin_session(client, "super_u")
+    rejected = _patch_member(client, session, "staff_u", display_name="   ")
+    assert rejected.status_code == 400, rejected.text
+    assert rejected.json()["detail"]["code"] == "TEAM_MEMBER_VALIDATION_FAILED"
+    with psycopg.connect(route_state) as conn:
+        row = conn.execute("SELECT display_name FROM users WHERE id = 'staff_u'").fetchone()
+    assert row is not None and row[0] == "Staff Admin"
+
+
+def test_concurrent_mutual_demotion_cannot_orphan_the_tenant(
+    client: TestClient, route_state: str
+) -> None:
+    """两个超管同时互相降级：后到的写请求必须等前一笔提交，再在最新数据上被拒。
+
+    用第二个连接扮演「对方的并发事务」：先拿同一把锁、把 ``super_u`` 降级，暂不提交。
+    没有串行化时，这条请求会立刻在「super_u 仍是超管」的旧快照里通过并提交，两笔
+    合起来就没有启用超管了；有串行化时它必须先被挡住，放行后重新计数并被拒绝。
+    """
+    with psycopg.connect(route_state, autocommit=True) as conn:
+        conn.execute("UPDATE users SET is_super_admin = 1 WHERE id = 'staff_u'")
+    session = _admin_session(client, "super_u")
+    other = psycopg.connect(route_state)
+    try:
+        other.execute("SELECT pg_advisory_xact_lock(hashtext('team:super_admin_guard'))")
+        other.execute("UPDATE users SET is_super_admin = 0 WHERE id = 'super_u'")
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_patch_member, client, session, "staff_u", is_super_admin=False)
+            time.sleep(1.0)
+            assert not future.done(), "写请求没有被串行化：它在对方提交前就完成了"
+            other.commit()
+            result = future.result(timeout=20)
+    finally:
+        other.close()
+    assert result.status_code == 400, result.text
+    assert result.json()["detail"]["code"] == "LAST_SUPER_ADMIN_REQUIRED"
+    with psycopg.connect(route_state) as conn:
+        row = conn.execute("SELECT is_super_admin FROM users WHERE id = 'staff_u'").fetchone()
+    assert row is not None and row[0] == 1  # 仍有一个启用超管，团队接口没有被锁死
 
 
 def test_update_unknown_member_is_404(client: TestClient) -> None:

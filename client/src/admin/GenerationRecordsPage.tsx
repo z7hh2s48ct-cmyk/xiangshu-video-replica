@@ -119,6 +119,10 @@ export function GenerationRecordsPage({
     fingerprint: string;
     key: string;
   } | null>(null);
+  // 一键重试同理：按「记录 + 原因」指纹保留幂等键，请求可能已提交但响应丢了时，
+  // 运营再点一次确认沿用同一键，服务端才能按重放处理而不是回「不可重试」。
+  // 只有拿到明确的成功结果才清掉。
+  const retryKeyRef = useRef<{ fingerprint: string; key: string } | null>(null);
   // 展开过详情的记录行：第三方调用记录只在首次展开时懒加载，
   // 避免为一屏记录白拉一屏接口。
   const [openedDetails, setOpenedDetails] = useState<Set<string>>(new Set());
@@ -231,11 +235,23 @@ export function GenerationRecordsPage({
   async function submitRetry(reason: string) {
     if (!pendingRetry || retryBusy) return;
     const target = pendingRetry;
+    const fingerprint = JSON.stringify({
+      recordId: target.record_id,
+      reason,
+    });
+    if (retryKeyRef.current?.fingerprint !== fingerprint) {
+      retryKeyRef.current = { fingerprint, key: crypto.randomUUID() };
+    }
     setRetryBusy(true);
     setRetryError("");
     setNotice("");
     try {
-      const result = await retryGenerationRecord(target.record_id, reason);
+      const result = await retryGenerationRecord(
+        target.record_id,
+        reason,
+        retryKeyRef.current.key,
+      );
+      retryKeyRef.current = null;
       // 两条重试路径的运营含义不同：重新入队（PENDING）会再次预扣积分，
       // 恢复存档（SUCCEEDED）沿用原有计费——分开说清，避免误读成重复扣费。
       setNotice(

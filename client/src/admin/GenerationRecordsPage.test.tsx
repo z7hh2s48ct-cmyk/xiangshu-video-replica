@@ -848,6 +848,7 @@ describe("GenerationRecordsPage", () => {
       expect(adminApi.retryGenerationRecord).toHaveBeenCalledWith(
         "video-failed-1",
         "运营手动重试",
+        expect.any(String),
       ),
     );
     expect(
@@ -856,6 +857,66 @@ describe("GenerationRecordsPage", () => {
     // 重试后重新拉取列表：状态已被服务端改写，旧行不该留在页面上。
     await waitFor(() =>
       expect(adminApi.getAdminGenerationRecords).toHaveBeenCalledTimes(2),
+    );
+  });
+
+  it("reuses the retry idempotency key after an ambiguous failure and rotates it after success", async () => {
+    vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
+      items: [videoFailureRecord()],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+    // 第一次：请求可能已提交但响应丢了（网络中断）；第二次：服务端按同键重放成功。
+    vi.mocked(adminApi.retryGenerationRecord)
+      .mockRejectedValueOnce(new Error("网络中断，请重试"))
+      .mockResolvedValue({
+        task_id: "video-failed-1",
+        status: "PENDING",
+        archive_status: "PENDING",
+      });
+
+    render(<GenerationRecordsPage initialStatus="FAILED" />);
+    fireEvent.click(await screen.findByText("查看详情"));
+    fireEvent.click(
+      screen.getByRole("button", { name: "重试任务 video-failed-1" }),
+    );
+    await screen.findByRole("dialog");
+    fireEvent.change(screen.getByLabelText("操作原因"), {
+      target: { value: "运营手动重试" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "重新入队" }));
+    expect(await screen.findByText("网络中断，请重试")).toBeInTheDocument();
+
+    // 对话框仍开着：同一条记录、同一原因再确认一次。
+    fireEvent.click(screen.getByRole("button", { name: "重新入队" }));
+    expect(
+      await screen.findByText(/已重新入队：任务 video-failed-1/),
+    ).toBeInTheDocument();
+
+    const calls = vi.mocked(adminApi.retryGenerationRecord).mock.calls;
+    expect(calls).toHaveLength(2);
+    const firstKey = calls[0][2];
+    expect(firstKey).toEqual(expect.any(String));
+    expect(calls[1][2]).toBe(firstKey);
+
+    // 拿到明确成功后键即作废：之后再发起的重试是新操作，必须换新键。
+    await waitFor(() =>
+      expect(adminApi.getAdminGenerationRecords).toHaveBeenCalledTimes(2),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "重试任务 video-failed-1" }),
+    );
+    await screen.findByRole("dialog");
+    fireEvent.change(screen.getByLabelText("操作原因"), {
+      target: { value: "运营手动重试" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "重新入队" }));
+    await waitFor(() =>
+      expect(adminApi.retryGenerationRecord).toHaveBeenCalledTimes(3),
+    );
+    expect(vi.mocked(adminApi.retryGenerationRecord).mock.calls[2][2]).not.toBe(
+      firstKey,
     );
   });
 

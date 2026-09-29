@@ -109,6 +109,29 @@ def _revoke_all_sessions(conn: psycopg.Connection, user_id: str, *, revoked_at: 
     ).rowcount
 
 
+def _require_nonblank(value: str, label: str) -> str:
+    """去首尾空白后必须非空。
+
+    Pydantic 的 ``min_length`` 在 ``strip()`` 之前判定，``" "`` 会通过校验再被裁成
+    空串写入：库里没有非空约束，空用户名还会永久占住唯一键。所以归一之后
+    在进入写事务之前再判一次。
+    """
+    text = value.strip()
+    if not text:
+        raise _http(400, "TEAM_MEMBER_VALIDATION_FAILED", f"{label}不能为空。")
+    return text
+
+
+def _lock_super_admin_guard(conn: psycopg.Connection) -> None:
+    """串行化「至少保留一个启用超管」的检查与写入（事务级建议锁）。
+
+    两个超管同时互相降级 / 停用时，各自的事务都能在「对方还是超管」的快照下通过
+    检查、再各改各的行，两笔都提交后就没有启用超管了（写偏斜）。先拿锁再读，
+    后到的事务会等前一笔提交，然后在最新数据上重新计数并被正确拒绝。
+    """
+    conn.execute("SELECT pg_advisory_xact_lock(hashtext('team:super_admin_guard'))")
+
+
 def _other_active_super_admins(conn: psycopg.Connection, exclude_user_id: str) -> int:
     row = conn.execute(
         "SELECT count(*) FROM users "
@@ -168,8 +191,8 @@ def create_team_member(
     actor: SuperAdminWriter,
 ) -> dict[str, object]:
     """新增团队成员：users + wallets + 密码凭据三件套一次建齐。"""
-    username = body.username.strip()
-    display_name = body.display_name.strip()
+    username = _require_nonblank(body.username, "登录名")
+    display_name = _require_nonblank(body.display_name, "显示名")
     try:
         password_hash = hash_admin_password(body.password)
     except ValueError as exc:
@@ -249,10 +272,15 @@ def update_team_member(
     actor: SuperAdminWriter,
 ) -> dict[str, object]:
     """更新成员（显示名 / 启用状态 / 超管标记）；停用即吊销其全部会话。"""
+    requested_display_name = (
+        None if body.display_name is None else _require_nonblank(body.display_name, "显示名")
+    )
 
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         if body.display_name is None and body.is_active is None and body.is_super_admin is None:
             raise _http(400, "TEAM_MEMBER_VALIDATION_FAILED", "没有需要更新的字段。")
+        # 先拿锁再读：后面的目标状态与超管计数都必须是前一笔已提交之后的数据。
+        _lock_super_admin_guard(conn)
         current_active, current_super = _require_team_target(conn, user_id)
         new_active = current_active if body.is_active is None else int(body.is_active)
         new_super = current_super if body.is_super_admin is None else int(body.is_super_admin)
@@ -277,7 +305,9 @@ def update_team_member(
 
         before = _load_member(conn, user_id)
         new_display_name = (
-            str(before["display_name"]) if body.display_name is None else body.display_name.strip()
+            str(before["display_name"])
+            if requested_display_name is None
+            else requested_display_name
         )
         db_now = transaction_now_iso(conn)
         revoked_sessions = 0
