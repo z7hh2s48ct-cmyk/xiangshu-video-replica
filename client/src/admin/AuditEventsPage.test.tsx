@@ -243,6 +243,40 @@ describe("AuditEventsPage", () => {
     });
   });
 
+  it("defaults the audit scope to admin actions", async () => {
+    // P0-3：服务端默认只回管理员动作；客户端显式带上同一口径，避免
+    // 「默认值在哪一侧」的隐性依赖。
+    const fetchMock = installFetch();
+    render(<AuditEventsPage />);
+
+    await screen.findByText("管理员调账");
+    const { searchParams } = new URL(String(fetchMock.mock.calls[0]?.[0]));
+    expect(searchParams.get("scope")).toBe("admin");
+  });
+
+  it("switches to the customer scope on submit (P0-3)", async () => {
+    const fetchMock = installFetch();
+    render(<AuditEventsPage />);
+
+    await screen.findByText("管理员调账");
+    fireEvent.change(screen.getByLabelText("审计范围"), {
+      target: { value: "customer" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(([url]) => {
+          const requestUrl = new URL(String(url));
+          return (
+            requestUrl.pathname.endsWith("/api/control/audit-log") &&
+            requestUrl.searchParams.get("scope") === "customer"
+          );
+        }),
+      ).toBe(true);
+    });
+  });
+
   it("keeps dotted event filters exact and renders a known price change", async () => {
     const fetchMock = installFetch();
     render(<AuditEventsPage />);
@@ -428,6 +462,28 @@ describe("AuditEventsPage", () => {
       "admin.activation_code_batch.created",
     );
     expect(options("管理员强制下线")).toHaveValue("ADMIN_SESSION_LOGOUT");
+  });
+
+  it("offers the sensitive admin actions the server already records (P0-4)", async () => {
+    installFetch();
+    render(<AuditEventsPage />);
+    await screen.findByText("管理员调账");
+
+    const options = (name: string) => screen.getByRole("option", { name });
+    expect(options("查看密钥明文")).toHaveValue(
+      "provider_settings.secret_reveal",
+    );
+    expect(options("数据导出")).toHaveValue("control.export");
+    expect(options("开通套餐（线下收款）")).toHaveValue(
+      "customer_package.grant",
+    );
+    expect(options("设置专项折扣")).toHaveValue("customer_discount.create");
+    expect(options("停用专项折扣")).toHaveValue("customer_discount.deactivate");
+    expect(options("修改充值套餐")).toHaveValue("recharge_package.update");
+    expect(options("查单同步")).toHaveValue("payment.sync");
+    expect(options("管理员密码登录")).toHaveValue(
+      "admin_session.password_login",
+    );
   });
 
   it("labels an administrator-forced session revoke as an administrator session action", async () => {

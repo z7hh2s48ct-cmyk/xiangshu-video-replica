@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 
 from app.auth import CurrentUser
 from app.db_portable import BusinessConnection
+from app.external_calls import CallTimer, Outcome, record_external_call
 from app.permissions import require_not_auditor, require_project_access, write_audit
 from app.settings import SettingsRepository, SettingsUnavailableError
 
@@ -1025,19 +1026,47 @@ def request_deepseek_text(
         )
         messages.append({"role": "user", "content": f"{label}：\n{instructions}"})
     messages.append({"role": "user", "content": f"待处理原文：\n\n{source_text}"})
-    payload = json.dumps(
-        {
-            "model": model,
-            "messages": messages,
-            "stream": False,
-            "temperature": 0 if purpose == "json_repair" else 1.3,
-            "max_tokens": DEEPSEEK_MAX_OUTPUT_TOKENS,
-            **({"response_format": {"type": "json_object"}} if purpose == "json_repair" else {}),
-        }
-    ).encode("utf-8")
+    payload_object = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "temperature": 0 if purpose == "json_repair" else 1.3,
+        "max_tokens": DEEPSEEK_MAX_OUTPUT_TOKENS,
+        **({"response_format": {"type": "json_object"}} if purpose == "json_repair" else {}),
+    }
+    payload = json.dumps(payload_object).encode("utf-8")
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    timer = CallTimer()
+
+    # 方案 P0-9：curl_cffi 绕过了 urllib 的记录包装，这里手动把每次调用
+    # （含网络失败、非 2xx、响应不可解析）写进调用日志，供管理端排查。
+    def record_call(
+        outcome: Outcome,
+        *,
+        response: Any = None,
+        http_status: int | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        record_external_call(
+            provider="deepseek",
+            endpoint="chat/completions",
+            method="POST",
+            url=url,
+            request_summary=payload_object,
+            outcome=outcome,
+            http_status=http_status,
+            response_body=getattr(response, "content", None),
+            response_headers=getattr(response, "headers", None),
+            latency_ms=timer.elapsed_ms(),
+            error_code=error_code,
+            error_message=error_message,
+            model=model,
+        )
+
     try:
         response = curl_requests.post(
-            f"{base_url.rstrip('/')}/chat/completions",
+            url,
             data=payload,
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
             timeout=DEEPSEEK_TIMEOUT_SECONDS,
@@ -1046,6 +1075,10 @@ def request_deepseek_text(
         )
     except (RequestException, TimeoutError, OSError) as exc:
         logger.warning("DeepSeek text request failed: %s", type(exc).__name__)
+        record_call(
+            "TIMEOUT" if "timeout" in type(exc).__name__.lower() else "NETWORK_ERROR",
+            error_message=type(exc).__name__,
+        )
         raise HTTPException(
             status_code=504,
             detail={
@@ -1056,6 +1089,11 @@ def request_deepseek_text(
         ) from exc
     if not 200 <= response.status_code < 300:
         logger.warning("DeepSeek text request failed with HTTP status %s", response.status_code)
+        record_call(
+            "PROVIDER_ERROR",
+            response=response,
+            http_status=response.status_code,
+        )
         message = (
             "文本 AI 服务 API Key 无效或无权限，请检查设置。"
             if response.status_code in (401, 403)
@@ -1074,6 +1112,12 @@ def request_deepseek_text(
         body = json.loads(response.content.decode("utf-8"))
     except (ValueError, KeyError) as exc:
         logger.warning("DeepSeek rewrite returned an unreadable payload")
+        record_call(
+            "PARSE_ERROR",
+            response=response,
+            http_status=response.status_code,
+            error_code="DEEPSEEK_RESPONSE_INVALID",
+        )
         raise ConfirmedRewriteResponseError(
             status_code=502,
             detail={
@@ -1089,6 +1133,13 @@ def request_deepseek_text(
             raise TypeError("rewrite content must be text")
         if choice.get("finish_reason") == "length":
             logger.warning("DeepSeek rewrite reached the output limit")
+            record_call(
+                "PROVIDER_ERROR",
+                response=response,
+                http_status=response.status_code,
+                error_code="DEEPSEEK_RESPONSE_TRUNCATED",
+                error_message="改写结果超过输出上限",
+            )
             raise ConfirmedRewriteResponseError(
                 status_code=502,
                 detail={
@@ -1098,6 +1149,12 @@ def request_deepseek_text(
             )
         content = content.strip()
     except (KeyError, IndexError, TypeError) as exc:
+        record_call(
+            "PARSE_ERROR",
+            response=response,
+            http_status=response.status_code,
+            error_code="DEEPSEEK_RESPONSE_INVALID",
+        )
         raise ConfirmedRewriteResponseError(
             status_code=502,
             detail={
@@ -1106,6 +1163,13 @@ def request_deepseek_text(
             },
         ) from exc
     if not content:
+        record_call(
+            "PROVIDER_ERROR",
+            response=response,
+            http_status=response.status_code,
+            error_code="DEEPSEEK_RESPONSE_EMPTY",
+            error_message="改写结果为空",
+        )
         raise ConfirmedRewriteResponseError(
             status_code=502,
             detail={
@@ -1113,6 +1177,7 @@ def request_deepseek_text(
                 "message": "AI 改写结果为空，请重试。",
             },
         )
+    record_call("SUCCEEDED", response=response, http_status=response.status_code)
     return content
 
 

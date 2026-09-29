@@ -16,6 +16,12 @@ code. This is the same shape
 test_customer_recharge.py::recharge_config_fixture uses. Without it the route
 answers 503 ZPAY_CONFIGURATION_INVALID.
 
+The SES seeding opens the email lane: the bind-email card only offers binding
+when a mail provider is configured (``service_available``), and the forgot
+flow requires one too. The credentials are throwaway — every actual send
+fails, which ``deliver_quietly`` logs and ignores; the specs read the code
+back from the database with read_email_code.py instead of from a mailbox.
+
 The plaintext codes are printed once at the end so the Playwright spec can
 drive the activation UI with them, and the Fernet key the ZPay config was
 encrypted with is printed for the runner to pass to the API process. Never a
@@ -49,6 +55,14 @@ ZPAY_MERCHANT_CONFIG = (
     b'{"pid":"merchant-123","key":"merchant-secret","enabled_channels":"alipay,wxpay"}'
 )
 
+# Throwaway mail credentials — never real SES keys. The four required fields
+# of email_delivery.validate_email_config; region stays unset (defaults to
+# ap-guangzhou).
+SES_MAIL_CONFIG = (
+    b'{"secret_id":"e2e-mail-secret-id","secret_key":"e2e-mail-secret-key",'
+    b'"from_address":"noreply@e2e.example.com","code_template_id":"123456"}'
+)
+
 
 def main() -> None:
     dsn = os.environ["CUSTOMER_E2E_DATABASE_URL"]
@@ -58,6 +72,7 @@ def main() -> None:
 
     settings_fernet_key = Fernet.generate_key()
     encrypted_config = Fernet(settings_fernet_key).encrypt(ZPAY_MERCHANT_CONFIG).decode("ascii")
+    encrypted_ses_config = Fernet(settings_fernet_key).encrypt(SES_MAIL_CONFIG).decode("ascii")
 
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute(
@@ -101,6 +116,21 @@ def main() -> None:
                 updated_at = CURRENT_TIMESTAMP
             """,
             (encrypted_config,),
+        )
+        # 邮箱功能（绑定 + 找回密码）以「已配置发信」为开关，这里把 ses
+        # 通道拧开；真发信必失败，由 deliver_quietly 记警告，spec 用
+        # read_email_code.py 从库里反推验证码。
+        conn.execute(
+            """
+            INSERT INTO provider_settings (
+                provider, encrypted_config, updated_by_user_id, created_at, updated_at
+            ) VALUES ('ses', %s, 'admin_e2e', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(provider) DO UPDATE SET
+                encrypted_config = excluded.encrypted_config,
+                updated_by_user_id = excluded.updated_by_user_id,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (encrypted_ses_config,),
         )
         # 客户 E2E 没有 COS 凭据，素材/资产上传会 503 STORAGE_PROVIDER_FORBIDDEN。
         # 改用本地持久盘（配套 VIDEO_REPLICA_STORAGE_ROOT，见 setup-backend.mjs），

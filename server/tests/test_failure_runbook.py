@@ -6,9 +6,10 @@
 的单一来源，本文件锁定两条契约：
 
 1. **覆盖面**：所有会写进任务行 ``error_code`` 的字面量码（扫描落库模块，
-   见 ``SCANNED_FILES``）以及经变量路径写入的分析族码
-   （``VARIABLE_PATH_CODES``）都必须登记建议——新增失败码时忘记登记会在
-   这里失败。即时校验码（HTTPException ``detail.code``）不在此列：调用方
+   见 ``SCANNED_FILES``）、经变量路径写入的分析族码
+   （``VARIABLE_PATH_CODES``）、图片/人物视图的变量赋值与构造式码，以及口播
+   由任务状态映射出的 ``ORAL_*`` 码，都必须登记建议——新增失败码时忘记登记
+   会在这里失败。即时校验码（HTTPException ``detail.code``）不在此列：调用方
    当场就拿到了 message，不属于事后诊断场景。
 2. **质量**：每条建议非空、为中文、可直接执行；查询按大小写/空白归一，
    未知码返回 None（fail-open，前端显示回退文案）。
@@ -63,6 +64,13 @@ VARIABLE_PATH_CODES = (
     "ORAL_TASK_FAILED",
     "ORAL_SUBMISSION_UNCERTAIN",
     "ORAL_ARCHIVE_FAILED",
+    # 方案 P0-9：改写服务经 detail.code 变量写入任务行的码
+    # （fail_script_rewrite_task 的 ``code = detail["code"]`` 路径）。
+    "DEEPSEEK_NETWORK_FAILED",
+    "DEEPSEEK_REQUEST_FAILED",
+    "DEEPSEEK_RESPONSE_INVALID",
+    "DEEPSEEK_RESPONSE_TRUNCATED",
+    "DEEPSEEK_RESPONSE_EMPTY",
 )
 
 
@@ -79,6 +87,47 @@ def test_every_scanned_literal_code_has_advice() -> None:
     # 防哑弹：扫描器本身必须抓到已知码，否则正则或文件清单失效时会静默通过。
     assert {"VIRAL_IMPORT_FAILED", "ZPAY_SIGNATURE_MISMATCH", "PROVIDER_TERMINAL"} <= scanned
     assert not missing, f"落库 error_code 缺少修复建议登记: {missing}"
+
+
+# P0-10：图片任务把码先赋给局部变量 ``code = "..."`` 再写库，人物视图用
+# ``CharacterImageProviderFailed("CODE", ...)`` 构造失败——这两种写法上面的
+# ``error_code =`` 正则都扫不到，漏登记的码在管理端只剩一个英文编号。
+CODE_VARIABLE_FILES = ("image_tasks.py",)
+CODE_VARIABLE_PATTERN = re.compile(r"""\bcode\s*=\s*['"]([A-Z][A-Z0-9_]{4,})['"]""")
+CHARACTER_FAILURE_FILE = "character_image_generation.py"
+CHARACTER_FAILURE_PATTERN = re.compile(
+    r"""CharacterImageProviderFailed\(\s*['"]([A-Z][A-Z0-9_]{4,})['"]"""
+)
+
+# P0-10 收尾（2026-09-29 复核）：口播的码既不是 ``error_code =`` 字面量、也不是
+# 构造式，而是 control_routes 的口播状态映射（``oral_tasks.status`` → ``ORAL_*``）。
+# 照原方案把 oral.py 加进 SCANNED_FILES 是空扫——那文件里一个码字面量都没有，
+# 守卫会永远通过。改为扫那张映射表：新增口播状态码却忘了登记建议会在这里失败。
+# 只匹配 ``"状态": "ORAL_*"`` 这种字典值位置，避免误抓 ORAL_VIDEO 等记录类型。
+ORAL_STATUS_CODE_FILE = "control_routes.py"
+ORAL_STATUS_CODE_PATTERN = re.compile(r'''"[A-Z_]+"\s*:\s*"(ORAL_[A-Z0-9_]+)"''')
+
+
+def test_variable_assigned_and_constructed_failure_codes_have_advice() -> None:
+    scanned: set[str] = set()
+    for name in CODE_VARIABLE_FILES:
+        text = (APP_DIR / name).read_text(encoding="utf-8")
+        scanned.update(match.group(1) for match in CODE_VARIABLE_PATTERN.finditer(text))
+    text = (APP_DIR / CHARACTER_FAILURE_FILE).read_text(encoding="utf-8")
+    scanned.update(match.group(1) for match in CHARACTER_FAILURE_PATTERN.finditer(text))
+    # 防哑弹：两种写法都必须真的扫到码。
+    assert {"IMAGE_TASK_PROVIDER_FAILED", "CHARACTER_PROVIDER_TIMEOUT"} <= scanned
+    missing = sorted(code for code in scanned if code not in FAILURE_RUNBOOK)
+    assert not missing, f"图片 / 人物视图失败码缺少修复建议登记: {missing}"
+
+
+def test_oral_status_mapped_failure_codes_have_advice() -> None:
+    text = (APP_DIR / ORAL_STATUS_CODE_FILE).read_text(encoding="utf-8")
+    scanned = {match.group(1) for match in ORAL_STATUS_CODE_PATTERN.finditer(text)}
+    # 防哑弹：映射表被改名或正则失效时必须失败，而不是静默通过。
+    assert {"ORAL_TASK_FAILED", "ORAL_ARCHIVE_FAILED"} <= scanned
+    missing = sorted(code for code in scanned if code not in FAILURE_RUNBOOK)
+    assert not missing, f"口播状态码缺少修复建议登记: {missing}"
 
 
 def test_every_variable_path_code_has_advice() -> None:

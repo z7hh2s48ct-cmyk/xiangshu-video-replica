@@ -1,6 +1,6 @@
 import { type FormEvent, useState } from "react";
 import { exportBillingReportCsv } from "../api.admin";
-import { BillingEconomics } from "./BillingEconomics";
+import { type BillingAttention, BillingEconomics } from "./BillingEconomics";
 import "./economics.css";
 import { TabBar } from "./ui/TabBar";
 
@@ -136,9 +136,11 @@ function ReportExport() {
 export function AnalyticsPage({
   readOnly = false,
   initialTab = "profit",
+  initialAttention = "",
 }: {
   readOnly?: boolean;
   initialTab?: "profit" | "cost";
+  initialAttention?: BillingAttention;
 }) {
   const [tab, setTab] = useState<string>(initialTab);
   return (
@@ -152,6 +154,7 @@ export function AnalyticsPage({
       {/* 导出端点要求 AdminWriter，auditor 会话不渲染入口。 */}
       {readOnly ? null : <ReportExport />}
       <BillingEconomics
+        initialAttention={initialAttention}
         readOnly={readOnly}
         view={tab === "cost" ? "cost" : "profit"}
       />

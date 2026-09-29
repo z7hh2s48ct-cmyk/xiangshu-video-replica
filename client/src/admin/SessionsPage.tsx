@@ -7,10 +7,8 @@ import {
 } from "react";
 
 import {
-  type AdjustmentWriteInput,
   AdminSessionError,
   type CustomerSessionListItem,
-  createCustomerAdjustment,
   listCustomerSessions,
   listLiveSessions,
   revokeCustomerSession,
@@ -19,34 +17,13 @@ import "./admin-sessions.css";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
-import {
-  ADJUSTMENT_SOURCE_LABELS,
-  labelFrom,
-  platformLabel,
-} from "./ui/vocabulary";
+import { platformLabel } from "./ui/vocabulary";
 
 const PAGE_SIZE = 50;
-const SOURCE_DOCUMENT_OPTIONS = [
-  "CS_TICKET",
-  "FREE_GRANT",
-  "COMPENSATION_APPROVAL",
-  "REFUND_APPROVAL",
-  "LEDGER_CORRECTION",
-  "OFFLINE_PAYMENT",
-] as const;
 
-// 平台名一律走共享词典（ui/vocabulary.ts 的 PLATFORM_LABELS）。这里曾私刻一份
-// 且只列了 windows/macos/linux，ios/android 落到 `?? platform` 兜底 —— 运营
-// 看到的是英文码 "ios"/"android" 而非 "iOS"/"Android"（2026-09-12 评审 P3
-// 记载的 platformLabel 与词典分叉）。合并 origin/main 的 B1（#216）时该副本
-// 一并删除：共享词典是它的严格超集，留着会与顶部 import 撞名。
-/**
- * B1（SOP §10 第 2 步）：这几个来源单类型可以做**反向调账**（负数）。
- *
- * 与服务端 `REVERSAL_SOURCE_DOCUMENT_TYPES` 同集合——服务端仍是权威，这里只决定
- * 输入框要不要挡住负号，以及给运营看什么提示。其余来源类型维持正向（>= 1）。
- */
-const REVERSAL_SOURCE_TYPES = new Set(["REFUND_APPROVAL", "LEDGER_CORRECTION"]);
+// 平台名一律走共享词典（ui/vocabulary.ts 的 PLATFORM_LABELS）。
+// 后台调账（含反向扣减）已迁到客户详情（方案 P0-2）：资金操作放在会话页既难找，
+// 又要求手输客户 ID，本页只保留会话查看与强制下线。
 
 function secondsBetween(later: string | number, earlier: string | number) {
   return Math.max(
@@ -77,9 +54,6 @@ export function SessionsPage({
 }) {
   const [queryUserId, setQueryUserId] = useState(userId ?? "");
   const [viewUserId, setViewUserId] = useState<string | null>(userId ?? null);
-  const [activeUserId, setActiveUserId] = useState<string | null>(
-    userId ?? null,
-  );
   const [items, setItems] = useState<CustomerSessionListItem[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
@@ -93,15 +67,6 @@ export function SessionsPage({
   const [revokeKey, setRevokeKey] = useState<string | null>(null);
   const [revokeError, setRevokeError] = useState("");
   const [revoking, setRevoking] = useState(false);
-
-  const [adjustOpen, setAdjustOpen] = useState(false);
-  const [adjustKey, setAdjustKey] = useState<string | null>(null);
-  const [credits, setCredits] = useState("");
-  const [sourceType, setSourceType] = useState<string>("CS_TICKET");
-  const [adjustReason, setAdjustReason] = useState("");
-  const [adjustConfirmOpen, setAdjustConfirmOpen] = useState(false);
-  const [writeError, setWriteError] = useState("");
-  const [submitting, setSubmitting] = useState(false);
   const requestIdRef = useRef(0);
   const contextIdRef = useRef(0);
 
@@ -149,7 +114,6 @@ export function SessionsPage({
     requestIdRef.current += 1;
     setQueryUserId(userId ?? "");
     setViewUserId(userId ?? null);
-    setActiveUserId(userId ?? null);
     setItems([]);
     setTotal(0);
     setOffset(0);
@@ -159,14 +123,6 @@ export function SessionsPage({
     setRevokeKey(null);
     setRevokeError("");
     setRevoking(false);
-    setAdjustOpen(false);
-    setAdjustKey(null);
-    setCredits("");
-    setSourceType("CS_TICKET");
-    setAdjustReason("");
-    setAdjustConfirmOpen(false);
-    setWriteError("");
-    setSubmitting(false);
     void load(userId ?? null, 0);
   }, [load, userId]);
 
@@ -180,8 +136,6 @@ export function SessionsPage({
     }
     contextIdRef.current += 1;
     setViewUserId(target);
-    setActiveUserId(target);
-    setAdjustOpen(false);
     setNotice("");
     void load(target, 0);
   }
@@ -193,8 +147,6 @@ export function SessionsPage({
     }
     contextIdRef.current += 1;
     setViewUserId(null);
-    setActiveUserId(null);
-    setAdjustOpen(false);
     setNotice("");
     void load(null, 0);
   }
@@ -204,10 +156,12 @@ export function SessionsPage({
       onCustomerChange(item.user_id);
       return;
     }
+    // 只看该客户的会话；调账已迁到客户详情，这里不再承担资金入口。
     contextIdRef.current += 1;
-    setActiveUserId(item.user_id);
     setQueryUserId(item.user_id);
-    setAdjustOpen(false);
+    setViewUserId(item.user_id);
+    setNotice("");
+    void load(item.user_id, 0);
   }
 
   function beginRevoke(item: CustomerSessionListItem) {
@@ -248,85 +202,6 @@ export function SessionsPage({
       }
     }
   }
-
-  function handleAdjustSubmit(event: FormEvent) {
-    event.preventDefault();
-    setWriteError("");
-    setError("");
-    const seconds = Number(credits);
-    const isReversal = REVERSAL_SOURCE_TYPES.has(sourceType);
-    if (!Number.isSafeInteger(seconds) || seconds === 0) {
-      setError(
-        isReversal ? "请输入非 0 的积分整数" : "请输入大于 0 的积分整数",
-      );
-      return;
-    }
-    if (seconds < 0 && !isReversal) {
-      setError(
-        "该来源单类型只能正向加积分；反向调账请选择「退款审批」或「账本修正」",
-      );
-      return;
-    }
-    if (!adjustReason.trim()) {
-      setError("请填写事由");
-      return;
-    }
-    setAdjustKey((key) => key ?? crypto.randomUUID());
-    setAdjustConfirmOpen(true);
-  }
-
-  async function submitAdjustment() {
-    if (!activeUserId || submitting || readOnly || !adjustKey) return;
-    const seconds = Number(credits);
-    const input: AdjustmentWriteInput = {
-      sourceDocumentType: sourceType,
-      sourceDocumentRef: `GRANT-${adjustKey}`,
-      credits: seconds,
-    };
-    const key = adjustKey;
-    setAdjustKey(key);
-    setSubmitting(true);
-    const actionContextId = contextIdRef.current;
-    try {
-      const result = await createCustomerAdjustment(
-        activeUserId,
-        input,
-        adjustReason.trim(),
-        key,
-      );
-      if (contextIdRef.current !== actionContextId) return;
-      setNotice(
-        seconds < 0
-          ? `反向调账成功（request id: ${result.request_id}），余额 ${result.wallet_balance_after} 积分；实际退付请在 ZPay 后台办理并以来源单号对齐`
-          : `增加积分成功（request id: ${result.request_id}），余额 ${result.wallet_balance_after} 积分`,
-      );
-      setCredits("");
-      setAdjustReason("");
-      setAdjustKey(null);
-      setAdjustConfirmOpen(false);
-      await load(viewUserId, offset);
-    } catch (cause) {
-      if (contextIdRef.current !== actionContextId) return;
-      setWriteError(
-        cause instanceof Error
-          ? cause.message
-          : seconds < 0
-            ? "反向调账失败：未知错误"
-            : "增加积分失败：未知错误",
-      );
-    } finally {
-      if (contextIdRef.current === actionContextId) {
-        setSubmitting(false);
-      }
-    }
-  }
-
-  // 来源类型只决定「允许不允许输入负数」；钱往哪个方向走由输入符号决定——
-  // 退款审批来源 + 正数 = 服务端走正向加款通道，弹窗必须说「增加积分」。
-  // 方向口径按符号判定与 submitAdjustment 成功通知（seconds < 0）同源，
-  // 避免运营确认的方向与账本实际方向相反（上线前检查 P1-2）。
-  const isReversalSource = REVERSAL_SOURCE_TYPES.has(sourceType);
-  const isReversalInput = Number(credits) < 0;
 
   return (
     <section aria-label="客户会话" className="admin-sessions admin-panel">
@@ -427,83 +302,6 @@ export function SessionsPage({
         />
       ) : null}
 
-      {activeUserId && !readOnly ? (
-        <section className="admin-sessions__adjustment">
-          <button
-            aria-expanded={adjustOpen}
-            className="admin-sessions__adjust-toggle"
-            type="button"
-            onClick={() => setAdjustOpen((open) => !open)}
-          >
-            {adjustOpen ? "收起后台调账" : "展开后台调账"}
-          </button>
-          {adjustOpen ? (
-            <form className="admin-form" onSubmit={handleAdjustSubmit}>
-              <h3>
-                {isReversalInput
-                  ? `为 ${activeUserId} 反向调账（扣减积分）`
-                  : `为 ${activeUserId} 后台增加积分`}
-              </h3>
-              <label>
-                积分整数
-                <input
-                  disabled={adjustConfirmOpen}
-                  min={isReversalSource ? undefined : 1}
-                  step={1}
-                  type="number"
-                  value={credits}
-                  onChange={(event) => {
-                    setCredits(event.target.value);
-                    setAdjustKey(null);
-                  }}
-                />
-              </label>
-              <label>
-                来源单类型
-                <select
-                  disabled={adjustConfirmOpen}
-                  value={sourceType}
-                  onChange={(event) => {
-                    setSourceType(event.target.value);
-                    setAdjustKey(null);
-                  }}
-                >
-                  {SOURCE_DOCUMENT_OPTIONS.map((option) => (
-                    <option key={option} value={option}>
-                      {labelFrom(ADJUSTMENT_SOURCE_LABELS, option)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                事由
-                <input
-                  disabled={adjustConfirmOpen}
-                  value={adjustReason}
-                  onChange={(event) => {
-                    setAdjustReason(event.target.value);
-                    setAdjustKey(null);
-                  }}
-                />
-              </label>
-              {isReversalSource ? (
-                <p className="admin-hint">
-                  此为账本反向记账，实际退付在 ZPay
-                  后台办理（两笔事实以来源单号对齐）。
-                  退款额度以客户当前可用余额为限：已消耗的部分不在账本内退回，
-                  超额提交会被拒绝。
-                </p>
-              ) : (
-                <p className="admin-hint">来源单号自动生成，事由留痕审计。</p>
-              )}
-              <button type="submit" disabled={adjustConfirmOpen}>
-                {isReversalInput ? "执行反向调账" : "执行后台增加积分"}
-              </button>
-            </form>
-          ) : null}
-        </section>
-      ) : null}
-
       <ConfirmDialog
         busy={revoking}
         confirmLabel="确认强制下线"
@@ -522,36 +320,6 @@ export function SessionsPage({
           setRevokeKey(null);
         }}
         onConfirm={(reason) => void submitRevoke(reason)}
-      />
-      <ConfirmDialog
-        busy={submitting}
-        confirmLabel={isReversalInput ? "确认反向调账" : "确认增加积分"}
-        description={
-          <>
-            {isReversalInput
-              ? `即将为 ${activeUserId} 反向调账 ${Math.abs(Number(credits))} 积分（账本扣减）。`
-              : `即将为 ${activeUserId} 增加 ${credits} 积分。`}
-            <br />
-            事由：{adjustReason.trim()}
-            <br />
-            来源单号：GRANT-{adjustKey}
-            {isReversalInput ? (
-              <>
-                <br />
-                实际退付在 ZPay 后台办理，以该来源单号对齐留档。
-              </>
-            ) : null}
-          </>
-        }
-        error={writeError}
-        level="standard"
-        open={adjustConfirmOpen}
-        title={isReversalInput ? "确认反向调账" : "确认后台增加积分"}
-        onClose={() => {
-          setAdjustConfirmOpen(false);
-          setWriteError("");
-        }}
-        onConfirm={() => void submitAdjustment()}
       />
     </section>
   );

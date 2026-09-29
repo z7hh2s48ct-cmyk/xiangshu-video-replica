@@ -17,12 +17,15 @@ export function AccountAccessPage({
   onHome,
   initialMode = "login",
   onModeChange,
+  onForgotPassword,
   remembered = null,
 }: {
   onSubmit(input: AccountAccessInput): Promise<void>;
   onHome(): void;
   initialMode?: "login" | "register";
   onModeChange?(mode: "login" | "register"): void;
+  /** 邮箱找回密码入口。只有登录模式展示：注册的人手里还没有账号。 */
+  onForgotPassword?(): void;
   /** 系统凭据库里已记住的登录，用于预填；本页只读不写。 */
   remembered?: { username: string; password: string } | null;
 }) {
@@ -207,6 +210,18 @@ export function AccountAccessPage({
               <span>记住密码</span>
               <small>保存在本机系统钥匙串，不会明文落盘</small>
             </label>
+          )}
+          {mode === "login" && onForgotPassword && (
+            <p className="account-forgot-row">
+              <button
+                type="button"
+                className="account-forgot"
+                disabled={busy}
+                onClick={onForgotPassword}
+              >
+                忘记密码？
+              </button>
+            </p>
           )}
           {error && (
             <p className="account-error" role="alert">

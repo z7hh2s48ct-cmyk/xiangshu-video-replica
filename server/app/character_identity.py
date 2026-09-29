@@ -7,7 +7,6 @@ import logging
 import re
 import sqlite3
 import struct
-import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
@@ -37,6 +36,7 @@ from app.character_policy import (
     effective_identity_state_values,
 )
 from app.db_portable import BusinessConnection
+from app.external_calls import external_call_model
 from app.permissions import require_role, write_audit
 from app.storage import (
     StorageAdapter,
@@ -188,15 +188,17 @@ class ApilioSourceImageInspector:
             ],
         }
         try:
-            raw_body, _ = self.transport.post(
-                f"{self.base_url}/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                },
-                body=json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode(),
-            )
+            # 质检调用的日志带模型名（调用日志的 model 列）。
+            with external_call_model(self.model):
+                raw_body, _ = self.transport.post(
+                    f"{self.base_url}/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                    },
+                    body=json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode(),
+                )
             response = json.loads(raw_body.decode("utf-8"))
             raw_content = response["choices"][0]["message"]["content"]
             inspection_payload = json.loads(raw_content)
@@ -740,7 +742,6 @@ def complete_source_upload(
         sha256=sha256,
         size_bytes=stored.size,
     )
-    started = time.monotonic()
     try:
         inspection = inspector.inspect(content, content_type=content_type)
     except SourceImageInspectorFailed as exc:
@@ -753,7 +754,6 @@ def complete_source_upload(
             content_type=content_type,
             identity_id=identity_id,
             actor=actor,
-            latency_ms=int((time.monotonic() - started) * 1000),
             content_object_id=registered.id,
         )
         if provider_state_error is not None:
@@ -803,22 +803,7 @@ def complete_source_upload(
                 ),
             )
             identity_source_updated = True
-        conn.execute(
-            """
-            INSERT INTO external_call_logs (
-                id, generation_task_id, provider, model, endpoint_name,
-                latency_ms, request_hash, error_code
-            )
-            VALUES (%s, NULL, %s, %s, 'source_image.inspect', %s, %s, NULL)
-            """,
-            (
-                str(uuid4()),
-                inspection.provider,
-                inspection.model,
-                int((time.monotonic() - started) * 1000),
-                sha256,
-            ),
-        )
+    # 质检 HTTP 调用的日志由传输层统一记录（方案 P0-9），这里不再单独写行。
     if state_error is not None:
         write_audit(
             conn,
@@ -1797,7 +1782,6 @@ def persist_source_inspection_failure(
     content_type: str,
     identity_id: str,
     actor: CurrentUser,
-    latency_ms: int,
     content_object_id: str | None = None,
 ) -> HTTPException | None:
     metadata = completed_asset_metadata(asset, stored_uri=stored_uri, stored_size=stored_size)
@@ -1831,19 +1815,7 @@ def persist_source_inspection_failure(
                 (str(asset["id"]), identity_id),
             )
             identity_source_updated = True
-        conn.execute(
-            """
-            INSERT INTO external_call_logs (
-                id, generation_task_id, provider, model, endpoint_name,
-                latency_ms, request_hash, error_code, error_message_redacted
-            )
-            VALUES (
-                %s, NULL, 'source-image-inspector', NULL, 'source_image.inspect',
-                %s, %s, 'SOURCE_IMAGE_INSPECTOR_UNAVAILABLE', 'source image inspection failed'
-            )
-            """,
-            (str(uuid4()), latency_ms, sha256),
-        )
+    # 质检调用失败的证据由传输层落调用日志（方案 P0-9），这里不再单独写行。
     write_audit(
         conn,
         actor=actor,

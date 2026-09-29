@@ -444,7 +444,7 @@ describe("AdminApp", () => {
       await screen.findByRole("heading", { level: 1, name: "客户管理" }),
     ).toBeInTheDocument();
     expect(
-      await screen.findByText(/后台加款与赠送积分在客户详情内完成/),
+      await screen.findByText(/赠送积分在客户详情内完成/),
     ).toBeInTheDocument();
     expect(
       fetchMock.mock.calls.some(([url]) =>
@@ -463,22 +463,20 @@ describe("AdminApp", () => {
     render(<AdminApp />);
 
     expect(
-      await screen.findByText(/后台加款与赠送积分在客户详情内完成/),
+      await screen.findByText(/赠送积分在客户详情内完成/),
     ).toBeInTheDocument();
 
     // 从侧栏点回「客户管理」= 不带 intent，引导必须跟着 intent 一起消失。
     fireEvent.click(screen.getByRole("button", { name: "客户管理" }));
     expect(window.location.hash).toBe("#admin/customersMgmt");
     await waitFor(() =>
-      expect(
-        screen.queryByText(/后台加款与赠送积分在客户详情内完成/),
-      ).toBeNull(),
+      expect(screen.queryByText(/赠送积分在客户详情内完成/)).toBeNull(),
     );
 
     await act(async () => window.history.back());
     await waitFor(() => expect(window.location.hash).toContain("intent="));
     expect(
-      await screen.findByText(/后台加款与赠送积分在客户详情内完成/),
+      await screen.findByText(/赠送积分在客户详情内完成/),
     ).toBeInTheDocument();
   });
 

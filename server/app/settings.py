@@ -24,7 +24,7 @@ from app.storage import (
 from app.zpay import parse_enabled_channels
 
 ProviderName = Literal[
-    "apilio", "metaso", "cos", "deepseek", "hifly", "tikhub", "dashscope", "douyidou"
+    "apilio", "metaso", "cos", "deepseek", "hifly", "tikhub", "dashscope", "douyidou", "ses"
 ]
 
 SETTINGS_KEY_ENV = "VIDEO_REPLICA_SETTINGS_KEY"
@@ -60,6 +60,9 @@ REQUIRED_PROVIDER_FIELDS: dict[ProviderName, tuple[str, ...]] = {
     "dashscope": ("api_key",),
     # 链接解析（C3）：抖音/快手/小红书等去水印与文案提取网关凭据。
     "douyidou": ("app_id", "app_secret"),
+    # 邮件推送：客户绑定邮箱与找回密码的验证码。只用模板发信（内地地域不支持
+    # 自由正文），模板变量约定见 app.email_delivery。
+    "ses": ("secret_id", "secret_key", "from_address", "code_template_id"),
 }
 DEFAULT_RUNTIME_SETTINGS: dict[str, int | str] = {
     "max_generation_count_per_batch": 4,
@@ -480,6 +483,10 @@ def validate_provider_config(provider: ProviderName, config: dict[str, str]) -> 
         raise ValueError(f"missing required setting: {', '.join(missing)}")
     if provider == "tikhub":
         _validate_tikhub_backup_channel(config)
+    if provider == "ses":
+        from app.email_delivery import validate_email_config
+
+        validate_email_config(config)
     if provider == "apilio":
         from app.analysis import parse_analysis_fallback_models
 
@@ -883,7 +890,12 @@ def remove_cos_lifecycle_rules(
 
 
 def get_provider_tester() -> ProviderTester:
-    return StorageProviderTester(fallback=HiflyProviderTester())
+    # 函数内导入：email_delivery 反向依赖本模块的 SettingsRepository。
+    from app.email_delivery import EmailProviderTester
+
+    return StorageProviderTester(
+        fallback=HiflyProviderTester(fallback=EmailProviderTester(fallback=NoopProviderTester()))
+    )
 
 
 def require_supported_provider(provider: str) -> ProviderName:
