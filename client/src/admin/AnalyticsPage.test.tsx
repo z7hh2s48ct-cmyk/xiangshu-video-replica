@@ -47,7 +47,7 @@ test.each([
       } as never;
     });
     render(<AnalyticsPage />);
-    const table = await screen.findByRole("table", { name: "请求明细" });
+    const table = await screen.findByRole("table", { name: "生成明细" });
     expect(
       within(table).getByRole("cell", { name: expected }),
     ).toBeInTheDocument();
@@ -102,25 +102,25 @@ test.each([
       return { items: [operation], total: 1 } as never;
     });
     render(<AnalyticsPage readOnly />);
-    const table = await screen.findByRole("table", { name: "请求明细" });
+    const table = await screen.findByRole("table", { name: "生成明细" });
     const headers = within(table)
       .getAllByRole("columnheader")
       .map((cell) => cell.textContent);
     const cells = within(within(table).getAllByRole("row")[1]).getAllByRole(
       "cell",
     );
-    expect(headers).toContain("消费折合");
-    expect(headers).toContain("实付收入");
-    expect(cells[headers.indexOf("消费折合")]).toHaveTextContent(
+    expect(headers).toContain("按售价折合");
+    expect(headers).toContain("确认收入");
+    expect(cells[headers.indexOf("按售价折合")]).toHaveTextContent(
       nominalDisplay,
     );
-    expect(cells[headers.indexOf("实付收入")]).toHaveTextContent(paidDisplay);
-    fireEvent.click(within(table).getByRole("button", { name: "查看请求" }));
+    expect(cells[headers.indexOf("确认收入")]).toHaveTextContent(paidDisplay);
+    fireEvent.click(within(table).getByRole("button", { name: "查看详情" }));
     const detail = await screen.findByRole("complementary", {
-      name: "请求核算详情",
+      name: "生成核算详情",
     });
     expect(detail).toHaveTextContent(
-      `消费折合 ${nominalDisplay} · 实付收入 ${paidDisplay}`,
+      `按售价折合 ${nominalDisplay} · 确认收入 ${paidDisplay}`,
     );
     expect(detail).toHaveTextContent("预算 68.3 秒，实际 68.0 秒");
     expect(
@@ -128,10 +128,10 @@ test.each([
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("tab", { name: "成本明细" }));
     expect(
-      within(table).queryByRole("columnheader", { name: "实付收入" }),
+      within(table).queryByRole("columnheader", { name: "确认收入" }),
     ).not.toBeInTheDocument();
     expect(
-      within(table).queryByRole("columnheader", { name: "消费折合" }),
+      within(table).queryByRole("columnheader", { name: "按售价折合" }),
     ).not.toBeInTheDocument();
   },
 );
@@ -268,7 +268,7 @@ describe("billing report export", () => {
   test("hides the export entry from auditor sessions", async () => {
     render(<AnalyticsPage readOnly />);
 
-    await screen.findByRole("table", { name: "请求明细" });
+    await screen.findByRole("table", { name: "生成明细" });
     expect(screen.queryByRole("region", { name: "计费报表导出" })).toBeNull();
   });
 });
