@@ -420,13 +420,21 @@ export type StudioContextValue = {
     copyClaim?: { platformKey: string; nativeId: string },
   ) => void;
   /**
-   * 爆款文案提取（桌面端）：本地抽音轨 → 上传 → 转写 → 回填；共享缓存命中则直接填入。
-   * Web 端没有本地缓存，调用方应退回 `extractScriptFromUpload` 那条服务端拉取链路。
+   * 爆款文案提取（双端统一入口）：
+   * - 桌面端：本地抽音轨 → 上传 → 转写 → 回填；共享缓存命中则直接填入（内部先 claim）。
+   * - Web 端（无本地缓存）：先取共享文案——命中即扣一次「获取文案」费并秒回填入、
+   *   跳过整次导入；未命中分文不扣，回落 `onCacheMiss`（导入 → 转写 → claim 交付）。
    */
-  extractViralCopy: (video: {
-    platformKey?: string;
-    nativeId?: string;
-    playUrl?: string | null;
-  }) => void;
+  extractViralCopy: (
+    video: {
+      platformKey?: string;
+      nativeId?: string;
+      playUrl?: string | null;
+    },
+    options?: {
+      /** Web 端专用：共享缓存未命中时的回落链路（服务端导入 → 转写）。 */
+      onCacheMiss?: () => void;
+    },
+  ) => void;
   refresh: () => void;
 };

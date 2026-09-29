@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import {
+  claimViralCopy,
   createIndependentVideoTask,
   createOralTask,
   customerGetWallet,
@@ -23,6 +24,8 @@ import {
   type IndependentCapabilities,
   listMaterials,
   type Project,
+  type ViralCopyBilling,
+  type ViralPlatform,
 } from "../api";
 import { BrandIdentity } from "../BrandIdentity";
 import { CustomerCenterPage } from "../customer/CustomerCenterPage";
@@ -125,6 +128,7 @@ import type {
   StudioTask,
 } from "./types";
 import { Button, Empty, Hint, Icon, Media, StudioDialog } from "./ui";
+import { cacheAvailable } from "./viralCache";
 import { WorkspaceNotifications } from "./WorkspaceNotifications";
 import { WorkspaceSearch } from "./WorkspaceSearch";
 import "./studio.css";
@@ -2040,16 +2044,67 @@ export function StudioWorkspace({
       });
   };
   /**
-   * 爆款文案提取：桌面端走「本地抽音轨 → 上传 → 转写」，平台不再需要留存原片。
-   *
-   * 只由桌面端调用——Web 端没有本地缓存，走服务端导入链路（导入 → 转写 → 凭视频
-   * 身份获取文案），正文同样只按 claim 回执交付，计费口径与桌面端一致。
+   * 命中共享文案缓存后的统一回填（桌面 / Web 两条 claim-first 链路共用）：
+   * 命中时既没有导入项目也没有转写任务，只把文案填进草稿、不动来源归属。
    */
-  const extractViralCopy = (video: {
-    platformKey?: string;
-    nativeId?: string;
-    playUrl?: string | null;
-  }) => {
+  const applyClaimedViralCopy = (
+    text: string,
+    billing: ViralCopyBilling,
+    guard: { permissionGeneration: number; account: string; scope: string },
+  ) => {
+    const currentDraft = latestDraftRef.current;
+    if (
+      currentUserRoleRef.current === "auditor" ||
+      permissionGenerationRef.current !== guard.permissionGeneration ||
+      saveAccountRef.current !== guard.account ||
+      JSON.stringify([
+        currentDraft.id,
+        currentDraft.projectId,
+        currentDraft.sourceId,
+        currentDraft.sourceAssetId,
+      ]) !== guard.scope
+    )
+      return;
+    // 命中共享缓存：没有项目也没有任务，只把文案填进草稿，不动来源归属。
+    const currentScript = currentDraft.script;
+    patchDraft({
+      scriptEdited: true,
+      script: {
+        ...currentScript,
+        original: text,
+        text: hasCopyResult(currentScript) ? currentScript.text : "",
+        resultKind: hasCopyResult(currentScript) ? "manual" : "extracted",
+        confirmed: false,
+      },
+    });
+    navigate("copy", { returnTo: "workbench" });
+    // 命中共享缓存同样计费（已购则复用）：扣了分就刷新钱包徽标，别让余额看起来没动。
+    if (billing.charged > 0) {
+      setWalletRevision((value) => value + 1);
+    }
+    const billed =
+      billing.charged > 0
+        ? `本次获取扣除 ${billing.charged} 积分`
+        : billing.deduped
+          ? "此前已购买过这条文案，本次未扣费"
+          : "本次未计费";
+    notify(`已命中共享文案缓存，${billed}，文案已填入，请核对后选择二创方式。`);
+  };
+
+  /**
+   * 爆款文案提取（双端统一入口）：
+   * - 桌面端：本地抽音轨 → 上传 → 转写，内部先 claim（命中即秒回、不抽音轨）。
+   * - Web 端（无本地缓存）：先取共享文案——命中即扣一次「获取文案」费并秒回正文、跳过
+   *   整次服务端导入；未命中分文不扣，回落 `onCacheMiss`（导入 → 转写 → claim 交付）。
+   */
+  const extractViralCopy = (
+    video: {
+      platformKey?: string;
+      nativeId?: string;
+      playUrl?: string | null;
+    },
+    options?: { onCacheMiss?: () => void },
+  ) => {
     if (review) {
       notify("审核示例不调用真实接口。");
       return;
@@ -2080,6 +2135,55 @@ export function StudioWorkspace({
       latestDraftRef.current.sourceId,
       latestDraftRef.current.sourceAssetId,
     ]);
+
+    if (!cacheAvailable()) {
+      // Web 端 claim-first：交付侧计费点前移——命中即扣一次「获取文案」费并秒回正文，
+      // 跳过整次导入；未命中分文不扣，交给调用方的导入 → 转写链路（转写完成后再凭
+      // 视频身份 claim 交付）。计费口径与桌面端一致。
+      const onCacheMiss = options?.onCacheMiss;
+      if (!onCacheMiss) {
+        // 桌面链路自带未命中处理；Web 分支少了回落链路说明调用方接错了。
+        notify("该视频暂不支持提取文案，请稍后重试。");
+        return;
+      }
+      extractingRef.current = true;
+      void claimViralCopy(platformKey as ViralPlatform, nativeId)
+        .then((claimed) => {
+          extractingRef.current = false;
+          if (!claimed.text) {
+            // 未命中：本次分文未扣，走调用方的导入 → 转写链路。
+            onCacheMiss();
+            return;
+          }
+          applyClaimedViralCopy(claimed.text, claimed.billing, {
+            permissionGeneration,
+            account: extractionAccount,
+            scope: extractionScope,
+          });
+        })
+        .catch((cause: unknown) => {
+          extractingRef.current = false;
+          // 读不到计费口径（未定价 / 停用 / 网络失败）时继续导入会白花一次转写费，
+          // 与桌面端同策略：如实提示，不做静默回落。
+          if (
+            currentUserRoleRef.current === "auditor" ||
+            permissionGenerationRef.current !== permissionGeneration
+          )
+            return;
+          if (
+            openWalletIfInsufficientCredits(cause, {
+              notify,
+              openWallet: () => openLive("wallet"),
+            })
+          )
+            return;
+          notify(
+            customerVisibleErrorMessage(cause, "文案提取失败，请稍后重试。"),
+          );
+        });
+      return;
+    }
+
     extractingRef.current = true;
     notify("正在准备本地音轨并转写文案，预计一到两分钟，请勿关闭页面…");
     // 与上传链路一致：提交即进文案工坊，用进度横幅承载等待过程。
@@ -2104,45 +2208,11 @@ export function StudioWorkspace({
         }
         extractingRef.current = false;
         endCopyExtractionProgress();
-        const currentDraft = latestDraftRef.current;
-        if (
-          currentUserRoleRef.current === "auditor" ||
-          permissionGenerationRef.current !== permissionGeneration ||
-          saveAccountRef.current !== extractionAccount ||
-          JSON.stringify([
-            currentDraft.id,
-            currentDraft.projectId,
-            currentDraft.sourceId,
-            currentDraft.sourceAssetId,
-          ]) !== extractionScope
-        )
-          return;
-        // 命中共享缓存：没有项目也没有任务，只把文案填进草稿，不动来源归属。
-        const currentScript = currentDraft.script;
-        patchDraft({
-          scriptEdited: true,
-          script: {
-            ...currentScript,
-            original: receipt.text,
-            text: hasCopyResult(currentScript) ? currentScript.text : "",
-            resultKind: hasCopyResult(currentScript) ? "manual" : "extracted",
-            confirmed: false,
-          },
+        applyClaimedViralCopy(receipt.text, receipt.billing, {
+          permissionGeneration,
+          account: extractionAccount,
+          scope: extractionScope,
         });
-        navigate("copy", { returnTo: "workbench" });
-        // 命中共享缓存同样计费（已购则复用）：扣了分就刷新钱包徽标，别让余额看起来没动。
-        if (receipt.billing.charged > 0) {
-          setWalletRevision((value) => value + 1);
-        }
-        const billed =
-          receipt.billing.charged > 0
-            ? `本次获取扣除 ${receipt.billing.charged} 积分`
-            : receipt.billing.deduped
-              ? "此前已购买过这条文案，本次未扣费"
-              : "本次未计费";
-        notify(
-          `已命中共享文案缓存，${billed}，文案已填入，请核对后选择二创方式。`,
-        );
       })
       .catch((cause: unknown) => {
         extractingRef.current = false;
