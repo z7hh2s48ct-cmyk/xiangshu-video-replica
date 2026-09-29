@@ -53,9 +53,10 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 # PENDING 期可写列白名单（计费请求上的 API 类型元数据此前会被触发器拒绝），
 # 20260927T1200_admin_offline_payment_source 为管理员代客开通套餐追加来源单类型
 # OFFLINE_PAYMENT，20260927T0000_oral_voice_language_settings 给 oral_voices 增加
-# 样本语言与语速/音量/音调参数列（附 CHECK 约束）。
+# 样本语言与语速/音量/音调参数列（附 CHECK 约束），20260928T1000_external_call_response_log
+# 给 external_call_logs 追加原始响应、任务归属与第三方任务号列（管理端报错排查）。
 # 迁移后 alembic 版本头即该值，9 处 assert version == HEAD_REVISION 依赖此值。
-HEAD_REVISION = "20260927T0000_oral_voice_language_settings"
+HEAD_REVISION = "20260928T1000_external_call_response_log"
 
 
 def test_viral_script_cache_migration_preserves_results_without_task_foreign_keys(

@@ -57,6 +57,7 @@ const settingsSnapshot = {
     tikhub: { provider: "tikhub", configured: false, config: {} },
     dashscope: { provider: "dashscope", configured: false, config: {} },
     douyidou: { provider: "douyidou", configured: false, config: {} },
+    ses: { provider: "ses", configured: false, config: {} },
   },
   runtime: {
     max_generation_count_per_batch: 5,
@@ -104,6 +105,16 @@ function installFetch(options?: {
       }
       return jsonResponse({
         provider: "metaso",
+        configured: true,
+        config: {},
+      });
+    }
+    if (
+      url.endsWith("/api/admin/settings/providers/ses") &&
+      init?.method === "PUT"
+    ) {
+      return jsonResponse({
+        provider: "ses",
         configured: true,
         config: {},
       });
@@ -353,6 +364,54 @@ describe("SettingsPanel", () => {
     expect(saveCall).toBeDefined();
     expect(saveCall?.[1]?.body).toBe(
       JSON.stringify({ config: { api_key: DUMMY_KEY } }),
+    );
+  });
+
+  it("saves the mail provider through the PUT settings route", async () => {
+    const fetchMock = installFetch();
+    const { container } = render(<SettingsPanel />);
+
+    await screen.findByText("视频生成");
+    const ses = providerCard(container, "ses");
+    expect(ses.getByText("邮件推送")).toBeInTheDocument();
+    expect(ses.getByLabelText("SecretId")).toHaveAttribute("type", "password");
+
+    fireEvent.change(ses.getByLabelText("SecretId"), {
+      target: { value: DUMMY_KEY },
+    });
+    fireEvent.change(ses.getByLabelText("SecretKey"), {
+      target: { value: DUMMY_KEY },
+    });
+    fireEvent.change(ses.getByLabelText("发信地址"), {
+      target: { value: "众墅之家 <noreply@example.com>" },
+    });
+    fireEvent.change(ses.getByLabelText("验证码模板 ID"), {
+      target: { value: "1234567" },
+    });
+    fireEvent.click(ses.getByRole("button", { name: "保存" }));
+
+    expect(await ses.findByText("已保存")).toBeInTheDocument();
+    // 保存后密钥不留在表单里。
+    expect(ses.getByLabelText("SecretId")).toHaveValue("");
+
+    const saveCall = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url).endsWith("/api/admin/settings/providers/ses") &&
+        init?.method === "PUT",
+    );
+    expect(saveCall).toBeDefined();
+    // 未填的可选字段（通知模板 / 地域）随表单原样上报空串，由服务端决定默认值。
+    expect(saveCall?.[1]?.body).toBe(
+      JSON.stringify({
+        config: {
+          secret_id: DUMMY_KEY,
+          secret_key: DUMMY_KEY,
+          from_address: "众墅之家 <noreply@example.com>",
+          code_template_id: "1234567",
+          notice_template_id: "",
+          region: "",
+        },
+      }),
     );
   });
 

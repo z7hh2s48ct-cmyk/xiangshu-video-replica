@@ -145,6 +145,12 @@ with psycopg.connect("${adminDsn}", autocommit=True) as c:
     VIDEO_REPLICA_CUSTOMER_IDEMPOTENCY_AEAD_KEY: keys.IDEMPOTENCY_AEAD,
     VIDEO_REPLICA_RATE_LIMIT_ACTIVATE_IP: "100000",
     VIDEO_REPLICA_RATE_LIMIT_ACTIVATE_CODE: "100000",
+    // The suite registers one throwaway account per scenario and logs in more
+    // than once per account; the default 10/5 login budgets run out by the
+    // later spec files, surfacing as a spurious "操作过于频繁" 429 on the
+    // register screen. E2E is not where the limiter is under test.
+    VIDEO_REPLICA_RATE_LIMIT_LOGIN_IP: "100000",
+    VIDEO_REPLICA_RATE_LIMIT_LOGIN_ACCOUNT: "100000",
     VIDEO_REPLICA_RATE_LIMIT_WINDOW_SECONDS: "3600",
     // Recharge lane (PR #65 task #7): the customer wallet view needs the ZPay
     // config + deployment settings to create orders.
@@ -199,7 +205,10 @@ with psycopg.connect("${adminDsn}", autocommit=True) as c:
 
   await waitForHealth(WEB_URL, 60_000, "vite");
 
-  // Persist run state for the specs.
+  // Persist run state for the specs. The email-flow specs spawn
+  // read_email_code.py themselves, so besides the URLs they need the E2E
+  // database DSN, the device-domain key that keys the code digests, and the
+  // venv python — all throwaway values minted for this run.
   writeFileSync(
     path.join(runDir, "run.json"),
     `${JSON.stringify(
@@ -207,6 +216,9 @@ with psycopg.connect("${adminDsn}", autocommit=True) as c:
         apiUrl: API_URL,
         webUrl: WEB_URL,
         codes: SEED_CODES,
+        dsn,
+        fingerprintKey: keys.FINGERPRINT,
+        python,
       },
       null,
       2,

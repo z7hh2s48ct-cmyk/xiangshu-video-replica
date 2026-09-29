@@ -61,6 +61,7 @@ from pg_test_kit import (
 )
 from psycopg.rows import dict_row
 
+from app.character_identity import character_error
 from app.character_image_generation import acquire_character_generation_task
 from app.db_pg import DATABASE_URL_ENV, close_pg_pool, pg_transaction
 from app.db_portable import BusinessConnection
@@ -84,6 +85,7 @@ from app.image_tasks import (
     acquire_character_sheet_task,
     acquire_first_frame_task,
     fail_image_task,
+    rate_limit_backoff_seconds,
     record_image_task_provider,
     save_first_frame_provider_submission,
 )
@@ -3292,6 +3294,193 @@ def test_retryable_transport_failure_stays_uncertain(pg_state: str) -> None:
     )[0]
     assert row["status"] == "SUBMISSION_UNCERTAIN"
     assert row["error_code"] == "IMAGE_TASK_SUBMISSION_UNCERTAIN"
+
+
+def test_character_sheet_definitive_provider_failure_lands_failed(pg_state: str) -> None:
+    """复现 2026-09-27 批量事故：人物五视图包装层把确定性供应商失败包成
+    502 后，任务不得落入 SUBMISSION_UNCERTAIN——上游已明确回答，没有
+    "结果未知"可言，应当置为可重试的 FAILED 让用户自助重新生成。"""
+    _seed_base(pg_state)
+    _seed_image_task(pg_state, table="character_sheet_tasks", task_id="cs-det")
+    with pg_transaction() as raw:
+        lease = acquire_character_sheet_task(BusinessConnection.postgres(raw), worker_id="worker-a")
+    assert lease is not None
+    with pg_transaction() as raw:
+        fail_image_task(
+            BusinessConnection.postgres(raw),
+            table="character_sheet_tasks",
+            lease=lease,
+            cause=character_error(
+                502,
+                "CONTACT_SHEET_PROVIDER_FAILED",
+                "生成服务返回了无效结果，本次未扣除积分，请重新生成。",
+                failure_kind="definitive",
+            ),
+            submission_started=True,
+        )
+    row = _rows(
+        pg_state,
+        "SELECT status, error_code, retryable FROM character_sheet_tasks WHERE id = 'cs-det'",
+    )[0]
+    assert row["status"] == "FAILED"
+    assert row["error_code"] == "CONTACT_SHEET_PROVIDER_FAILED"
+    assert int(row["retryable"]) == 1
+
+
+def test_character_sheet_rate_limit_requeues_until_attempts_exhausted(pg_state: str) -> None:
+    """429 是上游明确拒绝（未受理、未计费）：尝试未用尽时放回 PENDING
+    队列由 worker 错峰重取，而不是进 SUBMISSION_UNCERTAIN；attempt 耗尽
+    后落为可重试的 FAILED（忙碌），不再消耗自动重试。"""
+    _seed_base(pg_state)
+    _seed_image_task(pg_state, table="character_sheet_tasks", task_id="cs-429a", attempt=1)
+    with pg_transaction() as raw:
+        lease = acquire_character_sheet_task(BusinessConnection.postgres(raw), worker_id="worker-a")
+    assert lease is not None and lease.attempt == 2
+    busy_error = character_error(
+        429,
+        "CONTACT_SHEET_PROVIDER_BUSY",
+        "生成服务繁忙，本次未扣除积分，请稍后重新生成。",
+        failure_kind="rate_limited",
+    )
+    with pg_transaction() as raw:
+        fail_image_task(
+            BusinessConnection.postgres(raw),
+            table="character_sheet_tasks",
+            lease=lease,
+            cause=busy_error,
+            submission_started=True,
+        )
+    row = _rows(
+        pg_state,
+        "SELECT status, error_code, retryable, locked_by, completed_at"
+        " FROM character_sheet_tasks WHERE id = 'cs-429a'",
+    )[0]
+    assert row["status"] == "PENDING"
+    assert row["error_code"] == "IMAGE_TASK_PROVIDER_BUSY"
+    assert int(row["retryable"]) == 1
+    assert row["locked_by"] is None
+    assert row["completed_at"] is None
+
+    # attempt 已达上限：终态为忙碌失败，用户可自助重新生成。
+    # 领取按 created_at 先进先出，先清掉第一阶段重排队的任务，保证领到 cs-429b。
+    _exec(pg_state, "DELETE FROM character_sheet_tasks WHERE id = 'cs-429a'")
+    _seed_image_task(pg_state, table="character_sheet_tasks", task_id="cs-429b", attempt=2)
+    with pg_transaction() as raw:
+        last_lease = acquire_character_sheet_task(
+            BusinessConnection.postgres(raw), worker_id="worker-a"
+        )
+    assert last_lease is not None and last_lease.attempt == 3
+    with pg_transaction() as raw:
+        fail_image_task(
+            BusinessConnection.postgres(raw),
+            table="character_sheet_tasks",
+            lease=last_lease,
+            cause=busy_error,
+            submission_started=True,
+        )
+    final = _rows(
+        pg_state,
+        "SELECT status, error_code, retryable FROM character_sheet_tasks WHERE id = 'cs-429b'",
+    )[0]
+    assert final["status"] == "FAILED"
+    assert final["error_code"] == "IMAGE_TASK_PROVIDER_BUSY"
+    assert int(final["retryable"]) == 1
+
+
+def test_first_frame_rate_limit_transport_requeues_then_fails_busy(pg_state: str) -> None:
+    """首帧 submit 阶段 429（无回执）以原始传输异常形态到达：尝试未用尽时
+    同样重排队错峰重试；耗尽后落忙碌失败，不再涌入 SUBMISSION_UNCERTAIN
+    （对无回执任务对账只能 fail-closed，等于把用户推给管理员）。"""
+    _seed_base(pg_state)
+    _seed_image_task(pg_state, table="first_frame_tasks", task_id="ff-429a", attempt=1)
+    with pg_transaction() as raw:
+        lease = acquire_first_frame_task(BusinessConnection.postgres(raw), worker_id="worker-a")
+    assert lease is not None and lease.attempt == 2
+    with pg_transaction() as raw:
+        fail_image_task(
+            BusinessConnection.postgres(raw),
+            table="first_frame_tasks",
+            lease=lease,
+            cause=RetryableImageProviderFailed("Apilio returned HTTP 429", rate_limited=True),
+            submission_started=True,
+        )
+    row = _rows(
+        pg_state,
+        "SELECT status, error_code, retryable FROM first_frame_tasks WHERE id = 'ff-429a'",
+    )[0]
+    assert row["status"] == "PENDING"
+    assert row["error_code"] == "IMAGE_TASK_PROVIDER_BUSY"
+    assert int(row["retryable"]) == 1
+
+    _exec(pg_state, "DELETE FROM first_frame_tasks WHERE id = 'ff-429a'")
+    _seed_image_task(pg_state, table="first_frame_tasks", task_id="ff-429b", attempt=2)
+    with pg_transaction() as raw:
+        last_lease = acquire_first_frame_task(
+            BusinessConnection.postgres(raw), worker_id="worker-a"
+        )
+    assert last_lease is not None and last_lease.attempt == 3
+    with pg_transaction() as raw:
+        fail_image_task(
+            BusinessConnection.postgres(raw),
+            table="first_frame_tasks",
+            lease=last_lease,
+            cause=RetryableImageProviderFailed("Apilio returned HTTP 429", rate_limited=True),
+            submission_started=True,
+        )
+    final = _rows(
+        pg_state,
+        "SELECT status, error_code, retryable FROM first_frame_tasks WHERE id = 'ff-429b'",
+    )[0]
+    assert final["status"] == "FAILED"
+    assert final["error_code"] == "IMAGE_TASK_PROVIDER_BUSY"
+    assert int(final["retryable"]) == 1
+
+
+def test_character_sheet_transport_outage_stays_uncertain(pg_state: str) -> None:
+    """传输层中断（超时/连接断）结果真未知：人物五视图与首帧同样保守，
+    仍归档 SUBMISSION_UNCERTAIN 交管理员核对，绝不盲目重试。"""
+    _seed_base(pg_state)
+    _seed_image_task(pg_state, table="character_sheet_tasks", task_id="cs-trx")
+    with pg_transaction() as raw:
+        lease = acquire_character_sheet_task(BusinessConnection.postgres(raw), worker_id="worker-a")
+    assert lease is not None
+    with pg_transaction() as raw:
+        fail_image_task(
+            BusinessConnection.postgres(raw),
+            table="character_sheet_tasks",
+            lease=lease,
+            cause=character_error(
+                502,
+                "CONTACT_SHEET_PROVIDER_FAILED",
+                "人物五视图生成服务暂不可用，请稍后重试。",
+                failure_kind="transport_uncertain",
+            ),
+            submission_started=True,
+        )
+    row = _rows(
+        pg_state,
+        "SELECT status, error_code FROM character_sheet_tasks WHERE id = 'cs-trx'",
+    )[0]
+    assert row["status"] == "SUBMISSION_UNCERTAIN"
+    assert row["error_code"] == "IMAGE_TASK_SUBMISSION_UNCERTAIN"
+
+
+def test_rate_limit_backoff_seconds_jitter_bounds() -> None:
+    """退避秒数只对限流失败生效：full jitter 指数退避并封顶，非限流为 0。"""
+    busy = character_error(
+        429, "CONTACT_SHEET_PROVIDER_BUSY", "生成服务繁忙", failure_kind="rate_limited"
+    )
+    plain_502 = character_error(502, "CONTACT_SHEET_PROVIDER_FAILED", "服务暂不可用")
+    transport = RetryableImageProviderFailed("Apilio image request failed")
+    rate_limited_transport = RetryableImageProviderFailed(
+        "Apilio returned HTTP 429", rate_limited=True
+    )
+    for cause in (plain_502, transport):
+        assert rate_limit_backoff_seconds(cause, attempt=1) == 0.0
+    for attempt, cap in ((1, 5.0), (2, 10.0), (3, 20.0), (9, 45.0)):
+        backoff = rate_limit_backoff_seconds(busy, attempt=attempt)
+        assert 0.0 <= backoff <= cap
+        assert 0.0 < rate_limit_backoff_seconds(rate_limited_transport, attempt=attempt) <= cap
 
 
 def test_worker_round_logs_task_scoped_failure(

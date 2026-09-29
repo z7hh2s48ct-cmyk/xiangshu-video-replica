@@ -1482,6 +1482,7 @@ export interface AuditLogResponse {
 }
 
 export interface AuditLogOptions {
+  scope?: "admin" | "customer" | "all";
   eventType?: string;
   actorUserId?: string;
   targetUserId?: string;
@@ -1497,13 +1498,18 @@ export interface AuditLogOptions {
  * Fetch the unified audit trail (A10: five audited surfaces UNIONed) with
  * pagination and combined filters.
  *
- * GET /api/control/audit-log?event_type=&actor_user_id=&target_user_id=
+ * GET /api/control/audit-log?scope=&event_type=&actor_user_id=&target_user_id=
  *   &created_from=&created_to=&limit=&offset=
+ *
+ * P0-3：`scope` 默认 admin——客户工作台的日常动作也写在同一张表，整表并入
+ * 会淹没管理员操作；客户详情的「操作记录」用 scope=customer + targetUserId
+ * 查看某位客户自己的动作。
  */
 export async function listAuditLog(
   options: AuditLogOptions = {},
 ): Promise<AuditLogResponse> {
   const params = new URLSearchParams();
+  if (options.scope) params.set("scope", options.scope);
   if (options.eventType) params.set("event_type", options.eventType);
   if (options.actorUserId) params.set("actor_user_id", options.actorUserId);
   if (options.targetUserId) params.set("target_user_id", options.targetUserId);
@@ -1548,6 +1554,7 @@ export async function getAdminGenerationRecords(
     status?: string;
     recordType?: string;
     failurePhase?: string;
+    taskRef?: string;
     createdFrom?: string;
     createdTo?: string;
   } = {},
@@ -1560,6 +1567,8 @@ export async function getAdminGenerationRecords(
   if (options.status) params.set("status", options.status);
   if (options.recordType) params.set("record_type", options.recordType);
   if (options.failurePhase) params.set("failure_phase", options.failurePhase);
+  // P0-9 检索：服务端 task_ref 口径按任务编号匹配。
+  if (options.taskRef) params.set("task_ref", options.taskRef);
   if (options.createdFrom) params.set("created_from", options.createdFrom);
   if (options.createdTo) params.set("created_to", options.createdTo);
   const response = await requestControl(
@@ -1578,6 +1587,7 @@ export async function getAdminGenerationRecordSummary(
     status?: string;
     recordType?: string;
     failurePhase?: string;
+    taskRef?: string;
     createdFrom?: string;
     createdTo?: string;
   } = {},
@@ -1587,6 +1597,8 @@ export async function getAdminGenerationRecordSummary(
   if (options.status) params.set("status", options.status);
   if (options.recordType) params.set("record_type", options.recordType);
   if (options.failurePhase) params.set("failure_phase", options.failurePhase);
+  // task_ref 与列表同发，聚合口径跟随筛选。
+  if (options.taskRef) params.set("task_ref", options.taskRef);
   if (options.createdFrom) params.set("created_from", options.createdFrom);
   if (options.createdTo) params.set("created_to", options.createdTo);
   const query = params.toString();
@@ -1598,6 +1610,52 @@ export async function getAdminGenerationRecordSummary(
     throw await parseActivationError(response, "读取生成记录聚合失败");
   }
   return response.json() as Promise<AdminGenerationRecordSummary>;
+}
+
+export type AdminExternalCall = components["schemas"]["ExternalCallSummary"];
+export type AdminExternalCallList = components["schemas"]["ExternalCallList"];
+export type AdminExternalCallResponse =
+  components["schemas"]["ExternalCallResponse"];
+
+/**
+ * P0-9：某条生成记录的全部第三方接口调用，按时间顺序。
+ *
+ * GET /api/control/generation-records/{record_type}/{record_id}/calls —
+ * 把「这条记录到底出网调了几次、供应商怎么回」摊开给运营看，
+ * 与记录级三字段（provider_error_code / provider_message / advice）互补。
+ */
+export async function getAdminGenerationRecordCalls(
+  recordType: string,
+  recordId: string,
+): Promise<AdminExternalCallList> {
+  const response = await requestControl(
+    `/api/control/generation-records/${encodeURIComponent(recordType)}/${encodeURIComponent(recordId)}/calls`,
+    { method: "GET" },
+  );
+  if (!response.ok) {
+    throw await parseActivationError(response, "读取第三方调用记录失败");
+  }
+  return response.json() as Promise<AdminExternalCallList>;
+}
+
+/**
+ * P0-9：读取一次调用的原始响应（已脱敏）。
+ *
+ * GET /api/control/external-calls/{call_id}/response — 每次查看都写高敏
+ * 审计（external_call.response_view），因此不做缓存、不自动调用，只在
+ * 运营显式点击时读取；审计员角色被服务端 403 拦截，界面据此隐藏入口。
+ */
+export async function getExternalCallResponse(
+  callId: string,
+): Promise<AdminExternalCallResponse> {
+  const response = await requestControl(
+    `/api/control/external-calls/${encodeURIComponent(callId)}/response`,
+    { method: "GET" },
+  );
+  if (!response.ok) {
+    throw await parseActivationError(response, "读取调用原始响应失败");
+  }
+  return response.json() as Promise<AdminExternalCallResponse>;
 }
 
 export interface FirstFrameReconcileResult {

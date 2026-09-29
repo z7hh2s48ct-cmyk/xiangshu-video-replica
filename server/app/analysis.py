@@ -26,6 +26,12 @@ from pydantic import (
 )
 
 from app.db_portable import BusinessConnection
+from app.external_calls import (
+    endpoint_from_url,
+    external_call_context,
+    external_call_model,
+    recorded_urlopen,
+)
 
 ANALYSIS_KIND = "analysis"
 SHOT_CARD_KIND = "shot_card"
@@ -132,11 +138,20 @@ _analysis_task_ref: ContextVar[str | None] = ContextVar("analysis_task_ref", def
 
 
 @contextmanager
-def analysis_task_context(*, task_id: str, project_id: str, asset_id: str) -> Iterator[None]:
+def analysis_task_context(
+    *,
+    task_id: str,
+    project_id: str,
+    asset_id: str,
+    attempt: int | None = None,
+) -> Iterator[None]:
     """Bind the task reference for provider-call log lines in this scope."""
     token = _analysis_task_ref.set(f"task={task_id} project={project_id} asset={asset_id}")
     try:
-        yield
+        # 同一作用域内的第三方调用日志也归到这条拆解任务（方案 P0-9）。重试轮次由调用方
+        # 透传：这个内层上下文会覆盖外层绑定的 attempt，不透传会把轮次抹成空。
+        with external_call_context("ANALYSIS", task_id, attempt=attempt):
+            yield
     finally:
         _analysis_task_ref.reset(token)
 
@@ -352,8 +367,16 @@ class UrllibApilioChatTransport:
     ) -> tuple[bytes, Mapping[str, str]]:
         try:
             request = Request(url, data=body, headers=dict(headers), method="POST")
-            with urlopen(request, timeout=self.timeout_seconds) as response:  # noqa: S310
-                return response.read(), dict(response.headers.items())
+            # 调用与原始响应落到调用日志（方案 P0-9）；opener 取本模块的 urlopen，
+            # 测试替换它时照样生效。
+            response_body, response_headers, _status = recorded_urlopen(
+                request,
+                timeout=self.timeout_seconds,
+                provider="apilio_gemini",
+                endpoint=endpoint_from_url(url),
+                opener=urlopen,
+            )
+            return response_body, response_headers
         except HTTPError as exc:
             try:
                 reason = redacted_upstream_reason(exc.read())
@@ -531,7 +554,9 @@ class ApilioGemini:
                 self.failover_pause(FAILOVER_RETRY_WAIT_SECONDS)
             attempted.append(model)
             try:
-                return self._complete_once(payload)
+                # 每条调用日志记下本次实际使用的模型（命中备选时与主模型不同）。
+                with external_call_model(model):
+                    return self._complete_once(payload)
             except AnalysisProviderFailed as exc:
                 last_failure = exc
                 if index < len(models) - 1 and _should_try_fallback(exc, model=model):

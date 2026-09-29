@@ -989,6 +989,7 @@ def perform_analysis_task(
         task_id=work.lease.id,
         project_id=work.lease.project_id,
         asset_id=work.lease.asset_id,
+        attempt=work.lease.attempt,
     ):
         return _perform_analysis_task(work, on_provider_result=on_provider_result)
 

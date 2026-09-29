@@ -52,6 +52,7 @@ from app.first_frames import (
     ImageInput,
     ImageProvider,
     ImageProviderFailed,
+    RetryableImageProviderFailed,
     SceneContactSheetQualityResult,
 )
 from app.media import storage_key_from_uri
@@ -3012,6 +3013,7 @@ def _require_contact_sheet_resolution(
             502,
             "CONTACT_SHEET_RESOLUTION_TOO_LOW",
             "人物五视图分辨率不足，请稍后重试。",
+            failure_kind="definitive",
         )
 
 
@@ -3031,6 +3033,7 @@ def _require_contact_sheet_views(
             502,
             "CONTACT_SHEET_PROVIDER_INVALID_OUTPUT",
             "人物五视图生成服务返回了无法裁剪的图片，请稍后重试。",
+            failure_kind="definitive",
         )
     return crops
 
@@ -3632,11 +3635,30 @@ def _generate_contact_sheet_content(
                 character_reference_images=[],
                 output_count=1,
             )
-        except ImageProviderFailed as exc:
+        except RetryableImageProviderFailed as exc:
+            if exc.rate_limited:
+                # 429=上游明确拒绝且未受理：任务层可安全错峰重试，不产生
+                # 重复计费；超时/5xx 结果未知，保守交管理员核对。
+                raise character_error(
+                    429,
+                    "CONTACT_SHEET_PROVIDER_BUSY",
+                    "生成服务繁忙，本次未扣除积分，请稍后重新生成。",
+                    failure_kind="rate_limited",
+                ) from exc
             raise character_error(
                 502,
                 "CONTACT_SHEET_PROVIDER_FAILED",
                 "人物五视图生成服务暂不可用，请稍后重试。",
+                failure_kind="transport_uncertain",
+            ) from exc
+        except ImageProviderFailed as exc:
+            # 上游明确返回了不可用结果（无效 JSON/缺图/数量不符/拒收回执）：
+            # 确定性失败，重试同一任务可复现，不应落入"待核对"。
+            raise character_error(
+                502,
+                "CONTACT_SHEET_PROVIDER_FAILED",
+                "生成服务返回了无效结果，本次未扣除积分，请重新生成。",
+                failure_kind="definitive",
             ) from exc
         else:
             if generated:
@@ -3649,6 +3671,7 @@ def _generate_contact_sheet_content(
                 502,
                 "CONTACT_SHEET_PROVIDER_INVALID_OUTPUT",
                 "人物五视图生成服务返回了无效图片，请稍后重试。",
+                failure_kind="definitive",
             )
     raise AssertionError("configured image provider path must return or raise")
 
