@@ -96,6 +96,28 @@ export const FAILURE_PHASE_LABELS: LabelMap = {
   response: "上游返回不可用",
 };
 
+/** 失败的原因分类，与服务端 failure_runbook.FailureCategory 一一对应。
+ *
+ * 回答的是「这条失败该往哪边归类」——比建议文本更适合先筛一遍再分工。
+ */
+export const FAILURE_CATEGORY_LABELS: LabelMap = {
+  CUSTOMER_ASSET: "客户素材",
+  CONTENT_REVIEW: "内容审核",
+  PROVIDER_BUSY: "系统繁忙",
+  PROVIDER_FAULT: "服务商故障",
+  CONFIG: "配置问题",
+  DEFECT: "系统缺陷",
+  // 主动取消、检查点自愈、对账已恢复这类**流程状态**：不是故障，不需要按故障处理。
+  NOT_A_FAILURE: "无需处理（流程状态）",
+};
+
+/** 失败的处理人，与服务端 failure_runbook.FailureOwner 一一对应。 */
+export const FAILURE_OWNER_LABELS: LabelMap = {
+  SUPPORT: "客服告知客户",
+  OPS: "运营重试",
+  ENGINEERING: "技术处理",
+};
+
 /** 单次拆解尝试的终局，与 analysis_task_attempts.status 一一对应。 */
 export const ANALYSIS_ATTEMPT_STATUS_LABELS: LabelMap = {
   FAILED: "失败",

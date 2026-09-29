@@ -1638,6 +1638,30 @@ export async function getAdminGenerationRecordCalls(
   return response.json() as Promise<AdminExternalCallList>;
 }
 
+/** 生成结果的派生缩略图（方案 P2-1）；没有可签的图时 `url` 为 null。 */
+export type AdminGenerationRecordThumbnail =
+  components["schemas"]["GenerationRecordThumbnail"];
+
+/**
+ * 签发某条生成记录的缩略图地址。
+ *
+ * 服务端只签入库时派生的小图，并在签出成功时写一条审计——所以调用方应当按需取
+ * （例如详情展开时），而不是在列表渲染时批量拉。
+ */
+export async function getAdminGenerationRecordThumbnail(
+  recordType: string,
+  recordId: string,
+): Promise<AdminGenerationRecordThumbnail> {
+  const response = await requestControl(
+    `/api/control/generation-records/${encodeURIComponent(recordType)}/${encodeURIComponent(recordId)}/thumbnail`,
+    { method: "GET" },
+  );
+  if (!response.ok) {
+    throw await parseActivationError(response, "读取生成结果缩略图失败");
+  }
+  return response.json() as Promise<AdminGenerationRecordThumbnail>;
+}
+
 /**
  * P0-9：读取一次调用的原始响应（已脱敏）。
  *

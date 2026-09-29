@@ -8,6 +8,7 @@ vi.mock("../api.admin", () => ({
   getAdminGenerationRecords: vi.fn(),
   getAdminGenerationRecordSummary: vi.fn(),
   getAdminGenerationRecordCalls: vi.fn(),
+  getAdminGenerationRecordThumbnail: vi.fn(),
   getExternalCallResponse: vi.fn(),
   getAdminAnalysisDiagnostics: vi.fn(),
   reconcileFirstFrameTask: vi.fn(),
@@ -50,6 +51,16 @@ describe("GenerationRecordsPage", () => {
       items: [],
       total: 0,
     });
+    // 缩略图默认给「没有派生小图」：展开详情的用例都会渲染它，不该让它们各自
+    // 关心图片；要验图片的用例自己覆盖这一条。
+    vi.mocked(adminApi.getAdminGenerationRecordThumbnail).mockResolvedValue({
+      record_type: "FIRST_FRAME_IMAGE",
+      record_id: "ff-1",
+      url: null,
+      expires_in_seconds: 604800,
+    } as Awaited<
+      ReturnType<typeof adminApi.getAdminGenerationRecordThumbnail>
+    >);
     vi.mocked(adminApi.getAdminGenerationRecordSummary).mockResolvedValue({
       total: 3,
       counts: [
@@ -354,6 +365,56 @@ describe("GenerationRecordsPage", () => {
     expect(screen.getByText("400")).toBeInTheDocument();
     expect(screen.getByText("不可重试")).toBeInTheDocument();
     expect(screen.getByText(upstreamReason)).toBeInTheDocument();
+  });
+
+  it("shows the failure category and who is expected to handle it", async () => {
+    // P2-1：分类与处理人回答「这条失败该归谁办」，运营先筛一遍再分工。
+    const advice = "稍后重试一次；持续失败核对接入商服务状态。";
+    vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
+      items: [
+        firstFrameRecord({
+          status: "FAILED",
+          error_code: "ANALYSIS_PROVIDER_FAILED",
+          advice,
+          failure_category: "PROVIDER_FAULT",
+          failure_owner: "OPS",
+        }),
+      ],
+      total: 1,
+    } as unknown as Awaited<
+      ReturnType<typeof adminApi.getAdminGenerationRecords>
+    >);
+    vi.mocked(adminApi.getAdminGenerationRecordSummary).mockResolvedValue({
+      total: 1,
+      counts: [
+        { record_type: "FIRST_FRAME_IMAGE", status: "FAILED", count: 1 },
+      ],
+      failure_reasons: [
+        {
+          error_code: "ANALYSIS_PROVIDER_FAILED",
+          failure_phase: "http",
+          reason: null,
+          retryable: true,
+          count: 1,
+          advice,
+          failure_category: "PROVIDER_FAULT",
+          failure_owner: "OPS",
+        },
+      ],
+    });
+
+    render(<GenerationRecordsPage initialStatus="FAILED" />);
+
+    // 聚合行把「谁办 + 归哪类」放在最前，再才是环节与错误码这类排查细节。
+    expect(
+      await screen.findByText(/运营重试 · 服务商故障 · 上游拒绝（HTTP）/),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("查看详情"));
+    expect(screen.getByText("原因分类")).toBeInTheDocument();
+    expect(screen.getByText("服务商故障")).toBeInTheDocument();
+    expect(screen.getByText("处理人")).toBeInTheDocument();
+    expect(screen.getByText("运营重试")).toBeInTheDocument();
   });
 
   it("shows read-only oral failure details without a retry action", async () => {
