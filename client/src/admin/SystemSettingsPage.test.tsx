@@ -192,7 +192,7 @@ describe("SystemSettingsPage 付费探针入口", () => {
 
     await waitFor(() =>
       expect(card.querySelector("[role='alert']")?.textContent).toBe(
-        "付费探针未执行：当前版本尚未接入真实供应商客户端（服务端 501 未实现），未产生任何费用。",
+        "付费探针未执行：该服务尚未接入真实供应商客户端（服务端 501 未实现），未产生任何费用。",
       ),
     );
     expect(card.textContent).not.toContain("已产生费用");
