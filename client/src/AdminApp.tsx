@@ -859,6 +859,8 @@ export function AdminApp() {
           ) : null}
           {activeTab === "systemSettings" ? (
             <SystemSettingsPage
+              currentUserId={actor.user_id}
+              isSuperAdmin={actor.is_super_admin === true}
               readOnly={readOnly}
               initialTab={navigationIntent === "rates" ? "rates" : "payment"}
             />

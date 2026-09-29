@@ -43,7 +43,14 @@ vi.mock("./ViralRuntimeSection", () => ({
   ViralRuntimeSection: () => <div data-testid="viral-runtime">爆款运行时</div>,
 }));
 vi.mock("./AdminAlertsSection", () => ({
-  AdminAlertsSection: () => <div data-testid="admin-alerts">失败率告警</div>,
+  AdminAlertsSection: ({ readOnly }: { readOnly?: boolean }) => (
+    <div data-testid="admin-alerts">{`失败率告警 ro=${String(readOnly)}`}</div>
+  ),
+}));
+vi.mock("./TeamManagementSection", () => ({
+  TeamManagementSection: ({ currentUserId }: { currentUserId: string }) => (
+    <div data-testid="team-management">{`团队 me=${currentUserId}`}</div>
+  ),
 }));
 vi.mock("../SettingsPanel", () => ({
   SettingsPanel: ({
@@ -137,4 +144,34 @@ test("keeps the service sub-tab selection inside the services tab", () => {
   expect(screen.getByTestId("settings-panel")).toHaveTextContent(
     "section=runtime",
   );
+});
+
+test("forwards readOnly into the alerts tab so auditors get the read-only settings", () => {
+  render(<SystemSettingsPage initialTab="alerts" readOnly />);
+
+  expect(screen.getByTestId("admin-alerts")).toHaveTextContent("ro=true");
+});
+
+test("hides the team tab from everyone but super admins", () => {
+  render(<SystemSettingsPage />);
+
+  expect(screen.queryByRole("tab", { name: "团队与权限" })).toBeNull();
+});
+
+test("shows the team tab to super admins and passes the signed-in user down", () => {
+  render(<SystemSettingsPage currentUserId="u-root" isSuperAdmin />);
+
+  // 未选中时不提前挂载（团队页挂载即发请求）。
+  expect(screen.queryByTestId("team-management")).toBeNull();
+  fireEvent.click(screen.getByRole("tab", { name: "团队与权限" }));
+
+  expect(screen.getByTestId("team-management")).toHaveTextContent("me=u-root");
+});
+
+test("never mounts the team page for a non-super admin, even via initialTab", () => {
+  render(<SystemSettingsPage initialTab="team" />);
+
+  expect(screen.queryByTestId("team-management")).toBeNull();
+  // 回落到默认页签，而不是留一个空白页。
+  expect(screen.getByTestId("customer-pricing")).toBeInTheDocument();
 });
