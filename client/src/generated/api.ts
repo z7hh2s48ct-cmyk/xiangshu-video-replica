@@ -1848,6 +1848,28 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/control/generation-records/{record_type}/{record_id}/thumbnail": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Read Generation Record Thumbnail
+     * @description 签发该条生成记录的缩略图地址（方案 P2-1）。
+     *
+     *     查看客户媒体要留痕：签出成功时写一条审计（与资产下载签发的既有口径一致）。
+     */
+    get: operations["read_generation_record_thumbnail_api_control_generation_records__record_type___record_id__thumbnail_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/control/generation-records/{record_type}/{record_id}/calls": {
     parameters: {
       query?: never;
@@ -2509,6 +2531,70 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/control/team/members": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Team Members
+     * @description 团队成员列表（超管专属）：含角色 / 启用状态 / 是否超管 / 最近登录。
+     */
+    get: operations["list_team_members_api_control_team_members_get"];
+    put?: never;
+    /**
+     * Create Team Member
+     * @description 新增团队成员：users + wallets + 密码凭据三件套一次建齐。
+     */
+    post: operations["create_team_member_api_control_team_members_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/team/members/{user_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /**
+     * Update Team Member
+     * @description 更新成员（显示名 / 启用状态 / 超管标记）；停用即吊销其全部会话。
+     */
+    patch: operations["update_team_member_api_control_team_members__user_id__patch"];
+    trace?: never;
+  };
+  "/api/control/team/members/{user_id}/password": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Reset Team Member Password
+     * @description 超管为成员设置新密码；旧密码立即失效，已登录会话全部吊销。
+     */
+    post: operations["reset_team_member_password_api_control_team_members__user_id__password_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/control/first-frame-tasks/{task_id}/reconcile": {
     parameters: {
       query?: never;
@@ -2549,31 +2635,6 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  "/api/control/generation-records/{record_type}/{record_id}/thumbnail": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    /**
-     * Get Generation Record Thumbnail
-     * @description 生成记录行的产物缩略图（方案 P2-2）。
-     *
-     *     与客户素材库同一套派生缩略图：键由原对象确定性派生，缺失时现场从原
-     *     对象抽帧补齐（幂等），补齐失败按 404 由前端降级占位。缩略图是 480px
-     *     低敏派生图、列表内逐行内嵌，不写审计——逐张审计会把一次翻页变成上
-     *     百条噪声；真正的高敏读取（看原片）在 content 端点写。
-     */
-    get: operations["get_generation_record_thumbnail_api_control_generation_records__record_type___record_id__thumbnail_get"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
   "/api/control/generation-records/{record_type}/{record_id}/content": {
     parameters: {
       query?: never;
@@ -2607,12 +2668,56 @@ export interface paths {
     };
     /**
      * Read Failure Rate Report
-     * @description 近 1 小时失败率报告（方案 P1-5「通知与告警」页数据源）。
+     * @description 失败率报告（方案 P1-5「通知与告警」页数据源）；口径读设置单行表。
      *
      *     只读端点走 ``AdminReader``；管理会话本身要求 PG 运行时
      *     （admin_runtime_routes 同约定），因此这里直接用 pg_transaction。
      */
     get: operations["read_failure_rate_report_api_control_alerts_failure_rate_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/settings/alerts": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Read Alert Settings
+     * @description 告警设置快照（P2-4「通知与告警」页设置区块）。
+     */
+    get: operations["read_alert_settings_api_control_settings_alerts_get"];
+    /**
+     * Update Alert Settings
+     * @description 全量更新告警设置；接收人必须是启用中的管理员（admin / auditor）。
+     */
+    put: operations["update_alert_settings_api_control_settings_alerts_put"];
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/settings/alerts/recipient-candidates": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Alert Recipient Candidates
+     * @description 可作接收人的账号：启用中的 admin / auditor（读侧，普通管理员可见）。
+     */
+    get: operations["list_alert_recipient_candidates_api_control_settings_alerts_recipient_candidates_get"];
     put?: never;
     post?: never;
     delete?: never;
@@ -6971,6 +7076,8 @@ export interface components {
       display_name: string;
       /** Role */
       role: string;
+      /** Is Super Admin */
+      is_super_admin: boolean;
     };
     /**
      * AdminGenerationRetryRequest
@@ -7017,6 +7124,53 @@ export interface components {
        * @default
        */
       reason: string;
+    };
+    /**
+     * AlertSettingsSnapshot
+     * @description 「通知与告警」当前设置：接收人（可空）+ 失败率口径 + 最近修改。
+     */
+    AlertSettingsSnapshot: {
+      /** Recipient User Id */
+      recipient_user_id: string | null;
+      /** Recipient Display Name */
+      recipient_display_name: string | null;
+      /** Failure Rate Window Minutes */
+      failure_rate_window_minutes: number;
+      /** Failure Rate Threshold Percent */
+      failure_rate_threshold_percent: number;
+      /** Failure Rate Min Sample */
+      failure_rate_min_sample: number;
+      /** Updated By User Id */
+      updated_by_user_id: string | null;
+      /** Updated At */
+      updated_at: string | null;
+    };
+    /**
+     * AlertSettingsUpdate
+     * @description 全量更新告警设置：三个数值必填（范围与迁移 CHECK 一致）。
+     *
+     *     ``recipient_user_id`` 空串 / 缺省 = 显式不指定接收人（「没人接收」是
+     *     合法状态，不编造默认收件人）。
+     */
+    AlertSettingsUpdate: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /** Recipient User Id */
+      recipient_user_id?: string | null;
+      /** Failure Rate Window Minutes */
+      failure_rate_window_minutes: number;
+      /** Failure Rate Threshold Percent */
+      failure_rate_threshold_percent: number;
+      /** Failure Rate Min Sample */
+      failure_rate_min_sample: number;
     };
     /**
      * AnalysisDiagnosticAttempt
@@ -7106,8 +7260,8 @@ export interface components {
      *     是个别客户的问题还是整体故障。``reason`` 优先取任务行自带的上游诊断
      *     （拆解），没有时取该组样本任务在第三方接口调用日志里的服务商原话。
      *
-     *     ``advice`` 是 P2-2 runbook（``app.failure_runbook``）的译文，``category``
-     *     与 ``owner`` 是方案 P1-1 的中文分类与处理人，管理端聚合列表直接展示。
+     *     ``advice`` 是 P2-2 runbook（``app.failure_runbook``）的译文，``failure_category``
+     *     与 ``failure_owner`` 是方案 P1-1 的原因分类与处理人代码，标签由管理端词典翻译。
      */
     AnalysisFailureReason: {
       /**
@@ -7137,10 +7291,10 @@ export interface components {
       count: number;
       /** Advice */
       advice?: string | null;
-      /** Category */
-      category?: string | null;
-      /** Owner */
-      owner?: string | null;
+      /** Failure Category */
+      failure_category?: string | null;
+      /** Failure Owner */
+      failure_owner?: string | null;
     };
     /** AnalysisTaskResponse */
     AnalysisTaskResponse: {
@@ -9244,7 +9398,7 @@ export interface components {
     };
     /**
      * FailureRateError
-     * @description 类型内单个错误码的失败计数；分类/处理人/建议来自 runbook。
+     * @description 类型内单个错误码的失败计数；分类/处理人是稳定代码（标签由前端翻译），建议来自 runbook。
      */
     FailureRateError: {
       /** Error Code */
@@ -9260,7 +9414,7 @@ export interface components {
     };
     /**
      * FailureRateGroup
-     * @description 单类任务的近 1 小时失败率与主要错误码。
+     * @description 单类任务的窗口内失败率与主要错误码。
      */
     FailureRateGroup: {
       /** Record Type */
@@ -9289,6 +9443,10 @@ export interface components {
       threshold_percent: number;
       /** Min Sample Size */
       min_sample_size: number;
+      /** Recipient User Id */
+      recipient_user_id: string | null;
+      /** Recipient Display Name */
+      recipient_display_name: string | null;
       /** Total */
       total: number;
       /** Failed */
@@ -9623,6 +9781,27 @@ export interface components {
       status: string;
       /** Count */
       count: number;
+    };
+    /**
+     * GenerationRecordThumbnail
+     * @description 一条生成记录的派生缩略图地址（方案 P2-1）。
+     *
+     *     只签入库时派生的小图（``<原对象键>.thumb.jpg``，480px）：原视频与原图仍走可吊销的
+     *     代理通道，派生物按低敏感度接受 7 天窗口——与素材链路的既有口径一致。
+     *
+     *     ``url`` 允许为空，三处都会为空：记录类型没有媒体（拆解/取帧）、结果资产已删、
+     *     以及存储不是对象存储（本地盘不发外链）。管理端据此显示占位，不为历史记录补抽帧
+     *     —— 那需要离线任务，另立。
+     */
+    GenerationRecordThumbnail: {
+      /** Record Type */
+      record_type: string;
+      /** Record Id */
+      record_id: string;
+      /** Url */
+      url: string | null;
+      /** Expires In Seconds */
+      expires_in_seconds: number;
     };
     /** GenerationRuntimeLimits */
     GenerationRuntimeLimits: {
@@ -12248,6 +12427,64 @@ export interface components {
         | "CONFIRM_NOT_CHARGED"
         | "REGENERATE"
       )[];
+    };
+    /** TeamMemberCreateRequest */
+    TeamMemberCreateRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /** Username */
+      username: string;
+      /** Display Name */
+      display_name: string;
+      /**
+       * Role
+       * @enum {string}
+       */
+      role: "admin" | "auditor";
+      /** Password */
+      password: string;
+    };
+    /** TeamMemberPasswordRequest */
+    TeamMemberPasswordRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /** Password */
+      password: string;
+    };
+    /** TeamMemberUpdateRequest */
+    TeamMemberUpdateRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /** Display Name */
+      display_name?: string | null;
+      /** Is Active */
+      is_active?: boolean | null;
+      /** Is Super Admin */
+      is_super_admin?: boolean | null;
     };
     /** UpdateCustomerProfileRequest */
     UpdateCustomerProfileRequest: {
@@ -17429,6 +17666,50 @@ export interface operations {
       };
     };
   };
+  read_generation_record_thumbnail_api_control_generation_records__record_type___record_id__thumbnail_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Control-Proxy-Token"?: string | null;
+      };
+      path: {
+        record_type:
+          | "VIDEO"
+          | "ORAL_VIDEO"
+          | "ORAL_AVATAR"
+          | "ORAL_VOICE"
+          | "FIRST_FRAME_IMAGE"
+          | "CHARACTER_SHEET_IMAGE"
+          | "CHARACTER_VIEW_IMAGE"
+          | "SOURCE_FRAME_AI_SCORE"
+          | "SOURCE_FRAME_PROCESS"
+          | "ANALYSIS";
+        record_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["GenerationRecordThumbnail"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   list_generation_record_calls_api_control_generation_records__record_type___record_id__calls_get: {
     parameters: {
       query?: never;
@@ -18711,6 +18992,137 @@ export interface operations {
       };
     };
   };
+  list_team_members_api_control_team_members_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+    };
+  };
+  create_team_member_api_control_team_members_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["TeamMemberCreateRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  update_team_member_api_control_team_members__user_id__patch: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        user_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["TeamMemberUpdateRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  reset_team_member_password_api_control_team_members__user_id__password_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        user_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["TeamMemberPasswordRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   reconcile_first_frame_task_api_control_first_frame_tasks__task_id__reconcile_post: {
     parameters: {
       query?: never;
@@ -18781,44 +19193,6 @@ export interface operations {
       };
     };
   };
-  get_generation_record_thumbnail_api_control_generation_records__record_type___record_id__thumbnail_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        record_type:
-          | "VIDEO"
-          | "ORAL_VIDEO"
-          | "FIRST_FRAME_IMAGE"
-          | "CHARACTER_SHEET_IMAGE"
-          | "SOURCE_FRAME_AI_SCORE"
-          | "SOURCE_FRAME_PROCESS";
-        record_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": unknown;
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
   get_generation_record_content_api_control_generation_records__record_type___record_id__content_get: {
     parameters: {
       query?: never;
@@ -18873,6 +19247,81 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["FailureRateReport"];
+        };
+      };
+    };
+  };
+  read_alert_settings_api_control_settings_alerts_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AlertSettingsSnapshot"];
+        };
+      };
+    };
+  };
+  update_alert_settings_api_control_settings_alerts_put: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AlertSettingsUpdate"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AlertSettingsSnapshot"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_alert_recipient_candidates_api_control_settings_alerts_recipient_candidates_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
         };
       };
     };

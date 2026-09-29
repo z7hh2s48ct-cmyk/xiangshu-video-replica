@@ -11,10 +11,11 @@
 因此这里不套 ``admin_write_idempotency`` 快照层：双层幂等只会让重放的语义
 更含糊（业务层的才是资金安全的真源）。
 
-成片预览沿用客户素材库的那套派生缩略图（``material_thumbs``）：键由原对象
-确定性派生、缺失时现场抽帧补齐、失败降级 404。记录 → 产物的映射按类型各
-自解析（视频取任务行资产、图片取结果版本候选池、人物表取 result_json），
-不引入新表也不回填历史数据。
+「查看成片」（``content``）按 Range 流式读取原件并写审计；缩略图不在这里：
+生成记录的缩略图由 ``control_routes`` 的签名直连地址端点提供（P2-1），
+两处不重复实现同一路径。记录 → 产物的映射按类型各自解析（视频取任务行
+资产、图片取结果版本候选池、人物表取 result_json），不引入新表也不回填
+历史数据。
 """
 
 from __future__ import annotations
@@ -31,7 +32,6 @@ from app.auth import CurrentUser
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
 from app.generation import GenerationTaskRetryRequest, retry_generation_task
-from app.material_thumbs import ensure_thumbnail_object, thumbnail_key_for
 from app.media import storage_key_from_uri
 from app.media_routes import read_stored_object, storage_for_asset
 from app.permissions import write_audit
@@ -264,44 +264,6 @@ def _resolve_record_object(
         )
     storage_uri = str(asset["storage_uri"])
     return storage_for_asset(conn, storage_uri), storage_key_from_uri(storage_uri)
-
-
-@router.get("/generation-records/{record_type}/{record_id}/thumbnail")
-def get_generation_record_thumbnail(
-    record_type: MediaRecordType,
-    record_id: str,
-    actor: AdminReader,
-) -> Response:
-    """生成记录行的产物缩略图（方案 P2-2）。
-
-    与客户素材库同一套派生缩略图：键由原对象确定性派生，缺失时现场从原
-    对象抽帧补齐（幂等），补齐失败按 404 由前端降级占位。缩略图是 480px
-    低敏派生图、列表内逐行内嵌，不写审计——逐张审计会把一次翻页变成上
-    百条噪声；真正的高敏读取（看原片）在 content 端点写。
-    """
-    _require_media_viewer(actor)
-    with pg_transaction() as raw:
-        conn = BusinessConnection.postgres(raw)
-        storage, object_key = _resolve_record_object(
-            conn, record_type=record_type, record_id=record_id
-        )
-    thumbnail_key = thumbnail_key_for(object_key)
-    if not ensure_thumbnail_object(storage, thumbnail_key):
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "code": "MEDIA_PREVIEW_UNAVAILABLE",
-                "message": "这条记录的缩略图暂不可用。",
-            },
-        )
-    # 缩略图键由内容确定性派生，重建必换键，可以缓存；管理端地址未签名，
-    # 窗口取 1 小时（客户侧的 7 天与签名同寿，这里没有那层绑定）。
-    return read_stored_object(
-        storage,
-        object_key=thumbnail_key,
-        cache_control="private, max-age=3600",
-        disposition="inline",
-    )
 
 
 @router.get("/generation-records/{record_type}/{record_id}/content")

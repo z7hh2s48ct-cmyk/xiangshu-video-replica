@@ -1,10 +1,9 @@
 """生成记录成片预览端点（方案 P2-2）的真实 PG 泳道套件。
 
-钉住管理端媒体端点与记录列表 `has_preview` 的边界：记录 → 产物资产的解析
-（视频任务行 / 结果版本候选池 / 人物表 result_json）、缩略图缺失时的降级、
-`content` 的 Range 与审计、审计员的内容访问拒绝、列表字段。缩略图派生本身
-（ffmpeg 抽帧、幂等补齐）由 material_thumbs 自己的矩阵覆盖，这里用预置的
-``.thumb.jpg`` 对象让端点走「已存在」快路径，避免测试依赖本机 ffmpeg。
+钉住管理端「查看成片」端点与记录列表 `has_preview` 的边界：记录 → 产物资产的
+解析（视频任务行 / 结果版本候选池 / 人物表 result_json）、`content` 的 Range 与
+审计、审计员的内容访问拒绝、列表字段。缩略图不在本文件：它由 control_routes 的
+签名直连地址端点提供，对应用例在 test_external_calls_pg.py。
 """
 
 from __future__ import annotations
@@ -47,7 +46,6 @@ _RESET_TABLES = (
 )
 
 _VIDEO_PAYLOAD = b"fake-mp4-bytes-for-range-tests"
-_THUMB_PAYLOAD = b"\xff\xd8\xff\xe0fake-jpeg-thumbnail-bytes"
 
 
 def _pg_dsn() -> str:
@@ -171,8 +169,8 @@ def _insert_character_sheet_task(media_dsn: str, task_id: str, *, asset_id: str)
         )
 
 
-def _seed_video_media(media_dsn: str, root: Path, *, with_thumbnail: bool) -> None:
-    """一段可预览的视频记录：任务行 + 资产行 + 本地对象（缩略图可选预置）。"""
+def _seed_video_media(media_dsn: str, root: Path) -> None:
+    """一段可预览的视频记录：任务行 + 资产行 + 本地对象。"""
     _insert_asset(
         media_dsn,
         "a-media",
@@ -181,8 +179,6 @@ def _seed_video_media(media_dsn: str, root: Path, *, with_thumbnail: bool) -> No
     )
     _insert_video_task(media_dsn, "t-media", status="SUCCEEDED", result_asset_id="a-media")
     _write_object(root, "projects/p-1/gen/t-media.mp4", _VIDEO_PAYLOAD)
-    if with_thumbnail:
-        _write_object(root, "projects/p-1/gen/t-media.mp4.thumb.jpg", _THUMB_PAYLOAD)
 
 
 def _actor(role: str) -> AdminActor:
@@ -230,10 +226,6 @@ def api_auditor(
     close_pg_pool()
 
 
-def _thumbnail_url(record_type: str, record_id: str) -> str:
-    return f"/api/control/generation-records/{record_type}/{record_id}/thumbnail"
-
-
 def _content_url(record_type: str, record_id: str) -> str:
     return f"/api/control/generation-records/{record_type}/{record_id}/content"
 
@@ -252,22 +244,10 @@ def _audit_count(media_dsn: str, entity_id: str) -> int:
     return int(row[0])
 
 
-def test_thumbnail_serves_derived_image(api: TestClient, seeded: str, media_root: Path) -> None:
-    _seed_video_media(seeded, media_root, with_thumbnail=True)
-
-    response = api.get(_thumbnail_url("VIDEO", "t-media"))
-    assert response.status_code == 200
-    assert response.headers["content-type"] == "image/jpeg"
-    assert response.content == _THUMB_PAYLOAD
-    assert response.headers["content-disposition"].startswith("inline")
-    # 缩略图键由内容派生：允许短窗口缓存（管理端地址未签名）。
-    assert response.headers["cache-control"] == "private, max-age=3600"
-
-
 def test_content_streams_result_and_writes_audit(
     api: TestClient, seeded: str, media_root: Path
 ) -> None:
-    _seed_video_media(seeded, media_root, with_thumbnail=True)
+    _seed_video_media(seeded, media_root)
 
     response = api.get(_content_url("VIDEO", "t-media"))
     assert response.status_code == 200
@@ -279,7 +259,7 @@ def test_content_streams_result_and_writes_audit(
 
 
 def test_content_supports_range_requests(api: TestClient, seeded: str, media_root: Path) -> None:
-    _seed_video_media(seeded, media_root, with_thumbnail=True)
+    _seed_video_media(seeded, media_root)
 
     response = api.get(_content_url("VIDEO", "t-media"), headers={"Range": "bytes=0-3"})
     assert response.status_code == 206
@@ -288,42 +268,22 @@ def test_content_supports_range_requests(api: TestClient, seeded: str, media_roo
 
 
 def test_missing_record_and_missing_result_return_404(api: TestClient, seeded: str) -> None:
-    missing = api.get(_thumbnail_url("VIDEO", "no-such-task"))
+    missing = api.get(_content_url("VIDEO", "no-such-task"))
     assert missing.status_code == 404
     assert missing.json()["detail"]["code"] == "GENERATION_RECORD_NOT_FOUND"
 
     # 任务存在但没有归档产物（失败/历史记录）：与「记录不存在」区分。
     _insert_video_task(seeded, "t-plain", status="SUCCEEDED", result_asset_id=None)
-    no_result = api.get(_thumbnail_url("VIDEO", "t-plain"))
+    no_result = api.get(_content_url("VIDEO", "t-plain"))
     assert no_result.status_code == 404
     assert no_result.json()["detail"]["code"] == "MEDIA_RESULT_UNAVAILABLE"
-    no_content = api.get(_content_url("VIDEO", "t-plain"))
-    assert no_content.status_code == 404
     # 拒绝发生在写审计之前：不产生 content_view 留痕。
     assert _audit_count(seeded, "t-plain") == 0
 
 
-def test_thumbnail_derivation_failure_returns_404(
-    api: TestClient, seeded: str, media_root: Path
-) -> None:
-    """缩略图缺失且派生失败（垃圾源不可解码）：404 由前端降级占位。"""
-    _seed_video_media(seeded, media_root, with_thumbnail=False)
-    _write_object(media_root, "projects/p-1/gen/t-media.mp4", b"not-a-video")
-
-    response = api.get(_thumbnail_url("VIDEO", "t-media"))
-    assert response.status_code == 404
-    assert response.json()["detail"]["code"] == "MEDIA_PREVIEW_UNAVAILABLE"
-    # 原片仍可查看：降级只影响缩略图本身。
-    assert api.get(_content_url("VIDEO", "t-media")).status_code == 200
-
-
 def test_auditor_is_denied_media(api_auditor: TestClient, seeded: str, media_root: Path) -> None:
-    """审计员能看记录列表，但不能看客户生成内容（缩略图与原片都拒绝）。"""
-    _seed_video_media(seeded, media_root, with_thumbnail=True)
-
-    thumbnail = api_auditor.get(_thumbnail_url("VIDEO", "t-media"))
-    assert thumbnail.status_code == 403
-    assert thumbnail.json()["detail"]["code"] == "GENERATION_RECORD_MEDIA_FORBIDDEN"
+    """审计员能看记录列表，但不能看客户生成内容（原片拒绝）。"""
+    _seed_video_media(seeded, media_root)
 
     content = api_auditor.get(_content_url("VIDEO", "t-media"))
     assert content.status_code == 403
@@ -331,7 +291,7 @@ def test_auditor_is_denied_media(api_auditor: TestClient, seeded: str, media_roo
     assert _audit_count(seeded, "t-media") == 0
 
 
-def test_first_frame_thumbnail_reads_candidate_pool(
+def test_first_frame_content_reads_candidate_pool(
     api: TestClient, seeded: str, media_root: Path
 ) -> None:
     _insert_asset(
@@ -342,14 +302,13 @@ def test_first_frame_thumbnail_reads_candidate_pool(
     )
     _insert_first_frame_task(seeded, "ff-1", version_id="v-ff")
     _write_object(media_root, "projects/p-1/first-frames/a-ff.png", b"fake-png")
-    _write_object(media_root, "projects/p-1/first-frames/a-ff.png.thumb.jpg", _THUMB_PAYLOAD)
 
-    response = api.get(_thumbnail_url("FIRST_FRAME_IMAGE", "ff-1"))
+    response = api.get(_content_url("FIRST_FRAME_IMAGE", "ff-1"))
     assert response.status_code == 200
-    assert response.content == _THUMB_PAYLOAD
+    assert response.content == b"fake-png"
 
 
-def test_character_sheet_thumbnail_reads_result_json(
+def test_character_sheet_content_reads_result_json(
     api: TestClient, seeded: str, media_root: Path
 ) -> None:
     _insert_asset(
@@ -360,23 +319,22 @@ def test_character_sheet_thumbnail_reads_result_json(
     )
     _insert_character_sheet_task(seeded, "cs-1", asset_id="a-cs")
     _write_object(media_root, "projects/p-1/characters/a-cs.png", b"fake-png")
-    _write_object(media_root, "projects/p-1/characters/a-cs.png.thumb.jpg", _THUMB_PAYLOAD)
 
-    response = api.get(_thumbnail_url("CHARACTER_SHEET_IMAGE", "cs-1"))
+    response = api.get(_content_url("CHARACTER_SHEET_IMAGE", "cs-1"))
     assert response.status_code == 200
-    assert response.content == _THUMB_PAYLOAD
+    assert response.content == b"fake-png"
 
 
 def test_unsupported_record_type_is_rejected(api: TestClient) -> None:
     # 拆解没有媒体产物：路径参数直接拒绝，不给「碰巧 404」的模糊结果。
-    response = api.get(_thumbnail_url("ANALYSIS", "an-1"))
+    response = api.get(_content_url("ANALYSIS", "an-1"))
     assert response.status_code == 422
 
 
 def test_generation_records_list_exposes_has_preview(
     api: TestClient, seeded: str, media_root: Path
 ) -> None:
-    _seed_video_media(seeded, media_root, with_thumbnail=True)
+    _seed_video_media(seeded, media_root)
     _insert_video_task(seeded, "t-plain", status="SUCCEEDED", result_asset_id=None)
 
     response = api.get(

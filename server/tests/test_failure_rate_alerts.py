@@ -256,8 +256,8 @@ def test_report_counts_terminal_rows_in_window(seeded: str) -> None:
     assert [error.error_code for error in video.top_errors] == ["PROVIDER_TERMINAL"]
     assert video.top_errors[0].count == 2
     # runbook 挂载：分类/处理人/建议与生成记录同一份词典。
-    assert video.top_errors[0].category == "服务商故障"
-    assert video.top_errors[0].owner == "运营重试"
+    assert video.top_errors[0].category == "PROVIDER_FAULT"
+    assert video.top_errors[0].owner == "OPS"
     assert video.top_errors[0].advice
 
 
@@ -307,8 +307,8 @@ def test_oral_error_code_maps_from_status(seeded: str) -> None:
     archive_error = next(
         error for error in oral.top_errors if error.error_code == "ORAL_ARCHIVE_FAILED"
     )
-    assert archive_error.category == "配置问题"
-    assert archive_error.owner == "技术处理"
+    assert archive_error.category == "DEFECT"
+    assert archive_error.owner == "OPS"
 
 
 def test_threshold_respects_min_sample(seeded: str) -> None:

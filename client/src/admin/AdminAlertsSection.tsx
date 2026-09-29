@@ -8,7 +8,12 @@ import {
 } from "../api.admin";
 import { PageBanner } from "./ui/PageBanner";
 import { StatusBadge } from "./ui/StatusBadge";
-import { GENERATION_RECORD_TYPE_LABELS, labelFrom } from "./ui/vocabulary";
+import {
+  FAILURE_CATEGORY_LABELS,
+  FAILURE_OWNER_LABELS,
+  GENERATION_RECORD_TYPE_LABELS,
+  labelFrom,
+} from "./ui/vocabulary";
 
 /**
  * 「通知与告警」页签（方案 P1-5）：按业务类型展示近 1 小时失败率，
@@ -169,8 +174,13 @@ function ErrorGroup({ group }: { group: AdminFailureRateGroup }) {
             </span>
             {error.category || error.owner ? (
               <small>
-                失败分类：{error.category ?? "未分类"}
-                {error.owner ? ` · 处理人：${error.owner}` : ""}
+                失败分类：
+                {error.category
+                  ? labelFrom(FAILURE_CATEGORY_LABELS, error.category)
+                  : "未分类"}
+                {error.owner
+                  ? ` · 处理人：${labelFrom(FAILURE_OWNER_LABELS, error.owner)}`
+                  : ""}
               </small>
             ) : null}
             {error.advice ? <small>处理建议：{error.advice}</small> : null}

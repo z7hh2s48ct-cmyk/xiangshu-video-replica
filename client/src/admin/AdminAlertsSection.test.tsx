@@ -68,8 +68,8 @@ describe("AdminAlertsSection", () => {
               {
                 error_code: "PROVIDER_TERMINAL",
                 count: 5,
-                category: "服务商故障",
-                owner: "运营重试",
+                category: "PROVIDER_FAULT",
+                owner: "OPS",
                 advice: "等待服务商恢复后原地重试",
               },
             ],
@@ -110,8 +110,8 @@ describe("AdminAlertsSection", () => {
               {
                 error_code: "PROVIDER_TERMINAL",
                 count: 1,
-                category: "服务商故障",
-                owner: "运营重试",
+                category: "PROVIDER_FAULT",
+                owner: "OPS",
                 advice: "等待恢复",
               },
             ],

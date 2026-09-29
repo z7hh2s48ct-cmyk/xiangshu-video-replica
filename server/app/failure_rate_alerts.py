@@ -90,7 +90,7 @@ _BRANCHES: tuple[tuple[str, str, str], ...] = (
 
 
 class FailureRateError(BaseModel):
-    """类型内单个错误码的失败计数；分类/处理人/建议来自 runbook。"""
+    """类型内单个错误码的失败计数；分类/处理人是稳定代码（标签由前端翻译），建议来自 runbook。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -249,8 +249,8 @@ def build_failure_rate_report(
                 FailureRateError(
                     error_code=error_code,
                     count=count,
-                    category=explanation.category_label if explanation else None,
-                    owner=explanation.owner_label if explanation else None,
+                    category=explanation.category if explanation else None,
+                    owner=explanation.owner if explanation else None,
                     advice=explanation.advice if explanation else None,
                 )
             )

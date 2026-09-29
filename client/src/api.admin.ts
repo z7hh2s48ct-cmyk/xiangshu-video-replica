@@ -1730,6 +1730,30 @@ export async function getAdminGenerationRecordCalls(
   return response.json() as Promise<AdminExternalCallList>;
 }
 
+/** 生成结果的派生缩略图（方案 P2-1）；没有可签的图时 `url` 为 null。 */
+export type AdminGenerationRecordThumbnail =
+  components["schemas"]["GenerationRecordThumbnail"];
+
+/**
+ * 签发某条生成记录的缩略图地址。
+ *
+ * 服务端只签入库时派生的小图，并在签出成功时写一条审计——所以调用方应当按需取
+ * （例如详情展开时），而不是在列表渲染时批量拉。
+ */
+export async function getAdminGenerationRecordThumbnail(
+  recordType: string,
+  recordId: string,
+): Promise<AdminGenerationRecordThumbnail> {
+  const response = await requestControl(
+    `/api/control/generation-records/${encodeURIComponent(recordType)}/${encodeURIComponent(recordId)}/thumbnail`,
+    { method: "GET" },
+  );
+  if (!response.ok) {
+    throw await parseActivationError(response, "读取生成结果缩略图失败");
+  }
+  return response.json() as Promise<AdminGenerationRecordThumbnail>;
+}
+
 /**
  * P0-9：读取一次调用的原始响应（已脱敏）。
  *
@@ -1809,29 +1833,6 @@ export function retryGenerationRecord(
     reason,
     "重试生成任务失败",
   );
-}
-
-/**
- * 生成记录产物缩略图（方案 P2-2）。
- *
- * `GET /api/control/generation-records/{record_type}/{record_id}/thumbnail` ——
- * 480px 派生图、服务端不写审计，因此可随列表逐行内嵌；缺失（历史记录 / 派生
- * 失败）时服务端 404，调用方降级为占位文案。返回 Blob（管理端 cookie 走
- * requestControl 的 credentials:include），由调用方转 object URL。
- * 审计员被服务端 403 拦截，界面按 readOnly 隐藏整列入口。
- */
-export async function getGenerationRecordThumbnail(
-  recordType: string,
-  recordId: string,
-): Promise<Blob> {
-  const response = await requestControl(
-    `/api/control/generation-records/${encodeURIComponent(recordType)}/${encodeURIComponent(recordId)}/thumbnail`,
-    { method: "GET" },
-  );
-  if (!response.ok) {
-    throw await parseActivationError(response, "读取生成记录缩略图失败");
-  }
-  return response.blob();
 }
 
 /**

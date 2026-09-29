@@ -7,12 +7,12 @@ import {
   getAdminGenerationRecordSummary,
   getAdminGenerationRecords,
   getGenerationRecordContent,
-  getGenerationRecordThumbnail,
   reconcileFirstFrameTask,
   retryGenerationRecord,
 } from "../api.admin";
 import { AnalysisDiagnosticPanel } from "./AnalysisDiagnosticPanel";
 import { RecordCallsPanel } from "./RecordCallsPanel";
+import { RecordThumbnail } from "./RecordThumbnail";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { DataTable } from "./ui/DataTable";
 import { PageBanner } from "./ui/PageBanner";
@@ -20,6 +20,8 @@ import { Pagination } from "./ui/Pagination";
 import { StatusBadge } from "./ui/StatusBadge";
 import { TabBar } from "./ui/TabBar";
 import {
+  FAILURE_CATEGORY_LABELS,
+  FAILURE_OWNER_LABELS,
   FAILURE_PHASE_LABELS,
   formatDateTime,
   formatFen,
@@ -528,11 +530,28 @@ export function GenerationRecordsPage({
                       key={`${reason.record_type}-${reason.error_code}-${reason.failure_phase}-${reason.reason}`}
                     >
                       <span>
+                        {/* 先说是哪类任务（聚合已覆盖全部类型），紧接着放分类与处理人：
+                            运营扫一眼就知道这条该归谁办，再往下才是环节与错误码这类
+                            排查细节。 */}
                         {labelFrom(
                           GENERATION_RECORD_TYPE_LABELS,
                           reason.record_type,
                         )}
                         {" · "}
+                        {reason.failure_category && reason.failure_owner ? (
+                          <>
+                            {labelFrom(
+                              FAILURE_OWNER_LABELS,
+                              reason.failure_owner,
+                            )}
+                            {" · "}
+                            {labelFrom(
+                              FAILURE_CATEGORY_LABELS,
+                              reason.failure_category,
+                            )}
+                            {" · "}
+                          </>
+                        ) : null}
                         {reason.failure_phase
                           ? labelFrom(
                               FAILURE_PHASE_LABELS,
@@ -549,12 +568,6 @@ export function GenerationRecordsPage({
                         {" · "}
                         {reason.count} 条
                       </span>
-                      {reason.category || reason.owner ? (
-                        <small>
-                          失败分类：{reason.category ?? "未分类"}
-                          {reason.owner ? ` · 处理人：${reason.owner}` : ""}
-                        </small>
-                      ) : null}
                       {reason.reason ? (
                         <small>上游说明：{reason.reason}</small>
                       ) : null}
@@ -631,8 +644,7 @@ export function GenerationRecordsPage({
                           type="button"
                           onClick={() => void openPreview(item)}
                         >
-                          <RecordThumbnail item={item} />
-                          <small>{previewActionLabel(item)}</small>
+                          {previewActionLabel(item)}
                         </button>
                       ) : (
                         <span className="admin-generation-records__preview-empty">
@@ -678,18 +690,6 @@ export function GenerationRecordsPage({
                         <dd>{item.error_code ?? "—"}</dd>
                         <dt>错误说明</dt>
                         <dd>{item.error_message ?? "—"}</dd>
-                        {item.failure_category ? (
-                          <>
-                            <dt>失败分类</dt>
-                            <dd>{item.failure_category}</dd>
-                          </>
-                        ) : null}
-                        {item.failure_owner ? (
-                          <>
-                            <dt>处理人</dt>
-                            <dd>{item.failure_owner}</dd>
-                          </>
-                        ) : null}
                         {item.provider_error_code ? (
                           <>
                             <dt>服务商错误码</dt>
@@ -706,6 +706,24 @@ export function GenerationRecordsPage({
                           <>
                             <dt>修复建议</dt>
                             <dd>{item.advice}</dd>
+                          </>
+                        ) : null}
+                        {item.failure_category && item.failure_owner ? (
+                          <>
+                            <dt>原因分类</dt>
+                            <dd>
+                              {labelFrom(
+                                FAILURE_CATEGORY_LABELS,
+                                item.failure_category,
+                              )}
+                            </dd>
+                            <dt>处理人</dt>
+                            <dd>
+                              {labelFrom(
+                                FAILURE_OWNER_LABELS,
+                                item.failure_owner,
+                              )}
+                            </dd>
                           </>
                         ) : null}
                         {item.failure_phase ? (
@@ -752,6 +770,11 @@ export function GenerationRecordsPage({
                             : "正常"}
                         </dd>
                       </dl>
+                      <RecordThumbnail
+                        active={openedDetails.has(recordKey(item))}
+                        recordId={item.record_id}
+                        recordType={item.record_type}
+                      />
                       <RecordCallsPanel
                         active={openedDetails.has(recordKey(item))}
                         readOnly={readOnly}
@@ -1018,7 +1041,9 @@ function customerNoteFor(item: AdminGenerationRecord): string {
     `业务类型：${labelFrom(GENERATION_RECORD_TYPE_LABELS, item.record_type)}`,
   ];
   if (item.failure_category) {
-    lines.push(`失败分类：${item.failure_category}`);
+    lines.push(
+      `失败分类：${labelFrom(FAILURE_CATEGORY_LABELS, item.failure_category)}`,
+    );
   }
   if (item.advice) {
     lines.push(`处理建议：${item.advice}`);
@@ -1057,50 +1082,4 @@ function previewActionLabel(item: AdminGenerationRecord): string {
 
 function previewTitle(item: AdminGenerationRecord): string {
   return VIDEO_PREVIEW_TYPES.has(item.record_type) ? "成片预览" : "生成图预览";
-}
-
-/** 行内缩略图（P2-2）：只有 has_preview 的记录才拉取；404 / 派生失败时降级
- *  为占位文案，不打断整行渲染，也不挡住「查看成片」入口（原件可能仍在）。 */
-function RecordThumbnail({ item }: { item: AdminGenerationRecord }) {
-  const [url, setUrl] = useState("");
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    let active = true;
-    let objectUrl = "";
-    getGenerationRecordThumbnail(item.record_type, item.record_id)
-      .then((blob) => {
-        if (!active) return;
-        objectUrl = URL.createObjectURL(blob);
-        setUrl(objectUrl);
-      })
-      .catch(() => {
-        if (active) setFailed(true);
-      });
-    return () => {
-      active = false;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-    // 行以 record_type + record_id 为键，两者变化即另一条记录。
-  }, [item.record_id, item.record_type]);
-
-  if (failed) {
-    return (
-      <span className="admin-generation-records__preview-empty">
-        缩略图不可用
-      </span>
-    );
-  }
-  if (!url) {
-    return (
-      <span className="admin-generation-records__preview-empty">载入中…</span>
-    );
-  }
-  return (
-    <img
-      alt={`任务 ${item.record_id} 缩略图`}
-      className="admin-generation-records__thumb"
-      src={url}
-    />
-  );
 }

@@ -34,6 +34,8 @@ from app.csv_export import spreadsheet_safe_cell
 from app.db_portable import BusinessConnection
 from app.external_calls import summarize_provider_message
 from app.failure_runbook import failure_advice, failure_explanation
+from app.material_thumbs import THUMBNAIL_URL_EXPIRES_IN
+from app.media_routes import storage_for_asset
 from app.ops_metrics import get_or_create_request_id
 from app.permissions import write_audit
 from app.security_rate_limit import (
@@ -53,6 +55,7 @@ from app.settings import (
     require_supported_provider,
 )
 from app.sql_pagination import PAGE_CLAUSE
+from app.storage import StorageBackendUnavailable
 from app.zpay import deployment_config_from_environment
 
 router = APIRouter(prefix="/api/control", tags=["control"])
@@ -225,15 +228,16 @@ class ControlGenerationRecord(BaseModel):
     advice: str | None = None
     provider_error_code: str | None = None
     provider_message: str | None = None
-    # 方案 P1-1：失败原因分类与谁来处理（客服告知客户 / 运营重试 / 技术处理），
-    # 文案由 failure_runbook 同一处维护；原话命中审核关键词时分类升为「内容审核」。
+    # 失败原因分类与处理人（方案 P1-1 / P2-1）：接口只给稳定代码，中文标签由
+    # 前端词典翻译；与 advice 同源（failure_runbook 的同一张码表），一起填、
+    # 一起为空。原话命中审核关键词时分类升为 CONTENT_REVIEW、处理人改为 SUPPORT。
     failure_category: str | None = None
     failure_owner: str | None = None
     # 方案 P1-1：失败任务的预扣积分是否已退回（存在 RELEASE 流水）。None 表示
     # 非失败状态或无法判定（SQLite 降级通道）。
     credits_refunded: bool | None = None
     # 方案 P2-2：该记录是否有可在线预览的成片/生成图产物。True 时管理端可用
-    # 媒体端点拉缩略图与内容（视频成片为视频，其余为图片）。
+    # 媒体端点查看原件（视频成片为视频，其余为图片）；缩略图另由签名直连端点提供。
     has_preview: bool = False
 
 
@@ -264,8 +268,8 @@ class AnalysisFailureReason(BaseModel):
     是个别客户的问题还是整体故障。``reason`` 优先取任务行自带的上游诊断
     （拆解），没有时取该组样本任务在第三方接口调用日志里的服务商原话。
 
-    ``advice`` 是 P2-2 runbook（``app.failure_runbook``）的译文，``category``
-    与 ``owner`` 是方案 P1-1 的中文分类与处理人，管理端聚合列表直接展示。
+    ``advice`` 是 P2-2 runbook（``app.failure_runbook``）的译文，``failure_category``
+    与 ``failure_owner`` 是方案 P1-1 的原因分类与处理人代码，标签由管理端词典翻译。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -277,8 +281,9 @@ class AnalysisFailureReason(BaseModel):
     retryable: bool | None
     count: int
     advice: str | None = None
-    category: str | None = None
-    owner: str | None = None
+    # 聚合行同样带分类与处理人代码，便于「一眼看出这是谁的事」。
+    failure_category: str | None = None
+    failure_owner: str | None = None
 
 
 class ControlGenerationRecordSummary(BaseModel):
@@ -1460,6 +1465,133 @@ class ExternalCallResponse(BaseModel):
     truncated: bool
 
 
+class GenerationRecordThumbnail(BaseModel):
+    """一条生成记录的派生缩略图地址（方案 P2-1）。
+
+    只签入库时派生的小图（``<原对象键>.thumb.jpg``，480px）：原视频与原图仍走可吊销的
+    代理通道，派生物按低敏感度接受 7 天窗口——与素材链路的既有口径一致。
+
+    ``url`` 允许为空，三处都会为空：记录类型没有媒体（拆解/取帧）、结果资产已删、
+    以及存储不是对象存储（本地盘不发外链）。管理端据此显示占位，不为历史记录补抽帧
+    —— 那需要离线任务，另立。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    record_type: str
+    record_id: str
+    url: str | None
+    expires_in_seconds: int
+
+
+# 结果落在单个资产上的记录类型 → 取该资产的 SQL。图片类的记录行只带版本号，经
+# versions.result_asset_id 一跳取到产物；拆解与取帧没有媒体，不在表内。
+_RECORD_ASSET_SQL: dict[str, str] = {
+    "VIDEO": "SELECT result_asset_id AS asset_id FROM generation_tasks WHERE id = %s",
+    "ORAL_VIDEO": "SELECT result_asset_id AS asset_id FROM oral_tasks WHERE id = %s",
+    "FIRST_FRAME_IMAGE": (
+        "SELECT versions.result_asset_id AS asset_id FROM first_frame_tasks AS task "
+        "JOIN versions ON versions.id = task.result_version_id WHERE task.id = %s"
+    ),
+    "CHARACTER_SHEET_IMAGE": (
+        "SELECT versions.result_asset_id AS asset_id FROM character_sheet_tasks AS task "
+        "JOIN versions ON versions.id = task.result_version_id WHERE task.id = %s"
+    ),
+    "CHARACTER_VIEW_IMAGE": (
+        "SELECT versions.result_asset_id AS asset_id FROM character_generation_tasks AS task "
+        "JOIN versions ON versions.id = task.result_version_id WHERE task.id = %s"
+    ),
+}
+
+
+def _record_result_asset_id(
+    conn: BusinessConnection, *, record_type: str, record_id: str
+) -> str | None:
+    sql = _RECORD_ASSET_SQL.get(record_type)
+    if sql is None:
+        return None
+    row = conn.execute(sql, (record_id,)).fetchone()
+    return None if row is None else _optional_text(row["asset_id"])
+
+
+def _signed_record_thumbnail_url(conn: BusinessConnection, asset_id: str) -> str | None:
+    """为派生小图签出对象存储直连地址；非对象存储、无缩略图键、已删资产一律 None。"""
+    row = conn.execute(
+        "SELECT storage_uri, metadata_json, content_type FROM assets WHERE id = %s",
+        (asset_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    if not str(row["content_type"] or "").startswith(("video/", "image/")):
+        return None
+    try:
+        metadata = json.loads(str(row["metadata_json"] or "{}"))
+    except (TypeError, ValueError):
+        return None
+    thumbnail_key = metadata.get("thumbnail_key") if isinstance(metadata, dict) else None
+    if not isinstance(thumbnail_key, str) or not thumbnail_key:
+        # 历史资产没有记键（抽帧写入点上线前入库，或当初抽帧失败）。键虽可由原对象键
+        # 确定性派生，但对象是否真被派生过不确定，签出去只会得到必然 404 的图——
+        # 管理端宁可显示占位，也不给一张加载不出来的图。
+        return None
+    try:
+        storage = storage_for_asset(conn, str(row["storage_uri"]))
+    except StorageBackendUnavailable:
+        return None
+    if storage.provider != "cos":
+        # 本地盘：缩略图只能由应用服务器代理转发，管理端不为此新增一条穿透通道
+        # （原图已有可吊销的代理通道，需要时再统一）。返回 None 让前端显示占位。
+        return None
+    return storage.create_download_intent(
+        thumbnail_key, expires_in=THUMBNAIL_URL_EXPIRES_IN, can_read=True
+    ).url
+
+
+@router.get(
+    "/generation-records/{record_type}/{record_id}/thumbnail",
+    response_model=GenerationRecordThumbnail,
+)
+def read_generation_record_thumbnail(
+    conn: Database,
+    actor: ControlUser,
+    record_type: GenerationRecordType,
+    record_id: str,
+) -> GenerationRecordThumbnail:
+    """签发该条生成记录的缩略图地址（方案 P2-1）。
+
+    查看客户媒体要留痕：签出成功时写一条审计（与资产下载签发的既有口径一致）。
+    """
+    expires_in_seconds = int(THUMBNAIL_URL_EXPIRES_IN.total_seconds())
+    empty = GenerationRecordThumbnail(
+        record_type=record_type,
+        record_id=record_id,
+        url=None,
+        expires_in_seconds=expires_in_seconds,
+    )
+    if not conn.is_postgres:
+        return empty
+    asset_id = _record_result_asset_id(conn, record_type=record_type, record_id=record_id)
+    if asset_id is None:
+        return empty
+    url = _signed_record_thumbnail_url(conn, asset_id)
+    if url is None:
+        return empty
+    write_audit(
+        conn,
+        actor=actor,
+        action="generation_record.thumbnail_view",
+        entity_type="asset",
+        entity_id=asset_id,
+        metadata={"record_type": record_type, "record_id": record_id},
+    )
+    return GenerationRecordThumbnail(
+        record_type=record_type,
+        record_id=record_id,
+        url=url,
+        expires_in_seconds=expires_in_seconds,
+    )
+
+
 _CALL_LIST_LIMIT = 200
 
 
@@ -2509,8 +2641,8 @@ def _attach_failure_explanations(
             continue
         if record.advice is None:
             record.advice = explanation.advice
-        record.failure_category = explanation.category_label
-        record.failure_owner = explanation.owner_label
+        record.failure_category = explanation.category
+        record.failure_owner = explanation.owner
     _attach_credit_refunds(conn, records)
 
 
@@ -2827,8 +2959,8 @@ def _generation_failure_reasons(
                 retryable=None if row["retryable"] is None else bool(row["retryable"]),
                 count=int(row["total"]),
                 advice=explanation.advice if explanation is not None else None,
-                category=explanation.category_label if explanation is not None else None,
-                owner=explanation.owner_label if explanation is not None else None,
+                failure_category=explanation.category if explanation is not None else None,
+                failure_owner=explanation.owner if explanation is not None else None,
             )
         )
     return items

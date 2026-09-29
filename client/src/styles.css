@@ -4466,15 +4466,6 @@ button.activation-generator__submit {
   font-size: var(--admin-font-caption);
 }
 
-.admin-shell--control .admin-generation-records__thumb {
-  display: block;
-  width: 96px;
-  height: 54px;
-  border-radius: 6px;
-  object-fit: cover;
-  background: #0d0c0b;
-}
-
 .admin-shell--control .admin-generation-records__preview-empty {
   color: var(--admin-muted, #a49e95);
   font-size: var(--admin-font-caption);
@@ -4510,6 +4501,22 @@ button.activation-generator__submit {
 }
 
 .admin-shell--control .admin-generation-records__calls-note {
+  margin: 0 0 8px;
+  color: var(--admin-muted, #a49e95);
+  font-size: var(--admin-font-caption);
+}
+
+.admin-shell--control .admin-generation-records__thumbnail {
+  display: block;
+  width: 128px;
+  max-width: 100%;
+  margin: 0 0 10px;
+  border: 1px solid var(--admin-line, #ddd6ce);
+  border-radius: 8px;
+}
+
+/* 占位与加载态同样占一行：出现缩略图时不跳版，无图时也说明白为什么没有。 */
+.admin-shell--control .admin-generation-records__thumbnail-note {
   margin: 0 0 8px;
   color: var(--admin-muted, #a49e95);
   font-size: var(--admin-font-caption);
