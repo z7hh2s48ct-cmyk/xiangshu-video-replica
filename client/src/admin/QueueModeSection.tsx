@@ -73,7 +73,7 @@ export function QueueModeSection({ readOnly = false }: { readOnly?: boolean }) {
     >
       <h2>公平队列</h2>
       <p className="admin-hint">
-        开启后，多客户同时生成时按公平队列调度，避免单一客户占满并发额度；
+        开启后，多客户同时生成时按公平队列调度，避免单一客户占满并发数；
         切换立即生效并写入审计。当前状态：
         {loading ? (
           "读取中…"

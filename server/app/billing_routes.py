@@ -282,12 +282,93 @@ def customer_price_version(
         raise HTTPException(422, detail=str(exc)) from exc
 
 
+class BillingQuoteRequest(AdminWriteContract):
+    """价格试算入参（方案 P1 价格与套餐）：客户可选、业务必选、数量按业务单位."""
+
+    service: str
+    units: Decimal = Field(gt=0, le=1_000_000)
+    user_id: str | None = None
+
+
+@router.post("/api/control/billing/quote")
+def billing_quote(
+    payload: BillingQuoteRequest,
+    request: Request,
+    response: Response,
+    actor: AdminWriter,
+) -> dict[str, object]:
+    """价格试算（只读）：输入客户（可选）、业务、数量，输出原价、命中折扣、
+    实扣积分、折合金额、我方成本与毛利。
+
+    计算必须调用与结算同一套计价函数（``retail_snapshot``），前端不复刻公式
+    （方案 P1 验收：试算与实际扣费一致）。写契约仅用于留痕与幂等——本接口
+    不落任何业务数据。
+    """
+
+    def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
+        service = payload.service.strip()
+        if service not in SERVICES:
+            raise HTTPException(422, detail="未知计费科目")
+        business_conn = BusinessConnection.postgres(conn)
+        if payload.user_id is not None:
+            exists = conn.execute(
+                "SELECT 1 FROM users WHERE id = %s", (payload.user_id.strip(),)
+            ).fetchone()
+            if exists is None:
+                raise HTTPException(404, detail="客户不存在")
+        snapshot = retail_snapshot(
+            business_conn,
+            service,
+            payload.units,
+            user_id=payload.user_id.strip() if payload.user_id else None,
+        )
+        tariff = read_tariff(business_conn, service)
+        _, config = read_pricing(business_conn)
+        points_per_yuan = config.points_per_yuan if config else None
+        credits = Decimal(str(snapshot["credits"]))
+        unit_cost = tariff.unit_cost_fen if tariff and tariff.unit_cost_fen is not None else None
+        cost_fen = (
+            None if unit_cost is None else (unit_cost * payload.units).quantize(Decimal("0.01"))
+        )
+        nominal_fen = (
+            None
+            if points_per_yuan is None
+            else (credits * 100 / Decimal(points_per_yuan)).quantize(Decimal("0.01"))
+        )
+        return {
+            "service": service,
+            "label": SERVICES[service].name,
+            "units": str(payload.units),
+            "unit": SERVICES[service].unit,
+            "credits": str(credits),
+            "unit_credits": str(snapshot.get("unit_credits", "")),
+            "discount_basis_points": snapshot.get("discount_basis_points"),
+            "discount_rate": (
+                str(snapshot["discount_rate"])
+                if snapshot.get("discount_rate") is not None
+                else None
+            ),
+            "discount_source": snapshot.get("discount_source"),
+            "nominal_fen": str(nominal_fen) if nominal_fen is not None else None,
+            "cost_fen": str(cost_fen) if cost_fen is not None else None,
+            "gross_fen": (
+                str((nominal_fen - cost_fen).quantize(Decimal("0.01")))
+                if nominal_fen is not None and cost_fen is not None
+                else None
+            ),
+            "request_id": request_id,
+        }
+
+    return write_with_idempotency(request, response, actor, payload, business, success_status=200)
+
+
 @router.get("/api/control/billing/operations")
 def operations(
     _actor: AdminReader,
     start: date,
     end: date,
     user_id: str | None = None,
+    username: str | None = None,
     service: str | None = None,
     module: str | None = None,
     provider: str | None = None,
@@ -301,6 +382,7 @@ def operations(
             start=start,
             end=end,
             user_id=user_id,
+            username=username,
             service=service,
             module=module,
             provider=provider,
@@ -318,6 +400,7 @@ def report(
     end: date,
     grain: str = "day",
     user_id: str | None = None,
+    username: str | None = None,
     service: str | None = None,
     module: str | None = None,
     provider: str | None = None,
@@ -329,6 +412,7 @@ def report(
             end=end,
             grain=grain,
             user_id=user_id,
+            username=username,
             service=service,
             module=module,
             provider=provider,

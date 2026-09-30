@@ -58,6 +58,7 @@ import json
 import logging
 import uuid
 from collections.abc import Callable
+from decimal import Decimal
 from typing import Literal, Never, cast
 
 import psycopg
@@ -85,6 +86,7 @@ from app.admin_write_contract import (
 )
 from app.auth import CurrentUser, Role
 from app.csv_export import spreadsheet_safe_cell
+from app.customer_session_service import revoke_session
 from app.db_pg import MissingDatabaseConfigError, pg_transaction
 from app.db_portable import BusinessConnection
 from app.permissions import write_audit
@@ -970,6 +972,282 @@ CUSTOMER_ACCOUNT_FROM = (
 )
 
 
+@router.get("/adjustments.csv")
+def export_adjustments_csv(
+    actor: AdminWriter,
+    actor_username: str = "",
+    target_username: str = "",
+    source_document_type: str = "",
+    created_from: str = "",
+    created_to: str = "",
+    limit: int = 5000,
+) -> HttpResponse:
+    """资金中心·人工调整导出（方案 P1）：与 /adjustments 同筛选口径的整表 CSV。
+
+    复用 customers.csv 的审计与限流模式：导出走 ``control.export`` 高敏审计，
+    财务月度对账不再依赖逐页复制。
+    """
+    import csv as csv_mod
+    import hashlib as hashlib_mod
+    import io as io_mod
+
+    if _sqlite_lane():
+        raise _http(
+            503,
+            "ADJUSTMENT_SERVICE_UNAVAILABLE",
+            "Admin adjustments require the PostgreSQL runtime.",
+        )
+
+    try:
+        with pg_transaction() as conn:
+            decision = consume_rate_limit(
+                conn,
+                dimension=DIMENSION_CONTROL_EXPORT_ACCOUNT,
+                identifier=hashlib_mod.sha256(actor.user_id.encode("utf-8")).hexdigest(),
+                limit=control_export_account_limit(),
+                window_seconds=rate_limit_window_seconds(),
+            )
+            if not decision.allowed:
+                raise _http(
+                    429,
+                    "CONTROL_EXPORT_RATE_LIMITED",
+                    "Too many ledger exports; retry after the cooldown.",
+                )
+            clauses: list[str] = []
+            params: list[object] = []
+            if actor_username.strip():
+                clauses.append("admin_user.username ILIKE %s")
+                params.append(f"%{actor_username.strip()}%")
+            if target_username.strip():
+                clauses.append("target_user.username ILIKE %s")
+                params.append(f"%{target_username.strip()}%")
+            if source_document_type.strip():
+                clauses.append("aa.source_document_type = %s")
+                params.append(source_document_type.strip())
+            append_admin_date_filters(
+                clauses,
+                params,
+                column="aa.created_at",
+                created_from=created_from,
+                created_to=created_to,
+            )
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            rows = conn.execute(
+                "SELECT aa.created_at, admin_user.username, target_user.username, "
+                "aa.source_document_type, aa.source_document_ref, aa.reason, "
+                "COALESCE(ro.amount_fen, 0), COALESCE(ro.credits, tx.available_delta, 0) "
+                "FROM admin_adjustments aa "
+                + _ADJUSTMENT_ORDER_AND_LEDGER_JOINS
+                + " JOIN users admin_user ON admin_user.id = aa.admin_user_id "
+                + "JOIN users target_user ON target_user.id = aa.target_user_id "
+                + f"{where} ORDER BY aa.created_at DESC, aa.id DESC LIMIT %s",
+                (*params, max(1, min(limit, 5000))),
+            ).fetchall()
+            write_audit(
+                BusinessConnection.postgres(conn),
+                actor=CurrentUser(
+                    id=actor.user_id,
+                    username=actor.username,
+                    display_name=actor.display_name,
+                    role=cast(Role, actor.role),
+                ),
+                action="control.export",
+                entity_type="control_ledger",
+                entity_id="admin_adjustments",
+                metadata={
+                    "filters": {
+                        "actor_username": actor_username,
+                        "target_username": target_username,
+                        "source_document_type": source_document_type,
+                        "created_from": created_from,
+                        "created_to": created_to,
+                    },
+                    "limit": limit,
+                },
+            )
+    except (RuntimeError, MissingDatabaseConfigError) as exc:
+        raise _http(
+            503,
+            "ADJUSTMENT_SERVICE_UNAVAILABLE",
+            "Admin adjustments require the PostgreSQL runtime.",
+        ) from exc
+
+    buffer = io_mod.StringIO()
+    writer = csv_mod.writer(buffer)
+    writer.writerow(
+        [
+            "created_at",
+            "actor_username",
+            "target_username",
+            "source_document_type",
+            "source_document_ref",
+            "reason",
+            "amount_fen",
+            "credits",
+        ]
+    )
+    for row in rows:
+        writer.writerow([spreadsheet_safe_cell(str(value)) for value in row])
+    payload = buffer.getvalue().encode("utf-8")
+    return HttpResponse(
+        content=payload,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="adjustments.csv"'},
+    )
+
+
+# ---------------------------------------------------------------------------
+# 客户暂停 / 恢复（方案 P1 客户管理）：详情页第 4 个主操作。
+# 口径（方案待确认问题 #4 的建议项）：暂停只禁止新登录与新任务——
+# is_active=0 由登录/会话校验拦截，进行中任务跑完，钱包余额不动；
+# 暂停同时吊销当前在线会话（SES-03 传播），恢复不自动登录。
+# ---------------------------------------------------------------------------
+
+
+@router.post("/customers/{user_id}/suspend", status_code=200)
+def suspend_customer(
+    user_id: str,
+    body: AdminWriteRequest,
+    request: Request,
+    response: Response,
+    actor: AdminWriter,
+) -> dict[str, object]:
+    def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
+        if user_id == actor.user_id:
+            _deny_admin_self_service(
+                conn,
+                actor_user_id=actor.user_id,
+                target_user_id=user_id,
+                attempted_action="customer.suspend",
+                reason=body.reason.strip(),
+                request_id=request_id,
+            )
+        reason = body.reason.strip()
+        if not reason:
+            raise _http(400, "REASON_REQUIRED", "请填写暂停原因。")
+        current = conn.execute(
+            "SELECT u.is_active FROM users u WHERE u.id = %s", (user_id,)
+        ).fetchone()
+        if current is None:
+            raise _http(404, "USER_NOT_FOUND", "客户不存在。")
+        if int(current[0]) == 0:
+            # 幂等语义：重复暂停不算冲突，返回当前状态（写契约层已去重重放）。
+            return {
+                "user_id": user_id,
+                "is_active": 0,
+                "session_revoked": False,
+                "request_id": request_id,
+            }
+        conn.execute("UPDATE users SET is_active = 0 WHERE id = %s", (user_id,))
+        revoked = revoke_session(
+            conn,
+            user_id=user_id,
+            actor_user_id=actor.user_id,
+            reason=reason,
+            request_id=request_id,
+            now_iso=_transaction_now_iso(conn),
+        )
+        conn.execute(
+            """
+            INSERT INTO audit_logs
+                (id, actor_user_id, action, entity_type, entity_id, metadata_json)
+            VALUES (%s, %s, 'customer.suspend', 'user', %s, %s)
+            """,
+            (
+                str(uuid.uuid4()),
+                actor.user_id,
+                user_id,
+                json.dumps(
+                    {"reason": reason, "request_id": request_id, "session_revoked": revoked},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            ),
+        )
+        logger.info(
+            "customer suspended: user=%s actor=%s session_revoked=%s request=%s",
+            user_id,
+            actor.user_id,
+            revoked,
+            request_id,
+        )
+        return {
+            "user_id": user_id,
+            "is_active": 0,
+            "session_revoked": revoked,
+            "request_id": request_id,
+        }
+
+    return _write_with_idempotency(request, response, actor, body, business, success_status=200)
+
+
+@router.post("/customers/{user_id}/resume", status_code=200)
+def resume_customer(
+    user_id: str,
+    body: AdminWriteRequest,
+    request: Request,
+    response: Response,
+    actor: AdminWriter,
+) -> dict[str, object]:
+    def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
+        if user_id == actor.user_id:
+            _deny_admin_self_service(
+                conn,
+                actor_user_id=actor.user_id,
+                target_user_id=user_id,
+                attempted_action="customer.resume",
+                reason=body.reason.strip(),
+                request_id=request_id,
+            )
+        reason = body.reason.strip()
+        if not reason:
+            raise _http(400, "REASON_REQUIRED", "请填写恢复原因。")
+        current = conn.execute(
+            "SELECT u.is_active FROM users u WHERE u.id = %s", (user_id,)
+        ).fetchone()
+        if current is None:
+            raise _http(404, "USER_NOT_FOUND", "客户不存在。")
+        if int(current[0]) == 1:
+            return {
+                "user_id": user_id,
+                "is_active": 1,
+                "request_id": request_id,
+            }
+        conn.execute("UPDATE users SET is_active = 1 WHERE id = %s", (user_id,))
+        conn.execute(
+            """
+            INSERT INTO audit_logs
+                (id, actor_user_id, action, entity_type, entity_id, metadata_json)
+            VALUES (%s, %s, 'customer.resume', 'user', %s, %s)
+            """,
+            (
+                str(uuid.uuid4()),
+                actor.user_id,
+                user_id,
+                json.dumps(
+                    {"reason": reason, "request_id": request_id},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            ),
+        )
+        return {"user_id": user_id, "is_active": 1, "request_id": request_id}
+
+    return _write_with_idempotency(request, response, actor, body, business, success_status=200)
+
+
+# 列表排序（方案 P1 客户管理）：经营字段可排序；激活时间为既有默认。
+# 本月消耗的「本月」由数据库按上海挂钟取月首，避免应用机时区漂移。
+_CUSTOMER_SORTS = {
+    "activated": "aca.activated_at DESC, aca.id DESC",
+    "recharge": ("COALESCE(recharge.total_fen, 0) DESC, aca.activated_at DESC, aca.id DESC"),
+    "month_consumed": ("COALESCE(month_spend.credits, 0) DESC, aca.activated_at DESC, aca.id DESC"),
+    "last_active": (
+        "COALESCE(activity.last_at, aca.activated_at) DESC, aca.activated_at DESC, aca.id DESC"
+    ),
+}
+
+
 @router.get("/customers")
 def list_customers(
     actor: AdminReader,
@@ -981,6 +1259,7 @@ def list_customers(
     created_to: str = "",
     balance_min: int | None = None,
     balance_max: int | None = None,
+    sort: Literal["activated", "recharge", "month_consumed", "last_active"] = "activated",
 ) -> dict[str, object]:
     """Registered and activated customer accounts for operators and auditors (ADM-02 read path).
 
@@ -1050,7 +1329,12 @@ def list_customers(
                 "COALESCE(annotation.tags_json, '[]'::jsonb), "
                 "COALESCE(annotation.note, ''), "
                 "COALESCE(annotation.owner_user_id, ''), "
-                "COALESCE(owner.username, '') "
+                "COALESCE(owner.username, ''), "
+                # 经营字段（方案 P1 客户管理）：累计充值 / 最近活跃 / 当前权益。
+                "COALESCE(recharge.total_fen, 0), "
+                "activity.last_at, "
+                "COALESCE(month_spend.credits, 0), "
+                "benefit.discount_rate "
                 + CUSTOMER_ACCOUNT_FROM
                 + "LEFT JOIN (SELECT user_id, COUNT(*) AS slots_used FROM customer_devices "
                 "  WHERE status = 'BOUND' GROUP BY user_id) devices "
@@ -1097,8 +1381,33 @@ def list_customers(
                 "LEFT JOIN customer_annotations annotation "
                 "  ON annotation.user_id = aca.user_id "
                 "LEFT JOIN users owner ON owner.id = annotation.owner_user_id "
+                # 累计充值：实付订单（线下开通同样落 PAID 订单）。
+                "LEFT JOIN ("
+                "  SELECT user_id, COALESCE(SUM(amount_fen), 0) AS total_fen "
+                "  FROM recharge_orders WHERE status = 'PAID' GROUP BY user_id"
+                ") recharge ON recharge.user_id = aca.user_id "
+                # 最近活跃：最后一笔钱包流水的时间（充值/消耗/退回都算动作）。
+                "LEFT JOIN ("
+                "  SELECT user_id, MAX(created_at::timestamp AT TIME ZONE 'UTC') AS last_at "
+                "  FROM wallet_transactions GROUP BY user_id"
+                ") activity ON activity.user_id = aca.user_id "
+                # 本月消耗：上海挂钟月首之后的净扣积分。
+                "LEFT JOIN ("
+                "  SELECT user_id, COALESCE(SUM(-reserved_delta), 0) AS credits "
+                "  FROM wallet_transactions WHERE type = 'SETTLE' "
+                "    AND (created_at::timestamp AT TIME ZONE 'UTC') >= "
+                "        date_trunc('month', now() AT TIME ZONE 'Asia/Shanghai') "
+                "        AT TIME ZONE 'Asia/Shanghai' "
+                "  GROUP BY user_id"
+                ") month_spend ON month_spend.user_id = aca.user_id "
+                # 当前权益：生效中的专项折扣；费率原值返回，折文案在 Python 侧
+                # 换算（0.85 → 8.5 折），SQL 里拼字符串会把进制搞混。
+                "LEFT JOIN ("
+                "  SELECT d.user_id, MIN(d.discount_rate) AS discount_rate "
+                "  FROM customer_discounts d WHERE d.is_active GROUP BY d.user_id"
+                ") benefit ON benefit.user_id = aca.user_id "
                 f"{where} "
-                "ORDER BY aca.activated_at DESC, aca.id DESC "
+                f"ORDER BY {_CUSTOMER_SORTS[sort]} "
                 f"{PAGE_CLAUSE}",
                 (*params, bounded_limit, bounded_offset),
             ).fetchall()
@@ -1138,6 +1447,16 @@ def list_customers(
             "note": str(row[18]),
             "owner_user_id": str(row[19]),
             "owner_username": str(row[20]),
+            # 经营字段（方案 P1）：列表直接展示，不再进详情页逐个翻。
+            "total_recharge_fen": int(row[21]),
+            "last_active_at": (
+                row[22].isoformat() if row[22] is not None and hasattr(row[22], "isoformat") else ""
+            ),
+            "month_consumed_credits": int(row[23]),
+            "current_benefit": (
+                # 0.85 → 「专项 8.5 折」；无生效折扣显示空串，前端落「原价」。
+                f"专项 {Decimal(str(row[24])) * 10:g} 折" if row[24] is not None else ""
+            ),
         }
         for row in rows
     ]

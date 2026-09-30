@@ -140,7 +140,7 @@ describe("AuditEventsPage", () => {
 
     expect(
       await screen.findByText(
-        "oral：售价 0.25 → 0.5 积分 · 成本 0.000125 → 0.00025 分",
+        "oral：售价 0.25 → 0.5 积分 · 成本 < ¥0.01 → < ¥0.01",
       ),
     ).toBeInTheDocument();
   });
@@ -187,7 +187,7 @@ describe("AuditEventsPage", () => {
     render(<AuditEventsPage />);
 
     expect(
-      await screen.findByText("quality_inspection：初始配置 · 成本 0.5 分"),
+      await screen.findByText("quality_inspection：初始配置 · 成本 < ¥0.01"),
     ).toBeInTheDocument();
     expect(screen.getByText("oral：停用用户扣费")).toBeInTheDocument();
   });
@@ -317,7 +317,7 @@ describe("AuditEventsPage", () => {
     );
     render(<AuditEventsPage />);
 
-    expect(await screen.findByText("设置为 15 分/秒")).toBeInTheDocument();
+    expect(await screen.findByText("设置为 ¥0.15 /秒")).toBeInTheDocument();
     expect(screen.queryByText(/0 分\/秒/)).toBeNull();
   });
 
@@ -346,7 +346,7 @@ describe("AuditEventsPage", () => {
     );
     render(<AuditEventsPage />);
 
-    expect(await screen.findByText("9 → 12 分/秒")).toBeInTheDocument();
+    expect(await screen.findByText("¥0.09 → ¥0.12 /秒")).toBeInTheDocument();
     expect(screen.getByTitle(`CS_TICKET / ${sourceRef}`)).toBeInTheDocument();
     expect(screen.getByTitle(requestId)).toBeInTheDocument();
   });
@@ -408,12 +408,12 @@ describe("AuditEventsPage", () => {
     );
     render(<AuditEventsPage />);
 
-    expect(await screen.findByText("1 → 2 分/张")).toBeInTheDocument();
-    expect(screen.getByText("3 → 4 分/张")).toBeInTheDocument();
-    expect(screen.getByText("5 → 6 分/张")).toBeInTheDocument();
-    expect(screen.getByText("7 → 8 分/次")).toBeInTheDocument();
-    expect(screen.getByText("9 → 10 分")).toBeInTheDocument();
-    expect(screen.getByText("11 → 12 分/秒")).toBeInTheDocument();
+    expect(await screen.findByText("¥0.01 → ¥0.02 /张")).toBeInTheDocument();
+    expect(screen.getByText("¥0.03 → ¥0.04 /张")).toBeInTheDocument();
+    expect(screen.getByText("¥0.05 → ¥0.06 /张")).toBeInTheDocument();
+    expect(screen.getByText("¥0.07 → ¥0.08 /次")).toBeInTheDocument();
+    expect(screen.getByText("¥0.09 → ¥0.10")).toBeInTheDocument();
+    expect(screen.getByText("¥0.11 → ¥0.12 /秒")).toBeInTheDocument();
   });
 
   it("resets all submitted filters", async () => {

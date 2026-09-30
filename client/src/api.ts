@@ -1583,6 +1583,87 @@ export async function getControlReconciliation(): Promise<ControlReconciliation>
   );
 }
 
+/** 资金中心·资金概览聚合（方案 P1）：渠道分解、赠送、退款、预收与对账异常。 */
+export type FundsSummary = {
+  start: string;
+  end: string;
+  recharge_fen: number;
+  orders: number;
+  offline_fen: number;
+  grant_credits: number;
+  refund_credits: number;
+  refund_fen: number | null;
+  net_fen: number | null;
+  by_channel: { provider: string; orders: number; amount_fen: number }[];
+  prepaid_credits: number;
+  prepaid_fen: number | null;
+  reconciliation_problems: number;
+};
+
+export async function getFundsSummary(
+  start: string,
+  end: string,
+): Promise<FundsSummary> {
+  const query = new URLSearchParams({ start, end });
+  return requestControlJson<FundsSummary>(
+    `/api/control/funds/summary?${query.toString()}`,
+    "读取资金概览失败",
+  );
+}
+
+/** 对账异常的三类清单键，与服务端 /billing-reconciliation/items 同枚举。 */
+export type ReconciliationAnomaly =
+  | "wallet_mismatch"
+  | "paid_without_charge"
+  | "charge_without_paid_order";
+
+export type ReconciliationItemsResponse = {
+  anomaly: ReconciliationAnomaly;
+  items: Record<string, unknown>[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+export async function listReconciliationItems(
+  anomaly: ReconciliationAnomaly,
+  options: { limit?: number; offset?: number } = {},
+): Promise<ReconciliationItemsResponse> {
+  const params = new URLSearchParams({ anomaly });
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
+  if (options.offset !== undefined)
+    params.set("offset", String(options.offset));
+  return requestControlJson<ReconciliationItemsResponse>(
+    `/api/control/billing-reconciliation/items?${params.toString()}`,
+    "读取对账异常明细失败",
+  );
+}
+
+/** 资金中心·人工调整导出：与 /adjustments 列表同筛选口径。 */
+export async function downloadAdjustmentsCsv(
+  options: {
+    actorUsername?: string;
+    targetUsername?: string;
+    sourceDocumentType?: string;
+    createdFrom?: string;
+    createdTo?: string;
+  } = {},
+): Promise<void> {
+  const query = new URLSearchParams();
+  if (options.actorUsername) query.set("actor_username", options.actorUsername);
+  if (options.targetUsername)
+    query.set("target_username", options.targetUsername);
+  if (options.sourceDocumentType)
+    query.set("source_document_type", options.sourceDocumentType);
+  if (options.createdFrom) query.set("created_from", options.createdFrom);
+  if (options.createdTo) query.set("created_to", options.createdTo);
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  await downloadControlCsv(
+    `/api/control/adjustments.csv${suffix}`,
+    "adjustments.csv",
+  );
+}
+
 export async function getControlSettings(): Promise<ControlSettings> {
   return requestControlJson<ControlSettings>(
     "/api/control/settings",

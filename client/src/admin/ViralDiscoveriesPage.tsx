@@ -48,6 +48,12 @@ export function ViralDiscoveriesPage({
   readOnly?: boolean;
 }) {
   const [date, setDate] = useState(todayShanghai);
+  // 方案 P1 客户需求洞察：单日之外支持近 7/30 天与自定义区间。
+  const [rangePreset, setRangePreset] = useState<
+    "day" | "7d" | "30d" | "custom"
+  >("day");
+  const [rangeFrom, setRangeFrom] = useState(todayShanghai());
+  const [rangeTo, setRangeTo] = useState(todayShanghai());
   const [aggregate, setAggregate] = useState<ViralDiscoveryAggregate | null>(
     null,
   );
@@ -70,18 +76,36 @@ export function ViralDiscoveriesPage({
     key: string;
   } | null>(null);
 
-  const loadAggregate = useCallback(async (targetDate: string) => {
-    setLoading(true);
-    setError("");
-    try {
-      const result = await listViralDiscoveries(targetDate);
-      setAggregate(result);
-    } catch (cause) {
-      setError(adminActivationErrorMessage(cause, "读取搜索发现失败"));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const loadAggregate = useCallback(
+    async (targetDate: string, preset: typeof rangePreset = "day") => {
+      setLoading(true);
+      setError("");
+      try {
+        const shiftDays = preset === "7d" ? 7 : preset === "30d" ? 30 : 0;
+        const range =
+          preset === "custom"
+            ? { from: rangeFrom, to: rangeTo }
+            : preset === "day"
+              ? undefined
+              : {
+                  from: new Intl.DateTimeFormat("en-CA", {
+                    timeZone: "Asia/Shanghai",
+                  }).format(
+                    new Date(Date.now() - (shiftDays - 1) * 86_400_000),
+                  ),
+                  to: targetDate,
+                };
+        const result = await listViralDiscoveries(targetDate, range);
+        setAggregate(result);
+      } catch (cause) {
+        setError(adminActivationErrorMessage(cause, "读取搜索发现失败"));
+      } finally {
+        setLoading(false);
+      }
+    },
+    // 自定义区间输入变化时自动重查：与单日 date 输入的既有行为一致。
+    [rangeFrom, rangeTo],
+  );
   useEffect(() => {
     void loadAggregate(date);
   }, [date, loadAggregate]);
@@ -184,19 +208,58 @@ export function ViralDiscoveriesPage({
         className="admin-toolbar admin-viral-toolbar"
         onSubmit={(event) => {
           event.preventDefault();
-          void loadAggregate(date);
+          void loadAggregate(date, rangePreset);
         }}
       >
         <label>
-          日期
-          <input
-            type="date"
-            value={date}
-            onChange={(event) => {
-              if (event.target.value) setDate(event.target.value);
-            }}
-          />
+          时间范围
+          <select
+            value={rangePreset}
+            onChange={(event) =>
+              setRangePreset(event.target.value as typeof rangePreset)
+            }
+          >
+            <option value="day">单日</option>
+            <option value="7d">近 7 天</option>
+            <option value="30d">近 30 天</option>
+            <option value="custom">自定义区间</option>
+          </select>
         </label>
+        {rangePreset === "custom" ? (
+          <>
+            <label>
+              开始日期
+              <input
+                type="date"
+                value={rangeFrom}
+                onChange={(event) => {
+                  if (event.target.value) setRangeFrom(event.target.value);
+                }}
+              />
+            </label>
+            <label>
+              结束日期
+              <input
+                type="date"
+                value={rangeTo}
+                onChange={(event) => {
+                  if (event.target.value) setRangeTo(event.target.value);
+                }}
+              />
+            </label>
+          </>
+        ) : (
+          <label>
+            日期
+            <input
+              type="date"
+              value={date}
+              onChange={(event) => {
+                if (event.target.value) setDate(event.target.value);
+              }}
+            />
+          </label>
+        )}
         <button type="submit" disabled={loading}>
           查看
         </button>

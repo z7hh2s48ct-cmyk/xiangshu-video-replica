@@ -311,18 +311,14 @@ export function OrdersPage({ readOnly = false }: { readOnly?: boolean }) {
               <td>
                 {order.status !== "PENDING" || readOnly ? (
                   "—"
-                ) : order.provider === "wechat_native" ? (
-                  // 查单同步 only speaks to ZPay. A WeChat order is reconciled
-                  // from 客户详情 → 充值核验, which picks the right gateway.
-                  <span title="微信订单请在客户详情页的“充值核验”中核验">
-                    客户详情核验
-                  </span>
                 ) : (
+                  // 查单补单统一入口（方案 P1）：后端按订单渠道分派网关，
+                  // 微信订单不再需要绕道客户详情核验。
                   <button
                     type="button"
                     onClick={() => setPendingSyncOrderNo(order.order_no)}
                   >
-                    查单同步
+                    查单补单
                   </button>
                 )}
               </td>
@@ -342,10 +338,10 @@ export function OrdersPage({ readOnly = false }: { readOnly?: boolean }) {
       <ConfirmDialog
         busy={syncing}
         confirmLabel="确认查单"
-        description="将立即向 ZPay 查询该订单的最新支付状态；若已支付，会当场完成入账。原因将写入审计日志。"
+        description="将立即向支付通道查询该订单的最新支付状态；若已支付，会当场完成入账。原因将写入审计日志。"
         level="reason"
         open={pendingSyncOrderNo !== null}
-        title={`查单同步 ${pendingSyncOrderNo ?? ""}`}
+        title={`查单补单 ${pendingSyncOrderNo ?? ""}`}
         onClose={() => setPendingSyncOrderNo(null)}
         onConfirm={(reason: string) => void confirmSync(reason)}
       />

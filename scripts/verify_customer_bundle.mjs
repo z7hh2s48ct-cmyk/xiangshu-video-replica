@@ -14,7 +14,7 @@
  *     b. 禁止内容特征串（管理域）：AdminApp / api.admin / exchangeAdminSession /
  *        fetchAdminSession / loginAdminWithPassword / /api/control/ /
  *        X-Control-Proxy-Token / 激活码批次 / 审计中心 / 强制下线 /
- *        总览仪表盘 / 资金流水。
+ *        总览仪表盘 / 资金流水 / 资金中心。
  *     c. 禁止内容特征串（内部入口域）：getDevelopmentUserId / X-Dev-User-Id /
  *        internalAccessToken（CW-015 后这些应已从客户入口链路消失）。
  *  3) 前置校验：`client/dist` 不存在时明确报错退出 1，不得静默通过
@@ -41,7 +41,7 @@
  * 产物扫描里（不放宽前三条：万一将来关掉 minify 或改动构建，它们立刻恢复
  * 检测力），但**真正有齿的层级是源码级合同测试** `client/src/entryContract.test.ts`
  * ——源码不压缩，标识符原样可见。真正在压缩产物里存活的是字符串字面量：
- * `/api/control/`、`总览仪表盘`、`审计中心`、`资金流水`、`运营管理后台`、`ASX1.`，
+ * `/api/control/`、`总览仪表盘`、`审计中心`、`资金中心`、`运营管理后台`、`ASX1.`，
  * 这六条构成阳性对照集合（POSITIVE_CONTROL_NEEDLES）。
  *
  * 与源码级合同测试（`client/src/entryContract.test.ts`）形成双层保护：
@@ -99,8 +99,11 @@ const TEXT_EXTENSIONS = new Set([
 
 /** 禁止内容特征串（管理域）。命中即证明客户制品包含管理业务代码或其路由。
  *  CW-019 交接文档 §5.5 item 3 的原始清单逐条保留、不放宽；后续追加
- *  `运营管理后台`、`ASX1.`、`总览仪表盘`、`资金流水`。其中后两条替代已退出
- *  当前管理制品的旧文案，只用于恢复阳性对照，不删除旧禁止项。 */
+ *  `运营管理后台`、`ASX1.`、`总览仪表盘`、`资金流水`、`资金中心`。其中
+ *  `资金流水` 已随管理端「资金中心」改造（方案 P1）退出当前管理制品——页签改名后
+ *  产物里只剩 `资金中心`，旧词在管理制品中命中 0 次，阳性对照因此失败。
+ *  处理方式按本脚本的要求：旧词保留在禁止清单里（不放宽），阳性对照改用
+ *  `资金中心`，并已实测它在管理制品里命中、在客户制品里 0 命中。 */
 const FORBIDDEN_CONTENT_ADMIN = Object.freeze([
   "AdminApp",
   "api.admin",
@@ -114,6 +117,7 @@ const FORBIDDEN_CONTENT_ADMIN = Object.freeze([
   "审计中心",
   "强制下线",
   "资金流水",
+  "资金中心",
   "运营管理后台",
   "ASX1.",
 ]);
@@ -128,7 +132,7 @@ const POSITIVE_CONTROL_NEEDLES = Object.freeze([
   "/api/control/",
   "总览仪表盘",
   "审计中心",
-  "资金流水",
+  "资金中心",
   "运营管理后台",
   "ASX1.",
 ]);

@@ -23,6 +23,8 @@ import {
   listAdminWalletTransactions,
   listCustomerOwnerCandidates,
   listCustomers,
+  resumeCustomer,
+  suspendCustomer,
   updateCustomerAnnotation,
   updateCustomerUnitPrice,
 } from "../api.admin";
@@ -32,12 +34,15 @@ import { CustomerActivitySection } from "./CustomerActivitySection";
 import { CustomerBenefitsSection } from "./CustomerBenefitsSection";
 import { CustomerDeviceSection } from "./CustomerDeviceSection";
 import { CustomerRefundSection } from "./CustomerRefundSection";
+import { GenerationRecordsPage } from "./GenerationRecordsPage";
 import { RecordCallsPanel } from "./RecordCallsPanel";
+import { SessionsPage } from "./SessionsPage";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { CopyCustomerId } from "./ui/CopyCustomerId";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
 import { CustomerStatusBadge, OrderStatusBadge } from "./ui/StatusBadge";
+import { TabBar } from "./ui/TabBar";
 import {
   formatDateTime,
   formatFen,
@@ -486,9 +491,12 @@ export function CustomersPage({
                   <th>客户 ID</th>
                   <th>注册时间</th>
                   <th>状态</th>
+                  <th>当前权益</th>
                   <th>可用积分</th>
-                  <th>累计消耗</th>
+                  <th>累计充值</th>
+                  <th>本月消耗</th>
                   <th>生成情况</th>
+                  <th>最近活跃</th>
                   <th>操作</th>
                 </tr>
               </thead>
@@ -543,14 +551,22 @@ export function CustomersPage({
                     <td data-label="状态">
                       <CustomerStatusBadge status={customer.status} />
                     </td>
+                    <td data-label="当前权益">
+                      {customer.current_benefit || (
+                        <span className="customer-cell-muted">原价</span>
+                      )}
+                    </td>
                     <td data-label="可用积分">
                       <strong>{customer.available_credits ?? 0} 积分</strong>
                     </td>
                     <td
-                      aria-label={`${customer.username} 已结算消耗`}
-                      data-label="累计消耗"
+                      aria-label={`${customer.username} 累计充值`}
+                      data-label="累计充值"
                     >
-                      {customer.credits_spent ?? 0} 积分
+                      {formatFen(customer.total_recharge_fen ?? 0)}
+                    </td>
+                    <td data-label="本月消耗">
+                      {customer.month_consumed_credits ?? 0} 积分
                     </td>
                     <td data-label="生成情况">
                       <div className="customer-cell-generation">
@@ -563,6 +579,18 @@ export function CustomersPage({
                           {customer.generation_in_progress ?? 0}
                         </small>
                       </div>
+                    </td>
+                    <td data-label="最近活跃">
+                      <time
+                        className="customer-cell-date"
+                        dateTime={customer.last_active_at}
+                      >
+                        {customer.last_active_at
+                          ? formatDateTime(customer.last_active_at).split(
+                              " ",
+                            )[0]
+                          : "—"}
+                      </time>
                     </td>
                     <td data-label="操作">
                       <button
@@ -744,6 +772,90 @@ function Customer360Empty() {
   return <p className="admin-hint">暂无记录</p>;
 }
 
+/** 暂停 / 恢复账号（方案 P1 客户管理第 4 主操作）。
+ *  口径：暂停只禁止新登录与新任务并吊销当前会话，余额不动；恢复后客户自行
+ *  重新登录。与调账同写契约（原因必填 + 幂等键）。 */
+function CustomerSuspendButton({ customer }: { customer: CustomerListItem }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const suspended = customer.status === "SUSPENDED";
+  const action = suspended ? "恢复账号" : "暂停账号";
+
+  async function submit(reason: string) {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const key = crypto.randomUUID();
+      if (suspended) {
+        await resumeCustomer(customer.user_id, reason, key);
+      } else {
+        await suspendCustomer(customer.user_id, reason, key);
+      }
+      setOpen(false);
+      // 状态列与核心指标由列表刷新承载；这里给出可感知的结果提示。
+      window.alert(
+        suspended
+          ? `已恢复 ${companyNameOf(customer)}，客户可重新登录。`
+          : `已暂停 ${companyNameOf(customer)}，当前会话已下线，余额保持不变。`,
+      );
+      window.location.reload();
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : `${action}失败，请重试。`,
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)}>
+        {action}
+      </button>
+      <ConfirmDialog
+        busy={busy}
+        confirmLabel={`确认${action}`}
+        description={
+          suspended
+            ? "恢复后客户可重新登录，钱包余额与进行中的任务不受影响。原因将写入审计日志。"
+            : "暂停后该客户无法登录或发起新任务；当前在线会话立即下线，钱包余额保持不变，进行中的任务跑完。原因将写入审计日志。"
+        }
+        error={error}
+        level="reason"
+        open={open}
+        title={`${action} ${companyNameOf(customer)}`}
+        onClose={() => setOpen(false)}
+        onConfirm={(reason: string) => void submit(reason)}
+      />
+    </>
+  );
+}
+
+/** 详情页签（方案 P1 六页签）：对任一客户的全部操作都在详情页完成。 */
+const CUSTOMER_DETAIL_TABS = [
+  { id: "overview", label: "概览" },
+  { id: "funds", label: "充值与积分" },
+  { id: "records", label: "生成记录" },
+  { id: "devices", label: "登录与设备" },
+  { id: "benefits", label: "价格与权益" },
+  { id: "activity", label: "操作记录" },
+] as const;
+
+type CustomerDetailTab = (typeof CUSTOMER_DETAIL_TABS)[number]["id"];
+
+/** 资金操作目标区块 → 所属页签：顶部主操作按钮先切页签再滚动定位。 */
+const SECTION_TAB: Record<string, CustomerDetailTab> = {
+  "customer-benefits": "benefits",
+  "customer-free-grant": "funds",
+  "customer-refund": "funds",
+  "customer-annotation": "overview",
+  "customer-activity": "activity",
+  "customer-devices": "devices",
+};
+
 function CustomerDetailView({
   customer,
   focusSectionId,
@@ -763,10 +875,36 @@ function CustomerDetailView({
   refreshError: string;
   onBack: () => void;
 }) {
-  // 带资金意图进入时，展开客户即直达对应表单，省掉再点一次顶部按钮。
+  // 带资金意图进入时，先切到对应页签，展开客户即直达表单。
+  const [tab, setTab] = useState<CustomerDetailTab>(
+    (focusSectionId && SECTION_TAB[focusSectionId]) || "overview",
+  );
+  const [pendingSection, setPendingSection] = useState<string | null>(
+    focusSectionId,
+  );
+  // 切页签后再滚动：目标区块随页签挂载，同帧滚动会落空。
+  // setTab 与 setPendingSection 批量提交，effect 在重渲染后执行一次，
+  // 因此这里只依赖 pendingSection 即可，无需把 tab 列进来。
   useEffect(() => {
-    if (focusSectionId) scrollToSection(focusSectionId);
+    if (!pendingSection) return;
+    scrollToSection(pendingSection);
+    setPendingSection(null);
+  }, [pendingSection]);
+  useEffect(() => {
+    if (!focusSectionId) return;
+    setTab(SECTION_TAB[focusSectionId] ?? "overview");
+    setPendingSection(focusSectionId);
   }, [focusSectionId]);
+
+  function focusSection(sectionId: string) {
+    const target = SECTION_TAB[sectionId];
+    if (target && target !== tab) {
+      setTab(target);
+      setPendingSection(sectionId);
+    } else {
+      scrollToSection(sectionId);
+    }
+  }
 
   return (
     <div
@@ -809,22 +947,23 @@ function CustomerDetailView({
             <>
               <button
                 type="button"
-                onClick={() => scrollToSection("customer-benefits")}
+                onClick={() => focusSection("customer-benefits")}
               >
                 开通套餐（已收款）
               </button>
               <button
                 type="button"
-                onClick={() => scrollToSection("customer-free-grant")}
+                onClick={() => focusSection("customer-free-grant")}
               >
                 赠送积分
               </button>
               <button
                 type="button"
-                onClick={() => scrollToSection("customer-refund")}
+                onClick={() => focusSection("customer-refund")}
               >
                 退款扣减
               </button>
+              <CustomerSuspendButton customer={customer} />
             </>
           ) : null}
         </div>
@@ -848,56 +987,107 @@ function CustomerDetailView({
         </article>
       </section>
 
-      <CustomerAnnotationSection
-        key={`annotation:${customer.user_id}`}
-        onChanged={onChanged}
-        readOnly={readOnly}
-        userId={customer.user_id}
+      <TabBar
+        active={tab}
+        ariaLabel="客户详情页签"
+        items={CUSTOMER_DETAIL_TABS.map(({ id, label }) => ({ id, label }))}
+        onChange={(id) => setTab(id as CustomerDetailTab)}
       />
-      <AccountCreditPanel
-        key={`account:${customer.user_id}:${customer.available_credits}`}
-        onChanged={onChanged}
-        userId={customer.user_id}
-        readOnly={readOnly}
-      />
-      <Customer360Data
-        key={`ledger:${customer.user_id}:${customer.available_credits}`}
-        readOnly={readOnly}
-        userId={customer.user_id}
-      />
-      {/* 任务书 C：设备视图（BOUND 设备 + 解绑/吊销凭据）。 */}
-      <CustomerDeviceSection readOnly={readOnly} userId={customer.user_id} />
-      <div className="customer-detail-settings-grid">
-        {customer.activation_code !== "账号注册" && (
-          <CustomerPriceEditor readOnly={readOnly} userId={customer.user_id} />
-        )}
-        <FreeCreditsSection
-          key={`free-grant:${operatorId}:${customer.user_id}`}
-          onGranted={onGranted}
-          operatorId={operatorId}
+
+      {tab === "overview" ? (
+        <>
+          <CustomerAnnotationSection
+            key={`annotation:${customer.user_id}`}
+            onChanged={onChanged}
+            readOnly={readOnly}
+            userId={customer.user_id}
+          />
+          {/* 概览的「最近动态」复用操作记录视图（P0-3 的客户侧审计），
+              两个页签各自挂载，key 区分避免状态互串。 */}
+          <CustomerActivitySection
+            key={`overview-activity:${customer.user_id}`}
+            userId={customer.user_id}
+          />
+        </>
+      ) : null}
+
+      {tab === "funds" ? (
+        <>
+          <AccountCreditPanel
+            key={`account:${customer.user_id}:${customer.available_credits}`}
+            onChanged={onChanged}
+            userId={customer.user_id}
+            readOnly={readOnly}
+          />
+          <Customer360Data
+            key={`ledger:${customer.user_id}:${customer.available_credits}`}
+            readOnly={readOnly}
+            userId={customer.user_id}
+          />
+          <div className="customer-detail-settings-grid">
+            <FreeCreditsSection
+              key={`free-grant:${operatorId}:${customer.user_id}`}
+              onGranted={onGranted}
+              operatorId={operatorId}
+              readOnly={readOnly}
+              userId={customer.user_id}
+            />
+            <CustomerRefundSection
+              key={`refund:${customer.user_id}`}
+              availableCredits={customer.available_credits ?? 0}
+              onRefunded={onGranted}
+              readOnly={readOnly}
+              userId={customer.user_id}
+            />
+          </div>
+        </>
+      ) : null}
+
+      {tab === "records" ? (
+        <GenerationRecordsPage
+          key={`records:${customer.user_id}`}
+          initialUsername={customer.username}
           readOnly={readOnly}
+        />
+      ) : null}
+
+      {tab === "devices" ? (
+        <>
+          {/* 任务书 C：设备视图（BOUND 设备 + 解绑/吊销凭据）。 */}
+          <CustomerDeviceSection
+            readOnly={readOnly}
+            userId={customer.user_id}
+          />
+          {/* 该客户的在线会话（嵌入模式只看这一个客户）。 */}
+          <SessionsPage readOnly={readOnly} userId={customer.user_id} />
+        </>
+      ) : null}
+
+      {tab === "benefits" ? (
+        <>
+          <CustomerBenefitsSection
+            key={`benefits:${customer.user_id}`}
+            onChanged={onChanged}
+            readOnly={readOnly}
+            userId={customer.user_id}
+          />
+          {customer.activation_code !== "账号注册" && (
+            <CustomerPriceEditor
+              readOnly={readOnly}
+              userId={customer.user_id}
+            />
+          )}
+        </>
+      ) : null}
+
+      {tab === "activity" ? (
+        /* 方案 P0-3：客户自己的动作（建项目、读素材等）——与管理员处置共用
+           同一张审计表，这里按 scope=customer + 客户 ID 取出属于自己的部分。 */
+        <CustomerActivitySection
+          key={`activity:${customer.user_id}`}
           userId={customer.user_id}
         />
-      </div>
-      <CustomerRefundSection
-        key={`refund:${customer.user_id}`}
-        availableCredits={customer.available_credits ?? 0}
-        onRefunded={onGranted}
-        readOnly={readOnly}
-        userId={customer.user_id}
-      />
-      <CustomerBenefitsSection
-        key={`benefits:${customer.user_id}`}
-        onChanged={onChanged}
-        readOnly={readOnly}
-        userId={customer.user_id}
-      />
-      {/* 方案 P0-3：客户自己的动作（建项目、读素材等）——与管理员处置共用
-          同一张审计表，这里按 scope=customer + 客户 ID 取出属于自己的部分。 */}
-      <CustomerActivitySection
-        key={`activity:${customer.user_id}`}
-        userId={customer.user_id}
-      />
+      ) : null}
     </div>
   );
 }

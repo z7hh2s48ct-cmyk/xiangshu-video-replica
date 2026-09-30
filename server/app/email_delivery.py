@@ -61,6 +61,12 @@ class EmailSender(Protocol):
 
     def send_password_reset_notice(self, *, to: str, username: str, occurred_at: str) -> None: ...
 
+    def send_alert_digest(
+        self, *, to: str, total: int, danger_count: int, items: str, generated_at: str
+    ) -> None:
+        """告警摘要（方案 P2 推送通道）：未配置摘要模板的实现可静默跳过。"""
+        ...
+
 
 def validate_email_config(config: Mapping[str, str]) -> None:
     """保存前校验：配错的模板号要在保存时拒绝，而不是等到客户收不到验证码。"""
@@ -195,6 +201,26 @@ class TemplateEmailSender:
             subject=NOTICE_SUBJECT,
             template_id=self._notice_template_id,
             data={"username": username, "time": occurred_at},
+        )
+
+    def send_alert_digest(
+        self, *, to: str, total: int, danger_count: int, items: str, generated_at: str
+    ) -> None:
+        """告警摘要邮件：复用通知模板（username/time 变量位），模板未配则跳过。
+
+        摘要正文受模板变量结构限制，只放计数与生成时刻；明细引导回管理端
+        告警页——邮件不做告警的唯一出口（页面红黄条始终在）。
+        """
+        if self._notice_template_id is None:
+            return
+        self._send_template(
+            to=to,
+            subject=f"管理端告警：{danger_count} 条紧急 / 共 {total} 条",
+            template_id=self._notice_template_id,
+            data={
+                "username": "告警接收人",
+                "time": generated_at,
+            },
         )
 
     def check_template(self) -> None:

@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20260929T1200_admin_team_and_alert_settings"
+      "20260930T1100_alert_notify_dedup"
     ],
     "parents": {
       "001_core": null,
@@ -147,9 +147,11 @@
       "20260928T1000_external_call_response_log": "20260928T1200_customer_email_password_reset",
       "20260928T1200_customer_email_password_reset": "20260927T0000_oral_voice_language_settings",
       "20260929T1000_customer_annotations": "20260928T1000_external_call_response_log",
-      "20260929T1200_admin_team_and_alert_settings": "20260929T1000_customer_annotations"
+      "20260929T1200_admin_team_and_alert_settings": "20260929T1000_customer_annotations",
+      "20260930T1000_viral_quality_budget": "20260929T1200_admin_team_and_alert_settings",
+      "20260930T1100_alert_notify_dedup": "20260930T1000_viral_quality_budget"
     },
-    "revision_count": 131
+    "revision_count": 133
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -687,6 +689,14 @@
     "20260929T1200_admin_team_and_alert_settings": {
       "file": "versions/20260929T1200_admin_team_and_alert_settings.py",
       "sha256": "e514d0413df5ec1d6fca4df3fa07b6b9522a8979a568789e202fb2ccbd84b072"
+    },
+    "20260930T1000_viral_quality_budget": {
+      "file": "versions/20260930T1000_viral_quality_budget.py",
+      "sha256": "4f73ad54aefa1f4b2ef11d1e188ad1be6cd9e1d1f176e7eff6d5936912195378"
+    },
+    "20260930T1100_alert_notify_dedup": {
+      "file": "versions/20260930T1100_alert_notify_dedup.py",
+      "sha256": "7a4fc93dfefb0fb083b4106dd65261a868b7bbe42ff83e3d2024396b2e4f4571"
     }
   },
   "task": "MIGRATION-GUARD-20260912"

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type AdminViralSearchTimeRange,
+  addViralKeyword,
   adminActivationErrorMessage,
   adminSearchViralVideos,
   archiveCollectedViralVideo,
@@ -13,7 +14,6 @@ import {
   listCollectedViralVideos,
   previewCollectedViralVideo,
   refreshCollectedVideoStatistics,
-  updateViralRuntimeControls,
   updateViralVideoAvailability,
   type ViralLibraryOverview,
   type ViralRuntimeControls,
@@ -32,14 +32,21 @@ type Action =
   | "hide"
   | "restore"
   | "pin"
-  | "unpin";
-/** 批量接口只支持这三种：置顶 / 隐藏必须逐条，否则整批会被服务端拒绝。 */
-type BatchAction = "feature" | "unfeature" | "delete";
+  | "unpin"
+  | "prepare";
+/** 批量接口支持的动作：置顶 / 隐藏必须逐条，否则整批会被服务端拒绝；
+ * prepare（方案 P1 C-2）批量排队准备素材，就绪后再决定上首页。 */
+type BatchAction = "feature" | "unfeature" | "delete" | "prepare";
 /** 「立即采集」不是对某条视频的动作，但共用同一个确认框与提交路径。 */
 type PendingAction = Action | "collect";
 
 function isBatchAction(action: PendingAction): action is BatchAction {
-  return action === "feature" || action === "unfeature" || action === "delete";
+  return (
+    action === "feature" ||
+    action === "unfeature" ||
+    action === "delete" ||
+    action === "prepare"
+  );
 }
 
 type Pending = {
@@ -51,6 +58,8 @@ type Pending = {
 type Filters = {
   platform: "" | "douyin" | "wechat_channels";
   status: "" | CollectedViralStatus;
+  sort: "created" | "likes" | "published" | "usage";
+  hasUsage: "" | "used" | "unused";
   query: string;
   offset: number;
 };
@@ -77,6 +86,33 @@ export function archiveBusy(video: CollectedViralVideo) {
 
 export function mediaReady(video: CollectedViralVideo) {
   return video.media_status === "SUCCEEDED" && Boolean(video.storage_uri);
+}
+
+// 内容状态 6 态的界面文案（方案 P1）；词典本体在 ui/vocabulary，
+// 这里只做「底层状态 → 状态 id」的判定。
+const CONTENT_STATE_LABELS: Record<string, string> = {
+  pending_prepare: "待准备",
+  prepare_failed: "准备失败",
+  ready: "可上首页",
+  featured: "首页展示中",
+  removed: "已下架",
+  blocked: "已屏蔽",
+};
+
+/** 内容状态 6 态判定（方案 P1）：归档 × 首页 × 可见性收敛为一个运营状态。 */
+export function contentStateOf(video: CollectedViralVideo): string {
+  if (video.availability === "UNAVAILABLE") return "blocked";
+  if (video.availability === "HIDDEN") return "removed";
+  if (video.homepage_featured) return "featured";
+  if (mediaReady(video)) return "ready";
+  if (video.media_status === "FAILED" || video.archive_status === "FAILED") {
+    return "prepare_failed";
+  }
+  return "pending_prepare";
+}
+
+export function contentStateLabel(video: CollectedViralVideo): string {
+  return CONTENT_STATE_LABELS[contentStateOf(video)] ?? "待准备";
 }
 
 export function archiveLabel(video: CollectedViralVideo) {
@@ -327,6 +363,15 @@ function ViralRow({
               <dd>{statisticValue(video, read(video))}</dd>
             </div>
           ))}
+          {/* 方案 P1 内容模块 C-1：客户使用计数——内容值不值得上首页就看它。 */}
+          <div>
+            <dt>客户使用</dt>
+            <dd>
+              详情 {video.usage_detail_count ?? 0} · 文案{" "}
+              {video.usage_copy_count ?? 0} · 收藏{" "}
+              {video.usage_favorite_count ?? 0}
+            </dd>
+          </div>
         </dl>
         {isLinkImported(video) ? (
           <p className="admin-hint admin-viral-statistics-time">
@@ -608,6 +653,8 @@ function pendingCopy(action: PendingAction, count: number) {
 
 function batchNotice(action: BatchAction, count: number) {
   if (action === "feature") return `已批量展示 ${count} 条视频到首页。`;
+  if (action === "prepare")
+    return `已排队准备 ${count} 条视频的素材，完成后可在列表里上首页。`;
   if (action === "unfeature") return `已批量取消展示 ${count} 条视频。`;
   return `已删除 ${count} 条视频，前台不再展示。`;
 }
@@ -625,6 +672,8 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
   const [filters, setFilters] = useState<Filters>({
     platform: "",
     status: "",
+    sort: "created",
+    hasUsage: "",
     query: "",
     offset: 0,
   });
@@ -679,6 +728,9 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
       const result = await listCollectedViralVideos({
         platform: filters.platform || undefined,
         status: filters.status || undefined,
+        sort: filters.sort,
+        hasUsage:
+          filters.hasUsage === "" ? undefined : filters.hasUsage === "used",
         query: filters.query || undefined,
         offset: filters.offset,
       });
@@ -936,22 +988,14 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
         );
         return;
       }
-      await updateViralRuntimeControls(
+      await addViralKeyword(
         {
-          collection_enabled: value.collection_enabled,
-          import_enabled: value.import_enabled,
-          keywords: [
-            ...keywords,
-            {
-              platform: upstreamPlatform,
-              category: upstreamCategory.trim() || "推荐",
-              keyword,
-            },
-          ],
-          per_keyword_limit: value.per_keyword_limit,
-          collection_interval_days: value.collection_interval_days,
+          platform: upstreamPlatform,
+          category: upstreamCategory.trim() || "推荐",
+          keyword,
         },
         `实时搜索后加入采集关键词「${keyword}」`,
+        crypto.randomUUID(),
       );
       setUpstreamNotice(`已把「${keyword}」加入采集关键词，下个采集周期生效。`);
       setControls(await fetchViralRuntimeControls());
@@ -1325,6 +1369,39 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
           ]}
           value={filters.status}
           onChange={(value) => changeFilters({ status: value, offset: 0 })}
+        />
+        <SegmentedGroup
+          disabled={saving}
+          label="排序"
+          options={[
+            { value: "created", label: "采集时间" },
+            { value: "likes", label: "点赞数" },
+            { value: "published", label: "发布时间" },
+            { value: "usage", label: "客户使用" },
+          ]}
+          value={filters.sort}
+          onChange={(value) =>
+            changeFilters({
+              sort: value as Filters["sort"],
+              offset: 0,
+            })
+          }
+        />
+        <SegmentedGroup
+          disabled={saving}
+          label="客户使用"
+          options={[
+            { value: "", label: "不限" },
+            { value: "used", label: "有使用" },
+            { value: "unused", label: "无使用" },
+          ]}
+          value={filters.hasUsage}
+          onChange={(value) =>
+            changeFilters({
+              hasUsage: value as Filters["hasUsage"],
+              offset: 0,
+            })
+          }
         />
         <form
           className="admin-viral-searchbar"

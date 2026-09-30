@@ -326,24 +326,33 @@ describe("GenerationRecordsPage", () => {
   it("opens failed records with the filter already applied", async () => {
     render(<GenerationRecordsPage initialStatus="FAILED" />);
 
+    // 5 组口径：单状态意图归一到「失败」组，两种取消拼写一并筛出。
+    const failedGroup = "FAILED,CANCELED,CANCELLED,ARCHIVE_FAILED";
     await waitFor(() => {
       expect(adminApi.getAdminGenerationRecords).toHaveBeenCalledWith(
-        expect.objectContaining({ status: "FAILED" }),
+        expect.objectContaining({ status: failedGroup }),
       );
     });
-    expect(screen.getByLabelText("生成状态")).toHaveValue("FAILED");
+    expect(screen.getByLabelText("生成状态")).toHaveValue(failedGroup);
     // 失败阶段只有拆解任务有，其他类型下不该出现这个筛选项。
     expect(screen.queryByLabelText("失败阶段")).toBeNull();
   });
 
-  it("offers a single 已取消 option that covers both spellings (P0-6)", async () => {
+  it("collapses the 15 statuses into the 5 operator groups (P1)", async () => {
     render(<GenerationRecordsPage />);
     await waitFor(() =>
       expect(adminApi.getAdminGenerationRecords).toHaveBeenCalled(),
     );
-    const cancelled = screen.getAllByRole("option", { name: "已取消" });
-    expect(cancelled).toHaveLength(1);
-    expect(cancelled[0]).toHaveValue("CANCELED,CANCELLED");
+    // 5 组：排队中 / 生成中 / 成功 / 失败 / 需人工核对；两种「已取消」
+    // 拼写并入「失败」组（P0-6 口径延续）。
+    const groups = ["排队中", "生成中", "成功", "失败", "需人工核对"] as const;
+    for (const label of groups) {
+      expect(screen.getAllByRole("option", { name: label })).toHaveLength(1);
+    }
+    expect(screen.getByRole("option", { name: "失败" })).toHaveValue(
+      "FAILED,CANCELED,CANCELLED,ARCHIVE_FAILED",
+    );
+    expect(screen.queryByRole("option", { name: "已取消" })).toBeNull();
   });
 
   it("filters analysis failures by phase and surfaces upstream detail", async () => {
@@ -427,7 +436,8 @@ describe("GenerationRecordsPage", () => {
     await waitFor(() => {
       expect(adminApi.getAdminGenerationRecords).toHaveBeenLastCalledWith(
         expect.objectContaining({
-          status: "FAILED",
+          // 5 组口径：FAILED 归一到「失败」组后随查询提交。
+          status: "FAILED,CANCELED,CANCELLED,ARCHIVE_FAILED",
           recordType: "ANALYSIS",
           failurePhase: "http",
         }),
@@ -641,11 +651,11 @@ describe("GenerationRecordsPage", () => {
     await waitFor(() => expect(screen.queryByText("stale-user")).toBeNull());
   });
 
-  it("switches to the task-diagnosis tab and hides the records view", async () => {
+  it("switches to the failure-diagnosis tab and hides the records view", async () => {
     render(<GenerationRecordsPage />);
     await screen.findByText("人物置换首帧");
 
-    fireEvent.click(screen.getByRole("tab", { name: "任务诊断" }));
+    fireEvent.click(screen.getByRole("tab", { name: "失败诊断" }));
 
     expect(screen.getByLabelText("诊断任务编号")).toBeInTheDocument();
     expect(screen.queryByLabelText("生成账号")).toBeNull();

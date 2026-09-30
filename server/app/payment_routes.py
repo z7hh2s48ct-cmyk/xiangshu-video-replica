@@ -31,6 +31,7 @@ from app.wechat_native_provider import (
 )
 from app.zpay_payments import (
     WECHAT_NATIVE_SETTLEMENT_SPEC,
+    ZPAY_SETTLEMENT_SPEC,
     PaymentConfirmationError,
     confirm_recharge_payment,
     read_recharge_order,
@@ -214,13 +215,12 @@ def _handle_wechat_notification(
     "/control/recharge-orders/{order_no}/sync",
     response_model=RechargeOrderStatusResponse,
 )
-def sync_recharge_order_with_zpay(
+def sync_recharge_order(
     order_no: str,
     body: AdminWriteContract,
     request: Request,
     conn: Database,
     _actor: ControlUser,
-    provider: ZPayProviderDep,
 ) -> RechargeOrderStatusResponse:
     """Manual single-order query with the admin write contract (A4, A2).
 
@@ -229,7 +229,11 @@ def sync_recharge_order_with_zpay(
     a manual sync can credit a wallet, so it must name who asked for it.
     The query itself stays naturally idempotent (PAID orders replay, the
     confirmed credit is unique-constrained), so no snapshot layer is needed.
+
+    资金中心方案（P1）：所有渠道统一一个「查单补单」入口，网关按订单自身的
+    provider 字段分派——微信订单不再只能从客户详情核验。
     """
+    _syncable_providers = ("zpay", "wechat_native")
     _key, reason = _require_write_contract(request, body)
     request_id = get_or_create_request_id(request)
     write_audit(
@@ -259,6 +263,16 @@ def sync_recharge_order_with_zpay(
                 "message": "Recharge order is not waiting for payment.",
             },
         )
+    provider_name = str(local_order["provider"])
+    if provider_name not in _syncable_providers:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "RECHARGE_ORDER_NOT_SYNCABLE",
+                "message": "This order is not placed through a payment channel.",
+            },
+        )
+    provider = get_payment_provider(provider_name)
 
     merchant = _load_merchant_config(conn, provider)
     try:
@@ -317,6 +331,10 @@ def sync_recharge_order_with_zpay(
             channel=remote_order.channel,
             source_digest=remote_order.response_digest,
             allowed_channels=merchant.allowed_channels,
+            # 微信的支付凭证落在 transaction_id 列，结算规范必须跟着渠道走。
+            provider_spec=WECHAT_NATIVE_SETTLEMENT_SPEC
+            if provider_name == "wechat_native"
+            else ZPAY_SETTLEMENT_SPEC,
         )
     except PaymentConfirmationError as exc:
         raise HTTPException(

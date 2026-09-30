@@ -10,6 +10,7 @@ import { paidTestControlProvider } from "../api.admin";
 import { type SettingsBackend, SettingsPanel } from "../SettingsPanel";
 import { AdminAlertsSection } from "./AdminAlertsSection";
 import { AdminEnvironmentSwitch } from "./AdminEnvironmentSwitch";
+import { BillingQuoteCalculator } from "./BillingQuoteCalculator";
 import { BillingRatesManager } from "./BillingRatesManager";
 import { CustomerPricingManager } from "./CustomerPricingManager";
 import { H3AccountsManager } from "./H3AccountsManager";
@@ -18,17 +19,17 @@ import { QueueModeSection } from "./QueueModeSection";
 import { RechargePackageManager } from "./RechargePackageManager";
 import { TeamManagementSection } from "./TeamManagementSection";
 import { TabBar } from "./ui/TabBar";
-import { ViralRuntimeSection } from "./ViralRuntimeSection";
 
-const tabs = [
-  { id: "payment", label: "支付与价格" },
-  { id: "rates", label: "API 端点与价格" },
-  { id: "services", label: "服务配置" },
+// 方案 P1「价格与套餐一页化」：兑换比例 / 业务单价 / 充值套餐 / 试算器收拢
+// 到一个页签，讲清任一客户的扣费规则；收款设置单独一页（商户配置是另一类
+// 受众）；技术配置（API 服务、账号并发、运行参数）仅超级管理员可见——
+// 与团队页同一拦截策略：页签不出现，而不是点进去看 403。
+const baseTabs = [
+  { id: "pricing", label: "价格与套餐" },
+  { id: "collection", label: "收款设置" },
   { id: "alerts", label: "通知与告警" },
 ];
-
-// 团队成员管理整组接口只对超级管理员开放：其他人连页签都不给，
-// 而不是点进去看到一页 403。拦截本身仍在服务端。
+const technicalTab = { id: "services", label: "技术配置" };
 const teamTab = { id: "team", label: "团队与权限" };
 
 /**
@@ -55,36 +56,56 @@ const controlBackend: SettingsBackend = {
  */
 export function SystemSettingsPage({
   readOnly = false,
-  initialTab = "payment",
+  initialTab = "pricing",
   isSuperAdmin = false,
   currentUserId = "",
 }: {
   readOnly?: boolean;
-  initialTab?: "payment" | "rates" | "services" | "alerts" | "team";
+  /** 旧页签 id（payment/rates）在挂载时归并到 pricing，外部 intent 不用改。 */
+  initialTab?:
+    | "pricing"
+    | "collection"
+    | "services"
+    | "alerts"
+    | "team"
+    | "payment"
+    | "rates";
   isSuperAdmin?: boolean;
   /** 团队页据此隐藏「自己」那一行的停用 / 超管 / 重置密码按钮。 */
   currentUserId?: string;
 }) {
-  const [tab, setTab] = useState<string>(
-    initialTab === "team" && !isSuperAdmin ? "payment" : initialTab,
-  );
+  // 收拢归并：payment / rates 都落「价格与套餐」；非超管看不到技术配置页签，
+  // 带着该意图进来也落回价格页而不是看一页 404。
+  const normalizeTab = (value: string) => {
+    if (value === "payment" || value === "rates") return "pricing";
+    if (value === "services" && !isSuperAdmin) return "pricing";
+    if (value === "team" && !isSuperAdmin) return "pricing";
+    return value;
+  };
+  const [tab, setTab] = useState<string>(normalizeTab(initialTab));
   const [serviceTab, setServiceTab] = useState("providers");
+  const visibleTabs = isSuperAdmin
+    ? [...baseTabs, technicalTab, teamTab]
+    : baseTabs;
   return (
     <div>
       <TabBar
         active={tab}
         ariaLabel="系统设置页签"
-        items={isSuperAdmin ? [...tabs, teamTab] : tabs}
+        items={visibleTabs}
         onChange={setTab}
       />
-      {tab === "payment" ? (
+      {tab === "pricing" ? (
         <>
+          <BillingQuoteCalculator readOnly={readOnly} />
           <CustomerPricingManager readOnly={readOnly} />
           <RechargePackageManager readOnly={readOnly} />
-          <PaymentSettingsSection readOnly={readOnly} />
+          <BillingRatesManager readOnly={readOnly} />
         </>
       ) : null}
-      {tab === "rates" ? <BillingRatesManager readOnly={readOnly} /> : null}
+      {tab === "collection" ? (
+        <PaymentSettingsSection readOnly={readOnly} />
+      ) : null}
       {tab === "services" ? (
         <div className="admin-services">
           <AdminEnvironmentSwitch readOnly={readOnly} />
@@ -118,7 +139,6 @@ export function SystemSettingsPage({
                 source="control"
                 section="runtime"
               />
-              <ViralRuntimeSection readOnly={readOnly} />
             </div>
           )}
         </div>

@@ -292,7 +292,7 @@ describe("AdjustmentsPage (ADM-02 / T33)", () => {
     expect(screen.queryByText("+-50 积分")).not.toBeInTheDocument();
     expect(screen.queryByText("¥0.00")).not.toBeInTheDocument();
     expect(
-      screen.getByText("账本反向记账，实际退付在 ZPay 后台办理"),
+      screen.getByText("账本反向记账，实际退付在支付通道后台办理"),
     ).toBeInTheDocument();
   });
 
@@ -327,7 +327,7 @@ describe("AdjustmentsPage (ADM-02 / T33)", () => {
       expect(screen.getByText("+3 积分")).toBeInTheDocument();
     });
     expect(
-      screen.queryByText("账本反向记账，实际退付在 ZPay 后台办理"),
+      screen.queryByText("账本反向记账，实际退付在支付通道后台办理"),
     ).not.toBeInTheDocument();
     expect(screen.getByText("¥30.00")).toBeInTheDocument();
   });

@@ -61,6 +61,8 @@ function mockPanorama(items: unknown[], detail: unknown) {
 test("folds one business action into a row and keeps unproven costs visible", async () => {
   mockPanorama([settled, uncertain], {});
   render(<AnalyticsPage />);
+  // 经营分析默认落在「经营看板」；操作全景在「成本核对」页签的明细区。
+  fireEvent.click(await screen.findByRole("tab", { name: "成本核对" }));
   fireEvent.click(await screen.findByRole("button", { name: "查看操作全景" }));
   const table = await screen.findByRole("table", { name: "操作列表" });
   const headers = within(table)
@@ -168,6 +170,8 @@ test("opens one action panorama with its own requests and provider calls", async
     ],
   });
   render(<AnalyticsPage />);
+  // 经营分析默认落在「经营看板」；操作全景在「成本核对」页签的明细区。
+  fireEvent.click(await screen.findByRole("tab", { name: "成本核对" }));
   fireEvent.click(await screen.findByRole("button", { name: "查看操作全景" }));
   const table = await screen.findByRole("table", { name: "操作列表" });
   fireEvent.click(within(table).getByRole("button", { name: "查看操作明细" }));
@@ -206,6 +210,8 @@ test("scopes platform actions without a customer id", async () => {
     operations: [],
   });
   render(<AnalyticsPage />);
+  // 经营分析默认落在「经营看板」；操作全景在「成本核对」页签的明细区。
+  fireEvent.click(await screen.findByRole("tab", { name: "成本核对" }));
   fireEvent.click(await screen.findByRole("button", { name: "查看操作全景" }));
   const table = await screen.findByRole("table", { name: "操作列表" });
   expect(within(table).getByText("平台后台")).toBeInTheDocument();

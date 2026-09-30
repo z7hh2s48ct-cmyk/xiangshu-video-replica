@@ -53,8 +53,10 @@ export function SessionsPage({
   const requestIdRef = useRef(0);
   const contextIdRef = useRef(0);
 
+  const [keyword, setKeyword] = useState("");
+
   const load = useCallback(
-    async (targetUserId: string | null, nextOffset = 0) => {
+    async (targetUserId: string | null, nextOffset = 0, searchKeyword = "") => {
       const requestId = requestIdRef.current + 1;
       requestIdRef.current = requestId;
       setLoading(true);
@@ -62,7 +64,12 @@ export function SessionsPage({
       try {
         const response = targetUserId
           ? await listCustomerSessions(targetUserId, { limit: PAGE_SIZE })
-          : await listLiveSessions({ limit: PAGE_SIZE, offset: nextOffset });
+          : await listLiveSessions({
+              // 用名称找人（方案 P1）：关键字同时匹配用户名、公司名与客户编号。
+              keyword: searchKeyword || undefined,
+              limit: PAGE_SIZE,
+              offset: nextOffset,
+            });
         if (requestId !== requestIdRef.current) {
           return;
         }
@@ -118,6 +125,17 @@ export function SessionsPage({
     void load(target, 0);
   }
 
+  function searchByKeyword(event: FormEvent) {
+    event.preventDefault();
+    const term = keyword.trim();
+    if (!term) return;
+    contextIdRef.current += 1;
+    setViewUserId(null);
+    setQueryUserId("");
+    setNotice("");
+    void load(null, 0, term);
+  }
+
   function showAllLive() {
     if (onCustomerChange) {
       onCustomerChange(undefined);
@@ -125,6 +143,7 @@ export function SessionsPage({
     }
     contextIdRef.current += 1;
     setViewUserId(null);
+    setKeyword("");
     setNotice("");
     void load(null, 0);
   }
@@ -192,20 +211,32 @@ export function SessionsPage({
       </header>
 
       {!userId ? (
-        <form className="admin-sessions__toolbar" onSubmit={handleQuery}>
+        <form className="admin-sessions__toolbar" onSubmit={searchByKeyword}>
           <label>
-            <span>客户 ID</span>
+            <span>客户</span>
             <input
-              placeholder="输入客户 ID"
+              placeholder="用户名、公司名或客户编号"
+              value={keyword}
+              onChange={(event) => setKeyword(event.target.value)}
+            />
+          </label>
+          <button disabled={loading} type="submit">
+            搜索
+          </button>
+          <button disabled={loading} type="button" onClick={showAllLive}>
+            全部在线
+          </button>
+          {/* 排查用的精确编号入口保留但降为辅助，日常找人靠名称。 */}
+          <label>
+            <span>客户编号</span>
+            <input
+              placeholder="输入客户编号"
               value={queryUserId}
               onChange={(event) => setQueryUserId(event.target.value)}
             />
           </label>
-          <button disabled={loading} type="submit">
+          <button disabled={loading} type="button" onClick={handleQuery}>
             查看客户
-          </button>
-          <button disabled={loading} type="button" onClick={showAllLive}>
-            全部在线
           </button>
         </form>
       ) : null}

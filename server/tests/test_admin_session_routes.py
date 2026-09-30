@@ -24,6 +24,8 @@ os.environ.setdefault(
     "test-key-for-t34-session-tests-minimum-48-bytes-long-1234567890",
 )
 
+import json
+
 import psycopg
 import pytest
 from fastapi import FastAPI
@@ -968,8 +970,12 @@ def test_admin_collected_video_requires_manual_homepage_selection_and_delete_is_
     unready = client.patch(
         path, headers={**headers, "Idempotency-Key": "feature-unready"}, json=payload
     )
-    assert unready.status_code == 409, unready.text
+    # 方案 P1 C-2：未准备的视频改为排队自动准备，就绪后由后台上首页。
+    assert unready.status_code == 200, unready.text
+    assert unready.json()["queued_for_preparation"] is True
+    # 排队任务在同一夹具内清理，避免占用「每平台一个活跃任务」的槽位。
     with psycopg.connect(route_state) as conn:
+        conn.execute("DELETE FROM viral_refresh_tasks WHERE platform='douyin'")
         conn.execute(
             "INSERT INTO viral_media_preparations"
             "(id,platform,video_id,media_kind,status,storage_uri) VALUES"
@@ -1394,18 +1400,21 @@ def test_viral_batch_curation_is_all_or_nothing(
     )
     assert refused.status_code == 409, refused.text
     assert refused.json()["detail"]["code"] == "VIRAL_COVER_NOT_READY"
+    # 方案 P1 C-2 之后的口径：素材未就绪不再是整批拒绝，而是转入
+    # 「准备完成后自动上首页」的队列（整批取消仍适用于视频已被删除的场景）。
     not_ready = client.post(
         batch_path,
         headers={**headers, "Idempotency-Key": "batch-not-ready"},
         json={
             "action": "feature",
             "items": [{"platform": "douyin", "video_id": "no-media-video"}],
-            "reason": "未归档不能上首页",
+            "reason": "未归档先排队准备",
             "confirm": True,
         },
     )
-    assert not_ready.status_code == 409, not_ready.text
-    assert not_ready.json()["detail"]["code"] == "VIRAL_MEDIA_NOT_READY"
+    assert not_ready.status_code == 200, not_ready.text
+    assert not_ready.json()["queued_count"] == 1
+    assert not_ready.json()["items"][0]["queued_for_preparation"] is True
     missing = client.post(
         batch_path,
         headers={**headers, "Idempotency-Key": "batch-missing"},
@@ -1836,6 +1845,9 @@ def test_admin_viral_discoveries_daily_summary(client: TestClient, route_state: 
     assert response.status_code == 200, response.text
     assert response.json() == {
         "date": "2026-09-22",
+        # 方案 P1：区间参数落地后单日响应也带 from/to（与 date 同值）。
+        "from": "2026-09-22",
+        "to": "2026-09-22",
         "total": 3,
         "users": 2,
         "videos": 2,
@@ -2061,3 +2073,189 @@ def test_admin_realtime_search_requires_write_contract(
     )
     assert no_reason.status_code == 400
     assert no_reason.json()["detail"]["code"] == "REASON_REQUIRED"
+
+
+def test_viral_batch_prepare_queues_instead_of_rejecting(
+    client: TestClient, route_state: str
+) -> None:
+    """方案 P1 C-2：未准备的视频批量上首页不再整批拒绝，转排队自动准备。"""
+    headers = _admin_session(client)
+    batch_path = "/api/control/viral/videos/curation:batch"
+    with psycopg.connect(route_state) as conn:
+        conn.execute("DELETE FROM viral_refresh_tasks WHERE platform='douyin'")
+        conn.execute(
+            "INSERT INTO viral_videos(platform,video_id,title) "
+            "VALUES('douyin','unprepared-video','尚未转存')"
+        )
+
+    payload = {
+        "action": "feature",
+        "items": [{"platform": "douyin", "video_id": "unprepared-video"}],
+        "reason": "上首页（素材待准备）",
+        "confirm": True,
+    }
+    response = client.post(
+        batch_path,
+        headers={**headers, "Idempotency-Key": "batch-auto-queue"},
+        json=payload,
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["queued_count"] == 1
+    assert body["items"][0]["queued_for_preparation"] is True
+
+    with psycopg.connect(route_state) as conn:
+        task = conn.execute(
+            "SELECT collection_config_json FROM viral_refresh_tasks "
+            "WHERE platform='douyin' AND status='PENDING'"
+        ).fetchone()
+        assert task is not None
+        config = json.loads(task[0])
+        assert config["kind"] == "archive_batch"
+        assert config["video_ids"] == ["unprepared-video"]
+        # 上首页意图随任务走：后台准备完成后按原始操作人自动展示。
+        assert config["feature_after"]["reason"] == "上首页（素材待准备）"
+        featured = conn.execute(
+            "SELECT homepage_featured FROM viral_videos WHERE video_id='unprepared-video'"
+        ).fetchone()
+        assert featured == (0,)
+        conn.execute("DELETE FROM viral_refresh_tasks WHERE platform='douyin'")
+        conn.execute("DELETE FROM viral_videos WHERE video_id='unprepared-video'")
+
+
+def test_viral_keyword_single_add_and_delete_are_atomic(
+    client: TestClient, route_state: str
+) -> None:
+    """方案 P1 C-12：关键词单条增删不再整表覆盖（并发编辑互吞的修复）。"""
+    headers = _admin_session(client)
+    with psycopg.connect(route_state) as conn:
+        before = conn.execute(
+            "SELECT keywords_json FROM viral_runtime_controls WHERE id=1"
+        ).fetchone()
+        original = json.loads(before[0]) if before and before[0] else []
+
+    added = client.post(
+        "/api/control/viral/keywords",
+        headers={**headers, "Idempotency-Key": "kw-add"},
+        json={
+            "platform": "douyin",
+            "category": "推荐",
+            "keyword": "单条新增词",
+            "reason": "搜索发现高频词",
+            "confirm": True,
+        },
+    )
+    assert added.status_code == 200, added.text
+    assert added.json()["added"] is True
+
+    # 重复添加幂等：不产生第二条。
+    again = client.post(
+        "/api/control/viral/keywords",
+        headers={**headers, "Idempotency-Key": "kw-add-2"},
+        json={
+            "platform": "douyin",
+            "category": "推荐",
+            "keyword": "单条新增词",
+            "reason": "搜索发现高频词",
+            "confirm": True,
+        },
+    )
+    assert again.status_code == 200
+    assert again.json()["added"] is False
+
+    removed = client.post(
+        "/api/control/viral/keywords/delete",
+        headers={**headers, "Idempotency-Key": "kw-del"},
+        json={
+            "platform": "douyin",
+            "keyword": "单条新增词",
+            "reason": "采集效果差，移除",
+            "confirm": True,
+        },
+    )
+    assert removed.status_code == 200
+    assert removed.json()["deleted"] is True
+
+    with psycopg.connect(route_state) as conn:
+        after = conn.execute(
+            "SELECT keywords_json FROM viral_runtime_controls WHERE id=1"
+        ).fetchone()
+        assert json.loads(after[0]) == original
+
+
+def test_viral_discoveries_accept_a_date_range(client: TestClient, route_state: str) -> None:
+    """方案 P1 客户需求洞察：from/to 区间聚合，取代只能看单日。"""
+    _admin_session(client)
+    with psycopg.connect(route_state) as conn:
+        conn.execute("DELETE FROM viral_search_discoveries")
+        conn.execute(
+            """
+            INSERT INTO viral_search_discoveries
+                (id, user_id, keyword, platform, video_id, search_date, searched_at)
+            VALUES
+                ('disc-1', 'customer_u', '老房改造', 'douyin', 'v1', '2026-09-10', now()),
+                ('disc-2', 'customer_u', '老房改造', 'douyin', 'v2', '2026-09-12', now()),
+                ('disc-3', 'customer_u', '老房改造', 'douyin', 'v3', '2026-09-20', now())
+            """
+        )
+    try:
+        ranged = client.get("/api/control/viral/discoveries?from=2026-09-09&to=2026-09-15")
+        assert ranged.status_code == 200, ranged.text
+        body = ranged.json()
+        assert body["from"] == "2026-09-09"
+        assert body["to"] == "2026-09-15"
+        assert body["total"] == 2
+        assert body["keywords"][0]["keyword"] == "老房改造"
+        assert body["keywords"][0]["videos"] == 2
+
+        # 区间上限：92 天以上拒绝。
+        too_long = client.get("/api/control/viral/discoveries?from=2026-01-01&to=2026-09-15")
+        assert too_long.status_code == 422
+    finally:
+        with psycopg.connect(route_state) as conn:
+            conn.execute("DELETE FROM viral_search_discoveries")
+
+
+def test_viral_quality_rules_and_monthly_budget_round_trip(
+    client: TestClient, route_state: str
+) -> None:
+    """方案 P1 采集设置：质量规则与月度预算的写入、回读与调度门槛。"""
+    headers = _admin_session(client)
+    saved = client.patch(
+        "/api/control/settings/viral",
+        headers={**headers, "Idempotency-Key": "quality-budget-save"},
+        json={
+            "collection_enabled": True,
+            "import_enabled": True,
+            "keywords": [{"platform": "douyin", "category": "推荐", "keyword": "老房改造"}],
+            "quality_min_likes": 5000,
+            "quality_duration_min_ms": 15000,
+            "quality_duration_max_ms": 180000,
+            "quality_exclude_words": ["广告", "抽奖"],
+            "monthly_budget_fen": 50000,
+            "reason": "补齐采集质量门槛与月度成本上限",
+            "confirm": True,
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    body = saved.json()
+    assert body["quality_min_likes"] == 5000
+    assert body["quality_duration_min_ms"] == 15000
+    assert body["quality_duration_max_ms"] == 180000
+    assert body["quality_exclude_words"] == ["广告", "抽奖"]
+    assert body["monthly_budget_fen"] == 50000
+    assert body["month_spend_fen"] == 0
+
+    # 校验：负数点赞、0 元预算被拒。
+    bad = client.patch(
+        "/api/control/settings/viral",
+        headers={**headers, "Idempotency-Key": "quality-budget-bad"},
+        json={
+            "collection_enabled": True,
+            "import_enabled": True,
+            "quality_min_likes": -1,
+            "reason": "非法值",
+            "confirm": True,
+        },
+    )
+    assert bad.status_code == 422

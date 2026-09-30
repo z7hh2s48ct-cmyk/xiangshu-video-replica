@@ -35,14 +35,25 @@ table stores a real actor id; machine-only rows surface with an empty actor.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Literal, cast
 
 from fastapi import APIRouter
+from fastapi import Response as HttpResponse
 
 from app.admin_auth_routes import AdminReader
 from app.admin_dates import append_admin_date_filters, utc_timestamp_sql
 from app.api_errors import http_error as _http
+from app.auth import CurrentUser, Role
+from app.csv_export import spreadsheet_safe_cell
 from app.db_pg import MissingDatabaseConfigError, pg_transaction
+from app.db_portable import BusinessConnection
+from app.permissions import write_audit
+from app.security_rate_limit import (
+    DIMENSION_CONTROL_EXPORT_ACCOUNT,
+    consume_rate_limit,
+    control_export_account_limit,
+    rate_limit_window_seconds,
+)
 from app.sql_pagination import PAGE_CLAUSE, page_bounds
 
 router = APIRouter(prefix="/api/control", tags=["admin-audit"])
@@ -51,6 +62,77 @@ DEFAULT_LIST_LIMIT = 20
 MAX_LIST_LIMIT = 100
 AUDIT_SERVICE_UNAVAILABLE = "AUDIT_SERVICE_UNAVAILABLE"
 AUDIT_SERVICE_UNAVAILABLE_MESSAGE = "Audit log requires the PostgreSQL runtime."
+
+# 审计事件分组（方案 P1 审计中心改造）：「分组 → 事件」两级筛选的映射表。
+# 键是分组 id，值是该组包含的统一事件类型（与 _UNION_SQL 产出的 event_type
+# 同一口径）；前端下拉按此分组渲染，后端按值集合过滤。
+EVENT_GROUPS: dict[str, tuple[str, ...]] = {
+    # 资金：调账（开通/赠送/补偿/退款）与查单补单都落在 admin_adjustments
+    # 与 payment.sync 两个事件名上，来源单类型列里有更细的语义。
+    "funds": ("ADMIN_ADJUSTMENT", "payment.sync"),
+    "pricing": (
+        "operation_rate.update",
+        "billing.tariff.update",
+        "customer_pricing.update",
+        "customer_unit_price.update",
+        "customer_unit_price.reset",
+        "recharge_package.create",
+        "recharge_package.update",
+        "customer_discount.create",
+        "customer_discount.deactivate",
+        "customer_package.grant",
+    ),
+    "account": (
+        "ADMIN_DEVICE_DISABLE",
+        "ADMIN_DEVICE_UNBIND",
+        "ADMIN_SESSION_LOGOUT",
+        "h3.account.update",
+        "admin.activation_code_batch.created",
+        "ACTIVATION_CODE_ISSUED",
+        "ACTIVATION_CODE_ARCHIVED",
+        "ACTIVATION_CODE_DELIVERED",
+    ),
+    "system": (
+        "provider_settings.update",
+        "provider_settings.paid_test",
+        "runtime_settings.update",
+        "payment.provider.update",
+        "payment.wechat.update",
+        "control.reconciliation.read",
+    ),
+    # 密钥与导出：整组高敏。
+    "secret_export": (
+        "provider_settings.secret_reveal",
+        "admin.activation_code.revealed",
+        "admin.activation_code.revealed_replay",
+        "external_call.response_view",
+        "control.export",
+    ),
+    "login": ("admin_session.password_login", "admin_session.exchange"),
+}
+
+# 高敏事件（方案 P1）：列表整行标红 + P2 推送通知告警接收人。退款扣减按
+# 来源单类型在行级判定（ADMIN_ADJUSTMENT 里只有 REFUND_APPROVAL 是退款）。
+SENSITIVE_EVENTS: frozenset[str] = frozenset(
+    {
+        "provider_settings.secret_reveal",
+        "admin.activation_code.revealed",
+        "admin.activation_code.revealed_replay",
+        "external_call.response_view",
+        "control.export",
+        "billing.tariff.update",
+        "operation_rate.update",
+        "payment.provider.update",
+        "payment.wechat.update",
+        "admin_session.exchange",
+    }
+)
+
+
+def _is_sensitive(event_type: str, source_document_type: str) -> bool:
+    if event_type == "ADMIN_ADJUSTMENT":
+        return source_document_type == "REFUND_APPROVAL"
+    return event_type in SENSITIVE_EVENTS
 
 
 def _format_created_at(value: object) -> str:
@@ -160,10 +242,161 @@ _UNION_SQL = _UNION_SQL.replace("d.delivered_at::timestamptz", utc_timestamp_sql
 _UNION_SQL = _UNION_SQL.replace("al.created_at::timestamptz", utc_timestamp_sql("al.created_at"))
 
 
+@router.get("/audit-log.csv")
+def export_audit_log_csv(
+    actor: AdminReader,
+    event_type: str | None = None,
+    event_group: str | None = None,
+    actor_user_id: str | None = None,
+    target_user_id: str | None = None,
+    actor_username: str | None = None,
+    target_username: str | None = None,
+    created_from: str | None = None,
+    created_to: str | None = None,
+    scope: Literal["admin", "customer", "all"] = "admin",
+    limit: int = 5000,
+) -> HttpResponse:
+    """审计导出（方案 P1）：与列表同筛选口径的整表 CSV，走 control.export 审计。
+
+    复用 customers.csv 的限流维度：导出是数据出境动作，读级角色不放行整表
+    转储，auditor 需要导出时由管理员执行或走行级查看。
+    """
+    import csv as csv_mod
+    import hashlib as hashlib_mod
+    import io as io_mod
+
+    if limit < 1 or limit > 5000:
+        raise _http(422, "AUDIT_EXPORT_LIMIT_INVALID", "导出条数需在 1–5000 之间。")
+    bounded_limit, _ = page_bounds(limit, 0, max_limit=5000)
+    clauses: list[str] = []
+    params: list[object] = []
+    if scope != "all":
+        clauses.append("ev.actor_scope = %s")
+        params.append(scope)
+    if event_type:
+        clauses.append("ev.event_type = %s")
+        params.append(event_type)
+    if event_group:
+        groups = [key.strip() for key in event_group.split(",") if key.strip()]
+        unknown = [key for key in groups if key not in EVENT_GROUPS]
+        if unknown:
+            raise _http(422, "AUDIT_EVENT_GROUP_UNKNOWN", "未知的事件分组。")
+        merged: list[str] = []
+        for key in groups:
+            merged.extend(EVENT_GROUPS[key])
+        if merged:
+            clauses.append("ev.event_type = ANY(%s)")
+            params.append(merged)
+    if actor_user_id:
+        clauses.append("ev.actor_user_id = %s")
+        params.append(actor_user_id)
+    if target_user_id:
+        clauses.append("ev.target_user_id = %s")
+        params.append(target_user_id)
+    if actor_username:
+        clauses.append("ev.actor_username ILIKE %s")
+        params.append(f"%{actor_username}%")
+    if target_username:
+        clauses.append("tu.username ILIKE %s")
+        params.append(f"%{target_username}%")
+    append_admin_date_filters(
+        clauses, params, column="ev.created_at", created_from=created_from, created_to=created_to
+    )
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+    try:
+        with pg_transaction() as conn:
+            decision = consume_rate_limit(
+                conn,
+                dimension=DIMENSION_CONTROL_EXPORT_ACCOUNT,
+                identifier=hashlib_mod.sha256(actor.user_id.encode("utf-8")).hexdigest(),
+                limit=control_export_account_limit(),
+                window_seconds=rate_limit_window_seconds(),
+            )
+            if not decision.allowed:
+                raise _http(
+                    429,
+                    "CONTROL_EXPORT_RATE_LIMITED",
+                    "Too many audit exports; retry after the cooldown.",
+                )
+            write_audit(
+                BusinessConnection.postgres(conn),
+                actor=CurrentUser(
+                    id=actor.user_id,
+                    username=actor.username,
+                    display_name=actor.display_name,
+                    role=cast(Role, actor.role),
+                ),
+                action="control.export",
+                entity_type="control_ledger",
+                entity_id="audit_log",
+                metadata={
+                    "filters": {
+                        "event_type": event_type,
+                        "event_group": event_group,
+                        "actor_user_id": actor_user_id,
+                        "target_user_id": target_user_id,
+                        "actor_username": actor_username,
+                        "target_username": target_username,
+                        "created_from": created_from,
+                        "created_to": created_to,
+                        "scope": scope,
+                    },
+                    "limit": bounded_limit,
+                },
+            )
+            rows = conn.execute(
+                f"""
+                SELECT ev.event_type, ev.created_at, ev.actor_username,
+                       COALESCE(tu.username, '') AS target_username,
+                       ev.source_document_type, ev.source_document_ref,
+                       ev.reason
+                FROM ({_UNION_SQL}) AS ev(event_id, event_type, actor_user_id,
+                                          actor_username, target_user_id,
+                                          source_document_type,
+                                          source_document_ref, reason,
+                                          request_id, created_at,
+                                          change_subject, old_unit_price_fen,
+                                          new_unit_price_fen, change_detail,
+                                          actor_scope)
+                LEFT JOIN users tu ON tu.id = ev.target_user_id
+                {where}
+                ORDER BY ev.created_at DESC, ev.event_id
+                LIMIT %s
+                """,  # noqa: S608
+                tuple(params) + (bounded_limit,),
+            ).fetchall()
+    except (RuntimeError, MissingDatabaseConfigError) as exc:
+        raise _http(503, AUDIT_SERVICE_UNAVAILABLE, AUDIT_SERVICE_UNAVAILABLE_MESSAGE) from exc
+
+    buffer = io_mod.StringIO()
+    writer = csv_mod.writer(buffer)
+    writer.writerow(
+        [
+            "event_type",
+            "created_at",
+            "actor_username",
+            "target_username",
+            "source_document_type",
+            "source_document_ref",
+            "reason",
+        ]
+    )
+    for row in rows:
+        writer.writerow([spreadsheet_safe_cell(str(value)) for value in row])
+    payload = buffer.getvalue().encode("utf-8")
+    return HttpResponse(
+        content=payload,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="audit-log.csv"'},
+    )
+
+
 @router.get("/audit-log")
 def list_audit_log(
     actor: AdminReader,
     event_type: str | None = None,
+    event_group: str | None = None,
     actor_user_id: str | None = None,
     target_user_id: str | None = None,
     actor_username: str | None = None,
@@ -192,6 +425,19 @@ def list_audit_log(
     if event_type:
         clauses.append("ev.event_type = %s")
         params.append(event_type)
+    if event_group:
+        # 「分组 → 事件」两级筛选的组级入参；逗号分隔多组，映射成事件集合
+        # 交给 ANY 过滤。未登记的组名显式 422，避免静默空列表。
+        groups = [key.strip() for key in event_group.split(",") if key.strip()]
+        unknown = [key for key in groups if key not in EVENT_GROUPS]
+        if unknown:
+            raise _http(422, "AUDIT_EVENT_GROUP_UNKNOWN", "未知的事件分组。")
+        merged: list[str] = []
+        for key in groups:
+            merged.extend(EVENT_GROUPS[key])
+        if merged:
+            clauses.append("ev.event_type = ANY(%s)")
+            params.append(merged)
     if actor_user_id:
         clauses.append("ev.actor_user_id = %s")
         params.append(actor_user_id)
@@ -283,6 +529,7 @@ def list_audit_log(
             "old_unit_price_fen": int(row[12]) if row[12] is not None else None,
             "new_unit_price_fen": int(row[13]) if row[13] is not None else None,
             "change_detail": row[14] if row[14] is not None else None,
+            "sensitive": _is_sensitive(str(row[1]), str(row[6])),
         }
         for row in rows
     ]
