@@ -641,3 +641,188 @@ def test_merged_ledger_query_turns_jit_off_for_its_own_transaction_only(
         assert raw.execute("SHOW jit").fetchone()[0] == "off"
         raw.commit()
         assert raw.execute("SHOW jit").fetchone()[0] == default
+
+
+# ---------------------------------------------------------------------------
+# 早期周期（分项计费上线前，没有 billing_operation_id）与整周期汇总
+# ---------------------------------------------------------------------------
+
+
+def _seed_legacy_cycles(raw, uid):
+    """三条早期周期：迁移没有回填历史，靠 task_id / oral_task_id + billing_round 认亲。
+
+    lg-fail：暂扣 8 → 整笔退回 8；lg-done：暂扣 8 → 实扣 8；lg-oral（口播）：暂扣 6 → 实扣 6。
+    早期账本每个（任务，轮次）只有一笔终态（唯一索引），所以没有「部分成功」。
+    三条的流水交错写入，模拟中间夹着别的行。
+    """
+    raw.execute("UPDATE wallets SET available_credits=500 WHERE user_id=%s", (uid,))
+    _seed_video_batch(raw, uid, "lg-batch", ["lg-fail", "lg-done"])
+    raw.execute(
+        "INSERT INTO person_identities (id,owner_user_id,display_name,authorization_status,"
+        "source_quality_status,status,created_by) VALUES "
+        "('lg-person',%s,'口播人物','AUTHORIZED','PASSED','ACTIVE',%s)",
+        (uid, uid),
+    )
+    raw.execute(
+        "INSERT INTO oral_avatars(id,identity_id,owner_user_id,title,status,source_kind,"
+        "source_asset_id) VALUES ('lg-avatar','lg-person',%s,'分身','READY','IMAGE','source')",
+        (uid,),
+    )
+    raw.execute(
+        "INSERT INTO oral_tasks(id,owner_user_id,identity_id,avatar_id,mode,title,status,"
+        "estimated_cost_fen,idempotency_key,request_hash) VALUES "
+        "('lg-oral',%s,'lg-person','lg-avatar','TTS','口播','SUCCEEDED',0,'lg-oral','hash')",
+        (uid,),
+    )
+    for row_id, ledger_type, available, reserved, column, task in (
+        ("lg-r-fail", "RESERVE", -8, 8, "task_id", "lg-fail"),
+        ("lg-r-done", "RESERVE", -8, 8, "task_id", "lg-done"),
+        ("lg-r-oral", "RESERVE", -6, 6, "oral_task_id", "lg-oral"),
+        ("lg-s-done", "SETTLE", 0, -8, "task_id", "lg-done"),
+        ("lg-x-fail", "RELEASE", 8, -8, "task_id", "lg-fail"),
+        ("lg-s-oral", "SETTLE", 0, -6, "oral_task_id", "lg-oral"),
+    ):
+        raw.execute(
+            "INSERT INTO wallet_transactions(id,user_id,type,available_delta,reserved_delta,"
+            f"{column},billing_round,actor_user_id,idempotency_key) "
+            "VALUES (%s,%s,%s,%s,%s,%s,1,%s,%s)",
+            (row_id, uid, ledger_type, available, reserved, task, uid, row_id),
+        )
+
+
+def _entries_by_task(body):
+    return {
+        entry["rows"][0]["task_id"] or entry["rows"][0]["oral_task_id"]: entry
+        for entry in body["items"]
+    }
+
+
+def test_ledger_merges_legacy_cycles_by_task_and_round(pricing_client, route_state):
+    """回归：没有 operation id 的早期流水此前各自成行，一条任务又被拆成三笔「入账与调整」。"""
+    customer, uid = account(pricing_client)
+    with psycopg.connect(route_state) as raw:
+        _seed_legacy_cycles(raw, uid)
+
+    body = _ledger(pricing_client, customer)
+
+    entries = _entries_by_task(body)
+    assert set(entries) == {"lg-fail", "lg-done", "lg-oral"}
+    assert body["total"] == 3
+    counts = body["counts"]
+    assert (counts["completed"], counts["refunded"], counts["posted"]) == (2, 1, 0)
+    assert all(entry["kind"] == "cycle" for entry in entries.values())
+    fail, done, oral = entries["lg-fail"], entries["lg-done"], entries["lg-oral"]
+    assert fail["outcome"] == "FAILED"
+    assert [row["type"] for row in fail["rows"]] == ["RESERVE", "RELEASE"]
+    assert (fail["reserved_credits"], fail["charged_credits"], fail["refunded_credits"]) == (
+        8,
+        0,
+        8,
+    )
+    assert done["outcome"] == "COMPLETED"
+    assert (done["reserved_credits"], done["charged_credits"], done["refunded_credits"]) == (
+        8,
+        8,
+        0,
+    )
+    assert oral["outcome"] == "COMPLETED"
+    assert [row["type"] for row in oral["rows"]] == ["RESERVE", "SETTLE"]
+    assert (oral["reserved_credits"], oral["charged_credits"], oral["refunded_credits"]) == (
+        6,
+        6,
+        0,
+    )
+
+    # 逐页翻：每页一条，任何一页都不会只剩半截周期。
+    seen = []
+    for offset in range(3):
+        [entry] = _ledger(pricing_client, customer, limit=1, offset=offset)["items"]
+        seen.append((entry["outcome"], len(entry["rows"])))
+    assert sorted(seen) == [("COMPLETED", 2), ("COMPLETED", 2), ("FAILED", 2)]
+
+    assert _ledger(pricing_client, customer, outcome="refunded")["total"] == 1
+
+
+def test_ledger_legacy_cycle_cut_by_time_filter_still_returns_the_whole_cycle(
+    pricing_client, route_state
+):
+    customer, uid = account(pricing_client)
+    with psycopg.connect(route_state) as raw:
+        _seed_legacy_cycles(raw, uid)
+        raw.execute("SET session_replication_role = replica")
+        raw.execute(
+            "UPDATE wallet_transactions SET created_at='2026-01-10T00:00:00+00:00' "
+            "WHERE id='lg-r-fail'"
+        )
+        raw.execute(
+            "UPDATE wallet_transactions SET created_at='2026-03-10T00:00:00+00:00' "
+            "WHERE id='lg-x-fail'"
+        )
+        raw.execute("SET session_replication_role = DEFAULT")
+
+    # 范围只含 1 月的暂扣：这条早期任务仍是完整的「已退回」，不是「生成中」。
+    body = _ledger(
+        pricing_client,
+        customer,
+        started_at="2026-01-01T00:00:00+00:00",
+        ended_at="2026-02-01T00:00:00+00:00",
+    )
+    [entry] = body["items"]
+    assert entry["outcome"] == "FAILED"
+    assert [row["type"] for row in entry["rows"]] == ["RESERVE", "RELEASE"]
+    assert entry["refunded_credits"] == 8
+
+
+def test_ledger_sub_account_summary_reads_whole_cycles_under_a_time_filter(
+    pricing_client, route_state
+):
+    """回归：摘要只汇总命中筛选的行，列表里显示「退回 8」而摘要说退回 0。"""
+    customer, uid = account(pricing_client)
+    with psycopg.connect(route_state) as raw:
+        operations = _seed_ledger_scenario(raw, uid)
+        _move_cycle_across_months(raw, operations["fail"])
+
+    # 范围只含 1 月的暂扣，3 月的退回在范围外。
+    body = _ledger(
+        pricing_client,
+        customer,
+        started_at="2026-01-01T00:00:00+00:00",
+        ended_at="2026-02-01T00:00:00+00:00",
+        group_by_sub_account="true",
+    )
+    [entry] = body["items"]
+    assert entry["refunded_credits"] == 8
+    [summary] = body["sub_account_summary"]
+    assert (summary["debit_total"], summary["credit_total"], summary["transaction_count"]) == (
+        0,
+        8,
+        1,
+    )
+
+
+def test_ledger_sub_account_summary_includes_legacy_cycles(pricing_client, route_state):
+    customer, uid = account(pricing_client)
+    with psycopg.connect(route_state) as raw:
+        _seed_legacy_cycles(raw, uid)
+
+    body = _ledger(pricing_client, customer, group_by_sub_account="true")
+
+    [summary] = body["sub_account_summary"]
+    # 实扣：lg-done 8 + lg-oral 6；退回：lg-fail 8；三条周期，不是六笔流水。
+    assert (summary["debit_total"], summary["credit_total"], summary["transaction_count"]) == (
+        14,
+        8,
+        3,
+    )
+
+
+def test_export_with_outcome_follows_legacy_cycles(pricing_client, route_state):
+    customer, uid = account(pricing_client)
+    with psycopg.connect(route_state) as raw:
+        _seed_legacy_cycles(raw, uid)
+
+    _, refunded = _export_rows(pricing_client, customer, outcome="refunded")
+    # 只有 lg-fail 的 2 笔；已完成的 lg-done / lg-oral 不在其中。
+    assert sorted(row[1] for row in refunded) == ["RELEASE", "RESERVE"]
+    _, completed = _export_rows(pricing_client, customer, outcome="completed")
+    assert len(completed) == 4

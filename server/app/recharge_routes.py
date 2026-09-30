@@ -55,6 +55,7 @@ from app.customer_idempotency import (
     seal_response,
 )
 from app.customer_ledger import (
+    ENTRY_KEY_SQL,
     LEDGER_ROW_FROM,
     LEDGER_ROW_SELECT,
     LedgerBusiness,
@@ -1435,9 +1436,8 @@ def export_customer_wallet_transactions_csv(
             outcome_sql, outcome_args = outcome_placeholders(outcome)
             entry_prefix = entry_ctes(clauses)
             where_sql = (
-                "wt.user_id = %s AND (CASE WHEN wt.billing_operation_id IS NOT NULL "
-                "AND wt.type IN ('RESERVE','SETTLE','RELEASE') THEN wt.billing_operation_id "
-                "ELSE wt.id END) IN (SELECT entry_key FROM classified WHERE " + outcome_sql + ")"
+                f"wt.user_id = %s AND ({ENTRY_KEY_SQL}) IN "
+                "(SELECT entry_key FROM classified WHERE " + outcome_sql + ")"
             )
             entry_params = [*params, wallet_owner_id, *outcome_args]
             params = []
