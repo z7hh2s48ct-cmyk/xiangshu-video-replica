@@ -174,13 +174,17 @@ export function OrdersPage({ readOnly = false }: { readOnly?: boolean }) {
         >
           {autoRefresh ? "自动刷新：开（30 秒）" : "自动刷新：关"}
         </button>
-        <button
-          type="button"
-          disabled={exporting || loading}
-          onClick={() => void exportRechargeOrders()}
-        >
-          导出充值订单 CSV
-        </button>
+        {/* 整表导出是写级动作（服务端 ControlWriter）：auditor 不渲染入口，
+            而不是渲染出来点了才 403。 */}
+        {readOnly ? null : (
+          <button
+            type="button"
+            disabled={exporting || loading}
+            onClick={() => void exportRechargeOrders()}
+          >
+            导出充值订单 CSV
+          </button>
+        )}
       </div>
 
       {error ? <PageBanner tone="error">{error}</PageBanner> : null}

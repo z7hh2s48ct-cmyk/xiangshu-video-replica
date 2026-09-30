@@ -243,6 +243,23 @@ describe("AuditEventsPage", () => {
     });
   });
 
+  it("offers the CSV export to writers but hides it from read-only roles", async () => {
+    installFetch();
+    const { unmount } = render(<AuditEventsPage />);
+    expect(
+      await screen.findByRole("button", { name: "导出 CSV" }),
+    ).toBeInTheDocument();
+    unmount();
+
+    // auditor 没有导出权限：不渲染入口，而不是渲染出来点了才 403。
+    installFetch();
+    render(<AuditEventsPage readOnly />);
+    await screen.findByText("管理员调账");
+    expect(screen.queryByRole("button", { name: "导出 CSV" })).toBeNull();
+    // 列表与筛选仍然可用。
+    expect(screen.getByRole("button", { name: "重置" })).toBeInTheDocument();
+  });
+
   it("defaults the audit scope to admin actions", async () => {
     // P0-3：服务端默认只回管理员动作；客户端显式带上同一口径，避免
     // 「默认值在哪一侧」的隐性依赖。

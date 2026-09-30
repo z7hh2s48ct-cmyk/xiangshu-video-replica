@@ -173,15 +173,24 @@ function installFetch(options?: {
   session?: "valid" | "missing";
   failedTasks?: number;
   generationTotal?: number;
+  /** 以只读的 auditor 角色登录；默认是超级管理员。 */
+  role?: "admin" | "auditor";
 }) {
   const sessionState = options?.session ?? "missing";
+  const activeSession =
+    options?.role === "auditor"
+      ? {
+          ...adminSession,
+          actor: { ...adminActor, role: "auditor", is_super_admin: false },
+        }
+      : adminSession;
   const fetchMock = vi.fn((url: string, requestInit?: RequestInit) => {
     if (
       url.endsWith("/api/control/admin/session") &&
       (!requestInit?.method || requestInit.method === "GET")
     ) {
       if (sessionState === "valid") {
-        return jsonResponse(adminSession);
+        return jsonResponse(activeSession);
       }
       return jsonResponse(
         {
@@ -194,10 +203,10 @@ function installFetch(options?: {
       );
     }
     if (url.endsWith("/api/control/admin/session/password")) {
-      return jsonResponse(adminSession, 201);
+      return jsonResponse(activeSession, 201);
     }
     if (url.endsWith("/api/control/admin/session/exchange")) {
-      return jsonResponse(adminSession, 201);
+      return jsonResponse(activeSession, 201);
     }
     if (
       url.endsWith("/api/control/admin/password") &&
@@ -659,6 +668,31 @@ describe("AdminApp", () => {
         ).toBe(true);
       }
     });
+  });
+
+  it("does not offer auditors the funds actions that the server would reject", async () => {
+    installFetch({ role: "auditor" });
+    render(<AdminApp />);
+    await signInWithPassword();
+
+    fireEvent.click(screen.getByRole("button", { name: "资金中心" }));
+    fireEvent.click(screen.getByRole("tab", { name: "收款订单" }));
+    expect(
+      await screen.findByText(
+        (_, element) => element?.textContent === "待支付订单 1",
+      ),
+    ).toBeInTheDocument();
+
+    // 查单补单与整表导出都是写级动作：只读角色看不到入口，而不是点了才 403。
+    expect(screen.queryByRole("button", { name: "查单补单" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "导出充值订单 CSV" }),
+    ).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "积分流水" }));
+    await screen.findByRole("table", { name: "账务流水列表" });
+    expect(
+      screen.queryByRole("button", { name: "导出账务流水 CSV" }),
+    ).toBeNull();
   });
 
   it("saves ZPay and price settings while deployment URLs stay server-owned", async () => {

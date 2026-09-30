@@ -47,8 +47,8 @@ export function FundsPage({
         <FundsOverview onOpenReconciliation={() => setTab("reconciliation")} />
       )}
       {tab === "orders" && <OrdersPage readOnly={readOnly} />}
-      {tab === "transactions" && <AccountsPage />}
-      {tab === "adjustments" && <AdjustmentsPage />}
+      {tab === "transactions" && <AccountsPage readOnly={readOnly} />}
+      {tab === "adjustments" && <AdjustmentsPage readOnly={readOnly} />}
       {tab === "reconciliation" && <ReconciliationPage />}
     </div>
   );
