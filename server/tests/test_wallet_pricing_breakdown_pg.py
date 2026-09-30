@@ -230,3 +230,414 @@ def test_pair_state_reads_pending_for_an_open_reservation(pricing_client, route_
     rows = response.json()["items"]
     assert [row["type"] for row in rows] == ["RESERVE"]
     assert rows[0]["pair_state"] == "PENDING"
+
+
+# ---------------------------------------------------------------------------
+# 批次积分去向（任务失败提示的数据来源）
+# ---------------------------------------------------------------------------
+
+
+def _seed_video_batch(raw, uid, batch_id, task_ids):
+    """独立创作批次（无项目）+ 若干任务，任务 ID 同时是计费 operation 的 source_id。"""
+    raw.execute(
+        "INSERT INTO generation_batches (id, project_id, created_by_user_id, idempotency_key,"
+        " request_hash, request_snapshot_json, status, creation_kind)"
+        " VALUES (%s, NULL, %s, %s, %s, '{}', 'QUEUED', 'independent')",
+        (batch_id, uid, f"ik-{batch_id}", f"rh-{batch_id}"),
+    )
+    for task_id in task_ids:
+        raw.execute(
+            "INSERT INTO generation_tasks (id, batch_id, generation_mode, provider, model, status,"
+            " archive_status, quality_status)"
+            " VALUES (%s, %s, 'I2V', 'metaso', 'MiniMax-H3', 'QUEUED', 'PENDING', 'PENDING')",
+            (task_id, batch_id),
+        )
+
+
+def _seed_batch_with_mixed_outcomes(raw, uid):
+    """b-1：成功 / 部分成功 / 失败 / 进行中各一条；b-2：只有一条进行中的任务。"""
+    raw.execute("UPDATE wallets SET available_credits=500 WHERE user_id=%s", (uid,))
+    raw.execute(
+        "INSERT INTO billing_tariffs(service,enabled,unit_credits,unit_cost_fen) "
+        "VALUES('video_768p',true,1,1)"
+    )
+    conn = BusinessConnection.postgres(raw)
+    _seed_video_batch(raw, uid, "b-1", ["t-ok", "t-part", "t-fail", "t-open"])
+    _seed_video_batch(raw, uid, "b-2", ["t-other"])
+    for task_id, actual, succeeded in (
+        ("t-ok", 8, True),
+        ("t-part", 6, True),
+        ("t-fail", 0, False),
+    ):
+        operation_id = accept_operation(
+            conn, user_id=uid, service="video_768p", source_id=task_id, units=8
+        )
+        finish_operation(conn, operation_id=operation_id, units=actual, succeeded=succeeded)
+    # 仍在生成：只有预扣，没有结算也没有退回，不应计入任何一个数。
+    accept_operation(conn, user_id=uid, service="video_768p", source_id="t-open", units=8)
+    accept_operation(conn, user_id=uid, service="video_768p", source_id="t-other", units=8)
+
+
+def test_batch_credits_sum_settled_and_released_per_batch(pricing_client, route_state):
+    from app.generation import batch_credits_by_batch
+
+    _, uid = account(pricing_client)
+    with psycopg.connect(route_state) as raw:
+        _seed_batch_with_mixed_outcomes(raw, uid)
+
+    with psycopg.connect(route_state) as raw:
+        totals = batch_credits_by_batch(BusinessConnection.postgres(raw), ["b-1", "b-2", "b-none"])
+
+    # 实扣 8 + 6；退回 部分成功剩下的 2 + 失败全额 8。进行中的预扣两边都不算。
+    assert totals["b-1"].charged_credits == 14
+    assert totals["b-1"].refunded_credits == 10
+    # 只有进行中任务的批次没有落账，调用方按「零值」处理。
+    assert "b-2" not in totals
+    assert "b-none" not in totals
+    assert batch_credits_by_batch(BusinessConnection.postgres(raw), []) == {}
+
+
+def test_batch_detail_and_list_expose_credits(pricing_client, route_state):
+    from app.auth import CurrentUser
+    from app.generation import get_generation_batch, list_generation_batches
+
+    _, uid = account(pricing_client)
+    with psycopg.connect(route_state) as raw:
+        _seed_batch_with_mixed_outcomes(raw, uid)
+    actor = CurrentUser(id=uid, username="u", display_name="U", role="customer")
+
+    with psycopg.connect(route_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        detail = get_generation_batch(conn, batch_id="b-1", actor=actor)
+        page = list_generation_batches(conn, actor=actor, created_by_user_id=uid)
+
+    assert (detail.credits.charged_credits, detail.credits.refunded_credits) == (14, 10)
+    by_id = {item.id: item for item in page.items}
+    assert (by_id["b-1"].credits.charged_credits, by_id["b-1"].credits.refunded_credits) == (14, 10)
+    assert (by_id["b-2"].credits.charged_credits, by_id["b-2"].credits.refunded_credits) == (0, 0)
+
+
+# ---------------------------------------------------------------------------
+# 消费记录按计费周期合并（/api/customer/wallet/ledger）
+# ---------------------------------------------------------------------------
+
+LEDGER_PATH = "/api/customer/wallet/ledger"
+
+
+def _seed_ledger_scenario(raw, uid):
+    """完成 / 部分成功 / 整笔退回 / 生成中各一条，最后一笔独立的充值入账。
+
+    每个 asr 任务暂扣 8（1 积分/秒 × 8 秒）：done 实扣 8；part 实扣 6 退回 2；
+    fail 整笔退回 8；open 只有暂扣。返回 ``{source_id: operation_id}``。
+    """
+    raw.execute("UPDATE wallets SET available_credits=500 WHERE user_id=%s", (uid,))
+    raw.execute(
+        "INSERT INTO billing_tariffs(service,enabled,unit_credits,unit_cost_fen) "
+        "VALUES('asr',true,1,1)"
+    )
+    conn = BusinessConnection.postgres(raw)
+    operations: dict[str, str] = {}
+    for source, actual, succeeded in (("done", 8, True), ("part", 6, True), ("fail", 0, False)):
+        operation_id = accept_operation(conn, user_id=uid, service="asr", source_id=source, units=8)
+        finish_operation(conn, operation_id=operation_id, units=actual, succeeded=succeeded)
+        operations[source] = operation_id
+    operations["open"] = accept_operation(
+        conn, user_id=uid, service="asr", source_id="open", units=8
+    )
+    raw.execute(
+        "INSERT INTO recharge_orders (id, user_id, merchant_order_no, "
+        "base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot, "
+        "min_recharge_fen_snapshot, recharge_step_fen_snapshot, amount_fen, credits) "
+        "VALUES ('ledger-order',%s,'ledger-merchant-1',100,100,1000,100,1000,10)",
+        (uid,),
+    )
+    raw.execute(
+        "INSERT INTO wallet_transactions(id,user_id,type,available_delta,reserved_delta,"
+        "recharge_order_id,idempotency_key) VALUES('ledger-charge',%s,'CHARGE',10,0,"
+        "'ledger-order','ledger-charge:1')",
+        (uid,),
+    )
+    return operations
+
+
+def _move_cycle_across_months(raw, operation_id):
+    """把一条任务的暂扣摆到 1 月、退回摆到 3 月，用来造「时间筛选切在两笔之间」。
+
+    账本行受触发器保护；隔离库里临时绕过它。
+    """
+    raw.execute("SET session_replication_role = replica")
+    raw.execute(
+        "UPDATE wallet_transactions SET created_at='2026-01-10T00:00:00+00:00' "
+        "WHERE billing_operation_id=%s AND type='RESERVE'",
+        (operation_id,),
+    )
+    raw.execute(
+        "UPDATE wallet_transactions SET created_at='2026-03-10T00:00:00+00:00' "
+        "WHERE billing_operation_id=%s AND type='RELEASE'",
+        (operation_id,),
+    )
+    raw.execute("SET session_replication_role = DEFAULT")
+
+
+def _ledger(client, headers, **query):
+    response = client.get(LEDGER_PATH, headers=headers, params=query)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_ledger_requires_a_session(pricing_client):
+    assert pricing_client.get(LEDGER_PATH).status_code == 401
+
+
+def test_ledger_merges_each_billing_cycle_into_one_entry(pricing_client, route_state):
+    customer, uid = account(pricing_client)
+    with psycopg.connect(route_state) as raw:
+        operations = _seed_ledger_scenario(raw, uid)
+
+    body = _ledger(pricing_client, customer)
+
+    # 按最新一笔记账倒序：入账 → 生成中 → 整笔退回 → 部分成功 → 已完成。
+    assert [entry["outcome"] for entry in body["items"]] == [
+        "POSTED",
+        "PENDING",
+        "FAILED",
+        "PARTIAL",
+        "COMPLETED",
+    ]
+    by_outcome = {entry["outcome"]: entry for entry in body["items"]}
+
+    def amounts(entry):
+        return (entry["reserved_credits"], entry["charged_credits"], entry["refunded_credits"])
+
+    done = by_outcome["COMPLETED"]
+    assert (done["kind"], done["key"]) == ("cycle", operations["done"])
+    assert amounts(done) == (8, 8, 0)
+    assert done["net_available_delta"] == -8
+    assert [row["type"] for row in done["rows"]] == ["RESERVE", "SETTLE"]
+
+    part = by_outcome["PARTIAL"]
+    assert amounts(part) == (8, 6, 2)
+    assert part["net_available_delta"] == -6
+    # 周期内按资金走向排：暂扣 → 实扣 → 退回，而不是靠同一事务里相同的时间戳。
+    assert [row["type"] for row in part["rows"]] == ["RESERVE", "SETTLE", "RELEASE"]
+
+    failed = by_outcome["FAILED"]
+    assert amounts(failed) == (8, 0, 8)
+    # 整笔退回：对可用积分的净影响是 0，这正是用户想看到的「没花钱」。
+    assert failed["net_available_delta"] == 0
+    assert [row["type"] for row in failed["rows"]] == ["RESERVE", "RELEASE"]
+
+    pending = by_outcome["PENDING"]
+    assert amounts(pending) == (8, 0, 0)
+    assert pending["net_available_delta"] == -8
+    assert len(pending["rows"]) == 1
+
+    posted = by_outcome["POSTED"]
+    assert (posted["kind"], posted["key"]) == ("row", "ledger-charge")
+    assert posted["net_available_delta"] == 10
+    assert amounts(posted) == (0, 0, 0)
+
+    assert body["total"] == 5
+    assert body["counts"] == {
+        "total": 5,
+        "pending": 1,
+        "completed": 1,
+        "refunded": 2,
+        "posted": 1,
+    }
+    assert "unit_cost_fen" not in json.dumps(body)
+
+
+def test_ledger_pages_by_entry_and_never_splits_a_cycle(pricing_client, route_state):
+    """回归：逐行分页会把暂扣与退回切到两页，第二页只剩一行「暂扣 -8」。"""
+    customer, uid = account(pricing_client)
+    with psycopg.connect(route_state) as raw:
+        _seed_ledger_scenario(raw, uid)
+
+    first = _ledger(pricing_client, customer, limit=2, offset=0)
+    second = _ledger(pricing_client, customer, limit=2, offset=2)
+    third = _ledger(pricing_client, customer, limit=2, offset=4)
+
+    assert [entry["outcome"] for entry in first["items"]] == ["POSTED", "PENDING"]
+    assert [entry["outcome"] for entry in second["items"]] == ["FAILED", "PARTIAL"]
+    assert [entry["outcome"] for entry in third["items"]] == ["COMPLETED"]
+    assert {page["total"] for page in (first, second, third)} == {5}
+    # 第二页的两条各自带着完整的逐笔：整笔退回 2 笔、部分成功 3 笔，一笔都不缺。
+    assert [len(entry["rows"]) for entry in second["items"]] == [2, 3]
+    keys = [entry["key"] for page in (first, second, third) for entry in page["items"]]
+    assert len(keys) == len(set(keys)) == 5
+
+
+def test_ledger_outcome_filter_counts_entries_and_keeps_counts_stable(pricing_client, route_state):
+    customer, uid = account(pricing_client)
+    with psycopg.connect(route_state) as raw:
+        _seed_ledger_scenario(raw, uid)
+
+    refunded = _ledger(pricing_client, customer, outcome="refunded")
+    assert {entry["outcome"] for entry in refunded["items"]} == {"FAILED", "PARTIAL"}
+    assert refunded["total"] == 2
+    # 结果筛选条上的数字不随筛选变：用户要看到「切到别的结果有几条」。
+    assert refunded["counts"]["total"] == 5
+    assert refunded["counts"]["pending"] == 1
+
+    pending = _ledger(pricing_client, customer, outcome="pending")
+    assert [entry["outcome"] for entry in pending["items"]] == ["PENDING"]
+    assert pending["total"] == 1
+
+    posted = _ledger(pricing_client, customer, outcome="posted")
+    assert [entry["kind"] for entry in posted["items"]] == ["row"]
+
+    bogus = pricing_client.get(LEDGER_PATH, headers=customer, params={"outcome": "bogus"})
+    assert bogus.status_code == 422
+
+
+def test_ledger_time_filter_cutting_a_cycle_still_returns_the_whole_cycle(
+    pricing_client, route_state
+):
+    """筛选范围恰好只含退回、不含暂扣时，这条任务仍是完整的「已退回」，不是「生成中」。"""
+    customer, uid = account(pricing_client)
+    with psycopg.connect(route_state) as raw:
+        operations = _seed_ledger_scenario(raw, uid)
+        _move_cycle_across_months(raw, operations["fail"])
+
+    body = _ledger(
+        pricing_client,
+        customer,
+        started_at="2026-03-01T00:00:00+00:00",
+        ended_at="2026-04-01T00:00:00+00:00",
+    )
+
+    assert [entry["key"] for entry in body["items"]] == [operations["fail"]]
+    entry = body["items"][0]
+    assert entry["outcome"] == "FAILED"
+    assert [row["type"] for row in entry["rows"]] == ["RESERVE", "RELEASE"]
+    assert (entry["reserved_credits"], entry["refunded_credits"]) == (8, 8)
+    assert body["total"] == 1
+
+    inverted = pricing_client.get(
+        LEDGER_PATH,
+        headers=customer,
+        params={
+            "started_at": "2026-04-01T00:00:00+00:00",
+            "ended_at": "2026-03-01T00:00:00+00:00",
+        },
+    )
+    assert inverted.status_code == 422
+    naive = pricing_client.get(
+        LEDGER_PATH, headers=customer, params={"started_at": "2026-04-01T00:00:00"}
+    )
+    assert naive.status_code == 422
+
+
+def test_ledger_sub_account_summary_counts_entries_not_rows(pricing_client, route_state):
+    customer, uid = account(pricing_client)
+    with psycopg.connect(route_state) as raw:
+        _seed_ledger_scenario(raw, uid)
+
+    body = _ledger(pricing_client, customer, group_by_sub_account="true")
+
+    # 母账号自己操作时 actor 就是自己：四条任务共 8 笔流水，摘要按条数 4，与列表对得上。
+    [summary] = body["sub_account_summary"]
+    assert summary["sub_account_id"] == uid
+    assert summary["debit_total"] == 14
+    assert summary["credit_total"] == 10
+    assert summary["transaction_count"] == 4
+    # 不带该参数时不返回摘要。
+    assert _ledger(pricing_client, customer)["sub_account_summary"] is None
+    # 摘要同样遵守结果筛选：只看生成中时，只剩那一条任务，没有实扣也没有退回。
+    [filtered] = _ledger(pricing_client, customer, group_by_sub_account="true", outcome="pending")[
+        "sub_account_summary"
+    ]
+    assert (filtered["debit_total"], filtered["credit_total"], filtered["transaction_count"]) == (
+        0,
+        0,
+        1,
+    )
+
+
+def test_center_summary_reports_total_returned_credits(pricing_client, route_state):
+    customer, uid = account(pricing_client)
+    with psycopg.connect(route_state) as raw:
+        _seed_ledger_scenario(raw, uid)
+
+    response = pricing_client.get("/api/customer/center-summary", headers=customer)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    # 退回 = 部分成功剩下的 2 + 整笔退回的 8；暂扣与实扣不算退回。
+    assert body["total_returned_credits"] == 10
+    assert body["total_consumed_credits"] == 14
+
+
+def _export_rows(client, headers, **query):
+    import csv
+    import io
+
+    response = client.get("/api/customer/wallet/transactions/export", headers=headers, params=query)
+    assert response.status_code == 200, response.text
+    reader = csv.reader(io.StringIO(response.content.decode("utf-8-sig")))
+    header, *rows = list(reader)
+    return header, rows
+
+
+def test_export_with_outcome_matches_the_ledger_entries(pricing_client, route_state):
+    customer, uid = account(pricing_client)
+    with psycopg.connect(route_state) as raw:
+        operations = _seed_ledger_scenario(raw, uid)
+
+    _, everything = _export_rows(pricing_client, customer)
+    assert len(everything) == 9  # 2 + 3 + 2 + 1 + 入账
+
+    header, refunded = _export_rows(pricing_client, customer, outcome="refunded")
+    assert header[1] == "类型"
+    # 「有退回」两条任务的全部逐笔：部分成功 3 笔 + 整笔退回 2 笔。
+    assert sorted(row[1] for row in refunded) == sorted(
+        ["RESERVE", "SETTLE", "RELEASE", "RESERVE", "RELEASE"]
+    )
+    _, posted = _export_rows(pricing_client, customer, outcome="posted")
+    assert [row[1] for row in posted] == ["CHARGE"]
+
+    # 与列表同口径：带时间筛选、只命中退回那一笔时，导出仍取整条任务的两笔。
+    with psycopg.connect(route_state) as raw:
+        _move_cycle_across_months(raw, operations["fail"])
+    _, cut = _export_rows(
+        pricing_client,
+        customer,
+        outcome="refunded",
+        started_at="2026-03-01T00:00:00+00:00",
+        ended_at="2026-04-01T00:00:00+00:00",
+    )
+    assert sorted(row[1] for row in cut) == ["RELEASE", "RESERVE"]
+
+
+def test_merged_ledger_query_turns_jit_off_for_its_own_transaction_only(
+    pricing_client, route_state
+):
+    """回归：JIT 会让这条合并查询在 1 万条任务的账本上慢 10 倍以上（每次重新编译）。
+
+    关闭必须是事务级的：连接放回池里后，其他请求不该带着被改过的设置。
+    """
+    from app.customer_ledger import read_ledger_page
+
+    _, uid = account(pricing_client)
+    with psycopg.connect(route_state) as raw:
+        _seed_ledger_scenario(raw, uid)
+    with psycopg.connect(route_state) as raw:
+        default = raw.execute("SHOW jit").fetchone()[0]
+        page = read_ledger_page(
+            raw,
+            wallet_owner_id=uid,
+            sub_account_id=None,
+            token_group_id=None,
+            auth_source=None,
+            business=None,
+            started_at=None,
+            ended_at=None,
+            outcome=None,
+            limit=20,
+            offset=0,
+            group_by_sub_account=False,
+        )
+        assert page.total == 5
+        assert raw.execute("SHOW jit").fetchone()[0] == "off"
+        raw.commit()
+        assert raw.execute("SHOW jit").fetchone()[0] == default

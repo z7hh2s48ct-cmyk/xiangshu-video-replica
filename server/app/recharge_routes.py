@@ -8,7 +8,7 @@ import logging
 import sqlite3
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Literal, cast
 from uuid import uuid4
 
 import psycopg
@@ -31,7 +31,6 @@ import app.wechat_native_provider  # noqa: F401
 import app.zpay_provider  # noqa: F401
 from app.admin_dates import SHANGHAI
 from app.auth import AuthenticatedUser, Database
-from app.billing_catalog import SERVICES
 from app.csv_export import spreadsheet_safe_cell
 from app.customer_fence import (
     BusinessDbDep,
@@ -55,6 +54,18 @@ from app.customer_idempotency import (
     request_hash,
     seal_response,
 )
+from app.customer_ledger import (
+    LEDGER_ROW_FROM,
+    LEDGER_ROW_SELECT,
+    LedgerBusiness,
+    LedgerOutcomeFilter,
+    disable_jit,
+    entry_ctes,
+    ledger_filter_clauses,
+    ledger_row_response,
+    outcome_placeholders,
+    read_ledger_page,
+)
 from app.customer_pricing import read_pricing
 from app.db_portable import BusinessConnection
 from app.ops_metrics import set_current_trace_fields
@@ -77,10 +88,9 @@ from app.usage_billing import resolve_wallet_owner
 from app.wallet_routes import (
     ConsumptionByBusinessItem,
     ConsumptionByBusinessResponse,
+    WalletLedgerPage,
     WalletResponse,
     WalletTransactionPage,
-    WalletTransactionResponse,
-    pricing_breakdown,
 )
 from app.wechat_native_client import (
     NATIVE_ORDER_MIN_REMAINING_SECONDS,
@@ -1166,61 +1176,6 @@ def read_customer_wallet(request: Request) -> WalletResponse:
         )
 
 
-def _ledger_filter_clauses(
-    *,
-    wallet_owner_id: str,
-    sub_account_id: str | None,
-    token_group_id: str | None,
-    auth_source: str | None,
-    transaction_type: str | None,
-    business: str | None,
-    started_at: datetime | None,
-    ended_at: datetime | None,
-) -> tuple[list[str], list[object]]:
-    """流水筛选 → SQL 子句与参数（**列表与 CSV 导出共用**）。
-
-    这两条路径此前各拼一套，于是同一组筛选在两边语义不同：导出「视频生成」查
-    ``op.service = 'video'`` 而列表查 ``task_id IS NOT NULL OR service IN
-    (video_768p, video_2k)``；``historical`` 一边映射成 ``IS NULL`` 一边做等值比较；
-    时间上界一边开区间一边闭区间。客户看到的现象是「界面有行、导出的 CSV 只有表头」。
-    共用一份是唯一能让两边不漂移的写法——新增筛选项只需要改这里一处。
-    """
-    clauses = ["wt.user_id = %s"]
-    params: list[object] = [wallet_owner_id]
-    if sub_account_id:
-        clauses.append("wt.actor_user_id = %s")
-        params.append(sub_account_id)
-    if token_group_id:
-        clauses.append("k.token_group_id = %s")
-        params.append(token_group_id)
-    if auth_source == "historical":
-        clauses.append("wt.auth_source IS NULL")
-    elif auth_source:
-        clauses.append("wt.auth_source = %s")
-        params.append(auth_source)
-    if transaction_type:
-        clauses.append("wt.type = %s")
-        params.append(transaction_type)
-    if business:
-        clauses.append(
-            {
-                "video": "(wt.task_id IS NOT NULL OR op.service IN ('video_768p','video_2k'))",
-                "oral": "(wt.oral_task_id IS NOT NULL OR op.service = 'oral')",
-                "recharge": "wt.type = 'CHARGE'",
-            }.get(business, "op.service = %s")
-        )
-        if business not in {"video", "oral", "recharge"}:
-            params.append(business)
-    if started_at:
-        clauses.append("wt.created_at::timestamptz >= %s")
-        params.append(started_at)
-    if ended_at:
-        # 开区间：结束日期在调用方已 +1 天，边界那一瞬不该算进来。
-        clauses.append("wt.created_at::timestamptz < %s")
-        params.append(ended_at)
-    return clauses, params
-
-
 @router.get("/customer/wallet/transactions", response_model=WalletTransactionPage)
 def list_customer_wallet_transactions(
     request: Request,
@@ -1263,7 +1218,7 @@ def list_customer_wallet_transactions(
         # the organisation sits on the master's wallet (T2.10), including a
         # sub-account's consumption (attributed through actor_user_id).
         wallet_owner_id = resolve_wallet_owner(BusinessConnection.postgres(conn), user_id)
-        clauses, params = _ledger_filter_clauses(
+        clauses, params = ledger_filter_clauses(
             wallet_owner_id=wallet_owner_id,
             sub_account_id=sub_account_id,
             token_group_id=token_group_id,
@@ -1273,17 +1228,7 @@ def list_customer_wallet_transactions(
             started_at=started_at,
             ended_at=ended_at,
         )
-        from_sql = (
-            " FROM wallet_transactions wt LEFT JOIN customer_api_keys k ON k.id = "
-            "wt.api_key_id AND k.user_id = wt.user_id "
-            "LEFT JOIN billing_operations op ON op.id=wt.billing_operation_id "
-            "AND (op.user_id=wt.user_id OR op.user_id=wt.actor_user_id) "
-            "LEFT JOIN recharge_orders credit_order ON credit_order.id = wt.recharge_order_id "
-            "AND credit_order.user_id = wt.user_id "
-            "LEFT JOIN admin_adjustments credit_adjustment ON "
-            "credit_adjustment.recharge_order_id = credit_order.id "
-            "AND credit_adjustment.target_user_id = wt.user_id WHERE " + " AND ".join(clauses)
-        )
+        from_sql = LEDGER_ROW_FROM + " AND ".join(clauses)
         total_row = conn.execute(
             "SELECT COUNT(*)" + from_sql,
             params,
@@ -1291,38 +1236,7 @@ def list_customer_wallet_transactions(
         assert total_row is not None
         total = int(total_row[0])
         rows = conn.execute(
-            """
-            SELECT wt.id, wt.user_id, wt.type, wt.available_delta, wt.reserved_delta,
-                   wt.recharge_order_id, wt.task_id, wt.oral_task_id,
-                   wt.billing_round, wt.created_at,
-                   wt.api_key_id, k.token_group_id, k.label, k.credential_version, wt.auth_source,
-                   wt.pricing_snapshot_json,
-                   (SELECT task.batch_id FROM generation_tasks task WHERE task.id = wt.task_id),
-                   CASE WHEN wt.type = 'CHARGE' THEN
-                     COALESCE(credit_adjustment.source_document_type, credit_order.provider)
-                   END, wt.billing_operation_id,
-                   (SELECT o.service FROM billing_operations o WHERE o.id=wt.billing_operation_id),
-                   wt.actor_user_id,
-                   (SELECT u.display_name FROM users u WHERE u.id=wt.actor_user_id),
-                   -- P1-7：配对态按全量账本算，组内每行同值。分页把 RESERVE 与
-                   -- 结算/退回切开、或按类型筛选后只剩一行时，界面仍知道它是
-                   -- 「已结算」还是「退回」；(billing_operation_id,type) 索引支撑
-                   -- 这两个 EXISTS。
-                   CASE
-                     WHEN wt.billing_operation_id IS NULL THEN NULL
-                     WHEN EXISTS (
-                       SELECT 1 FROM wallet_transactions settled
-                       WHERE settled.billing_operation_id = wt.billing_operation_id
-                         AND settled.type = 'SETTLE'
-                     ) THEN 'SETTLED'
-                     WHEN EXISTS (
-                       SELECT 1 FROM wallet_transactions released
-                       WHERE released.billing_operation_id = wt.billing_operation_id
-                         AND released.type = 'RELEASE'
-                     ) THEN 'RELEASED'
-                     ELSE 'PENDING'
-                   END
-            """
+            LEDGER_ROW_SELECT
             + from_sql
             + f"""
             ORDER BY (wt.ledger_sequence IS NULL), wt.ledger_sequence DESC,
@@ -1367,11 +1281,56 @@ def list_customer_wallet_transactions(
                 for row in summary_rows
             ]
         return WalletTransactionPage(
-            items=[_customer_ledger_entry(row) for row in rows],
+            items=[ledger_row_response(row) for row in rows],
             total=total,
             limit=limit,
             offset=offset,
             sub_account_summary=sub_account_summary,
+        )
+
+
+@router.get("/customer/wallet/ledger", response_model=WalletLedgerPage)
+def list_customer_wallet_ledger(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    token_group_id: str | None = Query(default=None, max_length=128),
+    auth_source: Literal["session", "api_key", "internal", "historical"] | None = None,
+    business: LedgerBusiness | None = None,
+    started_at: datetime | None = None,
+    ended_at: datetime | None = None,
+    sub_account_id: str | None = Query(default=None, max_length=128),
+    outcome: LedgerOutcomeFilter | None = None,
+    group_by_sub_account: bool = Query(default=False),
+) -> WalletLedgerPage:
+    """消费记录（按任务合并）：一条任务的暂扣、实扣、退回是同一条，分页也以条为单位。
+
+    与 ``/customer/wallet/transactions`` 的区别只有一件事——那边一行一笔流水，分页会把
+    同一条任务切成两截；这里合并发生在分页之前，一页里的每条都是完整的一笔。逐笔
+    流水（含 CSV 导出）保持不变，仍是对账的事实来源。
+
+    只放行浏览器会话：不在 API Key 白名单里，程序化读取继续用逐笔接口。
+    """
+    if any(value is not None and value.tzinfo is None for value in (started_at, ended_at)):
+        raise HTTPException(422, detail="筛选时间必须包含时区。")
+    if started_at and ended_at and ended_at <= started_at:
+        raise HTTPException(422, detail="结束时间必须晚于开始时间。")
+    with customer_read_transaction(request) as (conn, user_id):
+        # 与余额、逐笔流水同一套钱包归属：子账号的消费记在母账号钱包上。
+        wallet_owner_id = resolve_wallet_owner(BusinessConnection.postgres(conn), user_id)
+        return read_ledger_page(
+            conn,
+            wallet_owner_id=wallet_owner_id,
+            sub_account_id=sub_account_id,
+            token_group_id=token_group_id,
+            auth_source=auth_source,
+            business=business,
+            started_at=started_at,
+            ended_at=ended_at,
+            outcome=outcome,
+            limit=limit,
+            offset=offset,
+            group_by_sub_account=group_by_sub_account,
         )
 
 
@@ -1439,8 +1398,13 @@ def export_customer_wallet_transactions_csv(
     started_at: datetime | None = None,
     ended_at: datetime | None = None,
     sub_account_id: str | None = Query(default=None, max_length=128),
+    outcome: LedgerOutcomeFilter | None = None,
 ) -> StreamingResponse:
     """把当前筛选下的流水导成 CSV。
+
+    带 ``outcome`` 时与合并列表（``/customer/wallet/ledger``）同口径：导出命中该结果的
+    条目的**全部**逐笔流水——界面上「有退回」筛出 5 条，CSV 里就是这 5 条任务各自的
+    暂扣 / 实扣 / 退回，而不是被时间筛选截掉一半的行。不带则维持原来的逐笔口径。
 
     与列表端点**共用** `_ledger_filter_clauses`——此前两边各拼一套，同一组筛选在
     导出侧语义不同（business 走等值比较、historical 不做 IS NULL 映射、时间上界开闭
@@ -1452,7 +1416,7 @@ def export_customer_wallet_transactions_csv(
         raise HTTPException(422, detail="结束时间必须晚于开始时间。")
     with customer_read_transaction(request) as (conn, user_id):
         wallet_owner_id = resolve_wallet_owner(BusinessConnection.postgres(conn), user_id)
-        clauses, params = _ledger_filter_clauses(
+        clauses, params = ledger_filter_clauses(
             wallet_owner_id=wallet_owner_id,
             sub_account_id=sub_account_id,
             token_group_id=token_group_id,
@@ -1463,7 +1427,21 @@ def export_customer_wallet_transactions_csv(
             ended_at=ended_at,
         )
         where_sql = " AND ".join(clauses)
-        sql = (
+        entry_prefix = ""
+        entry_params: list[object] = []
+        if outcome is not None:
+            # 先按合并列表的规则选出命中的条目，再取这些条目的全部逐笔流水。
+            disable_jit(conn)
+            outcome_sql, outcome_args = outcome_placeholders(outcome)
+            entry_prefix = entry_ctes(clauses)
+            where_sql = (
+                "wt.user_id = %s AND (CASE WHEN wt.billing_operation_id IS NOT NULL "
+                "AND wt.type IN ('RESERVE','SETTLE','RELEASE') THEN wt.billing_operation_id "
+                "ELSE wt.id END) IN (SELECT entry_key FROM classified WHERE " + outcome_sql + ")"
+            )
+            entry_params = [*params, wallet_owner_id, *outcome_args]
+            params = []
+        sql = entry_prefix + (
             # 「金额」不再是单列：SETTLE 行的金额记在 reserved_delta 上（available_delta
             # 恒为 0），只导一列会让每一笔真实消费都显示成 0。导两列与界面一致。
             "SELECT wt.created_at, wt.type, wt.available_delta, wt.reserved_delta, "
@@ -1475,7 +1453,7 @@ def export_customer_wallet_transactions_csv(
             "LEFT JOIN billing_operations op ON op.id=wt.billing_operation_id "
             "WHERE " + where_sql + " ORDER BY wt.created_at DESC LIMIT %s OFFSET %s"
         )
-        rows = conn.execute(sql, [*params, limit, offset]).fetchall()
+        rows = conn.execute(sql, [*entry_params, *params, limit, offset]).fetchall()
         # 静默截断会让客户以为拿到的是全量账；与 billing_routes 同款信号头。
         truncated = len(rows) >= limit
 
@@ -1566,46 +1544,6 @@ def customer_consumption_by_business(
         days=days,
         total_credits=sum(item.credits for item in items),
         items=items,
-    )
-
-
-def _customer_ledger_entry(row: Sequence[Any]) -> WalletTransactionResponse:
-    """One customer ledger row, priced by the retail side of its frozen snapshot.
-
-    P0-3: the customer must be able to check a delta against the unit price,
-    usage, discount and rounding it was priced with. The projection is a
-    whitelist — the snapshot's cost side never crosses this boundary.
-
-    P1-7: ``pair_state`` names the row's billing-cycle group state so the
-    client can fold RESERVE→SETTLE/RELEASE into one entry.
-    """
-    pricing = pricing_breakdown(json.loads(row[15]) if row[15] else None)
-    return WalletTransactionResponse(
-        id=str(row[0]),
-        user_id=str(row[1]),
-        type=row[2],
-        available_delta=int(row[3]),
-        reserved_delta=int(row[4]),
-        recharge_order_id=str(row[5]) if row[5] is not None else None,
-        task_id=str(row[6]) if row[6] is not None else None,
-        oral_task_id=str(row[7]) if row[7] is not None else None,
-        billing_round=int(row[8]) if row[8] is not None else None,
-        created_at=str(row[9]),
-        api_key_id=row[10],
-        token_group_id=row[11],
-        token_label=row[12],
-        credential_version=row[13],
-        auth_source=row[14],
-        credit_price_version=pricing.version if pricing else None,
-        generation_batch_id=row[16],
-        credit_source=row[17],
-        billing_operation_id=row[18],
-        service=row[19],
-        service_name=SERVICES[row[19]].name if row[19] in SERVICES else None,
-        actor_user_id=str(row[20]) if row[20] is not None else None,
-        actor_name=row[21],
-        pricing=pricing,
-        pair_state=row[22],
     )
 
 
@@ -1728,6 +1666,9 @@ class CustomerCenterSummaryResponse(BaseModel):
     available_credits: int
     reserved_credits: int
     total_consumed_credits: int
+    # 累计退回：失败任务的暂扣与部分成功多暂扣的部分，已经回到可用积分的总数。
+    # 与累计消费并排展示，用户才看得到「扣了多少、又退了多少」。
+    total_returned_credits: int = 0
     active_tokens: int
 
 
@@ -1748,9 +1689,11 @@ def read_customer_center_summary(
             "SELECT available_credits, reserved_credits, "
             "(SELECT COALESCE(SUM(-reserved_delta), 0) FROM wallet_transactions "
             "WHERE user_id = %s AND type = 'SETTLE'), "
-            "(SELECT COUNT(*) FROM customer_api_keys WHERE user_id = %s AND revoked_at IS NULL) "
+            "(SELECT COUNT(*) FROM customer_api_keys WHERE user_id = %s AND revoked_at IS NULL), "
+            "(SELECT COALESCE(SUM(available_delta), 0) FROM wallet_transactions "
+            "WHERE user_id = %s AND type = 'RELEASE') "
             "FROM wallets WHERE user_id = %s",
-            (wallet_owner_id, wallet_owner_id, wallet_owner_id),
+            (wallet_owner_id, wallet_owner_id, wallet_owner_id, wallet_owner_id),
         ).fetchone()
         if row is None:
             raise HTTPException(
@@ -1761,5 +1704,6 @@ def read_customer_center_summary(
             available_credits=int(row[0]),
             reserved_credits=int(row[1]),
             total_consumed_credits=int(row[2]),
+            total_returned_credits=int(row[4]),
             active_tokens=int(row[3]),
         )

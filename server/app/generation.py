@@ -905,6 +905,21 @@ class BatchProgress(BaseModel):
     historical_counts: dict[str, int] = Field(default_factory=dict)
 
 
+class BatchCredits(BaseModel):
+    """本批任务已落账的积分去向（客户可见口径）。
+
+    为什么挂在批次上：任务失败时用户第一眼看的是任务页而不是消费记录；有了这两个数，
+    任务页可以直接说「预扣的 N 积分已退回」，用户不必再去流水里自己对账。
+    只统计已经写入流水的 SETTLE / RELEASE，尚未结算的预扣不算在内——所以两个数都为 0
+    只表示「还没有落账」，不表示「没扣过」。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    charged_credits: int = 0
+    refunded_credits: int = 0
+
+
 class BatchResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -921,6 +936,7 @@ class BatchResult(BaseModel):
     generation_reason: str | None = None
     creation_kind: str = "replica"
     progress: BatchProgress
+    credits: BatchCredits = Field(default_factory=BatchCredits)
     tasks: list[TaskResult]
 
     @model_validator(mode="after")
@@ -949,6 +965,7 @@ class GenerationBatchListItem(BaseModel):
     generation_reason: str | None = None
     creation_kind: str = "replica"
     progress: BatchProgress
+    credits: BatchCredits = Field(default_factory=BatchCredits)
     total_estimated_cost: float | None
     total_actual_cost: float | None
     needs_attention_count: int
@@ -6521,6 +6538,7 @@ def list_generation_batches(
     tasks_by_batch: dict[str, list[TaskSummary]] = {batch_id: [] for batch_id in batch_ids}
     for row in task_rows:
         tasks_by_batch[str(row["batch_id"])].append(task_summary(row))
+    credits_by_batch = batch_credits_by_batch(conn, batch_ids)
 
     items: list[GenerationBatchListItem] = []
     for row in page_rows:
@@ -6547,6 +6565,7 @@ def list_generation_batches(
                 generation_reason=optional_text(row["generation_reason"]),
                 creation_kind=str(row["creation_kind"]),
                 progress=progress,
+                credits=credits_by_batch.get(batch_id, BatchCredits()),
                 total_estimated_cost=optional_cost_total([task.estimated_cost for task in tasks]),
                 total_actual_cost=optional_cost_total([task.actual_cost for task in tasks]),
                 needs_attention_count=progress.counts["needs_attention"],
@@ -6750,6 +6769,7 @@ def get_generation_batch(
         generation_reason=optional_text(batch["generation_reason"]),
         creation_kind=str(batch["creation_kind"]),
         progress=progress,
+        credits=batch_credits_by_batch(conn, [batch_id]).get(batch_id, BatchCredits()),
         tasks=tasks,
     )
 
@@ -7879,6 +7899,42 @@ def calculate_progress(tasks: Sequence[TaskSummary]) -> BatchProgress:
         counts=counts,
         historical_counts=historical_counts,
     )
+
+
+def batch_credits_by_batch(
+    conn: BusinessConnection, batch_ids: Sequence[str]
+) -> dict[str, BatchCredits]:
+    """一次查出若干批次的实扣与退回积分。
+
+    路径是 任务 → 计费 operation（source_id 即任务 ID，仅视频科目）→ 流水，
+    每一跳都走现成索引（idx_billing_operations_source、uq_billing_operation_ledger_type）；
+    直接按 wallet_transactions.task_id 找会退化成全表扫描，而任务列表每 20 秒轮询一次。
+    多轮计费（重试）的 operation 都算进来：「本批共退回多少」应包含每一次失败的预扣。
+    """
+    if not batch_ids:
+        return {}
+    placeholders = ", ".join("%s" for _ in batch_ids)
+    rows = conn.execute(
+        f"""
+        SELECT task.batch_id,
+               COALESCE(SUM(-tx.reserved_delta) FILTER (WHERE tx.type = 'SETTLE'), 0) AS charged,
+               COALESCE(SUM(tx.available_delta) FILTER (WHERE tx.type = 'RELEASE'), 0) AS refunded
+        FROM generation_tasks AS task
+        JOIN billing_operations AS op
+          ON op.source_id = task.id AND op.service IN ('video_768p', 'video_2k')
+        JOIN wallet_transactions AS tx
+          ON tx.billing_operation_id = op.id AND tx.type IN ('SETTLE', 'RELEASE')
+        WHERE task.batch_id IN ({placeholders})
+        GROUP BY task.batch_id
+        """,  # noqa: S608
+        tuple(batch_ids),
+    ).fetchall()
+    return {
+        str(row["batch_id"]): BatchCredits(
+            charged_credits=int(row["charged"]), refunded_credits=int(row["refunded"])
+        )
+        for row in rows
+    }
 
 
 def batch_status(stored_status: str, progress: BatchProgress) -> str:
