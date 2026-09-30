@@ -211,13 +211,12 @@ def test_customer_conf_and_capability_wire_updater() -> None:
     assert updater.get("endpoints"), "customer overlay 缺少 updater endpoint"
     # CI 构建走占位源（与 VITE_API_BASE_URL 的 staging.example.invalid 同模式），
     # 真实 endpoint 只在签名机的临时 overlay 里注入。
-    assert any(
-        "staging.example.invalid" in endpoint for endpoint in updater["endpoints"]
-    ), "CI 构建的 endpoint 必须是占位源"
-    assert all(
-        endpoint.endswith(UPDATER_MANIFEST_PATH)
-        for endpoint in updater["endpoints"]
-    ), "endpoint 必须指向静态升级清单 stable.json"
+    assert any("staging.example.invalid" in endpoint for endpoint in updater["endpoints"]), (
+        "CI 构建的 endpoint 必须是占位源"
+    )
+    assert all(endpoint.endswith(UPDATER_MANIFEST_PATH) for endpoint in updater["endpoints"]), (
+        "endpoint 必须指向静态升级清单 stable.json"
+    )
 
     # dev（不带 customer overlay 的 tauri:dev）不具备更新能力：主配置不得
     # 出现 updater 配置。
