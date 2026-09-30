@@ -609,7 +609,7 @@ export function BillingEconomics({
           </p>
           <p>
             预算 {usage(detail.budget_units)} {billingUnit[detail.unit]}，实际{" "}
-            {usage(detail.actual_units)} {billingUnit[detail.unit]}；预留{" "}
+            {usage(detail.actual_units)} {billingUnit[detail.unit]}；暂扣{" "}
             {detail.reserved_credits}，净扣 {detail.charged_credits} 积分。
           </p>
           <p>

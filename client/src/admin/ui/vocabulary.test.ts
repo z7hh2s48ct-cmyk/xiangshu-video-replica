@@ -8,6 +8,7 @@ import {
   formatFen,
   formatRelativeTime,
   formatYuanFromFen,
+  HELD_CREDITS_LABEL,
   labelFrom,
   ledgerExportMessage,
   rechargeOrderStatusLabel,
@@ -71,11 +72,13 @@ describe("vocabulary", () => {
 
   it("names every transaction type with the P2-1 wording", () => {
     expect(transactionTypeLabel("CHARGE")).toBe("充值到账");
-    expect(transactionTypeLabel("RESERVE")).toBe("生成冻结");
-    expect(transactionTypeLabel("SETTLE")).toBe("生成扣费");
-    expect(transactionTypeLabel("RELEASE")).toBe("失败退回");
+    // 与客户端 LEDGER_TERMS 同一套词，客服话术才对得上客户看到的。
+    expect(transactionTypeLabel("RESERVE")).toBe("暂扣");
+    expect(transactionTypeLabel("SETTLE")).toBe("实扣");
+    expect(transactionTypeLabel("RELEASE")).toBe("退回");
     expect(transactionTypeLabel("REFUND")).toBe("退款扣减");
     expect(transactionTypeLabel("CONVERSION")).toBe("历史转换");
+    expect(HELD_CREDITS_LABEL).toBe("暂扣中");
   });
 
   it("formats recent activity as relative time and falls back past a week", () => {

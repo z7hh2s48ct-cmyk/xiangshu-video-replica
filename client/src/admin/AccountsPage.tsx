@@ -12,6 +12,7 @@ import { StatusBadge } from "./ui/StatusBadge";
 import { useAutoRefresh } from "./ui/useAutoRefresh";
 import {
   formatDateTime,
+  HELD_CREDITS_LABEL,
   ledgerExportMessage,
   TRANSACTION_TYPE_LABELS,
   transactionTypeLabel,
@@ -180,7 +181,7 @@ export function AccountsPage() {
               <th>客户</th>
               <th>业务类型</th>
               <th>可用变动</th>
-              <th>冻结变动</th>
+              <th>{HELD_CREDITS_LABEL}变动</th>
               <th>变动后余额</th>
               <th>关联业务</th>
             </>
@@ -223,8 +224,8 @@ export function AccountsPage() {
                   "历史未记录"
                 ) : (
                   <>
-                    <strong>{tx.available_balance_after} 积分</strong> / 冻结{" "}
-                    {tx.reserved_balance_after} 积分
+                    <strong>{tx.available_balance_after} 积分</strong> /{" "}
+                    {HELD_CREDITS_LABEL} {tx.reserved_balance_after} 积分
                   </>
                 )}
               </td>

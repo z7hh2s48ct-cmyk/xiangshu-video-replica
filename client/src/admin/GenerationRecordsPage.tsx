@@ -252,11 +252,11 @@ export function GenerationRecordsPage({
         retryKeyRef.current.key,
       );
       retryKeyRef.current = null;
-      // 两条重试路径的运营含义不同：重新入队（PENDING）会再次预扣积分，
+      // 两条重试路径的运营含义不同：重新入队（PENDING）会再次暂扣积分，
       // 恢复存档（SUCCEEDED）沿用原有计费——分开说清，避免误读成重复扣费。
       setNotice(
         result.status === "PENDING"
-          ? `已重新入队：任务 ${result.task_id} 将重新生成，并按规则再次预扣积分。`
+          ? `已重新入队：任务 ${result.task_id} 将重新生成，并按规则再次暂扣积分。`
           : `已恢复存档：任务 ${result.task_id} 将重试归档，沿用原有结果与计费。`,
       );
       setPendingRetry(null);
@@ -887,7 +887,7 @@ export function GenerationRecordsPage({
         confirmLabel="重新对账"
         description={
           pendingReconcile
-            ? `将向图像供应商核对任务 ${pendingReconcile.record_id} 的真实提交结果：已受理则回到生成队列继续处理；未成功则置为失败并退回预扣积分。同一任务重复对账会被拒绝。`
+            ? `将向图像供应商核对任务 ${pendingReconcile.record_id} 的真实提交结果：已受理则回到生成队列继续处理；未成功则置为失败并退回暂扣积分。同一任务重复对账会被拒绝。`
             : undefined
         }
         error={reconcileError}
@@ -907,7 +907,7 @@ export function GenerationRecordsPage({
         confirmLabel="重新入队"
         description={
           pendingRetry
-            ? `将按现有规则尝试原地重试任务 ${pendingRetry.record_id}：未触达服务商的失败会重新生成并再次预扣积分；已付款结果会改为重试归档、不重新计费。服务端不满足条件时会拒绝并说明原因。`
+            ? `将按现有规则尝试原地重试任务 ${pendingRetry.record_id}：未触达服务商的失败会重新生成并再次暂扣积分；已付款结果会改为重试归档、不重新计费。服务端不满足条件时会拒绝并说明原因。`
             : undefined
         }
         error={retryError}

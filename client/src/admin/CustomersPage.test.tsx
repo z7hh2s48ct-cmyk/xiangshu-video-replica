@@ -996,7 +996,8 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     expect(
       screen.queryByRole("button", { name: "查看会话" }),
     ).not.toBeInTheDocument();
-    expect(screen.queryByText("冻结额度")).not.toBeInTheDocument();
+    // 详情不单列暂扣额度：旧叫法「冻结额度」与统一后的「暂扣中额度」都不应出现。
+    expect(screen.queryByText(/冻结额度|暂扣中额度/)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "← 返回客户列表" }));
 

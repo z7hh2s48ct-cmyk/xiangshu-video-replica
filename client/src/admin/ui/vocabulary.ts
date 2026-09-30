@@ -7,8 +7,10 @@
 //    显示成 100 元，属数据失真，已修复。
 // 4. REVOKED 按域区分动词：激活码"已撤销"、设备"已强制退出"（沿用操作
 //    动词），客户沿用其激活码口径"已撤销"。
-// 5. 术语词典（方案 P2-1）：积分流水类型用"生成冻结 / 生成扣费 / 失败退回 /
-//    退款扣减"；金额不足 1 分显示 "< ¥0.01"，不得四舍五入成 ¥0.01 虚报。
+// 5. 术语词典（方案 P2-1）：积分流水类型用"暂扣 / 实扣 / 退回 / 退款扣减"，
+//    其中前三个与客户端 customer/ledgerVocabulary.ts 的 LEDGER_TERMS 逐字一致，
+//    客服话术才能和客户看到的对上；账户里尚未结算的那部分额度统称"暂扣中"。
+//    金额不足 1 分显示 "< ¥0.01"，不得四舍五入成 ¥0.01 虚报。
 // 6. 列表里的"最近活动"用相对时间（formatRelativeTime），其余时间走
 //    formatDateTime（北京时间）。
 
@@ -55,9 +57,10 @@ export const TRANSACTION_TYPE_LABELS: LabelMap = {
   CONVERSION: "历史转换",
   CHARGE: "充值到账",
   // P2-1：冻结/结算/释放太抽象，运营要能一眼看出这笔钱是哪一步产生的。
-  RESERVE: "生成冻结",
-  SETTLE: "生成扣费",
-  RELEASE: "失败退回",
+  // 三个词与客户端一致：提交任务先「暂扣」，结束后按用量「实扣」，多暂扣的「退回」。
+  RESERVE: "暂扣",
+  SETTLE: "实扣",
+  RELEASE: "退回",
   // B1：审计调账的反向记账类型（20260923T1200），金额为负、不挂充值单。
   REFUND: "退款扣减",
 };
@@ -276,6 +279,9 @@ export function parseUtcTimestamp(value: string): number {
     : value;
   return Date.parse(timestamp);
 }
+
+/** 账户里正在暂扣、尚未结算的额度叫法，与客户端 HELD_CREDITS_LABEL 一致。 */
+export const HELD_CREDITS_LABEL = "暂扣中";
 
 /** 钱包额度展示统一后缀。 */
 export function formatCredits(count: number | null | undefined): string {

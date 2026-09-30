@@ -149,7 +149,37 @@ describe("AccountsPage", () => {
     expect(within(table).getByText("充值到账")).toBeInTheDocument();
     expect(screen.getByText("+10 积分")).toBeInTheDocument();
     expect(screen.getByText(/18 积分/)).toBeInTheDocument();
-    expect(screen.getByText(/冻结 2 积分/)).toBeInTheDocument();
+    expect(screen.getByText(/暂扣中 2 积分/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("columnheader", { name: "暂扣中变动" }),
+    ).toBeInTheDocument();
+  });
+
+  it("builds the type filter from the vocabulary with the unified ledger terms", async () => {
+    installFetch();
+    render(<AccountsPage />);
+    await screen.findByText("operator-1");
+
+    const select = screen.getByLabelText("流水业务类型");
+    const options = within(select).getAllByRole("option");
+    const byValue = Object.fromEntries(
+      options.map((option) => [
+        (option as HTMLOptionElement).value,
+        option.textContent,
+      ]),
+    );
+    // 下拉与词典逐项对应；客服对客户说的「暂扣 / 实扣 / 退回」就是筛选项文字。
+    expect(byValue).toMatchObject({
+      RESERVE: "暂扣",
+      SETTLE: "实扣",
+      RELEASE: "退回",
+      CHARGE: "充值到账",
+      REFUND: "退款扣减",
+      CONVERSION: "历史转换",
+    });
+    expect(options.map((option) => option.textContent)).not.toContain(
+      "生成冻结",
+    );
   });
 
   it("does not invent balances for unsequenced history", async () => {
