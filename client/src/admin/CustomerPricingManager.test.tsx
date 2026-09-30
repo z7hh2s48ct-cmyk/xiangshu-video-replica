@@ -103,11 +103,17 @@ test("rejects discount folds outside the allowed range before saving", async () 
   expect(updateCustomerPricing).not.toHaveBeenCalled();
 });
 
-test("states that per-customer discounts are not wired into billing yet", async () => {
+test("states that per-customer discounts are wired into billing and merged with the global discount", async () => {
   vi.mocked(getCustomerPricing).mockResolvedValue(payload);
   render(<CustomerPricingManager />);
   expect(
-    await screen.findByText(/按客户单独定制的折扣.*尚未接入扣费链路/),
+    await screen.findByText(/客户专项折扣与套餐权益已接入扣费链路.*取更优/),
+  ).toBeInTheDocument();
+  expect(screen.queryByText(/尚未接入扣费链路/)).not.toBeInTheDocument();
+  // 爆款采集按批次冻结全局价格、不走客户折扣合并：说明必须带上这条例外，
+  // 否则运营会以为配给客户的折扣也覆盖爆款采集费用。
+  expect(
+    screen.getByText(/例外：爆款数据采集.*全局价格.*暂不享受客户专项折扣/),
   ).toBeInTheDocument();
 });
 

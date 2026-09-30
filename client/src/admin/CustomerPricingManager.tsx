@@ -251,7 +251,7 @@ export function CustomerPricingManager({
         </form>
       )}
       <p className="admin-recharge-rate__note">
-        按客户单独定制的折扣（customer_discounts）尚未接入扣费链路，当前所有客户按上表全局折扣与取整计价。
+        客户专项折扣与套餐权益已接入扣费链路：受理任务时与上表全局折扣取更优（折数更低者）计价，并随任务冻结，事后调整不影响已受理任务。例外：爆款数据采集按批次统一冻结全局价格，暂不享受客户专项折扣与套餐权益。
       </p>
       {data && (
         <div className="admin-recharge-rate__history">
