@@ -916,6 +916,74 @@ def test_dispatch_alert_digest_pushes_without_anyone_opening_the_console(
         _clear_digest_scenario(seeded)
 
 
+def test_concurrent_workers_send_a_single_digest_per_hour(
+    api: TestClient, seeded: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回归（PR #37 评审 P1）：部署里是 4 个独立 worker 进程，各有各的进程内节流。
+
+    「检查 → 发信 → 记账」若没有跨进程互斥，四个 worker 会同时看到「近一小时没发过」，
+    各发一封。发信刻意拖慢，把这段竞态窗口拉开；结果必须仍然只有一封。
+    """
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.failure_rate_alerts import dispatch_alert_digest
+
+    class _SlowSender(_DigestSender):
+        def send_alert_digest(self, **kwargs: object) -> None:
+            time.sleep(0.3)
+            super().send_alert_digest(**kwargs)
+
+    _seed_digest_scenario(seeded)
+    sender = _SlowSender()
+    monkeypatch.setattr(
+        "app.email_delivery.email_sender_from_settings", lambda conn: sender, raising=False
+    )
+    workers = 4
+    barrier = threading.Barrier(workers)
+
+    def _tick() -> None:
+        barrier.wait()
+        dispatch_alert_digest()
+
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for future in [pool.submit(_tick) for _ in range(workers)]:
+                future.result()
+        assert len(sender.sent) == 1
+        assert _dedup_rows(seeded) == 1
+    finally:
+        _clear_digest_scenario(seeded)
+
+
+def test_failed_send_releases_the_claim_so_another_worker_can_retry(
+    api: TestClient, seeded: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """认领发生在发信之前：发送失败必须撤销认领，否则一次抖动会挡掉后面一小时的重试。"""
+    from app.failure_rate_alerts import dispatch_alert_digest
+
+    _seed_digest_scenario(seeded)
+    failing = _DigestSender(fail_with="Timeout")
+    monkeypatch.setattr(
+        "app.email_delivery.email_sender_from_settings", lambda conn: failing, raising=False
+    )
+    try:
+        dispatch_alert_digest()
+        assert failing.sent == []
+        assert _dedup_rows(seeded) == 0
+
+        working = _DigestSender()
+        monkeypatch.setattr(
+            "app.email_delivery.email_sender_from_settings", lambda conn: working, raising=False
+        )
+        dispatch_alert_digest()
+        assert len(working.sent) == 1
+        assert _dedup_rows(seeded) == 1
+    finally:
+        _clear_digest_scenario(seeded)
+
+
 def test_dispatch_alert_digest_stays_silent_when_nothing_is_dangerous(
     api: TestClient, seeded: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

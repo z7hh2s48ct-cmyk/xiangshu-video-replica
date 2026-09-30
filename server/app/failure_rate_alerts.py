@@ -533,6 +533,22 @@ def _alert_recipient_email(conn: BusinessConnection) -> str | None:
     return str(row[0]) if row is not None else None
 
 
+def _claim_alert_digest_slot(conn: BusinessConnection) -> datetime | None:
+    """原子认领「本小时的摘要名额」；返回认领时刻，已被别人认领则返回 None。
+
+    部署里有多个独立的 generation_worker 进程，进程内节流拦不住彼此。这里把
+    「近一小时没发过」的判断和记账合成一条 upsert：并发的第二个认领者会在唯一键上
+    等第一个提交，再按新行重新求值 WHERE，于是拿不到名额。
+    """
+    row = conn.execute(
+        "INSERT INTO alert_notify_dedup (id, last_sent_at) VALUES (1, clock_timestamp()) "
+        "ON CONFLICT (id) DO UPDATE SET last_sent_at = EXCLUDED.last_sent_at "
+        "WHERE alert_notify_dedup.last_sent_at <= clock_timestamp() - interval '1 hour' "
+        "RETURNING last_sent_at"
+    ).fetchone()
+    return row[0] if row is not None else None
+
+
 def _deliver_alert_email_quietly(overview: AlertsOverview) -> None:
     """把 danger 告警摘要发给接收人；发送失败只记日志（P2 推送通道）。"""
 
@@ -545,39 +561,40 @@ def _deliver_alert_email_quietly(overview: AlertsOverview) -> None:
             email = _alert_recipient_email(conn)
             if email is None:
                 return
-            # 防打扰：同一小时已发过就跳过（dedup 行存最近投递时刻）。
-            recent = conn.execute(
-                "SELECT 1 FROM alert_notify_dedup WHERE id = 1 "
-                "AND last_sent_at::timestamptz > clock_timestamp() - interval '1 hour'"
-            ).fetchone()
-            if recent is not None:
-                return
             sender = email_sender_from_settings(conn)
-        if sender is None:
-            logger.info("alert email skipped: email provider not configured")
-            return
+            if sender is None:
+                # 通道没配就不认领名额：否则配好之前的每一小时都会被白白占掉。
+                logger.info("alert email skipped: email provider not configured")
+                return
+            # 先认领再发信，且认领在发信之前提交。发信可能很慢，不能让事务或锁跨着网络
+            # 调用（连接层有空闲事务超时）；认领一提交，其它 worker 立刻看到「已有人在发」。
+            claimed_at = _claim_alert_digest_slot(conn)
+            if claimed_at is None:
+                return
         dangerous = [item for item in overview.items if item.severity == "danger"]
         lines = "\n".join(f"- {item.headline}（{item.detail}）" for item in dangerous)
-        delivered = deliver_quietly(
-            lambda: sender.send_alert_digest(
-                to=email,
-                total=len(overview.items),
-                danger_count=len(dangerous),
-                items=lines,
-                generated_at=overview.generated_at,
-            ),
-            kind="alert_digest",
-        )
-        if not delivered:
-            # 没发出去就不记账：先记再发会让一次发送失败（没配发信通道、模板缺失、
-            # 网络抖动）把接下来一小时的重试全部挡掉，而告警其实一封都没送到。
-            return
-        with _pg() as raw:
-            BusinessConnection.postgres(raw).execute(
-                "INSERT INTO alert_notify_dedup (id, last_sent_at) VALUES (1, "
-                "clock_timestamp()) ON CONFLICT (id) DO UPDATE SET "
-                "last_sent_at = clock_timestamp()"
+        delivered = False
+        try:
+            delivered = deliver_quietly(
+                lambda: sender.send_alert_digest(
+                    to=email,
+                    total=len(overview.items),
+                    danger_count=len(dangerous),
+                    items=lines,
+                    generated_at=overview.generated_at,
+                ),
+                kind="alert_digest",
             )
+        finally:
+            if not delivered:
+                # 没发出去就撤销认领：一次发送失败（模板缺失、网络抖动）不能把接下来
+                # 一小时的重试全部挡掉，而告警其实一封都没送到。只撤销自己认领的那一行，
+                # 不误删之后别人重新认领的记录。
+                with _pg() as raw:
+                    BusinessConnection.postgres(raw).execute(
+                        "DELETE FROM alert_notify_dedup WHERE id = 1 AND last_sent_at = %s",
+                        (claimed_at,),
+                    )
 
     try:
         _send()
