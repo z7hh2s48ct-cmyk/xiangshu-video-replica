@@ -23,6 +23,11 @@ tauri-build = { version = "2", features = [] }
 # file://）。它在 tauri.conf.json 里与 assetProtocol.scope 成对出现，缺任意一半
 # tauri 的构建脚本都会直接报错——这是好事，省得运行时才发现放不了。
 tauri = { version = "2", features = ["protocol-asset"] }
+# 桌面自动更新用官方 updater 插件：清单检查、下载、minisign 签名校验与安装
+# 一条龙，公钥编译进包（tauri.customer.conf.json 的 plugins.updater.pubkey），
+# 私钥只存在于签名机。配置只放在 customer overlay 里，dev（不带 overlay 的
+# tauri:dev）不会具备更新能力；CI 的无签名构建也不生成 updater 制品。
+tauri-plugin-updater = "2"
 # serde / serde_json / uuid are already resolved in the locked tree by the
 # Tauri dependency graph itself (Cargo.lock pins uuid 1.24) 鈥?declaring them
 # here adds no new external code to the audit surface, it only re-uses what
@@ -51,9 +56,12 @@ tokio = { version = "1", features = ["fs", "io-util", "sync"] }
 
 # Already locked by Tauri/Wry. Observe the Windows completion callback instead
 # of reporting success when the asynchronous clear request is merely accepted.
+# 版本与 tauri 2.12 的依赖树对齐（updater 插件 2.13 要求 tauri ^2.12，连带
+# webview2-com 0.39 / windows-core 0.62）；钉死是为了与 publish_accounts 的
+# COM 接口转换保持单一 windows-core 版本，避免双版本让 cast 消失。
 [target.'cfg(windows)'.dependencies]
-webview2-com = "=0.38.2"
-windows-core = "=0.61.2"
+webview2-com = "=0.39.1"
+windows-core = "=0.62.2"
 
 [profile.release]
 panic = "abort"

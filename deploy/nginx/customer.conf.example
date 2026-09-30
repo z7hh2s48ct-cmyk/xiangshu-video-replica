@@ -191,6 +191,26 @@ server {
         try_files $uri $uri/ /admin/index.html;
     }
 
+    # Desktop self-update channel (same-origin static hosting): stable.json is
+    # the current-version manifest every installed client checks; <version>/
+    # holds the signed installer, its .sig and checksums. Contents are placed
+    # and swapped by deploy/customer-desktop-release.sh — adjust the alias to
+    # the same directory that script's $VIDEO_REPLICA_SITE_ROOT resolves to.
+    # Large installers are streamed by nginx directly, never through the API
+    # processes. stable.json must not be cached: clients have to see a publish
+    # or rollback immediately, while versioned paths are immutable.
+    location = /downloads/customer-cloud/stable.json {
+        alias /opt/video-replica/app/desktop-releases/customer-cloud/stable.json;
+        default_type application/json;
+        add_header Cache-Control "no-cache" always;
+    }
+
+    location ^~ /downloads/customer-cloud/ {
+        alias /opt/video-replica/app/desktop-releases/customer-cloud/;
+        autoindex off;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+    }
+
     # The customer workspace is a browser-route SPA, so auth cookies never
     # cross an origin boundary.
     location / {

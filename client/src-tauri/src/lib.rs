@@ -7,12 +7,22 @@ mod viral_decrypt;
 
 use tauri::Manager;
 
+// 升级安装完成后由前端调用。重启能力本可由 plugin-process 提供，但那会为了
+// 一个函数多引一个插件；AppHandle::restart 原生等价（终止当前进程并以新
+// 版本参数重新拉起），保持外壳依赖面最小。
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) -> Result<(), String> {
+    app.restart()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(video_downloads::VideoDownloads::default())
         .manage(publish_accounts::PublishAccounts::default())
         .invoke_handler(tauri::generate_handler![
+            restart_app,
             publish_accounts::list_local_publish_accounts,
             publish_accounts::start_local_publish_login,
             publish_accounts::check_local_publish_login,
