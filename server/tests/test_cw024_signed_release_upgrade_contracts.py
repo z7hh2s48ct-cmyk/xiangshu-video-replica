@@ -39,7 +39,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 CUSTOMER_INSTALLER_HOOKS = REPO_ROOT / "client" / "src-tauri" / "customer-installer-hooks.nsh"
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+DESKTOP_BUILD_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "desktop-build.yml"
 PACKAGE_JSON = REPO_ROOT / "package.json"
+CLIENT_PACKAGE_JSON = REPO_ROOT / "client" / "package.json"
+TAURI_CONF = REPO_ROOT / "client" / "src-tauri" / "tauri.conf.json"
+CUSTOMER_TAURI_CONF = REPO_ROOT / "client" / "src-tauri" / "tauri.customer.conf.json"
+UPDATER_CAPABILITY = REPO_ROOT / "client" / "src-tauri" / "capabilities" / "updater.json"
+CARGO_TOML = REPO_ROOT / "client" / "src-tauri" / "Cargo.toml"
 SIGNED_RELEASE_SCRIPT = REPO_ROOT / "scripts" / "release" / "build-customer-signed-release.ps1"
 
 # CW-003 冻结受支持版本（0.1.14 跳过无发布）对应的全部实际旧安装路径。
@@ -186,3 +192,77 @@ def test_signed_release_flow_is_the_only_release_entrypoint() -> None:
         "powershell -NoProfile -ExecutionPolicy Bypass -File "
         "scripts/release/build-customer-signed-release.ps1"
     )
+
+
+# ---------------------------------------------------------------------------
+# 自动更新（updater）合同：签名发行物必须自带可自升级的产物。
+# 分发是 nginx 静态托管（stable.json + <version>/安装包），不新增服务端路由。
+# ---------------------------------------------------------------------------
+
+UPDATER_PUBKEY_PLACEHOLDER = "REPLACE_WITH_UPDATER_PUBLIC_KEY"
+UPDATER_MANIFEST_PATH = "/downloads/customer-cloud/stable.json"
+
+
+def test_customer_conf_and_capability_wire_updater() -> None:
+    conf = json.loads(_read(CUSTOMER_TAURI_CONF))
+
+    updater = conf["plugins"]["updater"]
+    assert updater.get("pubkey"), "customer overlay 缺少 updater 公钥"
+    assert updater.get("endpoints"), "customer overlay 缺少 updater endpoint"
+    # CI 构建走占位源（与 VITE_API_BASE_URL 的 staging.example.invalid 同模式），
+    # 真实 endpoint 只在签名机的临时 overlay 里注入。
+    assert any(
+        "staging.example.invalid" in endpoint for endpoint in updater["endpoints"]
+    ), "CI 构建的 endpoint 必须是占位源"
+    assert all(
+        endpoint.endswith(UPDATER_MANIFEST_PATH)
+        for endpoint in updater["endpoints"]
+    ), "endpoint 必须指向静态升级清单 stable.json"
+
+    # dev（不带 customer overlay 的 tauri:dev）不具备更新能力：主配置不得
+    # 出现 updater 配置。
+    main_conf = json.loads(_read(TAURI_CONF))
+    assert "plugins" not in main_conf, "updater 配置只允许存在于 customer overlay"
+
+    capability = json.loads(_read(UPDATER_CAPABILITY))
+    assert capability["windows"] == ["main"]
+    assert "updater:default" in capability["permissions"], "缺少 updater 权限声明"
+
+    # Rust 与 JS 两侧的插件依赖缺一不可：缺 JS 包前端调不到，缺 crate 构建失败。
+    assert "tauri-plugin-updater" in _read(CARGO_TOML)
+    client_dependencies = json.loads(_read(CLIENT_PACKAGE_JSON))["dependencies"]
+    assert "@tauri-apps/plugin-updater" in client_dependencies
+
+
+def test_signed_release_flow_emits_updater_artifacts_and_fails_closed() -> None:
+    script = _read(SIGNED_RELEASE_SCRIPT)
+
+    # fail-closed：缺 updater 私钥或公钥仍是占位值时拒绝出制品——那样的包
+    # 装出去永远升不了级，等于悄悄废掉整个升级通道。
+    assert "TAURI_SIGNING_PRIVATE_KEY is required" in script
+    assert UPDATER_PUBKEY_PLACEHOLDER in script
+    # updater 制品只在签名机的临时 overlay 里开启（createUpdaterArtifacts），
+    # 主配置保持关闭，CI 的无签名构建因此不受影响。
+    assert "createUpdaterArtifacts = $true" in script
+    # 真实 endpoint 从已通过 require:customer-api-base 校验的云端 origin 推导。
+    assert "$($env:VITE_API_BASE_URL.TrimEnd('/'))" in script
+    assert UPDATER_MANIFEST_PATH in script
+    # 产物合同：.sig 必须存在（缺失即中止），stable.json 记录签名内容与下载地址。
+    assert "updater signature was not produced" in script
+    assert ".exe.sig" in script
+    assert "'stable.json'" in script
+    assert "'signature' = (Get-Content -LiteralPath $sigPath -Raw)" in script
+    assert "'windows-x86_64'" in script
+    # 发行物记录里必须带 updater 段（endpoint 与签名制品的 SHA）。
+    assert "'updater' = [ordered]@{" in script
+    assert "'endpoint'" in script
+
+
+def test_desktop_build_workflow_carries_no_signing_material() -> None:
+    workflow = _read(DESKTOP_BUILD_WORKFLOW)
+
+    # 无签名内部构建工作流同样不得出现任何签名材料；updater 私钥只存在于
+    # 签名机的环境变量里，产物 .sig 由 release:customer 流程生成。
+    assert "TAURI_SIGNING_PRIVATE_KEY" not in workflow
+    assert "certificateThumbprint" not in workflow
+    assert "signtool" not in workflow

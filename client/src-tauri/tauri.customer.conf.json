@@ -6,5 +6,13 @@
         "installerHooks": "customer-installer-hooks.nsh"
       }
     }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "REPLACE_WITH_UPDATER_PUBLIC_KEY",
+      "endpoints": [
+        "https://staging.example.invalid/downloads/customer-cloud/stable.json"
+      ]
+    }
   }
 }

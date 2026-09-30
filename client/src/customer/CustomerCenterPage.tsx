@@ -37,6 +37,7 @@ import { PublishAccountsPanel } from "../studio/MainPages";
 import { Icon } from "../studio/ui";
 import type { WorkspaceShellProps } from "../workspace-shell";
 import { AccountPasswordSetup } from "./AccountPasswordSetup";
+import { useAppUpdate } from "./appUpdate";
 import { BUSINESS_LABEL } from "./businessLabels";
 import { useCustomerConfirm } from "./CustomerConfirmDialog";
 import { CustomerPricesPage } from "./CustomerPricesPage";
@@ -182,6 +183,8 @@ export function CustomerCenterPage({
   // 首访引导（方案 G / P2#14）：按账号记「看过」，换账号会重新引导一次。
   const { tour } = useOnboarding(account.profile?.user_id ?? "anonymous");
   const [help, setHelp] = useState(false);
+  // 手动「检查更新」仅桌面客户端显示；浏览器 lane 下 supported=false 直接隐藏入口。
+  const appUpdate = useAppUpdate();
   const [tab, setTab] = useState<Tab>("tokens");
   const [summary, setSummary] = useState<CustomerCenterSummary | null>(null);
   const [tokens, setTokens] = useState<CustomerApiKey[] | null>(null);
@@ -1043,6 +1046,11 @@ export function CustomerCenterPage({
             <Icon name="home" />
             返回主界面
           </button>
+          {appUpdate.supported && (
+            <button type="button" onClick={appUpdate.openManualCheck}>
+              检查更新
+            </button>
+          )}
           <button type="button" onClick={() => setHelp(true)}>
             <Icon name="info" />
             帮助
@@ -1581,6 +1589,7 @@ export function CustomerCenterPage({
       )}
       {confirmDialog}
       {tour}
+      {appUpdate.dialog}
       {help && <HelpDialog onClose={() => setHelp(false)} />}
       <CustomerRechargeDialog
         isOpen={recharge}
