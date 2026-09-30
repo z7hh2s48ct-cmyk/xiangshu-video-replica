@@ -102,6 +102,61 @@ class WalletTransactionPage(BaseModel):
     sub_account_summary: list[dict[str, str | int]] | None = None
 
 
+LedgerEntryKind = Literal["cycle", "row"]
+# PENDING 生成中（只有暂扣）/ COMPLETED 已实扣 / PARTIAL 实扣后退回了剩余 /
+# FAILED 没有实扣、暂扣整笔退回 / POSTED 不属于计费周期的单笔流水（入账、转换、调账）。
+LedgerOutcome = Literal["PENDING", "COMPLETED", "PARTIAL", "FAILED", "POSTED"]
+
+
+class WalletLedgerEntry(BaseModel):
+    """合并后的一条流水：一个计费周期（一条任务）或一笔独立记账。
+
+    用户看账要回答的是「这条任务最后花了多少、有没有退回」，而不是三笔流水各自的
+    正负号；三个金额与结果由服务端按整组算好，逐笔明细放在 ``rows`` 里供核对。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    kind: LedgerEntryKind
+    outcome: LedgerOutcome
+    # 周期内暂扣 / 实扣 / 退回的积分（均为正数）；kind=row 时为 0，金额看 rows。
+    reserved_credits: int
+    charged_credits: int
+    refunded_credits: int
+    # 该条对可用积分的净影响（各笔 available_delta 之和）：完成为 -实扣，整笔退回为 0，
+    # 生成中为 -暂扣，入账为 +到账积分。
+    net_available_delta: int
+    started_at: str
+    updated_at: str
+    rows: list[WalletTransactionResponse]
+
+
+class WalletLedgerCounts(BaseModel):
+    """当前筛选（不含结果筛选）下各结果的条目数，给结果筛选条显示数量。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    total: int
+    pending: int
+    completed: int
+    # 部分成功 + 整笔退回。
+    refunded: int
+    posted: int
+
+
+class WalletLedgerPage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[WalletLedgerEntry]
+    # 满足结果筛选的条目总数，分页据此计算。
+    total: int
+    limit: int
+    offset: int
+    counts: WalletLedgerCounts
+    sub_account_summary: list[dict[str, str | int]] | None = None
+
+
 class ConsumptionByBusinessItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

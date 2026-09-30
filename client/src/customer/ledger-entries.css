@@ -1,0 +1,321 @@
+/* 消费记录表（按任务合并）。自成一套样式，不依赖 .uc-center：用户中心与钱包页共用同一个
+ * 组件，两边的表格默认样式不同。颜色沿用客户端已有的暗色 + 金色体系。 */
+.le {
+  min-width: 0;
+}
+
+.le-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.le-table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+  font-size: 13px;
+  text-align: left;
+}
+
+.le-table th {
+  color: #8f8c86;
+  font-weight: 400;
+  white-space: nowrap;
+  background: #ffffff03;
+}
+
+.le-table th,
+.le-table td {
+  padding: 15px 10px;
+  border-bottom: 1px solid #2b2c2f;
+  line-height: 1.6;
+  vertical-align: middle;
+}
+
+.le-table td b {
+  display: block;
+  font-weight: 650;
+}
+
+/* 有退回的行左侧加一道绿色竖条：扫一眼就能看到哪些钱回来了。 */
+.le-row--refund > td:first-child {
+  box-shadow: inset 3px 0 0 #3f8f63;
+}
+
+.le-table td .le-sub {
+  display: block;
+  margin-top: 3px;
+  color: #8f8c86;
+  font-size: 12px;
+  white-space: normal;
+}
+
+.le-table td .le-sub--good {
+  color: #8bcca0;
+}
+
+.le-num {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.le-amount {
+  display: block;
+  color: #f1eee8;
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.le-amount--zero {
+  color: #8f8c86;
+}
+
+.le-amount--pending {
+  color: #edc262;
+}
+
+.le-amount--in {
+  color: #8bcca0;
+}
+
+.le-badge {
+  display: inline-block;
+  padding: 1px 9px;
+  border: 1px solid;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: nowrap;
+}
+
+.le-badge--pending {
+  color: #edc262;
+  border-color: #61522f;
+  background: #221c0d;
+}
+
+.le-badge--done {
+  color: #c4c5cd;
+  border-color: #3a3a44;
+}
+
+.le-badge--refunded {
+  color: #8bcca0;
+  border-color: #2f5a40;
+  background: #10201a;
+}
+
+.le-badge--posted {
+  color: #edc262;
+  border-color: #61522f;
+}
+
+.le-flow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.le-step {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 5px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.le-step--hold {
+  color: #edc262;
+  background: #251f0e;
+}
+
+.le-step--charge {
+  color: #e9e9ee;
+  background: #26272d;
+}
+
+.le-step--refund {
+  color: #8bcca0;
+  background: #12261c;
+  font-weight: 600;
+}
+
+.le-step--info {
+  color: #c4c5cd;
+  background: #26272d;
+}
+
+.le-arrow {
+  color: #6d6b66;
+  font-size: 12px;
+}
+
+.le-wait {
+  color: #8f8c86;
+  font-size: 12px;
+}
+
+.le .le-link {
+  display: inline-block;
+  margin: 6px 12px 0 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: #8f8c86;
+  font-size: 12px;
+  font-weight: 400;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.le .le-link:hover {
+  color: #f1eee8;
+}
+
+.le .le-link:focus-visible {
+  outline: 2px solid #f0bc5e;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.le-detail > td {
+  padding: 6px 10px 14px 34px;
+  background: #ffffff05;
+}
+
+.le-mini {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.le-table .le-mini th,
+.le-table .le-mini td {
+  padding: 6px 10px;
+  border-bottom: 1px dashed #2b2c2f;
+  background: none;
+  vertical-align: top;
+}
+
+.le-legend {
+  margin: 14px 2px 4px;
+  color: #8f8c86;
+  font-size: 12px;
+  line-height: 1.9;
+}
+
+.le-legend .le-step {
+  margin-right: 4px;
+}
+
+/* 结果筛选条 */
+.le-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  margin: 4px 0 14px;
+  padding: 0;
+  border: 0;
+}
+
+/* 给读屏用的分组名，视觉上不显示。 */
+.le-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.le-chips .le-chip {
+  padding: 6px 14px;
+  border: 1px solid #3a3a44;
+  border-radius: 999px;
+  background: transparent;
+  color: #8f8c86;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.le-chips .le-chip[aria-pressed="true"] {
+  border-color: #e0a83f;
+  background: rgba(224, 168, 63, 0.08);
+  color: #f0bc5e;
+}
+
+.le-chips .le-chip em {
+  margin-left: 6px;
+  font-style: normal;
+  opacity: 0.7;
+}
+
+/* 手机宽度：表头隐藏，每条任务一张卡，列名靠 data-label 补在每格上方
+   （与 customer-center.css 里其它表格同一断点、同一做法）。 */
+@media (max-width: 760px) {
+  .le-table {
+    display: block;
+    min-width: 0;
+  }
+
+  .le-table > thead {
+    display: none;
+  }
+
+  .le-table > tbody,
+  .le-table > tbody > tr {
+    display: block;
+    width: 100%;
+  }
+
+  .le-table > tbody > tr.le-row {
+    margin-bottom: 12px;
+    padding: 10px 12px;
+    border: 1px solid #2b2c2f;
+    border-radius: 10px;
+  }
+
+  /* 卡片上不再有「第一格」，退回的绿色标记改画在卡片左缘。 */
+  .le-table > tbody > tr.le-row--refund {
+    border-left: 3px solid #3f8f63;
+  }
+
+  .le-row--refund > td:first-child {
+    box-shadow: none;
+  }
+
+  .le-table > tbody > tr.le-row > td {
+    display: block;
+    width: 100%;
+    padding: 6px 0;
+    border: 0;
+    text-align: left;
+    white-space: normal;
+  }
+
+  .le-table > tbody > tr.le-row > td::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 2px;
+    color: #8f8c86;
+    font-size: 12px;
+  }
+
+  .le-table > tbody > tr.le-detail {
+    margin: -6px 0 12px;
+  }
+
+  .le-detail > td {
+    display: block;
+    padding: 8px 12px;
+    overflow-x: auto;
+  }
+
+  .le-mini {
+    min-width: 520px;
+  }
+}

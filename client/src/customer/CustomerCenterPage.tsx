@@ -1,6 +1,5 @@
 import {
   type FormEvent,
-  Fragment,
   useCallback,
   useEffect,
   useMemo,
@@ -14,7 +13,7 @@ import {
   type CustomerApiKey,
   type CustomerCenterSummary,
   type CustomerSubAccount,
-  type CustomerWalletTransactionPage,
+  type CustomerWalletLedgerPage,
   customerCloseRechargeOrder,
   customerCreateApiKey,
   customerExportWalletTransactionsCSV,
@@ -24,7 +23,7 @@ import {
   customerListApiKeys,
   customerListRechargeOrders,
   customerListSubAccounts,
-  customerListWalletTransactions,
+  customerListWalletLedger,
   customerRevokeApiKey,
   customerRotateApiKey,
   getStudioNotificationPreferences,
@@ -46,19 +45,14 @@ import { DeviceSection } from "./DeviceSection";
 import { EmailBindingSection } from "./EmailBindingSection";
 import { ErrorNote } from "./ErrorNote";
 import { HelpDialog, TermHint } from "./HelpDialog";
-import { LedgerPairingSummary } from "./LedgerPairingSummary";
-import {
-  groupLedgerRows,
-  type LedgerPairState,
-  netAvailableDelta,
-  netReservedDelta,
-} from "./ledger-pairing";
+import { LedgerEntryTable } from "./LedgerEntryTable";
+import { LedgerOutcomeChips } from "./LedgerOutcomeChips";
+import { HELD_CREDITS_LABEL, HOLD_EXPLANATION } from "./ledgerVocabulary";
 import { useOnboarding } from "./OnboardingTour";
 import { quotaPercentUsed, quotaState } from "./quotaViz";
 import { RetryButton } from "./RetryButton";
 import { SecuritySection } from "./SecuritySection";
 import { SubAccountManagementPage } from "./SubAccountManagementPage";
-import { TransactionPricingBreakdown } from "./TransactionPricingBreakdown";
 import { tokenIdleDays, tokenUsageShares } from "./tokenUsage";
 import type { CustomerStoredIdentity } from "./useCustomerSession";
 import "./customer-center.css";
@@ -111,47 +105,6 @@ function resolveAccountType(
   return raw === "SUB" || raw === "SUB_ADMIN" ? raw : "MASTER";
 }
 
-const LEDGER_TYPE_LABEL: Record<WalletTransaction["type"], string> = {
-  CHARGE: "积分入账",
-  CONVERSION: "历史积分转换",
-  RESERVE: "任务预扣",
-  SETTLE: "任务消费",
-  RELEASE: "积分退回",
-  // 管理端审计调账的反向记账（20260923T1200_admin_refund_adjustment）。
-  REFUND: "退款调账",
-};
-
-/** P1-7：折叠后的计费周期按最终态命名，而不是最后写入的那一笔。 */
-const PAIR_STATE_LABEL: Record<LedgerPairState, string> = {
-  PENDING: "任务预扣",
-  SETTLED: "任务消费",
-  RELEASED: "积分退回",
-};
-
-const CREDIT_SOURCE_LABEL: Record<string, string> = {
-  FREE_GRANT: "积分赠送",
-  CREDIT_COMPENSATION: "积分补偿",
-  OFFLINE_PAYMENT: "套餐充值",
-  zpay: "在线充值",
-  wechat_native: "微信充值",
-  activation_code: "账号激活",
-  FINANCE_RECEIPT: "后台入账",
-  COMPENSATION_APPROVAL: "后台调整",
-};
-
-function signedCredits(value: number): string {
-  return `${value > 0 ? "+" : ""}${value} 积分`;
-}
-
-/** 流水行的业务描述：优先具体服务名，退到任务类型。 */
-function businessDescription(item: WalletTransaction): string {
-  if (item.service_name) return item.service_name;
-  if (item.type === "CONVERSION") return "历史余额";
-  if (item.oral_task_id) return "数字人口播";
-  if (item.task_id) return "视频生成";
-  return "充值 / 赠送";
-}
-
 /** 消费记录筛选变化后等多久再发请求（P1#16：避免连续切换打出一串请求）。 */
 const LEDGER_FILTER_DEBOUNCE_MS = 300;
 
@@ -169,7 +122,8 @@ const BUSINESS_GROUPS: ReadonlyArray<readonly [string, readonly string[]]> = [
 
 type LedgerFilters = {
   source: string;
-  type: string;
+  /** 结果筛选（进行中 / 已完成 / 有退回 / 入账与调整），空串为全部。 */
+  outcome: string;
   business: string;
   start: string;
   end: string;
@@ -192,7 +146,7 @@ function ledgerFilterParams(
   } else if (filters.source) {
     params.auth_source = filters.source;
   }
-  if (filters.type) params.transaction_type = filters.type;
+  if (filters.outcome) params.outcome = filters.outcome;
   if (filters.business) params.business = filters.business;
   if (filters.subAccount) params.sub_account_id = filters.subAccount;
   if (filters.start) {
@@ -207,26 +161,6 @@ function ledgerFilterParams(
   }
   if (options.summarize) params.group_by_sub_account = "true";
   return params;
-}
-
-function ledgerSource(item: WalletTransaction) {
-  const label = item.credit_source
-    ? (CREDIT_SOURCE_LABEL[item.credit_source] ?? "后台入账")
-    : item.api_key_id
-      ? `${item.token_label || "Token"} · 第 ${item.credential_version ?? 1} 次更新`
-      : item.auth_source === "session"
-        ? "软件操作"
-        : item.auth_source === "internal"
-          ? "内部操作"
-          : "早期版本消费";
-  return (
-    <>
-      {label}
-      {item.credit_price_version != null && (
-        <small>价格 V{item.credit_price_version}</small>
-      )}
-    </>
-  );
 }
 
 export function CustomerCenterPage({
@@ -284,16 +218,12 @@ export function CustomerCenterPage({
   const [notifications, setNotifications] = useState<boolean | null>(null);
   const [preferencesError, setPreferencesError] = useState("");
   const [transactionPage, setTransactionPage] =
-    useState<CustomerWalletTransactionPage | null>(null);
-  // P1-7：同一计费周期的行折叠成一组，展开状态只属于当前页面。
-  const [expandedPairs, setExpandedPairs] = useState<ReadonlySet<string>>(
-    new Set(),
-  );
+    useState<CustomerWalletLedgerPage | null>(null);
   const [orderPage, setOrderPage] = useState<RechargeOrderPage | null>(null);
   const [offset, setOffset] = useState(0);
   const [filters, setFilters] = useState<LedgerFilters>({
     source: "",
-    type: "",
+    outcome: "",
     business: "",
     start: "",
     end: "",
@@ -312,7 +242,7 @@ export function CustomerCenterPage({
   function clearFilters() {
     setFilters({
       source: "",
-      type: "",
+      outcome: "",
       business: "",
       start: "",
       end: "",
@@ -329,7 +259,7 @@ export function CustomerCenterPage({
   const [isExporting, setIsExporting] = useState(false);
   const anyFilterActive =
     filters.source !== "" ||
-    filters.type !== "" ||
+    filters.outcome !== "" ||
     filters.business !== "" ||
     filters.start !== "" ||
     filters.end !== "" ||
@@ -563,7 +493,7 @@ export function CustomerCenterPage({
     const timer = window.setTimeout(() => {
       void credential()
         .then(async (auth) => {
-          const result = await customerListWalletTransactions(auth, {
+          const result = await customerListWalletLedger(auth, {
             limit: 20,
             offset,
             filters: ledgerFilterParams(filters, { summarize }),
@@ -899,75 +829,43 @@ export function CustomerCenterPage({
       </p>
     </section>
   );
-  const togglePair = (operationId: string) => {
-    setExpandedPairs((current) => {
-      const next = new Set(current);
-      if (next.has(operationId)) {
-        next.delete(operationId);
-      } else {
-        next.add(operationId);
-      }
-      return next;
+  // 「查看任务」：由流水里带的批次 / 口播任务 ID 跳到任务详情，返回时回到用户中心。
+  const openTask = (item: WalletTransaction) =>
+    navigate("task-detail", {
+      selectedTaskId: item.oral_task_id
+        ? `oral-${item.oral_task_id}`
+        : item.generation_batch_id || undefined,
+      selectedTaskKind: item.oral_task_id ? "oral_task" : "generation_batch",
+      selectedTaskBackendId:
+        item.oral_task_id || item.generation_batch_id || undefined,
+      returnTo: "profile",
     });
-  };
-
-  const taskDetailButton = (item: WalletTransaction) =>
-    item.generation_batch_id || item.oral_task_id ? (
-      <button
-        type="button"
-        onClick={() =>
-          navigate("task-detail", {
-            selectedTaskId: item.oral_task_id
-              ? `oral-${item.oral_task_id}`
-              : item.generation_batch_id || undefined,
-            selectedTaskKind: item.oral_task_id
-              ? "oral_task"
-              : "generation_batch",
-            selectedTaskBackendId:
-              item.oral_task_id || item.generation_batch_id || undefined,
-            returnTo: "profile",
-          })
-        }
-      >
-        查看任务
-      </button>
-    ) : null;
-
-  const ledgerRowCells = (item: WalletTransaction) => (
-    <>
-      <td>{date(item.created_at)}</td>
-      <td>
-        {LEDGER_TYPE_LABEL[item.type]}
-        <small>{businessDescription(item)}</small>
-        <TransactionPricingBreakdown
-          credential={credential}
-          transaction={item}
-        />
-        {taskDetailButton(item)}
-      </td>
-      <td>{ledgerSource(item)}</td>
-      <td>{signedCredits(item.available_delta)}</td>
-      <td>{signedCredits(item.reserved_delta)}</td>
-    </>
-  );
 
   const recordPanel = (
     <section className="uc-card">
       <header>
         <h2>消费与积分流水</h2>
-        {/* P1#6：待结算/累计消费原先挤在首屏 hero 里，与「充值」抢焦点；
-            它们是「看账」的信息，挪到看账的页签里更合适。 */}
+        {/* P1#6：累计消费原先挤在首屏 hero 里，与「充值」抢焦点；它们是「看账」的
+            信息，挪到看账的页签里更合适。这里并排放消费、退回与暂扣中三个数：
+            用户只看到扣钱、看不到退回，是这块最常见的误解。 */}
         <section className="uc-record-totals" aria-label="流水总额">
-          <TermHint
-            hint="任务开始时按预估用量预扣，结束后按实际用量结算，多扣的会退回。"
-            term="待结算"
-          />{" "}
-          <b>{summary?.reserved_credits.toLocaleString("zh-CN") ?? "—"}</b> 积分
           <span>
             累计消费{" "}
             <b>
               {summary?.total_consumed_credits.toLocaleString("zh-CN") ?? "—"}
             </b>{" "}
+            积分
+          </span>
+          <span className="uc-record-totals__returned">
+            累计退回{" "}
+            <b>
+              {summary?.total_returned_credits?.toLocaleString("zh-CN") ?? "—"}
+            </b>{" "}
+            积分
+          </span>
+          <span>
+            <TermHint hint={HOLD_EXPLANATION} term={HELD_CREDITS_LABEL} />{" "}
+            <b>{summary?.reserved_credits.toLocaleString("zh-CN") ?? "—"}</b>{" "}
             积分
           </span>
         </section>
@@ -990,20 +888,6 @@ export function CustomerCenterPage({
                 {token.label || "未命名 Token"}（含历史版本）
               </option>
             ))}
-          </select>
-        </label>
-        <label>
-          流水类型
-          <select
-            value={filters.type}
-            onChange={(event) => updateFilter("type", event.target.value)}
-          >
-            <option value="">全部类型</option>
-            <option value="SETTLE">最终消费</option>
-            <option value="RESERVE">任务预扣</option>
-            <option value="RELEASE">积分退回</option>
-            <option value="CHARGE">积分入账</option>
-            <option value="CONVERSION">历史积分转换</option>
           </select>
         </label>
         <label>
@@ -1081,18 +965,23 @@ export function CustomerCenterPage({
           </button>
         ) : null}
       </div>
+      <LedgerOutcomeChips
+        counts={transactionPage?.counts}
+        value={filters.outcome}
+        onChange={(value) => updateFilter("outcome", value)}
+      />
       {summarize && transactionPage?.sub_account_summary?.length ? (
         <div className="uc-table-scroll">
           <table className="uc-responsive-table uc-summary-table">
             <caption className="uc-record-summary__caption">
-              当前筛选下的子账号汇总（消费＝结算掉的额度，退回＝返回名下的额度）
+              当前筛选下的子账号汇总（消费＝实扣的额度，退回＝返回名下的额度）
             </caption>
             <thead>
               <tr>
                 <th>子账号</th>
                 <th>消费</th>
                 <th>退回</th>
-                <th>流水笔数</th>
+                <th>条数</th>
               </tr>
             </thead>
             <tbody>
@@ -1114,70 +1003,22 @@ export function CustomerCenterPage({
           {retryButton}
         </div>
       )}
-      <div className="uc-table-scroll">
-        <table className="uc-responsive-table uc-ledger-table">
-          <thead>
-            <tr>
-              <th>时间（北京时间）</th>
-              <th>业务</th>
-              <th>来源</th>
-              <th>可用积分变化</th>
-              <th>待结算变化</th>
-            </tr>
-          </thead>
-          <tbody>
-            {groupLedgerRows(transactionPage?.items ?? []).map((entry) => {
-              if (entry.kind === "row") {
-                return <tr key={entry.row.id}>{ledgerRowCells(entry.row)}</tr>;
-              }
-              const { pair } = entry;
-              // 摘要行落在组内最新一行的时间上，业务描述取自同一行。
-              const latest = pair.rows[pair.rows.length - 1];
-              const expanded = expandedPairs.has(pair.operationId);
-              return (
-                <Fragment key={`pair-${pair.operationId}`}>
-                  <tr className="ledger-pair-parent">
-                    <td>{date(latest.created_at)}</td>
-                    <td>
-                      {PAIR_STATE_LABEL[pair.state]}
-                      <small>{businessDescription(latest)}</small>
-                      <LedgerPairingSummary
-                        pair={pair}
-                        expanded={expanded}
-                        onToggle={() => togglePair(pair.operationId)}
-                      />
-                    </td>
-                    <td>{ledgerSource(latest)}</td>
-                    <td>{signedCredits(netAvailableDelta(pair.rows))}</td>
-                    <td>{signedCredits(netReservedDelta(pair.rows))}</td>
-                  </tr>
-                  {expanded &&
-                    pair.rows.map((row) => (
-                      <tr key={row.id} className="ledger-pair-child">
-                        {ledgerRowCells(row)}
-                      </tr>
-                    ))}
-                </Fragment>
-              );
-            })}
-            {!transactionPage?.items.length && (
-              <tr>
-                <td colSpan={5}>
-                  {recordsError
-                    ? "记录暂未读取成功"
-                    : recordsBusy
-                      ? "正在读取记录…"
-                      : "暂无积分流水，开始创作后会在这里记录。"}
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+      <LedgerEntryTable
+        credential={credential}
+        empty={
+          recordsError
+            ? "记录暂未读取成功"
+            : recordsBusy
+              ? "正在读取记录…"
+              : "暂无积分流水，开始创作后会在这里记录。"
+        }
+        entries={transactionPage?.items ?? []}
+        onOpenTask={openTask}
+      />
       {tab === "consumption" && (
         <>
           <p className="uc-footnote">
-            预扣与退回不计入累计消费；历史未记录 Token
+            暂扣与退回不计入累计消费，累计消费只统计实扣；历史未记录 Token
             来源的消费仅计入账号总额。
           </p>
           <Pagination

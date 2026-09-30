@@ -58,7 +58,7 @@ describe("pricingLines", () => {
       "提交用量：3 秒",
       "折扣：95%（9.5 折）",
       "消费取整：向下取整（最低 1 积分）",
-      "预扣上限：5 积分",
+      "暂扣上限：5 积分",
       "实际扣费按成功交付用量结算，差额同笔退回",
     ]);
   });
@@ -135,7 +135,7 @@ describe("pricingLines", () => {
     expect(lines).toEqual([
       "单价：4 积分/次",
       "提交用量：1 次",
-      "预扣上限：4 积分",
+      "暂扣上限：4 积分",
       "实际扣费按成功交付用量结算，差额同笔退回",
     ]);
   });
@@ -166,7 +166,7 @@ describe("pricingLines", () => {
     expect(lines).toContain("折扣：无折扣（按价目表单价）");
     expect(lines).toContain("消费取整：向上取整（最低 1 积分）");
     expect(lines).toContain("计费轮次：第 3 轮");
-    expect(lines).toContain("提交时按预扣上限冻结额度");
+    expect(lines).toContain("提交时按暂扣上限先扣留额度");
     expect(lines).toContain("操作人：剪辑助手");
     // 子账号没有名字时退回稳定标识，绝不显示成自己的操作。
     expect(

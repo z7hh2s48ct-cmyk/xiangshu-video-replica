@@ -345,7 +345,7 @@ describe("LiveWorkspacePanel 客户钱包入口 (CW-016)", () => {
     // 积分与视频时长分开显示，充值只按管理员配置的积分换算。
     expect(await screen.findByText("可用额度")).toBeInTheDocument();
     expect(screen.getByText("12 积分")).toBeInTheDocument();
-    expect(screen.getByText("冻结中 2 积分")).toBeInTheDocument();
+    expect(screen.getByText("暂扣中 2 积分")).toBeInTheDocument();
     expect(screen.getByText(/1元 = 100 积分/)).toBeInTheDocument();
     expect(screen.getByText("额度流水")).toBeInTheDocument();
     // 档位由管理端配置：客户专属 50 元档只在客户 lane 出现。

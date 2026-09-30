@@ -130,6 +130,7 @@ def test_create_replay_conflict_and_summary_use_real_account(client):
         "available_credits": 0,
         "reserved_credits": 0,
         "total_consumed_credits": 0,
+        "total_returned_credits": 0,
         "active_tokens": 1,
     }
 

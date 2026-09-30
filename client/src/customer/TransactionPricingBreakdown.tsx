@@ -26,9 +26,9 @@ const ROUNDING_TEXT: Record<string, string> = {
 
 // 三行共享同一份提交时冻结的快照：行内变化才是真实资金移动。
 const OPERATION_HINT: Record<string, string> = {
-  RESERVE: "提交时按预扣上限冻结额度",
+  RESERVE: "提交时按暂扣上限先扣留额度",
   SETTLE: "实际扣费按成功交付用量结算，差额同笔退回",
-  RELEASE: "失败任务对应预扣已全额退回",
+  RELEASE: "失败任务暂扣的额度已全额退回",
 };
 
 /** 冻结快照里的 numeric 文本带固定小数位（"2.000000"），界面去尾零后展示。 */
@@ -107,7 +107,7 @@ export function pricingLines(transaction: WalletTransaction): string[] {
         }（最低 1 积分）`,
       );
     }
-    lines.push(`预扣上限：${pricing.credits} 积分`);
+    lines.push(`暂扣上限：${pricing.credits} 积分`);
     const hint = OPERATION_HINT[transaction.type];
     if (hint) lines.push(hint);
   } else {

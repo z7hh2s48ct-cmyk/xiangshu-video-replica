@@ -171,6 +171,8 @@ export type StudioTask = {
   backendId?: string;
   backendStatus?: string;
   billingStatus?: string;
+  /** 本批已落账的积分去向（实扣 / 退回）；旧服务端不返回时为 undefined。 */
+  credits?: { charged: number; refunded: number };
   retryAction?: "archive-retry";
   title: string;
   type: "视频复刻" | "人物置换" | "视频生成" | "数字人口播";

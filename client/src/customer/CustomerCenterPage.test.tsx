@@ -21,7 +21,7 @@ const mocks = vi.hoisted(() => ({
   summary: vi.fn(),
   navigate: vi.fn(),
   notice: vi.fn(),
-  transactions: vi.fn(),
+  ledger: vi.fn(),
   orders: vi.fn(),
   subAccounts: vi.fn(),
   exportCsv: vi.fn(),
@@ -50,7 +50,7 @@ vi.mock("../api", async (original) => ({
   customerRevokeAllApiKeys: mocks.revokeAll,
   customerRevokeAllSessions: mocks.revokeAllSessions,
   customerGetCenterSummary: mocks.summary,
-  customerListWalletTransactions: mocks.transactions,
+  customerListWalletLedger: mocks.ledger,
   customerListRechargeOrders: mocks.orders,
   customerListSubAccounts: mocks.subAccounts,
   customerExportWalletTransactionsCSV: mocks.exportCsv,
@@ -113,6 +113,89 @@ const subIdentity = {
   parentDisplayName: "总部机构",
 };
 
+const ZERO_COUNTS = {
+  total: 0,
+  pending: 0,
+  completed: 0,
+  refunded: 0,
+  posted: 0,
+};
+
+/** 合并后的流水页：counts 默认跟着条数走，需要时用 overrides 覆盖。 */
+function ledgerPage(
+  items: unknown[] = [],
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    items,
+    total: items.length,
+    limit: 20,
+    offset: 0,
+    counts: { ...ZERO_COUNTS, total: items.length },
+    ...overrides,
+  };
+}
+
+function ledgerRow(overrides: Record<string, unknown>) {
+  return {
+    user_id: "alice-id",
+    recharge_order_id: null,
+    task_id: null,
+    billing_round: 1,
+    created_at: "2026-09-13T00:00:00Z",
+    ...overrides,
+  };
+}
+
+/** 一条按计费周期合并的任务：暂扣 5 → 实扣 3 → 退回 2。 */
+function partialCycle(overrides: Record<string, unknown> = {}) {
+  const common = {
+    billing_operation_id: "op-1",
+    service: "asr",
+    service_name: "语音转写",
+    auth_source: "session",
+    credit_price_version: 3,
+  };
+  return {
+    key: "op-1",
+    kind: "cycle",
+    outcome: "PARTIAL",
+    reserved_credits: 5,
+    charged_credits: 3,
+    refunded_credits: 2,
+    net_available_delta: -3,
+    started_at: "2026-09-13T00:00:01Z",
+    updated_at: "2026-09-13T00:00:02Z",
+    rows: [
+      ledgerRow({
+        ...common,
+        id: "ledger-reserve",
+        type: "RESERVE",
+        created_at: "2026-09-13T00:00:01Z",
+        available_delta: -5,
+        reserved_delta: 5,
+      }),
+      ledgerRow({
+        ...common,
+        id: "ledger-settle",
+        type: "SETTLE",
+        created_at: "2026-09-13T00:00:02Z",
+        available_delta: 0,
+        reserved_delta: -3,
+      }),
+      ledgerRow({
+        ...common,
+        id: "ledger-release",
+        type: "RELEASE",
+        created_at: "2026-09-13T00:00:02Z",
+        available_delta: 2,
+        reserved_delta: -2,
+      }),
+    ],
+    ...overrides,
+  };
+}
+
 function setup(
   overrides: {
     /** 显式传 null 表示「资料还没读到」；不传就是母账号资料。 */
@@ -127,14 +210,10 @@ function setup(
     available_credits: 125,
     reserved_credits: 10,
     total_consumed_credits: 22,
+    total_returned_credits: 34,
     active_tokens: 1,
   });
-  mocks.transactions.mockResolvedValue({
-    items: [],
-    total: 0,
-    limit: 20,
-    offset: 0,
-  });
+  mocks.ledger.mockResolvedValue(ledgerPage());
   mocks.orders.mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0 });
   mocks.subAccounts.mockResolvedValue([]);
   mocks.history.mockResolvedValue({ items: [], total: 0 });
@@ -248,7 +327,7 @@ test("消费记录：子账号下拉把筛选传给后端，汇总开关拉聚�
   const subSelect = await screen.findByLabelText("子账号");
   fireEvent.change(subSelect, { target: { value: "sub-1" } });
   await waitFor(() =>
-    expect(mocks.transactions).toHaveBeenLastCalledWith(
+    expect(mocks.ledger).toHaveBeenLastCalledWith(
       expect.anything(),
       expect.objectContaining({
         filters: expect.objectContaining({ sub_account_id: "sub-1" }),
@@ -257,11 +336,8 @@ test("消费记录：子账号下拉把筛选传给后端，汇总开关拉聚�
   );
 
   // 打开汇总：请求带 group_by_sub_account，并渲染摘要表
-  mocks.transactions.mockResolvedValue({
-    items: [],
-    total: 0,
-    limit: 20,
-    offset: 0,
+  mocks.ledger.mockResolvedValue({
+    ...ledgerPage(),
     sub_account_summary: [
       {
         sub_account_id: "sub-1",
@@ -275,7 +351,7 @@ test("消费记录：子账号下拉把筛选传给后端，汇总开关拉聚�
   fireEvent.click(screen.getByRole("checkbox", { name: "按子账号汇总" }));
 
   await waitFor(() =>
-    expect(mocks.transactions).toHaveBeenLastCalledWith(
+    expect(mocks.ledger).toHaveBeenLastCalledWith(
       expect.anything(),
       expect.objectContaining({
         filters: expect.objectContaining({ group_by_sub_account: "true" }),
@@ -306,23 +382,23 @@ test("消费记录：导出 CSV 带上当前筛选，清除筛选只在有筛选
   // 没有任何筛选时不显示「清除筛选」
   expect(screen.queryByRole("button", { name: "清除筛选" })).toBeNull();
 
-  fireEvent.change(screen.getByLabelText("流水类型"), {
-    target: { value: "SETTLE" },
-  });
+  fireEvent.click(screen.getByRole("button", { name: /已完成/ }));
   const clear = await screen.findByRole("button", { name: "清除筛选" });
 
   fireEvent.click(screen.getByRole("button", { name: "导出 CSV" }));
+  // 列表与导出共用一个参数函数：结果筛选也要跟着导出走，否则界面显示
+  // 「已完成」而导出的 CSV 是全部。
   await waitFor(() =>
     expect(mocks.exportCsv).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ transaction_type: "SETTLE" }),
+      expect.objectContaining({ outcome: "completed" }),
     ),
   );
 
   // 清除筛选：回到无筛选态并重取
   fireEvent.click(clear);
   await waitFor(() =>
-    expect(mocks.transactions).toHaveBeenLastCalledWith(
+    expect(mocks.ledger).toHaveBeenLastCalledWith(
       expect.anything(),
       expect.objectContaining({ filters: {} }),
     ),
@@ -352,7 +428,7 @@ test("发布账号页签给出上下文说明与跳转（P1#11）", async () => 
   expect(mocks.navigate).toHaveBeenCalledWith("publishing");
 });
 
-test("待结算与累计消费从首屏挪进消费记录页签（P1#6）", async () => {
+test("暂扣中、累计消费与累计退回从首屏挪进消费记录页签（P1#6）", async () => {
   render(<CustomerCenterPage account={setup()} />);
   await screen.findByText("125");
 
@@ -361,11 +437,14 @@ test("待结算与累计消费从首屏挪进消费记录页签（P1#6）", asyn
 
   fireEvent.click(screen.getByRole("tab", { name: "消费记录" }));
   const totals = await screen.findByRole("region", { name: "流水总额" });
-  expect(totals).toHaveTextContent("待结算");
+  // 消费、退回、暂扣中三个数并排：只看到扣钱、看不到退回是最常见的误解。
+  expect(totals).toHaveTextContent("暂扣中");
   expect(totals).toHaveTextContent("累计消费");
-  // 数字本身来自 summary（reserved 10 / consumed 22）
+  expect(totals).toHaveTextContent("累计退回");
+  // 数字本身来自 summary（reserved 10 / consumed 22 / returned 34）
   expect(totals).toHaveTextContent("10");
   expect(totals).toHaveTextContent("22");
+  expect(totals).toHaveTextContent("34");
 });
 
 test("Token 卡片化并显示消费占比（机会点 2 / P1#5）", async () => {
@@ -651,7 +730,7 @@ test("filters the actual image, transcription and link services shown in the led
     expect(screen.getByRole("option", { name: label })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("业务"), { target: { value } });
     await waitFor(() =>
-      expect(mocks.transactions).toHaveBeenLastCalledWith(
+      expect(mocks.ledger).toHaveBeenLastCalledWith(
         expect.anything(),
         expect.objectContaining({
           filters: expect.objectContaining({ business: value }),
@@ -664,7 +743,7 @@ test("filters the actual image, transcription and link services shown in the led
 test("进入消费记录先显示加载态，而不是「暂无积分流水」（评审 #6）", async () => {
   const account = setup();
   // 请求一直悬着：加载态期间界面不能宣称「暂无积分流水」。
-  mocks.transactions.mockReturnValue(new Promise(() => {}));
+  mocks.ledger.mockReturnValue(new Promise(() => {}));
   render(<CustomerCenterPage account={account} />);
   await screen.findByText("125");
 
@@ -678,109 +757,142 @@ test("进入消费记录先显示加载态，而不是「暂无积分流水」�
 
 test("opens the pricing basis of a settled row inside the records tab", async () => {
   const account = setup();
-  mocks.transactions.mockResolvedValue({
-    items: [
-      {
-        id: "ledger-priced",
-        type: "SETTLE",
-        created_at: "2026-09-13T00:00:00Z",
-        available_delta: 0,
-        reserved_delta: -3,
-        billing_round: 1,
-        credit_price_version: 3,
-        service: "asr",
-        service_name: "语音转写",
-        pricing: {
-          service: "asr",
-          version: 3,
-          unit: "second",
-          units: "3.000000",
-          unit_credits: "2.000000",
-          unit_rounding: "ceil",
-          discount_basis_points: 9500,
-          consumption_rounding: "floor",
-          credits: 5,
-          enabled: true,
-        },
-      },
-    ],
-    total: 1,
-    limit: 20,
-    offset: 0,
-  });
+  const pricing = {
+    service: "asr",
+    version: 3,
+    unit: "second",
+    units: "3.000000",
+    unit_credits: "2.000000",
+    unit_rounding: "ceil",
+    discount_basis_points: 9500,
+    consumption_rounding: "floor",
+    credits: 5,
+    enabled: true,
+  };
+  const cycle = partialCycle();
+  cycle.rows = cycle.rows.map((row) => ({ ...row, pricing }));
+  mocks.ledger.mockResolvedValue(ledgerPage([cycle]));
   render(<CustomerCenterPage account={account} />);
   await screen.findByText("125");
   fireEvent.click(screen.getByRole("tab", { name: "消费记录" }));
 
-  const summary = await screen.findByText("计费依据 · 费率 V3");
-  expect(summary.closest("details")?.open).toBe(false);
+  // 计费依据收在逐笔明细里：先展开这条任务，再看每一笔的依据。
+  fireEvent.click(await screen.findByRole("button", { name: /查看 3 笔明细/ }));
+  const summaries = await screen.findAllByText("计费依据 · 费率 V3");
+  expect(summaries).toHaveLength(3);
+  expect(summaries[0].closest("details")?.open).toBe(false);
   // 折叠态下 jest-dom 不认为内容可见，存在性由文档断言。
   expect(
-    screen.getByText("单价：2 积分/秒，不足 1 秒按 1 秒计"),
-  ).toBeInTheDocument();
-  expect(screen.getByText("预扣上限：5 积分")).toBeInTheDocument();
-  expect(screen.getByText("价格 V3")).toBeVisible();
+    screen.getAllByText("单价：2 积分/秒，不足 1 秒按 1 秒计").length,
+  ).toBeGreaterThan(0);
+  expect(screen.getAllByText("暂扣上限：5 积分").length).toBeGreaterThan(0);
+  expect(screen.getByText(/价格 V3/)).toBeVisible();
 });
 
-test("folds one billing cycle into a single expandable entry in the records table", async () => {
+test("merges one billing cycle into a single entry and expands to the itemised rows", async () => {
   const account = setup();
-  mocks.transactions.mockResolvedValue({
-    items: [
-      {
-        id: "ledger-release",
-        type: "RELEASE",
-        created_at: "2026-09-13T00:00:02Z",
-        available_delta: 2,
-        reserved_delta: -2,
-        billing_operation_id: "op-1",
-        pair_state: "SETTLED",
-        service: "asr",
-        service_name: "语音转写",
-      },
-      {
-        id: "ledger-settle",
-        type: "SETTLE",
-        created_at: "2026-09-13T00:00:02Z",
-        available_delta: 0,
-        reserved_delta: -3,
-        billing_operation_id: "op-1",
-        pair_state: "SETTLED",
-        service: "asr",
-        service_name: "语音转写",
-      },
-      {
-        id: "ledger-reserve",
-        type: "RESERVE",
-        created_at: "2026-09-13T00:00:01Z",
-        available_delta: -5,
-        reserved_delta: 5,
-        billing_operation_id: "op-1",
-        pair_state: "SETTLED",
-        service: "asr",
-        service_name: "语音转写",
-      },
-    ],
-    total: 3,
-    limit: 20,
-    offset: 0,
-  });
+  mocks.ledger.mockResolvedValue(ledgerPage([partialCycle()]));
   render(<CustomerCenterPage account={account} />);
   await screen.findByText("125");
   fireEvent.click(screen.getByRole("tab", { name: "消费记录" }));
 
-  // 折叠：三笔只剩一行摘要，净变化是整组的合计。
-  const summary = await screen.findByText("预扣 5 → 实扣 3 → 退回 2");
-  expect(summary).toBeVisible();
-  // 「任务预扣」在筛选下拉里也有同名选项，断言限定在表格内。
-  const table = summary.closest("table") as HTMLElement;
-  expect(within(table).queryByText("任务预扣")).toBeNull();
-  expect(screen.getByText("-3 积分")).toBeVisible();
-  expect(screen.getByText("0 积分")).toBeVisible();
+  const table = await screen.findByRole("table", { name: "消费记录列表" });
+  // 三笔只剩一行：资金去向讲清暂扣 → 实扣 → 退回，本次实际花费是整组的净额。
+  expect(await within(table).findByText("暂扣 5")).toBeVisible();
+  expect(within(table).getByText("实扣 3")).toBeVisible();
+  expect(within(table).getByText("退回 +2")).toBeVisible();
+  expect(within(table).getByText("部分成功")).toBeVisible();
+  expect(within(table).getByText("-3 积分")).toBeVisible();
+  expect(within(table).getByText("已退回 2")).toBeVisible();
+  expect(within(table).queryByRole("table", { name: "逐笔明细" })).toBeNull();
 
   fireEvent.click(screen.getByRole("button", { name: /查看 3 笔明细/ }));
-  expect(await within(table).findByText("任务预扣")).toBeVisible();
-  expect(screen.getByText("+5 积分")).toBeVisible();
-  expect(screen.getByText("-2 积分")).toBeVisible();
+  const itemised = await within(table).findByRole("table", {
+    name: "逐笔明细",
+  });
+  // 逐笔明细保持暂扣 → 实扣 → 退回的资金走向，数字是原始的正负变化。
+  expect(
+    within(itemised)
+      .getAllByRole("row")
+      .slice(1)
+      .map((row) => row.children[1].textContent),
+  ).toEqual(["暂扣", "实扣", "退回"]);
+  expect(within(itemised).getByText("-5 积分")).toBeVisible();
+  expect(within(itemised).getByText("+2 积分")).toBeVisible();
+});
+
+test("a fully refunded task says so in words, not as a bare negative number", async () => {
+  const account = setup();
+  const failed = partialCycle({
+    key: "op-failed",
+    outcome: "FAILED",
+    reserved_credits: 8,
+    charged_credits: 0,
+    refunded_credits: 8,
+    net_available_delta: 0,
+    rows: [
+      ledgerRow({
+        id: "failed-reserve",
+        type: "RESERVE",
+        available_delta: -8,
+        reserved_delta: 8,
+        billing_operation_id: "op-failed",
+        auth_source: "session",
+      }),
+      ledgerRow({
+        id: "failed-release",
+        type: "RELEASE",
+        available_delta: 8,
+        reserved_delta: -8,
+        billing_operation_id: "op-failed",
+        auth_source: "session",
+      }),
+    ],
+  });
+  mocks.ledger.mockResolvedValue(ledgerPage([failed]));
+  render(<CustomerCenterPage account={account} />);
+  await screen.findByText("125");
+  fireEvent.click(screen.getByRole("tab", { name: "消费记录" }));
+
+  const table = await screen.findByRole("table", { name: "消费记录列表" });
+  expect(await within(table).findByText("未成功 · 已全额退回")).toBeVisible();
+  expect(within(table).getByText("0 积分")).toBeVisible();
+  expect(within(table).getByText("已退回 8，余额已恢复")).toBeVisible();
+  // 用户最容易误读的那个数——暂扣的 -8——只在展开的明细里出现，不在主行上。
+  expect(within(table).queryByText("-8 积分")).toBeNull();
+});
+
+test("结果筛选条显示各结果的条数，点击后把结果交给后端并回到第一页", async () => {
+  const account = setup();
+  mocks.ledger.mockResolvedValue(
+    ledgerPage([partialCycle()], {
+      counts: { total: 9, pending: 2, completed: 4, refunded: 3, posted: 0 },
+    }),
+  );
+  render(<CustomerCenterPage account={account} />);
+  await screen.findByText("125");
+  fireEvent.click(screen.getByRole("tab", { name: "消费记录" }));
+
+  const refunded = await screen.findByRole("button", { name: /有退回/ });
+  // 条数随数据一起到，晚于筛选条本身。
+  await waitFor(() => expect(refunded).toHaveTextContent("3"));
+  expect(screen.getByRole("button", { name: /全部/ })).toHaveTextContent("9");
+  expect(screen.getByRole("button", { name: /全部/ })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+
+  fireEvent.click(refunded);
+  await waitFor(() =>
+    expect(mocks.ledger).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        offset: 0,
+        filters: expect.objectContaining({ outcome: "refunded" }),
+      }),
+    ),
+  );
+  expect(refunded).toHaveAttribute("aria-pressed", "true");
 });
 
 test.each([
@@ -790,22 +902,13 @@ test.each([
   "opens the exact ledger task and returns to profile (%s)",
   async (oral, batch, selected, kind, backend) => {
     const account = setup();
-    mocks.transactions.mockResolvedValue({
-      items: [
-        {
-          id: "ledger-1",
-          type: "SETTLE",
-          created_at: "2026-09-13T00:00:00Z",
-          available_delta: 0,
-          reserved_delta: -42,
-          oral_task_id: oral,
-          generation_batch_id: batch,
-        },
-      ],
-      total: 1,
-      limit: 20,
-      offset: 0,
-    });
+    const cycle = partialCycle({ outcome: "COMPLETED" });
+    cycle.rows = cycle.rows.map((row) => ({
+      ...row,
+      oral_task_id: oral,
+      generation_batch_id: batch,
+    }));
+    mocks.ledger.mockResolvedValue(ledgerPage([cycle]));
     render(<CustomerCenterPage account={account} />);
     await screen.findByText("125");
     fireEvent.click(screen.getByRole("tab", { name: "消费记录" }));

@@ -58,6 +58,90 @@ function jsonResponse(payload: unknown, status = 200) {
   });
 }
 
+type LedgerFixtureRow = Record<string, unknown>;
+
+/** 按服务端的规则把逐笔流水行合并成条目：同一 operation 的暂扣 / 实扣 / 退回是一条。 */
+function ledgerFromRows(
+  rows: LedgerFixtureRow[],
+  page: { total?: number; limit?: number; offset?: number } = {},
+) {
+  const cycleTypes = new Set(["RESERVE", "SETTLE", "RELEASE"]);
+  const groups = new Map<string, LedgerFixtureRow[]>();
+  const order: { key: string; cycle: boolean }[] = [];
+  for (const row of rows) {
+    const cycle =
+      Boolean(row.billing_operation_id) && cycleTypes.has(String(row.type));
+    const key = cycle ? String(row.billing_operation_id) : String(row.id);
+    if (!groups.has(key)) {
+      groups.set(key, []);
+      order.push({ key, cycle });
+    }
+    groups.get(key)?.push(row);
+  }
+  // 服务端保证周期内按资金走向排：暂扣 → 实扣 → 退回（不靠同一事务里相同的时间戳）。
+  const typeOrder: Record<string, number> = {
+    RESERVE: 0,
+    SETTLE: 1,
+    RELEASE: 2,
+  };
+  const items = order.map(({ key, cycle }) => {
+    const members = [...(groups.get(key) ?? [])];
+    if (cycle) {
+      members.sort(
+        (a, b) =>
+          (typeOrder[String(a.type)] ?? 9) - (typeOrder[String(b.type)] ?? 9),
+      );
+    }
+    const sum = (type: string, pick: (row: LedgerFixtureRow) => number) =>
+      members
+        .filter((row) => row.type === type)
+        .reduce((total, row) => total + pick(row), 0);
+    const reserved = sum("RESERVE", (row) => Number(row.reserved_delta));
+    const charged = sum("SETTLE", (row) => -Number(row.reserved_delta));
+    const refunded = sum("RELEASE", (row) => Number(row.available_delta));
+    const outcome = !cycle
+      ? "POSTED"
+      : charged > 0
+        ? refunded > 0
+          ? "PARTIAL"
+          : "COMPLETED"
+        : refunded > 0
+          ? "FAILED"
+          : "PENDING";
+    const times = members.map((row) => String(row.created_at)).sort();
+    return {
+      key,
+      kind: cycle ? "cycle" : "row",
+      outcome,
+      reserved_credits: cycle ? reserved : 0,
+      charged_credits: cycle ? charged : 0,
+      refunded_credits: cycle ? refunded : 0,
+      net_available_delta: members.reduce(
+        (total, row) => total + Number(row.available_delta),
+        0,
+      ),
+      started_at: times[0],
+      updated_at: times[times.length - 1],
+      rows: members,
+    };
+  });
+  const count = (...outcomes: string[]) =>
+    items.filter((item) => outcomes.includes(item.outcome)).length;
+  return {
+    items,
+    total: page.total ?? items.length,
+    limit: page.limit ?? 20,
+    offset: page.offset ?? 0,
+    counts: {
+      total: items.length,
+      pending: count("PENDING"),
+      completed: count("COMPLETED"),
+      refunded: count("PARTIAL", "FAILED"),
+      posted: count("POSTED"),
+    },
+  };
+}
+
 // Fixture credential strings live behind named constants so the repo's
 // secret scan never sees a raw quoted value — a dummy, never a real secret.
 const sessionTokenText = "customer-wallet-session-token-1";
@@ -169,9 +253,9 @@ describe("CustomerWalletPanel", () => {
       if (url.endsWith("/api/customer/wallet")) {
         return jsonResponse(wallet);
       }
-      if (url.includes("/api/customer/wallet/transactions?")) {
-        return jsonResponse({
-          items: [
+      if (url.includes("/api/customer/wallet/ledger?")) {
+        return jsonResponse(
+          ledgerFromRows([
             {
               id: "tx-1",
               user_id: "user-1",
@@ -181,13 +265,11 @@ describe("CustomerWalletPanel", () => {
               recharge_order_id: "order-1",
               task_id: null,
               billing_round: null,
-              created_at: "2026-08-19 10:00:00",
+              credit_source: "zpay",
+              created_at: "2026-08-19T02:00:00Z",
             },
-          ],
-          total: 1,
-          limit: 20,
-          offset: 0,
-        });
+          ]),
+        );
       }
       if (url.endsWith("/api/customer/recharge-orders/")) {
         // The created order's status poll: PENDING parks the poll; the test
@@ -238,8 +320,11 @@ describe("CustomerWalletPanel", () => {
 
     expect(await screen.findByText("12 积分")).toBeInTheDocument();
     expect(screen.getByText("12 积分")).toBeInTheDocument();
-    expect(screen.getByText("冻结中 2 积分")).toBeInTheDocument();
-    expect(screen.getAllByText("充值到账")).toHaveLength(2);
+    expect(screen.getByText("暂扣中 2 积分")).toBeInTheDocument();
+    // 入账不是消费：标题说「积分入账」，来源说「在线充值」，不落到「早期版本消费」上。
+    expect(await screen.findByText("积分入账")).toBeInTheDocument();
+    expect(screen.getByText("在线充值")).toBeInTheDocument();
+    expect(screen.queryByText("早期版本消费")).toBeNull();
 
     // 套餐点击直接按套餐下单：到账积分与权益随订单快照，不走自定义金额。
     fireEvent.click(screen.getByRole("button", { name: "购买套餐标准档" }));
@@ -263,9 +348,9 @@ describe("CustomerWalletPanel", () => {
       "fetch",
       vi.fn((url: string) => {
         if (url.endsWith("/api/customer/wallet")) return jsonResponse(wallet);
-        if (url.includes("/api/customer/wallet/transactions?")) {
-          return jsonResponse({
-            items: [
+        if (url.includes("/api/customer/wallet/ledger?")) {
+          return jsonResponse(
+            ledgerFromRows([
               {
                 id: "tx-priced",
                 user_id: "user-1",
@@ -308,11 +393,8 @@ describe("CustomerWalletPanel", () => {
                 created_at: "2026-09-22 09:00:00",
                 pricing: null,
               },
-            ],
-            total: 2,
-            limit: 20,
-            offset: 0,
-          });
+            ]),
+          );
         }
         return jsonResponse({ items: [], total: 0, limit: 20, offset: 0 });
       }),
@@ -333,58 +415,47 @@ describe("CustomerWalletPanel", () => {
     expect(screen.getAllByText(/计费依据/)).toHaveLength(1);
   });
 
-  it("folds a settled billing cycle into one row with expandable detail", async () => {
+  it("merges a settled billing cycle into one row with expandable detail", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn((url: string) => {
         if (url.endsWith("/api/customer/wallet")) return jsonResponse(wallet);
-        if (url.includes("/api/customer/wallet/transactions?")) {
-          return jsonResponse({
-            items: [
+        if (url.includes("/api/customer/wallet/ledger?")) {
+          const cycle = {
+            user_id: "user-1",
+            recharge_order_id: null,
+            task_id: "task-1",
+            billing_round: 1,
+            billing_operation_id: "op-1",
+            service: "asr",
+            service_name: "语音转写",
+            auth_source: "session",
+          };
+          return jsonResponse(
+            ledgerFromRows([
               {
+                ...cycle,
                 id: "tx-release",
-                user_id: "user-1",
                 type: "RELEASE",
                 available_delta: 2,
                 reserved_delta: -2,
-                recharge_order_id: null,
-                task_id: "task-1",
-                billing_round: 1,
-                billing_operation_id: "op-1",
-                pair_state: "SETTLED",
-                created_at: "2026-09-22 10:00:01",
-                service: "asr",
-                service_name: "语音转写",
+                created_at: "2026-09-22T02:00:01Z",
               },
               {
+                ...cycle,
                 id: "tx-settle",
-                user_id: "user-1",
                 type: "SETTLE",
                 available_delta: 0,
                 reserved_delta: -3,
-                recharge_order_id: null,
-                task_id: "task-1",
-                billing_round: 1,
-                billing_operation_id: "op-1",
-                pair_state: "SETTLED",
-                created_at: "2026-09-22 10:00:01",
-                service: "asr",
-                service_name: "语音转写",
+                created_at: "2026-09-22T02:00:01Z",
               },
               {
+                ...cycle,
                 id: "tx-reserve",
-                user_id: "user-1",
                 type: "RESERVE",
                 available_delta: -5,
                 reserved_delta: 5,
-                recharge_order_id: null,
-                task_id: "task-1",
-                billing_round: 1,
-                billing_operation_id: "op-1",
-                pair_state: "SETTLED",
-                created_at: "2026-09-22 10:00:00",
-                service: "asr",
-                service_name: "语音转写",
+                created_at: "2026-09-22T02:00:00Z",
               },
               {
                 id: "tx-charge",
@@ -395,13 +466,10 @@ describe("CustomerWalletPanel", () => {
                 recharge_order_id: "order-1",
                 task_id: null,
                 billing_round: null,
-                created_at: "2026-09-22 09:00:00",
+                created_at: "2026-09-22T01:00:00Z",
               },
-            ],
-            total: 4,
-            limit: 20,
-            offset: 0,
-          });
+            ]),
+          );
         }
         return jsonResponse({ items: [], total: 0, limit: 20, offset: 0 });
       }),
@@ -410,17 +478,22 @@ describe("CustomerWalletPanel", () => {
       <CustomerWalletPanel store={fakeStore()} onSessionExpired={vi.fn()} />,
     );
 
-    // 折叠：三笔只剩一行摘要，时间跟随组内最新的退回行。
-    expect(await screen.findByText("预扣 5 → 实扣 3 → 退回 2")).toBeVisible();
-    expect(screen.queryByText("任务冻结")).toBeNull();
-    expect(screen.queryByText("2026-09-22 10:00:00")).toBeNull();
+    // 合并：三笔只剩一行，资金去向讲清暂扣 → 实扣 → 退回，花费是整组净额。
+    expect(await screen.findByText("暂扣 5")).toBeVisible();
+    expect(screen.getByText("实扣 3")).toBeVisible();
+    expect(screen.getByText("退回 +2")).toBeVisible();
     expect(screen.getByText("-3 积分")).toBeVisible();
+    expect(screen.queryByRole("table", { name: "逐笔明细" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: /查看 3 笔明细/ }));
-    expect(await screen.findByText("任务冻结")).toBeVisible();
-    expect(screen.getByText("失败返还")).toBeVisible();
-    expect(screen.getByText("2026-09-22 10:00:00")).toBeVisible();
-    expect(screen.getByText("+2 积分")).toBeVisible();
+    const itemised = await screen.findByRole("table", { name: "逐笔明细" });
+    expect(
+      within(itemised)
+        .getAllByRole("row")
+        .slice(1)
+        .map((row) => row.children[1].textContent),
+    ).toEqual(["暂扣", "实扣", "退回"]);
+    expect(within(itemised).getByText("+2 积分")).toBeVisible();
   });
 
   it("resumes polling an outstanding pending payment after a remount", async () => {
@@ -431,7 +504,7 @@ describe("CustomerWalletPanel", () => {
       if (url.endsWith("/api/customer/wallet")) {
         return jsonResponse(wallet);
       }
-      if (url.includes("/api/customer/wallet/transactions?")) {
+      if (url.includes("/api/customer/wallet/ledger?")) {
         return jsonResponse({ items: [], total: 0, limit: 20, offset: 0 });
       }
       if (url.endsWith("/api/customer/recharge-orders/202608190001")) {
@@ -517,7 +590,7 @@ describe("CustomerWalletPanel", () => {
       if (url.endsWith("/api/customer/wallet")) {
         return jsonResponse(wallet);
       }
-      if (url.includes("/api/customer/wallet/transactions?")) {
+      if (url.includes("/api/customer/wallet/ledger?")) {
         return jsonResponse({ items: [], total: 0, limit: 20, offset: 0 });
       }
       if (url.endsWith("/api/customer/recharge-orders/order-pending")) {
@@ -582,27 +655,29 @@ describe("CustomerWalletPanel", () => {
       if (url.endsWith("/api/customer/wallet")) {
         return jsonResponse(wallet);
       }
-      if (url.includes("/api/customer/wallet/transactions")) {
+      if (url.includes("/api/customer/wallet/ledger")) {
         const offset = Number(new URL(url).searchParams.get("offset") ?? "0");
-        return jsonResponse({
-          items: [
-            {
-              id: `tx-${offset}`,
-              user_id: "user-1",
-              type: "CHARGE",
-              available_delta: 1,
-              reserved_delta: 0,
-              recharge_order_id: `order-${offset}`,
-              task_id: null,
-              billing_round: null,
-              created_at:
-                offset === 0 ? "2026-09-07 10:00:00" : "2026-08-01 09:00:00",
-            },
-          ],
-          total: 21,
-          limit: 20,
-          offset,
-        });
+        return jsonResponse(
+          ledgerFromRows(
+            [
+              {
+                id: `tx-${offset}`,
+                user_id: "user-1",
+                type: "CHARGE",
+                available_delta: 1,
+                reserved_delta: 0,
+                recharge_order_id: `order-${offset}`,
+                task_id: null,
+                billing_round: null,
+                created_at:
+                  offset === 0
+                    ? "2026-09-07T02:00:00Z"
+                    : "2026-08-01T01:00:00Z",
+              },
+            ],
+            { total: 21, offset },
+          ),
+        );
       }
       if (url.includes("/api/customer/recharge-orders?")) {
         const offset = Number(new URL(url).searchParams.get("offset") ?? "0");
@@ -637,13 +712,13 @@ describe("CustomerWalletPanel", () => {
     ).closest("section");
     expect(ledger).not.toBeNull();
     expect(
-      within(ledger as HTMLElement).getByText("2026-09-07 10:00:00"),
+      await within(ledger as HTMLElement).findByText("2026/9/7 10:00:00"),
     ).toBeInTheDocument();
     fireEvent.click(
       within(ledger as HTMLElement).getByRole("button", { name: "下一页" }),
     );
     expect(
-      await within(ledger as HTMLElement).findByText("2026-08-01 09:00:00"),
+      await within(ledger as HTMLElement).findByText("2026/8/1 09:00:00"),
     ).toBeInTheDocument();
     expect(
       fetchMock.mock.calls.filter(([url]) =>
@@ -672,9 +747,7 @@ describe("CustomerWalletPanel", () => {
 
     expect(
       fetchMock.mock.calls.some(([url]) =>
-        String(url).endsWith(
-          "/api/customer/wallet/transactions?limit=20&offset=20",
-        ),
+        String(url).endsWith("/api/customer/wallet/ledger?limit=20&offset=20"),
       ),
     ).toBe(true);
     expect(
@@ -693,29 +766,31 @@ describe("CustomerWalletPanel", () => {
       if (url.endsWith("/api/customer/wallet")) {
         return jsonResponse(wallet);
       }
-      if (url.includes("/api/customer/wallet/transactions?")) {
+      if (url.includes("/api/customer/wallet/ledger?")) {
         const offset = Number(new URL(url).searchParams.get("offset") ?? "0");
         if (offset === 20 && failLedgerPage) {
           return Promise.reject(new Error("额度流水加载失败"));
         }
-        return jsonResponse({
-          items: [
-            {
-              id: `tx-${offset}`,
-              user_id: "user-1",
-              type: "CHARGE",
-              available_delta: 1,
-              reserved_delta: 0,
-              recharge_order_id: `order-${offset}`,
-              task_id: null,
-              billing_round: null,
-              created_at: offset === 0 ? "ledger-page-one" : "ledger-page-two",
-            },
-          ],
-          total: 21,
-          limit: 20,
-          offset,
-        });
+        return jsonResponse(
+          ledgerFromRows(
+            [
+              {
+                id: `tx-${offset}`,
+                user_id: "user-1",
+                type: "CHARGE",
+                available_delta: 1,
+                reserved_delta: 0,
+                recharge_order_id: `order-${offset}`,
+                task_id: null,
+                billing_round: null,
+                // 解析不了的时间原样显示，正好当作「翻到了哪一页」的标记。
+                created_at:
+                  offset === 0 ? "ledger-page-one" : "ledger-page-two",
+              },
+            ],
+            { total: 21, offset },
+          ),
+        );
       }
       if (url.includes("/api/customer/recharge-orders?")) {
         const offset = Number(new URL(url).searchParams.get("offset") ?? "0");
@@ -815,7 +890,7 @@ describe("CustomerWalletPanel", () => {
       if (url.endsWith("/api/customer/wallet")) {
         return jsonResponse(wallet);
       }
-      if (url.includes("/api/customer/wallet/transactions?")) {
+      if (url.includes("/api/customer/wallet/ledger?")) {
         return jsonResponse({ items: [], total: 0, limit: 20, offset: 0 });
       }
       if (url.includes("/api/customer/recharge-orders?")) {
@@ -947,7 +1022,7 @@ describe("CustomerWalletPanel", () => {
         if (url.endsWith("/api/customer/wallet")) {
           return jsonResponse(wallet);
         }
-        if (url.includes("/api/customer/wallet/transactions?")) {
+        if (url.includes("/api/customer/wallet/ledger?")) {
           return delayedLedger;
         }
         if (url.includes("/api/customer/recharge-orders?")) {
@@ -998,8 +1073,8 @@ describe("CustomerWalletPanel", () => {
 
       await act(async () => {
         resolveLedger?.(
-          await jsonResponse({
-            items: [
+          await jsonResponse(
+            ledgerFromRows([
               {
                 id: "late-ledger",
                 user_id: "user-1",
@@ -1009,13 +1084,10 @@ describe("CustomerWalletPanel", () => {
                 recharge_order_id: "ledger-order",
                 task_id: null,
                 billing_round: null,
-                created_at: "2026-09-07 11:00:00",
+                created_at: "2026-09-07T03:00:00Z",
               },
-            ],
-            total: 1,
-            limit: 20,
-            offset: 0,
-          }),
+            ]),
+          ),
         );
       });
       expect(await screen.findByText("+37 积分")).toBeInTheDocument();
@@ -1140,7 +1212,7 @@ describe("CustomerWalletPanel", () => {
       if (url.endsWith("/api/customer/wallet")) {
         return jsonResponse(wallet);
       }
-      if (url.includes("/api/customer/wallet/transactions?")) {
+      if (url.includes("/api/customer/wallet/ledger?")) {
         return jsonResponse({ items: [], total: 0, limit: 20, offset: 0 });
       }
       if (url.includes("/api/customer/recharge-orders?")) {
