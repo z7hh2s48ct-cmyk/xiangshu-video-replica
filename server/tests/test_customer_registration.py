@@ -61,7 +61,7 @@ REGISTER_PATH = "/api/customer/register"
 # 及其后的 REFUND 调账、1800 部署垫片、20260924T0000 交易号唯一索引、
 # 20260924T0100 口播提交时刻列、20260924T0200 口播隐藏偏好表、20260926T0000
 # 爆款首页策展排行与 20260925T1400 计费触发器追加修复（api_metadata 的 PENDING 期写入）。
-HEAD_REVISION = "20260930T1100_alert_notify_dedup"
+HEAD_REVISION = "20260930T1400_registration_bonus_settings"
 PRIOR_REVISION = "20260912T1353_customer_discounts"
 
 # A policy-valid password (>= MIN_PASSWORD_LENGTH, not blank). Never a secret.
@@ -212,6 +212,19 @@ def route_state(registration_dsn: str) -> Iterator[str]:
         conn.execute("SET session_replication_role = replica")
         conn.execute("TRUNCATE wallets, users, security_rate_limit_counters CASCADE")
         conn.execute("SET session_replication_role = DEFAULT")
+        # CASCADE 会连坐带 users 外键的单行配置表（alert_settings 测试的已知坑），
+        # registration_bonus_settings 的种子行同样被清掉——重建回默认 0，让每个
+        # 用例都从「关闭赠送」的出厂态出发；runtime_settings（updated_by_user_id
+        # 同样引用 users）是赠送定价快照的来源，一并重建。
+        conn.execute(
+            "INSERT INTO registration_bonus_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING"
+        )
+        conn.execute(
+            "INSERT INTO runtime_settings "
+            "(id, max_generation_count_per_batch, max_concurrent_h3_tasks, "
+            " internal_base_unit_price_fen, min_recharge_fen, recharge_step_fen) "
+            "VALUES (1, 4, 2, 1000, 10000, 1000)"
+        )
     yield registration_dsn
     close_pg_pool()
 
@@ -643,6 +656,129 @@ def test_register_rejects_unknown_body_fields(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Registration bonus — 注册赠送积分（registration_bonus_settings）
+# ---------------------------------------------------------------------------
+
+
+def _set_registration_bonus(credits: int) -> None:
+    """直接 SQL 改配置行：本文件只测注册路径，设置路由有自己的契约测试。"""
+    with psycopg.connect(_dedicated_dsn(CW076_DB_NAME), autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO registration_bonus_settings (id, bonus_credits) VALUES (1, %s) "
+            "ON CONFLICT (id) DO UPDATE SET bonus_credits = EXCLUDED.bonus_credits",
+            (credits,),
+        )
+
+
+def test_register_with_default_bonus_off_keeps_zero_credit_wallet(
+    client: TestClient,
+) -> None:
+    """种子默认 0 = 关闭：注册后既无赠送流水也无 0 元订单（既有口径回归）。"""
+    response = client.post(
+        REGISTER_PATH, json={"username": "bonus-off", "password": VALID_PASSWORD}
+    )
+    assert response.status_code == 201, response.text
+    user_id = response.json()["user_id"]
+    with psycopg.connect(_dedicated_dsn(CW076_DB_NAME)) as conn:
+        wallet = conn.execute(
+            "SELECT available_credits FROM wallets WHERE user_id = %s", (user_id,)
+        ).fetchone()
+        assert wallet is not None and wallet[0] == 0
+        orders = conn.execute(
+            "SELECT count(*) FROM recharge_orders WHERE user_id = %s", (user_id,)
+        ).fetchone()[0]
+        ledger = conn.execute(
+            "SELECT count(*) FROM wallet_transactions WHERE user_id = %s", (user_id,)
+        ).fetchone()[0]
+    assert orders == 0
+    assert ledger == 0
+
+
+def test_register_grants_configured_bonus_with_paid_zero_fen_order(
+    client: TestClient,
+) -> None:
+    """配置 30 分：钱包 +30，落一张 PAID 0 元 admin_adjustment 单 + 一条 CHARGE。"""
+    _set_registration_bonus(30)
+    response = client.post(REGISTER_PATH, json={"username": "bonus-on", "password": VALID_PASSWORD})
+    assert response.status_code == 201, response.text
+    user_id = response.json()["user_id"]
+    with psycopg.connect(_dedicated_dsn(CW076_DB_NAME)) as conn:
+        credits = conn.execute(
+            "SELECT available_credits FROM wallets WHERE user_id = %s", (user_id,)
+        ).fetchone()[0]
+        order = conn.execute(
+            "SELECT provider, status, amount_fen, credits, merchant_order_no "
+            "FROM recharge_orders WHERE user_id = %s",
+            (user_id,),
+        ).fetchone()
+        charge = conn.execute(
+            "SELECT type, available_delta, reserved_delta, idempotency_key, "
+            "recharge_order_id FROM wallet_transactions WHERE user_id = %s",
+            (user_id,),
+        ).fetchone()
+    assert credits == 30
+    assert order == ("admin_adjustment", "PAID", 0, 30, f"REGBONUS-{user_id}")
+    assert charge is not None
+    assert charge[0] == "CHARGE"
+    assert charge[1] == 30
+    assert charge[2] == 0
+    assert charge[3].startswith("registration_bonus:charge:")
+    # 流水必须挂在同一张订单上：账本对账要求每张 PAID 单恰有一条同额 CHARGE。
+    assert charge[4] is not None and charge[4] != ""
+
+
+def test_register_after_bonus_reset_to_zero_creates_no_ledger_rows(
+    client: TestClient,
+) -> None:
+    """改回 0 后再注册：不产生订单与流水——关闭是彻底关闭，不是发放 0 条。"""
+    _set_registration_bonus(0)
+    response = client.post(
+        REGISTER_PATH, json={"username": "bonus-reset", "password": VALID_PASSWORD}
+    )
+    assert response.status_code == 201, response.text
+    user_id = response.json()["user_id"]
+    with psycopg.connect(_dedicated_dsn(CW076_DB_NAME)) as conn:
+        credits = conn.execute(
+            "SELECT available_credits FROM wallets WHERE user_id = %s", (user_id,)
+        ).fetchone()[0]
+        orders = conn.execute(
+            "SELECT count(*) FROM recharge_orders WHERE user_id = %s", (user_id,)
+        ).fetchone()[0]
+        ledger = conn.execute(
+            "SELECT count(*) FROM wallet_transactions WHERE user_id = %s", (user_id,)
+        ).fetchone()[0]
+    assert credits == 0
+    assert orders == 0
+    assert ledger == 0
+
+
+def test_duplicate_register_conflict_leaves_exactly_one_bonus_ledger(
+    client: TestClient,
+) -> None:
+    """用户名冲突的第二次注册 409 且不落任何赠送痕迹——发放只随成功事务发生。"""
+    _set_registration_bonus(40)
+    first = client.post(REGISTER_PATH, json={"username": "bonus-dup", "password": VALID_PASSWORD})
+    assert first.status_code == 201, first.text
+    second = client.post(REGISTER_PATH, json={"username": "bonus-dup", "password": VALID_PASSWORD})
+    assert second.status_code == 409, second.text
+    assert second.json()["detail"]["code"] == "USERNAME_TAKEN"
+    user_id = first.json()["user_id"]
+    with psycopg.connect(_dedicated_dsn(CW076_DB_NAME)) as conn:
+        orders = conn.execute(
+            "SELECT count(*) FROM recharge_orders WHERE user_id = %s", (user_id,)
+        ).fetchone()[0]
+        ledger = conn.execute(
+            "SELECT count(*) FROM wallet_transactions WHERE user_id = %s", (user_id,)
+        ).fetchone()[0]
+        credits = conn.execute(
+            "SELECT available_credits FROM wallets WHERE user_id = %s", (user_id,)
+        ).fetchone()[0]
+    assert orders == 1
+    assert ledger == 1
+    assert credits == 40
+
+
+# ---------------------------------------------------------------------------
 # Lane 4 — registration revision schema guards (own dedicated database)
 # ---------------------------------------------------------------------------
 
@@ -1017,10 +1153,14 @@ def test_password_customer_xiaohongshu_resolution_import_and_replay_on_postgres(
     assert replay.json() == resolved.json()
     assert transport.calls == 1
     with psycopg.connect(route_state) as conn:
+        # route_state 现在会重建 runtime_settings 单行（注册赠送的定价快照
+        # 读它），这里改为 upsert 补上本用例需要的存储供应商与操作者。
         conn.execute(
             "INSERT INTO runtime_settings (id, max_generation_count_per_batch, "
             "max_concurrent_h3_tasks, active_storage_provider, updated_by_user_id) "
-            "VALUES (1, 4, 2, 'cos', %s)",
+            "VALUES (1, 4, 2, 'cos', %s) "
+            "ON CONFLICT (id) DO UPDATE SET active_storage_provider = 'cos', "
+            "updated_by_user_id = EXCLUDED.updated_by_user_id",
             (user["user_id"],),
         )
     item = resolved.json()["item"]

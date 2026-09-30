@@ -291,7 +291,12 @@ def main(argv: list[str] | None = None) -> int:
     loads = []
     for i, shard in enumerate(shards):
         dest = args.out_dir / f"shard-{i}.txt"
-        dest.write_text("".join(f"{p}\n" for p in shard), encoding="utf-8")
+        # 显式 LF：write_text 的通用换行转换在 Windows 上会把 \n 写成 \r\n，
+        # run-pytest-shards.sh 按行读出的路径会带上不可见的 \r，pytest 直接
+        # file not found（CI 在 Linux 上不受影响，Windows 本地门禁会踩）。
+        dest.write_text(
+            "".join(f"{p}\n" for p in shard), encoding="utf-8", newline="\n"
+        )
         load = sum(cost(f) for f in shard)
         loads.append(load)
         print(f"    shard-{i}.txt: {len(shard):3d} files, ~{load:7.1f}s estimated")

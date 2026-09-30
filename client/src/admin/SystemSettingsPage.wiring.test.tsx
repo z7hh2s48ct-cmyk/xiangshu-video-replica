@@ -18,6 +18,11 @@ vi.mock("./RechargePackageManager", () => ({
     <div data-testid="recharge-packages">{`ro=${String(readOnly)}`}</div>
   ),
 }));
+vi.mock("./RegistrationBonusSection", () => ({
+  RegistrationBonusSection: ({ readOnly }: { readOnly?: boolean }) => (
+    <div data-testid="registration-bonus">{`ro=${String(readOnly)}`}</div>
+  ),
+}));
 vi.mock("./PaymentSettingsSection", () => ({
   PaymentSettingsSection: ({ readOnly }: { readOnly?: boolean }) => (
     <div data-testid="payment-settings">{`ro=${String(readOnly)}`}</div>
@@ -79,6 +84,10 @@ test("defaults to the pricing tab with every block writable", () => {
   expect(screen.getByTestId("customer-pricing")).toHaveTextContent("ro=false");
   expect(screen.getByTestId("recharge-packages")).toHaveTextContent("ro=false");
   expect(screen.getByTestId("billing-rates")).toHaveTextContent("ro=false");
+  // 注册赠送积分与充值套餐同类（给客户多少积分的策略），也挂在本页签。
+  expect(screen.getByTestId("registration-bonus")).toHaveTextContent(
+    "ro=false",
+  );
   // 其它页签的内容不该提前挂载（各区块都会各自发请求）。
   expect(screen.queryByTestId("payment-settings")).toBeNull();
   expect(screen.queryByTestId("settings-panel")).toBeNull();
@@ -106,6 +115,7 @@ test("forwards readOnly into the pricing blocks", () => {
   expect(screen.getByTestId("customer-pricing")).toHaveTextContent("ro=true");
   expect(screen.getByTestId("recharge-packages")).toHaveTextContent("ro=true");
   expect(screen.getByTestId("billing-rates")).toHaveTextContent("ro=true");
+  expect(screen.getByTestId("registration-bonus")).toHaveTextContent("ro=true");
   // 收款设置在独立页签：切过去后同样收到只读态。
   fireEvent.click(screen.getByRole("tab", { name: "收款设置" }));
   expect(screen.getByTestId("payment-settings")).toHaveTextContent("ro=true");

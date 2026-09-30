@@ -69,6 +69,9 @@ PG_ONLY_TABLES: frozenset[str] = frozenset(
         # 20260930T1100_alert_notify_dedup: 告警邮件推送防打扰单行表，PG-only
         # （非 postgresql 方言 return）。
         "alert_notify_dedup",
+        # 20260930T1400_registration_bonus_settings: 注册赠送积分单行配置表，
+        # PG-only（非 postgresql 方言 return）；出厂默认行由迁移种子写入。
+        "registration_bonus_settings",
         # 20260912T1353_customer_discounts: 客户消耗侧折扣配置，PG-only
         # （非 postgresql 方言 return）。
         "customer_discounts",
@@ -153,6 +156,7 @@ PG_ONLY_SEEDED_TABLES: frozenset[str] = frozenset(
         "customer_credit_pricing",
         "legacy_credit_policy",
         "alert_settings",
+        "registration_bonus_settings",
     }
 )
 _OPERATION_COST_RATE_SEEDS = (
@@ -900,6 +904,17 @@ def pg_only_table_has_divergent_state(conn: psycopg.Connection[Any], table: str)
                 )
             )
         ) != (1, None, Decimal(30), 60, 5, None)
+    if table == "registration_bonus_settings":
+        # 单行配置表（20260930T1400）：迁移写入 id=1 的默认行（bonus_credits=0
+        # 即关闭赠送、无修改人）。被改过或多出行，说明目标库已经有人在用，
+        # 同样按分歧拒绝——历史档案导入绝不能覆盖运营已配置的注册赠送策略。
+        rows = conn.execute(
+            "SELECT id, bonus_credits, updated_by_user_id FROM registration_bonus_settings"
+        ).fetchall()
+        return len(rows) != 1 or tuple(
+            _row_value(rows[0], name, i)
+            for i, name in enumerate(("id", "bonus_credits", "updated_by_user_id"))
+        ) != (1, 0, None)
     if table not in PG_ONLY_SEEDED_TABLES:
         query = sql.SQL("SELECT COUNT(*) FROM {}").format(sql.Identifier(table))
         return bool(_count_rows(conn, query))

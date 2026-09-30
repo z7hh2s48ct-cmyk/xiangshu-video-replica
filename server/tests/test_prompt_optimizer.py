@@ -52,6 +52,11 @@ def route_state(route_dsn: str) -> Iterator[str]:
             "TRUNCATE wallets, users, security_rate_limit_counters, billing_tariffs CASCADE"
         )
         conn.execute("SET session_replication_role = DEFAULT")
+        # CASCADE 会连坐带 users 外键的单行配置表——注册赠送的种子行被清掉后，
+        # 注册路径会 fail-closed（配置行缺失拒绝注册），必须重建回默认 0。
+        conn.execute(
+            "INSERT INTO registration_bonus_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING"
+        )
     yield route_dsn
     close_pg_pool()
 

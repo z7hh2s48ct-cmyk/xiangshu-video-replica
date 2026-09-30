@@ -36,6 +36,7 @@ const EVENT_GROUP_MEMBERS: Record<string, ReadonlySet<string>> = {
     "customer_discount.create",
     "customer_discount.deactivate",
     "customer_package.grant",
+    "registration_bonus.settings.update",
   ]),
   account: new Set([
     "ADMIN_DEVICE_DISABLE",
@@ -121,6 +122,7 @@ const EVENT_OPTIONS = [
   ["customer_discount.deactivate", "停用专项折扣"],
   ["recharge_package.create", "新建充值套餐"],
   ["recharge_package.update", "修改充值套餐"],
+  ["registration_bonus.settings.update", "注册赠送设置调整"],
   ["payment.sync", "查单同步"],
   ["control.export", "数据导出"],
   // P0-9：记录详情里「查看原始响应」的高敏动作，每次读取都写审计；

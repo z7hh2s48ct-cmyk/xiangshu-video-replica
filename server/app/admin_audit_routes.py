@@ -81,6 +81,7 @@ EVENT_GROUPS: dict[str, tuple[str, ...]] = {
         "customer_discount.create",
         "customer_discount.deactivate",
         "customer_package.grant",
+        "registration_bonus.settings.update",
     ),
     "account": (
         "ADMIN_DEVICE_DISABLE",

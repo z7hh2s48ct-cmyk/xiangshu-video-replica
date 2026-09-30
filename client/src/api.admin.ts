@@ -1935,6 +1935,53 @@ export function updateAlertSettings(
 }
 
 // ---------------------------------------------------------------------------
+// 注册赠送积分 —— /api/control/settings/registration-bonus
+// ---------------------------------------------------------------------------
+
+/**
+ * 注册赠送积分设置快照：新注册主账号一次性获得的积分数（0 = 关闭）。
+ * 手写而非取自生成类型——与告警设置同理，避免为一个端点重生成整份
+ * OpenAPI 类型。
+ */
+export interface RegistrationBonusSettings {
+  bonus_credits: number;
+  updated_by_user_id: string | null;
+  updated_by_display_name: string | null;
+  updated_at: string | null;
+}
+
+export type RegistrationBonusFields = Pick<
+  RegistrationBonusSettings,
+  "bonus_credits"
+>;
+
+export function getRegistrationBonusSettings(): Promise<RegistrationBonusSettings> {
+  return adminRead<RegistrationBonusSettings>(
+    "/api/control/settings/registration-bonus",
+    "读取注册赠送设置失败",
+  );
+}
+
+/**
+ * 全量更新注册赠送积分（写契约：confirm + reason + 幂等键，旧值 / 新值
+ * 入审计）。只影响此后新注册的主账号，不补发存量。
+ */
+export function updateRegistrationBonusSettings(
+  fields: RegistrationBonusFields,
+  reason: string,
+  idempotencyKey?: string,
+): Promise<RegistrationBonusSettings> {
+  return adminWrite<RegistrationBonusSettings>(
+    "/api/control/settings/registration-bonus",
+    fields,
+    reason,
+    "保存注册赠送设置失败",
+    idempotencyKey,
+    "PUT",
+  );
+}
+
+// ---------------------------------------------------------------------------
 // 团队与权限（方案 P2-4）—— /api/control/team，全部为超级管理员专属
 // ---------------------------------------------------------------------------
 

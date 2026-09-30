@@ -246,6 +246,12 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
         # (test_admin_team_routes.py), migrated to alembic head and
         # truncated per test.
         "admin_team_test",
+        # 注册赠送积分：dedicated database for the
+        # /api/control/settings/registration-bonus 读写契约与
+        # grant_registration_bonus 落账形状矩阵
+        # (test_registration_bonus_settings.py), migrated to alembic head
+        # and truncated per test.
+        "registration_bonus_settings_test",
     }
 )
 
