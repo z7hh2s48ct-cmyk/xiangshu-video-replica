@@ -14,7 +14,6 @@ import {
   listCollectedViralVideos,
   previewCollectedViralVideo,
   refreshCollectedVideoStatistics,
-  updateViralRuntimeControls,
   updateViralVideoAvailability,
   type ViralLibraryOverview,
   type ViralRuntimeControls,

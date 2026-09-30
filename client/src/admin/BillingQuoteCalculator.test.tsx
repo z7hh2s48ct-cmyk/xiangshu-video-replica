@@ -130,7 +130,9 @@ describe("BillingQuoteCalculator", () => {
     // jsdom 的约束校验会拦截无效表单的提交按钮点击；这里直接派发 submit
     // 事件来覆盖组件自身的兜底校验（浏览器里两层都会生效）。
     fireEvent.submit(
-      screen.getByRole("button", { name: "试算" }).closest("form") as HTMLFormElement,
+      screen
+        .getByRole("button", { name: "试算" })
+        .closest("form") as HTMLFormElement,
     );
 
     expect(await screen.findByRole("alert")).toHaveTextContent("请选择业务");

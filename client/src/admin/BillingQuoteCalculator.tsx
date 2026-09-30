@@ -8,7 +8,7 @@ import {
   listCustomers,
   submitBillingQuote,
 } from "../api.admin";
-import { type BillingService } from "./billingTypes";
+import type { BillingService } from "./billingTypes";
 import { PageBanner } from "./ui/PageBanner";
 import { formatFen } from "./ui/vocabulary";
 

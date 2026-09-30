@@ -883,11 +883,13 @@ function CustomerDetailView({
     focusSectionId,
   );
   // 切页签后再滚动：目标区块随页签挂载，同帧滚动会落空。
+  // setTab 与 setPendingSection 批量提交，effect 在重渲染后执行一次，
+  // 因此这里只依赖 pendingSection 即可，无需把 tab 列进来。
   useEffect(() => {
     if (!pendingSection) return;
     scrollToSection(pendingSection);
     setPendingSection(null);
-  }, [tab, pendingSection]);
+  }, [pendingSection]);
   useEffect(() => {
     if (!focusSectionId) return;
     setTab(SECTION_TAB[focusSectionId] ?? "overview");
