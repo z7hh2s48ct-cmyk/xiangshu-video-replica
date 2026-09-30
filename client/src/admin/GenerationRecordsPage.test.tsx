@@ -144,6 +144,8 @@ describe("GenerationRecordsPage", () => {
         { record_type: "FIRST_FRAME_IMAGE", status: "SUCCEEDED", count: 1 },
         { record_type: "SOURCE_FRAME_AI_SCORE", status: "SUCCEEDED", count: 1 },
       ],
+      succeeded_count: 2,
+      failed_count: 0,
       failure_reasons: [],
     });
     // 调用日志区块懒加载：默认给空列表，展开详情不会打到未 mock 的路径。
@@ -396,6 +398,8 @@ describe("GenerationRecordsPage", () => {
     vi.mocked(adminApi.getAdminGenerationRecordSummary).mockResolvedValue({
       total: 1,
       counts: [{ record_type: "ANALYSIS", status: "FAILED", count: 1 }],
+      succeeded_count: 0,
+      failed_count: 1,
       failure_reasons: [
         {
           record_type: "ANALYSIS",
@@ -493,6 +497,8 @@ describe("GenerationRecordsPage", () => {
       counts: [
         { record_type: "FIRST_FRAME_IMAGE", status: "FAILED", count: 1 },
       ],
+      succeeded_count: 0,
+      failed_count: 1,
       failure_reasons: [
         {
           record_type: "FIRST_FRAME_IMAGE",

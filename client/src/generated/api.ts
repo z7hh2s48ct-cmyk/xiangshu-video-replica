@@ -1760,7 +1760,7 @@ export interface paths {
     get?: never;
     put?: never;
     /**
-     * Sync Recharge Order With Zpay
+     * Sync Recharge Order
      * @description Manual single-order query with the admin write contract (A4, A2).
      *
      *     The operator must send confirm + reason + an Idempotency-Key like every
@@ -1768,8 +1768,11 @@ export interface paths {
      *     a manual sync can credit a wallet, so it must name who asked for it.
      *     The query itself stays naturally idempotent (PAID orders replay, the
      *     confirmed credit is unique-constrained), so no snapshot layer is needed.
+     *
+     *     资金中心方案（P1）：所有渠道统一一个「查单补单」入口，网关按订单自身的
+     *     provider 字段分派——微信订单不再只能从客户详情核验。
      */
-    post: operations["sync_recharge_order_with_zpay_api_control_recharge_orders__order_no__sync_post"];
+    post: operations["sync_recharge_order_api_control_recharge_orders__order_no__sync_post"];
     delete?: never;
     options?: never;
     head?: never;
@@ -1837,7 +1840,9 @@ export interface paths {
     /**
      * List Generation Records
      * @description ``task_ref``：我方任务编号、8 位短编号、第三方任务号或第三方请求编号，
-     *     任填一个都落到同一条记录（方案 P0-12）。
+     *     任填一个都落到同一条记录（方案 P0-12）。``status_group`` 是 5 组运营口径
+     *     （方案 P1），与显式 ``status`` 合并；``project_name`` 按项目名筛视频与
+     *     拆解记录。
      */
     get: operations["list_generation_records_api_control_generation_records_get"];
     put?: never;
@@ -1972,6 +1977,29 @@ export interface paths {
     };
     /** Read Reconciliation */
     get: operations["read_reconciliation_api_control_billing_reconciliation_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/billing-reconciliation/items": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Read Reconciliation Items
+     * @description 对账异常明细（方案 P1 资金中心）：三类清单按类型分页，条数与汇总一致。
+     *
+     *     总览待办与资金中心的异常数字必须「点进去条数一致」，所以这里的筛选口径
+     *     逐字复用 /billing-reconciliation 汇总里的三个子查询，只加客户信息与分页。
+     */
+    get: operations["read_reconciliation_items_api_control_billing_reconciliation_items_get"];
     put?: never;
     post?: never;
     delete?: never;
@@ -2236,6 +2264,40 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/control/business/overview": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Business Overview */
+    get: operations["business_overview_api_control_business_overview_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/funds/summary": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Funds Summary */
+    get: operations["funds_summary_api_control_funds_summary_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/control/customers/{user_id}/unit-price": {
     parameters: {
       query?: never;
@@ -2302,6 +2364,63 @@ export interface paths {
     get: operations["list_all_admin_adjustments_api_control_adjustments_get"];
     put?: never;
     post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/adjustments.csv": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Export Adjustments Csv
+     * @description 资金中心·人工调整导出（方案 P1）：与 /adjustments 同筛选口径的整表 CSV。
+     *
+     *     复用 customers.csv 的审计与限流模式：导出走 ``control.export`` 高敏审计，
+     *     财务月度对账不再依赖逐页复制。
+     */
+    get: operations["export_adjustments_csv_api_control_adjustments_csv_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/customers/{user_id}/suspend": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Suspend Customer */
+    post: operations["suspend_customer_api_control_customers__user_id__suspend_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/customers/{user_id}/resume": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Resume Customer */
+    post: operations["resume_customer_api_control_customers__user_id__resume_post"];
     delete?: never;
     options?: never;
     head?: never;
@@ -2490,6 +2609,9 @@ export interface paths {
      *     Same liveness semantics as the per-customer view (DB-clock lease check),
      *     across all users instead of one — the console "今日概览/会话" entry point
      *     so operators no longer need to know a customer id upfront.
+     *
+     *     ``keyword`` 同时匹配用户名与公司名（方案 P1 登录与设备改造：用名称找人），
+     *     客户编号只在详情链路里出现。
      */
     get: operations["list_live_sessions_api_control_customer_sessions_live_get"];
     put?: never;
@@ -2674,6 +2796,30 @@ export interface paths {
      *     （admin_runtime_routes 同约定），因此这里直接用 pg_transaction。
      */
     get: operations["read_failure_rate_report_api_control_alerts_failure_rate_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/alerts/overview": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Read Alerts Overview
+     * @description 告警总览（方案 P2）：四类告警的首屏红黄条数据源。
+     *
+     *     ``notify=1`` 时在有 danger 级告警且接收人配了邮箱的情况下，后台投递一封
+     *     摘要邮件（失败只记日志，不影响响应）；防打扰：同一小时只发一封，
+     *     以 ``alert_notify_dedup`` 里的最近投递时间为准。
+     */
+    get: operations["read_alerts_overview_api_control_alerts_overview_get"];
     put?: never;
     post?: never;
     delete?: never;
@@ -2917,6 +3063,31 @@ export interface paths {
     get: operations["customer_price_version_api_customer_billing_price_version_get"];
     put?: never;
     post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/billing/quote": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Billing Quote
+     * @description 价格试算（只读）：输入客户（可选）、业务、数量，输出原价、命中折扣、
+     *     实扣积分、折合金额、我方成本与毛利。
+     *
+     *     计算必须调用与结算同一套计价函数（``retail_snapshot``），前端不复刻公式
+     *     （方案 P1 验收：试算与实际扣费一致）。写契约仅用于留痕与幂等——本接口
+     *     不落任何业务数据。
+     */
+    post: operations["billing_quote_api_control_billing_quote_post"];
     delete?: never;
     options?: never;
     head?: never;
@@ -3380,6 +3551,40 @@ export interface paths {
     patch: operations["update_viral_runtime_api_control_settings_viral_patch"];
     trace?: never;
   };
+  "/api/control/viral/keywords": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Add Viral Keyword */
+    post: operations["add_viral_keyword_api_control_viral_keywords_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/viral/keywords/delete": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Delete Viral Keyword */
+    post: operations["delete_viral_keyword_api_control_viral_keywords_delete_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/control/viral/videos/{platform}/{video_id}/availability": {
     parameters: {
       query?: never;
@@ -3655,6 +3860,29 @@ export interface paths {
      *     documented defaults seed it so the switch always lands on a real row.
      */
     patch: operations["update_queue_mode_api_control_settings_queue_mode_patch"];
+    trace?: never;
+  };
+  "/api/control/audit-log.csv": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Export Audit Log Csv
+     * @description 审计导出（方案 P1）：与列表同筛选口径的整表 CSV，走 control.export 审计。
+     *
+     *     复用 customers.csv 的限流维度：导出是数据出境动作，读级角色不放行整表
+     *     转储，auditor 需要导出时由管理员执行或走行级查看。
+     */
+    get: operations["export_audit_log_csv_api_control_audit_log_csv_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
     trace?: never;
   };
   "/api/control/audit-log": {
@@ -4848,6 +5076,32 @@ export interface paths {
     };
     /** List Customer Wallet Transactions */
     get: operations["list_customer_wallet_transactions_api_customer_wallet_transactions_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/customer/wallet/ledger": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Customer Wallet Ledger
+     * @description 消费记录（按任务合并）：一条任务的暂扣、实扣、退回是同一条，分页也以条为单位。
+     *
+     *     与 ``/customer/wallet/transactions`` 的区别只有一件事——那边一行一笔流水，分页会把
+     *     同一条任务切成两截；这里合并发生在分页之前，一页里的每条都是完整的一笔。逐笔
+     *     流水（含 CSV 导出）保持不变，仍是对账的事实来源。
+     *
+     *     只放行浏览器会话：不在 API Key 白名单里，程序化读取继续用逐笔接口。
+     */
+    get: operations["list_customer_wallet_ledger_api_customer_wallet_ledger_get"];
     put?: never;
     post?: never;
     delete?: never;
@@ -7126,6 +7380,25 @@ export interface components {
       reason: string;
     };
     /**
+     * AlertOverviewItem
+     * @description 一条告警：严重度 + 结论 + 跳转线索。
+     */
+    AlertOverviewItem: {
+      /** Key */
+      key: string;
+      /**
+       * Severity
+       * @enum {string}
+       */
+      severity: "danger" | "warn";
+      /** Headline */
+      headline: string;
+      /** Detail */
+      detail: string;
+      /** Count */
+      count: number;
+    };
+    /**
      * AlertSettingsSnapshot
      * @description 「通知与告警」当前设置：接收人（可空）+ 失败率口径 + 最近修改。
      */
@@ -7171,6 +7444,15 @@ export interface components {
       failure_rate_threshold_percent: number;
       /** Failure Rate Min Sample */
       failure_rate_min_sample: number;
+    };
+    /** AlertsOverview */
+    AlertsOverview: {
+      /** Items */
+      items: components["schemas"]["AlertOverviewItem"][];
+      /** Recipient Display Name */
+      recipient_display_name: string | null;
+      /** Generated At */
+      generated_at: string;
     };
     /**
      * AnalysisDiagnosticAttempt
@@ -7479,6 +7761,27 @@ export interface components {
        */
       confirm_grant: boolean;
     };
+    /**
+     * BatchCredits
+     * @description 本批任务已落账的积分去向（客户可见口径）。
+     *
+     *     为什么挂在批次上：任务失败时用户第一眼看的是任务页而不是消费记录；有了这两个数，
+     *     任务页可以直接说「预扣的 N 积分已退回」，用户不必再去流水里自己对账。
+     *     只统计已经写入流水的 SETTLE / RELEASE，尚未结算的预扣不算在内——所以两个数都为 0
+     *     只表示「还没有落账」，不表示「没扣过」。
+     */
+    BatchCredits: {
+      /**
+       * Charged Credits
+       * @default 0
+       */
+      charged_credits: number;
+      /**
+       * Refunded Credits
+       * @default 0
+       */
+      refunded_credits: number;
+    };
     /** BatchProgress */
     BatchProgress: {
       /** Total Count */
@@ -7526,8 +7829,31 @@ export interface components {
        */
       creation_kind: string;
       progress: components["schemas"]["BatchProgress"];
+      credits?: components["schemas"]["BatchCredits"];
       /** Tasks */
       tasks: components["schemas"]["TaskResult"][];
+    };
+    /**
+     * BillingQuoteRequest
+     * @description 价格试算入参（方案 P1 价格与套餐）：客户可选、业务必选、数量按业务单位.
+     */
+    BillingQuoteRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /** Service */
+      service: string;
+      /** Units */
+      units: number | string;
+      /** User Id */
+      user_id?: string | null;
     };
     /** BillingSettingsRequest */
     BillingSettingsRequest: {
@@ -8485,6 +8811,20 @@ export interface components {
       counts: components["schemas"]["GenerationRecordCount"][];
       /** Failure Reasons */
       failure_reasons: components["schemas"]["AnalysisFailureReason"][];
+      /**
+       * Succeeded Count
+       * @default 0
+       */
+      succeeded_count: number;
+      /**
+       * Failed Count
+       * @default 0
+       */
+      failed_count: number;
+      /** Success Rate Pct */
+      success_rate_pct?: number | null;
+      /** Avg Duration Seconds */
+      avg_duration_seconds?: number | null;
     };
     /**
      * ControlProviderPaidTestRequest
@@ -8840,6 +9180,11 @@ export interface components {
       reserved_credits: number;
       /** Total Consumed Credits */
       total_consumed_credits: number;
+      /**
+       * Total Returned Credits
+       * @default 0
+       */
+      total_returned_credits: number;
       /** Active Tokens */
       active_tokens: number;
     };
@@ -9596,6 +9941,7 @@ export interface components {
        */
       creation_kind: string;
       progress: components["schemas"]["BatchProgress"];
+      credits?: components["schemas"]["BatchCredits"];
       /** Total Estimated Cost */
       total_estimated_cost: number | null;
       /** Total Actual Cost */
@@ -12724,7 +13070,7 @@ export interface components {
        * Action
        * @enum {string}
        */
-      action: "feature" | "unfeature" | "delete";
+      action: "feature" | "unfeature" | "delete" | "prepare";
       /** Items */
       items: components["schemas"]["ViralBatchTarget"][];
     };
@@ -12826,7 +13172,7 @@ export interface components {
        * Action
        * @enum {string}
        */
-      action: "feature" | "unfeature" | "delete" | "pin" | "unpin";
+      action: "feature" | "unfeature" | "delete" | "pin" | "unpin" | "prepare";
     };
     /**
      * ViralDetailBilling
@@ -12947,6 +13293,28 @@ export interface components {
       /** Updatedat */
       updatedAt: string;
     };
+    /** ViralKeywordAddRequest */
+    ViralKeywordAddRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /**
+       * Platform
+       * @enum {string}
+       */
+      platform: "douyin" | "wechat_channels";
+      /** Category */
+      category: string;
+      /** Keyword */
+      keyword: string;
+    };
     /** ViralKeywordConfig */
     ViralKeywordConfig: {
       /**
@@ -12956,6 +13324,26 @@ export interface components {
       platform: "douyin" | "wechat_channels";
       /** Category */
       category: string;
+      /** Keyword */
+      keyword: string;
+    };
+    /** ViralKeywordDeleteRequest */
+    ViralKeywordDeleteRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /**
+       * Platform
+       * @enum {string}
+       */
+      platform: "douyin" | "wechat_channels";
       /** Keyword */
       keyword: string;
     };
@@ -13088,6 +13476,21 @@ export interface components {
        * @default 10
        */
       per_keyword_limit: number;
+      /** Quality Min Likes */
+      quality_min_likes?: number | null;
+      /** Quality Duration Min Ms */
+      quality_duration_min_ms?: number | null;
+      /** Quality Duration Max Ms */
+      quality_duration_max_ms?: number | null;
+      /** Quality Exclude Words */
+      quality_exclude_words?: string[];
+      /** Monthly Budget Fen */
+      monthly_budget_fen?: number | null;
+      /**
+       * Month Spend Fen
+       * @default 0
+       */
+      month_spend_fen: number;
       /** Next Collection At */
       next_collection_at?: string | null;
       /**
@@ -13118,6 +13521,16 @@ export interface components {
       per_keyword_limit?: number | null;
       /** Collection Interval Days */
       collection_interval_days?: (1 | 7) | null;
+      /** Quality Min Likes */
+      quality_min_likes?: number | null;
+      /** Quality Duration Min Ms */
+      quality_duration_min_ms?: number | null;
+      /** Quality Duration Max Ms */
+      quality_duration_max_ms?: number | null;
+      /** Quality Exclude Words */
+      quality_exclude_words?: string[] | null;
+      /** Monthly Budget Fen */
+      monthly_budget_fen?: number | null;
     };
     /** ViralSearchBilling */
     ViralSearchBilling: {
@@ -13329,6 +13742,75 @@ export interface components {
       volume: number | string;
       /** Pitch */
       pitch: number | string;
+    };
+    /**
+     * WalletLedgerCounts
+     * @description 当前筛选（不含结果筛选）下各结果的条目数，给结果筛选条显示数量。
+     */
+    WalletLedgerCounts: {
+      /** Total */
+      total: number;
+      /** Pending */
+      pending: number;
+      /** Completed */
+      completed: number;
+      /** Refunded */
+      refunded: number;
+      /** Posted */
+      posted: number;
+    };
+    /**
+     * WalletLedgerEntry
+     * @description 合并后的一条流水：一个计费周期（一条任务）或一笔独立记账。
+     *
+     *     用户看账要回答的是「这条任务最后花了多少、有没有退回」，而不是三笔流水各自的
+     *     正负号；三个金额与结果由服务端按整组算好，逐笔明细放在 ``rows`` 里供核对。
+     */
+    WalletLedgerEntry: {
+      /** Key */
+      key: string;
+      /**
+       * Kind
+       * @enum {string}
+       */
+      kind: "cycle" | "row";
+      /**
+       * Outcome
+       * @enum {string}
+       */
+      outcome: "PENDING" | "COMPLETED" | "PARTIAL" | "FAILED" | "POSTED";
+      /** Reserved Credits */
+      reserved_credits: number;
+      /** Charged Credits */
+      charged_credits: number;
+      /** Refunded Credits */
+      refunded_credits: number;
+      /** Net Available Delta */
+      net_available_delta: number;
+      /** Started At */
+      started_at: string;
+      /** Updated At */
+      updated_at: string;
+      /** Rows */
+      rows: components["schemas"]["WalletTransactionResponse"][];
+    };
+    /** WalletLedgerPage */
+    WalletLedgerPage: {
+      /** Items */
+      items: components["schemas"]["WalletLedgerEntry"][];
+      /** Total */
+      total: number;
+      /** Limit */
+      limit: number;
+      /** Offset */
+      offset: number;
+      counts: components["schemas"]["WalletLedgerCounts"];
+      /** Sub Account Summary */
+      sub_account_summary?:
+        | {
+            [key: string]: string | number;
+          }[]
+        | null;
     };
     /** WalletResponse */
     WalletResponse: {
@@ -17453,7 +17935,7 @@ export interface operations {
       };
     };
   };
-  sync_recharge_order_with_zpay_api_control_recharge_orders__order_no__sync_post: {
+  sync_recharge_order_api_control_recharge_orders__order_no__sync_post: {
     parameters: {
       query?: never;
       header?: {
@@ -17617,6 +18099,9 @@ export interface operations {
       query?: {
         username?: string | null;
         status?: string | null;
+        status_group?:
+          | ("queued" | "running" | "succeeded" | "failed" | "attention")
+          | null;
         record_type?:
           | (
               | "VIDEO"
@@ -17635,6 +18120,7 @@ export interface operations {
         created_from?: string | null;
         created_to?: string | null;
         task_ref?: string | null;
+        project_name?: string | null;
         limit?: number;
         offset?: number;
       };
@@ -17793,6 +18279,9 @@ export interface operations {
       query?: {
         username?: string | null;
         status?: string | null;
+        status_group?:
+          | ("queued" | "running" | "succeeded" | "failed" | "attention")
+          | null;
         record_type?:
           | (
               | "VIDEO"
@@ -17811,6 +18300,7 @@ export interface operations {
         created_from?: string | null;
         created_to?: string | null;
         task_ref?: string | null;
+        project_name?: string | null;
       };
       header?: {
         "X-Control-Proxy-Token"?: string | null;
@@ -17892,6 +18382,46 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["ReconciliationSummary"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_reconciliation_items_api_control_billing_reconciliation_items_get: {
+    parameters: {
+      query: {
+        anomaly:
+          | "wallet_mismatch"
+          | "paid_without_charge"
+          | "charge_without_paid_order";
+        limit?: number;
+        offset?: number;
+      };
+      header?: {
+        "X-Control-Proxy-Token"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
         };
       };
       /** @description Validation Error */
@@ -18391,6 +18921,74 @@ export interface operations {
       };
     };
   };
+  business_overview_api_control_business_overview_get: {
+    parameters: {
+      query: {
+        start: string;
+        end: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  funds_summary_api_control_funds_summary_get: {
+    parameters: {
+      query: {
+        start: string;
+        end: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   read_customer_unit_price_api_control_customers__user_id__unit_price_get: {
     parameters: {
       query?: never;
@@ -18570,6 +19168,116 @@ export interface operations {
       };
     };
   };
+  export_adjustments_csv_api_control_adjustments_csv_get: {
+    parameters: {
+      query?: {
+        actor_username?: string;
+        target_username?: string;
+        source_document_type?: string;
+        created_from?: string;
+        created_to?: string;
+        limit?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": unknown;
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  suspend_customer_api_control_customers__user_id__suspend_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        user_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AdminWriteContract"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  resume_customer_api_control_customers__user_id__resume_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        user_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AdminWriteContract"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   list_customers_api_control_customers_get: {
     parameters: {
       query?: {
@@ -18581,6 +19289,7 @@ export interface operations {
         created_to?: string;
         balance_min?: number | null;
         balance_max?: number | null;
+        sort?: "activated" | "recharge" | "month_consumed" | "last_active";
       };
       header?: never;
       path?: never;
@@ -18924,6 +19633,7 @@ export interface operations {
   list_live_sessions_api_control_customer_sessions_live_get: {
     parameters: {
       query?: {
+        keyword?: string;
         limit?: number;
         offset?: number;
       };
@@ -19247,6 +19957,37 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["FailureRateReport"];
+        };
+      };
+    };
+  };
+  read_alerts_overview_api_control_alerts_overview_get: {
+    parameters: {
+      query?: {
+        notify?: boolean;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AlertsOverview"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
         };
       };
     };
@@ -19685,12 +20426,48 @@ export interface operations {
       };
     };
   };
+  billing_quote_api_control_billing_quote_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["BillingQuoteRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   operations_api_control_billing_operations_get: {
     parameters: {
       query: {
         start: string;
         end: string;
         user_id?: string | null;
+        username?: string | null;
         service?: string | null;
         module?: string | null;
         provider?: string | null;
@@ -19733,6 +20510,7 @@ export interface operations {
         end: string;
         grain?: string;
         user_id?: string | null;
+        username?: string | null;
         service?: string | null;
         module?: string | null;
         provider?: string | null;
@@ -20629,6 +21407,76 @@ export interface operations {
       };
     };
   };
+  add_viral_keyword_api_control_viral_keywords_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ViralKeywordAddRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  delete_viral_keyword_api_control_viral_keywords_delete_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ViralKeywordDeleteRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   update_viral_video_availability_api_control_viral_videos__platform___video_id__availability_patch: {
     parameters: {
       query?: never;
@@ -20705,6 +21553,9 @@ export interface operations {
       query?: {
         platform?: ("douyin" | "wechat_channels") | null;
         status?: ("ready" | "pending" | "failed" | "featured") | null;
+        category?: string;
+        has_usage?: boolean | null;
+        sort?: "created" | "likes" | "published" | "usage";
         query?: string;
         offset?: number;
         limit?: number;
@@ -21088,10 +21939,51 @@ export interface operations {
       };
     };
   };
+  export_audit_log_csv_api_control_audit_log_csv_get: {
+    parameters: {
+      query?: {
+        event_type?: string | null;
+        event_group?: string | null;
+        actor_user_id?: string | null;
+        target_user_id?: string | null;
+        actor_username?: string | null;
+        target_username?: string | null;
+        created_from?: string | null;
+        created_to?: string | null;
+        scope?: "admin" | "customer" | "all";
+        limit?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": unknown;
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   list_audit_log_api_control_audit_log_get: {
     parameters: {
       query?: {
         event_type?: string | null;
+        event_group?: string | null;
         actor_user_id?: string | null;
         target_user_id?: string | null;
         actor_username?: string | null;
@@ -23101,6 +23993,64 @@ export interface operations {
       };
     };
   };
+  list_customer_wallet_ledger_api_customer_wallet_ledger_get: {
+    parameters: {
+      query?: {
+        limit?: number;
+        offset?: number;
+        token_group_id?: string | null;
+        auth_source?:
+          | ("session" | "api_key" | "internal" | "historical")
+          | null;
+        business?:
+          | (
+              | "video"
+              | "oral"
+              | "recharge"
+              | "character"
+              | "first_frame"
+              | "analysis"
+              | "rewrite"
+              | "asr"
+              | "link_resolution"
+              | "prompt_optimize"
+              | "avatar_clone"
+              | "voice_clone"
+              | "viral_data"
+            )
+          | null;
+        started_at?: string | null;
+        ended_at?: string | null;
+        sub_account_id?: string | null;
+        outcome?: ("pending" | "completed" | "refunded" | "posted") | null;
+        group_by_sub_account?: boolean;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["WalletLedgerPage"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   export_customer_wallet_transactions_csv_api_customer_wallet_transactions_export_get: {
     parameters: {
       query?: {
@@ -23133,6 +24083,7 @@ export interface operations {
         started_at?: string | null;
         ended_at?: string | null;
         sub_account_id?: string | null;
+        outcome?: ("pending" | "completed" | "refunded" | "posted") | null;
       };
       header?: never;
       path?: never;
