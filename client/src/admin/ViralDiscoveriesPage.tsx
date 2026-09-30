@@ -103,7 +103,8 @@ export function ViralDiscoveriesPage({
         setLoading(false);
       }
     },
-    [],
+    // 自定义区间输入变化时自动重查：与单日 date 输入的既有行为一致。
+    [rangeFrom, rangeTo],
   );
   useEffect(() => {
     void loadAggregate(date);
