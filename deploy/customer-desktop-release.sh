@@ -161,13 +161,15 @@ MANIFEST_VERSION="$(stable_field "$RELEASE_DIR/stable.json" version)"
   exit 1
 }
 MANIFEST_URL_PATH="/downloads/customer-cloud/$VERSION/$INSTALLER"
-URL_PATH="$(stable_field "$RELEASE_DIR/stable.json" platforms.windows-x86_64.url)"
-[[ "${URL_PATH#https://*}" == */downloads/customer-cloud/* ]] || {
-  printf 'download url is not under /downloads/customer-cloud/: %s\n' "$URL_PATH" >&2
+DOWNLOAD_URL="$(stable_field "$RELEASE_DIR/stable.json" platforms.windows-x86_64.url)"
+# 路径比较前先分离 HTTPS 源站，避免把主机名误当成路径的一部分。
+[[ "$DOWNLOAD_URL" =~ ^https://[^/?#]+(/[^?#]*)$ ]] || {
+  printf '下载地址必须是包含主机和路径的 HTTPS URL（不含查询或片段）: %s\n' "$DOWNLOAD_URL" >&2
   exit 1
 }
-[[ "${URL_PATH#*://}" == "$MANIFEST_URL_PATH" ]] || {
-  printf 'download url path mismatch: %s != %s\n' "${URL_PATH#*://}" "$MANIFEST_URL_PATH" >&2
+URL_PATH="${BASH_REMATCH[1]}"
+[[ "$URL_PATH" == "$MANIFEST_URL_PATH" ]] || {
+  printf '下载地址路径不匹配: %s != %s\n' "$URL_PATH" "$MANIFEST_URL_PATH" >&2
   exit 1
 }
 
