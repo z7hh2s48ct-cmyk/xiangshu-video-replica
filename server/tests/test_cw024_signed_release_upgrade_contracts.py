@@ -32,8 +32,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -265,3 +270,124 @@ def test_desktop_build_workflow_carries_no_signing_material() -> None:
     assert "TAURI_SIGNING_PRIVATE_KEY" not in workflow
     assert "certificateThumbprint" not in workflow
     assert "signtool" not in workflow
+
+
+@pytest.mark.skipif(os.name == "nt", reason="发布脚本在 Linux 主机执行")
+@pytest.mark.parametrize(
+    ("url", "expected_error"),
+    [
+        ("https://release.example.invalid/downloads/customer-cloud/2.4.0/setup.exe", None),
+        ("https://release.example.invalid:8443/downloads/customer-cloud/2.4.0/setup.exe", None),
+        (
+            "https://release.example.invalid/other/customer-cloud/2.4.0/setup.exe",
+            "下载地址路径不匹配",
+        ),
+        (
+            "https://release.example.invalid/downloads/customer-cloud/2.3.0/setup.exe",
+            "下载地址路径不匹配",
+        ),
+        (
+            "https://release.example.invalid/prefix/downloads/customer-cloud/2.4.0/setup.exe",
+            "下载地址路径不匹配",
+        ),
+        (
+            "http://release.example.invalid/downloads/customer-cloud/2.4.0/setup.exe",
+            "下载地址必须是",
+        ),
+        (
+            "ftp://release.example.invalid/downloads/customer-cloud/2.4.0/setup.exe",
+            "下载地址必须是",
+        ),
+        ("/downloads/customer-cloud/2.4.0/setup.exe", "下载地址必须是"),
+        ("https:///downloads/customer-cloud/2.4.0/setup.exe", "下载地址必须是"),
+    ],
+    ids=[
+        "https",
+        "https-port",
+        "wrong-channel",
+        "wrong-version",
+        "nested-path",
+        "http",
+        "ftp",
+        "relative",
+        "missing-host",
+    ],
+)
+def test_desktop_publish_validates_download_url_before_changing_live_channel(
+    tmp_path: Path, url: str, expected_error: str | None
+) -> None:
+    # 调用真实脚本而非复制校验表达式，确保原来的「主机名混入路径」错误会被抓住。
+    # 所有写入都限制在临时站点；curl 替身只读取本地清单，绝不访问真实发布服务。
+    release = tmp_path / "release" / "2.4.0"
+    release.mkdir(parents=True)
+    installer = url.rsplit("/", 1)[-1]
+    manifest = {
+        "version": "2.4.0",
+        "platforms": {"windows-x86_64": {"url": url, "signature": "test-only"}},
+    }
+    (release / "stable.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (release / "release-manifest.json").write_text("{}", encoding="utf-8")
+    (release / installer).write_bytes(b"test installer, not executable")
+    (release / f"{installer}.sig").write_bytes(b"test-only signature")
+    (release / "SHA256SUMS.txt").write_text(
+        "".join(
+            f"{hashlib.sha256((release / name).read_bytes()).hexdigest()}  {name}\n"
+            for name in (installer, f"{installer}.sig")
+        ),
+        encoding="utf-8",
+    )
+    site = tmp_path / "site"
+    channel = site / "downloads" / "customer-cloud"
+    channel.mkdir(parents=True)
+    previous_manifest = b'{"version": "2.3.0"}\n'
+    (channel / "stable.json").write_bytes(previous_manifest)
+    stub_bin = tmp_path / "bin"
+    stub_bin.mkdir()
+    curl_calls = tmp_path / "curl-calls.txt"
+    (stub_bin / "curl").write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf "%s\\n" "$*" >> "$TEST_CURL_CALLS"\n'
+        '[[ "$#" == 6 && "$1" == -fsS && "$2" == --max-time && "$3" == 30 '
+        '&& "$4" == "$TEST_EXPECTED_ENDPOINT" && "$5" == -o ]] || exit 97\n'
+        'cp "$VIDEO_REPLICA_SITE_ROOT/downloads/customer-cloud/stable.json" "$6"\n',
+        encoding="utf-8",
+    )
+    (stub_bin / "curl").chmod(0o755)
+    result = subprocess.run(
+        [
+            "bash",
+            str(REPO_ROOT / "deploy" / "customer-desktop-release.sh"),
+            "--release-dir",
+            str(release),
+        ],
+        env={
+            "PATH": f"{stub_bin}{os.pathsep}{os.environ['PATH']}",
+            "VIDEO_REPLICA_SITE_ROOT": str(site),
+            "TEST_CURL_CALLS": str(curl_calls),
+            "TEST_EXPECTED_ENDPOINT": url.rsplit("/", 2)[0] + "/stable.json",
+            "TMPDIR": str(tmp_path),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    output = result.stdout + result.stderr
+    if expected_error is not None:
+        assert result.returncode != 0, output
+        assert expected_error in output
+        assert (channel / "stable.json").read_bytes() == previous_manifest
+        assert not (channel / "2.4.0").exists()
+        assert not (channel / "stable.json.2.3.0.bak").exists()
+        assert not curl_calls.exists()
+        assert not list(channel.glob(".staging-*"))
+        return
+
+    assert result.returncode == 0, output
+    assert "published 2.4.0 (setup.exe)" in output
+    assert (channel / "stable.json").read_bytes() == (release / "stable.json").read_bytes()
+    assert (channel / "stable.json.2.3.0.bak").read_bytes() == previous_manifest
+    for artifact in release.iterdir():
+        assert (channel / "2.4.0" / artifact.name).read_bytes() == artifact.read_bytes()
+    assert len(curl_calls.read_text(encoding="utf-8").splitlines()) == 1
