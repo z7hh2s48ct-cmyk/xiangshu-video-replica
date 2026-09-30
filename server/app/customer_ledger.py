@@ -201,11 +201,43 @@ def ledger_row_response(row: Sequence[Any]) -> WalletTransactionResponse:
     )
 
 
-# 条目键：计费周期用 operation id，其余流水用自己的行 id（两者都是 UUID，不会相撞）。
-_ENTRY_KEY_SQL = (
-    f"CASE WHEN wt.billing_operation_id IS NOT NULL AND wt.type IN {_CYCLE_TYPE_SQL} "
-    "THEN wt.billing_operation_id ELSE wt.id END"
+# 「是不是计费周期」只看流水类型：表约束 ck_wallet_transactions_shape 保证这三种类型的行
+# 要么带 operation id，要么带 task_id / oral_task_id + billing_round，不存在认不出周期的行。
+# 不写成「类型 AND (有 operation id OR 有任务 + 轮次)」：那样 bool_or 的输入表达式一复杂，
+# PostgreSQL 就把 HashAggregate 换成对全部流水做文本排序的 GroupAggregate（1 万条任务
+# 的账本上 12ms → 70ms）。
+_IS_CYCLE_SQL = f"wt.type IN {_CYCLE_TYPE_SQL}"
+# 分项计费上线（20260913T1100）之前的周期没有 operation id，迁移也没有回填历史：
+# 这类流水靠 task_id / oral_task_id + billing_round 认出同一周期，条目键用下面的前缀拼出，
+# 与 operation id / 行 id 的形状不同，永远不会相撞。
+_LEGACY_TASK_PREFIX = "legacy:t:"
+_LEGACY_ORAL_PREFIX = "legacy:o:"
+# 条目键：计费周期用 operation id，早期周期用带前缀的「任务 + 轮次」，其余流水用自己的行 id。
+# 导出接口也按同一个键筛条目，所以对外公开，不要各写一份。
+ENTRY_KEY_SQL = (
+    f"CASE WHEN {_IS_CYCLE_SQL} AND wt.billing_operation_id IS NOT NULL "
+    "THEN wt.billing_operation_id "
+    f"WHEN {_IS_CYCLE_SQL} AND wt.task_id IS NOT NULL "
+    f"THEN '{_LEGACY_TASK_PREFIX}' || wt.task_id || ':' || wt.billing_round::text "
+    f"WHEN {_IS_CYCLE_SQL} AND wt.oral_task_id IS NOT NULL "
+    f"THEN '{_LEGACY_ORAL_PREFIX}' || wt.oral_task_id || ':' || wt.billing_round::text "
+    "ELSE wt.id END"
 )
+
+
+def entry_key_of(row: WalletTransactionResponse) -> tuple[bool, str]:
+    """一行流水所属的 ``(是否计费周期, 条目键)``——与 ``ENTRY_KEY_SQL`` 逐分支对应。"""
+    if row.type not in CYCLE_TYPES:
+        return False, row.id
+    if row.billing_operation_id is not None:
+        return True, str(row.billing_operation_id)
+    if row.task_id is not None:
+        return True, f"{_LEGACY_TASK_PREFIX}{row.task_id}:{row.billing_round}"
+    if row.oral_task_id is not None:
+        return True, f"{_LEGACY_ORAL_PREFIX}{row.oral_task_id}:{row.billing_round}"
+    return False, row.id
+
+
 _KEYED_FROM = (
     " FROM wallet_transactions wt "
     "LEFT JOIN customer_api_keys k ON k.id = wt.api_key_id AND k.user_id = wt.user_id "
@@ -214,10 +246,21 @@ _KEYED_FROM = (
 )
 
 
-def _has_row_sql(entry_key: str, ledger_type: str) -> str:
+def _has_row_sql(ledger_type: str) -> str:
+    """条目 ``e`` 在全量账本里是否有 ``ledger_type`` 这一笔。
+
+    用 CASE 而不是 OR 分派：三条分支各自是一条干净的相关子查询，只有命中的那条会执行，
+    规划器也能各自选中 (billing_operation_id, type) 与早期终态流水的部分唯一索引。
+    """
     return (
-        "EXISTS (SELECT 1 FROM wallet_transactions x "
-        f"WHERE x.billing_operation_id = {entry_key} AND x.type = '{ledger_type}')"
+        "CASE WHEN e.legacy_round IS NULL THEN EXISTS (SELECT 1 FROM wallet_transactions x "
+        f"WHERE x.billing_operation_id = e.entry_key AND x.type = '{ledger_type}') "
+        "WHEN e.legacy_task_id IS NOT NULL THEN EXISTS (SELECT 1 FROM wallet_transactions x "
+        "WHERE x.task_id = e.legacy_task_id AND x.billing_round = e.legacy_round "
+        f"AND x.billing_operation_id IS NULL AND x.type = '{ledger_type}') "
+        "ELSE EXISTS (SELECT 1 FROM wallet_transactions x "
+        "WHERE x.oral_task_id = e.legacy_oral_id AND x.billing_round = e.legacy_round "
+        f"AND x.billing_operation_id IS NULL AND x.type = '{ledger_type}') END"
     )
 
 
@@ -238,20 +281,30 @@ def entry_ctes(clauses: Sequence[str]) -> str:
     - ``keyed``：命中筛选的**行**，带上所属条目键；筛选（含时间范围）只决定
       「这一条要不要出现」，不会把一条任务切成半截——取行时另按条目键补全整组。
     - ``classified``：结果按**全量账本**判定（EXISTS 走 (billing_operation_id, type)
-      唯一索引），而不是按命中筛选的那几行：时间筛选恰好切在暂扣与退回之间时，
-      结果仍是「已退回」，不会误判成「生成中」。
+      唯一索引；早期周期走任务 + 轮次的终态唯一索引），而不是按命中筛选的那几行：
+      时间筛选恰好切在暂扣与退回之间时，结果仍是「已退回」，不会误判成「生成中」。
+    - ``legacy_*``：早期周期（没有 operation id）在全量账本里认亲用的任务 / 轮次；
+      正常周期这三列为空。
     """
-    settled = _has_row_sql("e.entry_key", "SETTLE")
-    released = _has_row_sql("e.entry_key", "RELEASE")
+    settled = _has_row_sql("SETTLE")
+    released = _has_row_sql("RELEASE")
     return (
         "WITH keyed AS (SELECT wt.id, wt.type, wt.ledger_sequence, wt.created_at, "
         "wt.actor_user_id, wt.available_delta, wt.reserved_delta, "
-        f"{_ENTRY_KEY_SQL} AS entry_key, "
-        f"(wt.billing_operation_id IS NOT NULL AND wt.type IN {_CYCLE_TYPE_SQL}) AS is_cycle"
+        f"{ENTRY_KEY_SQL} AS entry_key, "
+        f"{_IS_CYCLE_SQL} AS is_cycle, "
+        "CASE WHEN wt.billing_operation_id IS NULL AND "
+        f"{_IS_CYCLE_SQL} THEN wt.task_id END AS legacy_task_id, "
+        "CASE WHEN wt.billing_operation_id IS NULL AND wt.task_id IS NULL AND "
+        f"{_IS_CYCLE_SQL} THEN wt.oral_task_id END AS legacy_oral_id, "
+        "CASE WHEN wt.billing_operation_id IS NULL AND "
+        f"{_IS_CYCLE_SQL} THEN wt.billing_round END AS legacy_round"
         + _KEYED_FROM
         + " AND ".join(clauses)
         + "), entries AS (SELECT entry_key, bool_or(is_cycle) AS is_cycle, "
-        "MAX(ledger_sequence) AS seq, MAX(created_at) AS latest_at, MAX(id) AS latest_id "
+        "MAX(ledger_sequence) AS seq, MAX(created_at) AS latest_at, MAX(id) AS latest_id, "
+        "MAX(actor_user_id) AS actor_user_id, MAX(legacy_task_id) AS legacy_task_id, "
+        "MAX(legacy_oral_id) AS legacy_oral_id, MAX(legacy_round) AS legacy_round "
         "FROM keyed GROUP BY entry_key), "
         "classified AS (SELECT e.*, CASE "
         "WHEN NOT e.is_cycle THEN 'POSTED' "
@@ -284,9 +337,7 @@ def assemble_entries(
         if row.id in seen:
             continue
         seen.add(row.id)
-        is_cycle = row.billing_operation_id is not None and row.type in CYCLE_TYPES
-        key = (is_cycle, str(row.billing_operation_id) if is_cycle else row.id)
-        members_by_key.setdefault(key, []).append(row)
+        members_by_key.setdefault(entry_key_of(row), []).append(row)
 
     entries: list[WalletLedgerEntry] = []
     for entry_key, is_cycle, outcome in page:
@@ -368,7 +419,8 @@ def read_ledger_page(
 
     page_rows = conn.execute(
         prefix
-        + "SELECT entry_key, is_cycle, outcome FROM classified"
+        + "SELECT entry_key, is_cycle, outcome, legacy_task_id, legacy_oral_id, legacy_round "
+        + "FROM classified"
         + (f" WHERE {outcome_sql}" if outcome_sql else "")
         + " ORDER BY (seq IS NULL), seq DESC, latest_at DESC, latest_id DESC "
         + PAGE_CLAUSE,
@@ -378,8 +430,11 @@ def read_ledger_page(
 
     items: list[WalletLedgerEntry] = []
     if page:
-        cycle_keys = [key for key, is_cycle, _ in page if is_cycle]
-        row_keys = [key for key, is_cycle, _ in page if not is_cycle]
+        # 三类条目各取各的整组：有 operation id 的周期、早期周期（任务 + 轮次）、单行流水。
+        cycle_keys = [str(row[0]) for row in page_rows if row[1] and row[5] is None]
+        legacy_task_cycles = [(str(row[3]), int(row[5])) for row in page_rows if row[3] is not None]
+        legacy_oral_cycles = [(str(row[4]), int(row[5])) for row in page_rows if row[4] is not None]
+        row_keys = [str(row[0]) for row in page_rows if not row[1]]
         branches: list[str] = []
         row_params: list[object] = [wallet_owner_id]
         if cycle_keys:
@@ -388,6 +443,18 @@ def read_ledger_page(
                 f"AND wt.type IN {_CYCLE_TYPE_SQL})"
             )
             row_params.extend(cycle_keys)
+        for column, cycles in (
+            ("task_id", legacy_task_cycles),
+            ("oral_task_id", legacy_oral_cycles),
+        ):
+            if cycles:
+                pairs = " OR ".join(f"(wt.{column} = %s AND wt.billing_round = %s)" for _ in cycles)
+                branches.append(
+                    f"(wt.billing_operation_id IS NULL AND wt.type IN {_CYCLE_TYPE_SQL} "
+                    f"AND ({pairs}))"
+                )
+                for task, billing_round in cycles:
+                    row_params.extend((task, billing_round))
         if row_keys:
             branches.append(f"wt.id IN ({', '.join('%s' for _ in row_keys)})")
             row_params.extend(row_keys)
@@ -425,23 +492,43 @@ def _sub_account_summary(
     outcome_sql: str,
     outcome_params: Sequence[str],
 ) -> list[dict[str, str | int]]:
-    """按子账号汇总当前筛选下的实扣与退回（口径同逐笔列表，见 recharge_routes 旧注释）。
+    """按子账号汇总当前筛选下的实扣与退回，口径与下方合并列表一致。
 
     ``transaction_count`` 数的是**条目**（一条任务算一次），与下方列表的条数对得上；
     逐笔口径下同一条任务会被数成三笔，摘要说 3 笔、列表里只有 1 条。
+
+    实扣与退回按**整条周期**汇总，而不是只汇总命中筛选的那几行：时间筛选只含暂扣、
+    不含 3 月才落账的退回时，列表里这条任务显示「退回 8」，摘要也必须算上这 8，
+    否则同一屏上两个数对不上。
     """
+    settle_or_release = "x.type IN ('SETTLE', 'RELEASE')"
+    members = (
+        # 三条分支各带一个「本条目是否属于这一类」的守卫，运行时只有命中的那条会执行。
+        f"SELECT x.type, x.reserved_delta, x.available_delta FROM wallet_transactions x "
+        f"WHERE c.legacy_round IS NULL AND c.is_cycle AND x.billing_operation_id = c.entry_key "
+        f"AND {settle_or_release} "
+        "UNION ALL SELECT x.type, x.reserved_delta, x.available_delta "
+        "FROM wallet_transactions x WHERE c.legacy_task_id IS NOT NULL "
+        "AND x.task_id = c.legacy_task_id AND x.billing_round = c.legacy_round "
+        f"AND x.billing_operation_id IS NULL AND {settle_or_release} "
+        "UNION ALL SELECT x.type, x.reserved_delta, x.available_delta "
+        "FROM wallet_transactions x WHERE c.legacy_oral_id IS NOT NULL "
+        "AND x.oral_task_id = c.legacy_oral_id AND x.billing_round = c.legacy_round "
+        f"AND x.billing_operation_id IS NULL AND {settle_or_release}"
+    )
     rows = conn.execute(
-        prefix + "SELECT kr.actor_user_id, "
-        "(SELECT u.display_name FROM users u WHERE u.id = kr.actor_user_id), "
-        "COALESCE(SUM(CASE WHEN kr.type = 'SETTLE' THEN -kr.reserved_delta ELSE 0 END), 0), "
-        "COALESCE(SUM(CASE WHEN kr.type = 'RELEASE' THEN kr.available_delta ELSE 0 END), 0), "
-        "COUNT(DISTINCT kr.entry_key) "
-        "FROM keyed kr JOIN classified c ON c.entry_key = kr.entry_key "
-        "WHERE kr.actor_user_id IS NOT NULL"
+        prefix + "SELECT c.actor_user_id, "
+        "(SELECT u.display_name FROM users u WHERE u.id = c.actor_user_id), "
+        "COALESCE(SUM(m.debit), 0), COALESCE(SUM(m.credit), 0), COUNT(*) "
+        "FROM classified c LEFT JOIN LATERAL (SELECT "
+        "SUM(CASE WHEN member.type = 'SETTLE' THEN -member.reserved_delta ELSE 0 END) AS debit, "
+        "SUM(CASE WHEN member.type = 'RELEASE' THEN member.available_delta ELSE 0 END) AS credit "
+        f"FROM ({members}) member) m ON TRUE "
+        "WHERE c.actor_user_id IS NOT NULL"
         + (f" AND c.{outcome_sql}" if outcome_sql else "")
         # 不设 LIMIT：摘要的用途就是和下方列表对账，静默只回前 N 个会让
         # 「列表里有、摘要里没有」再次发生。
-        + " GROUP BY kr.actor_user_id ORDER BY 3 DESC",
+        + " GROUP BY c.actor_user_id ORDER BY 3 DESC",
         [*params, *outcome_params],
     ).fetchall()
     return [
