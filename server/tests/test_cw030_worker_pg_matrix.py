@@ -4003,16 +4003,17 @@ def test_viral_copy_upload_replay_reuses_project_asset_and_task(pg_state: str) -
     assert conflict.value.status_code == 409
 
 
-def test_viral_source_gate_only_opens_for_server_marked_copy_audio(pg_state: str) -> None:
-    """`reference_audio` 的放行只取决于服务端标记.
+def test_viral_source_gate_opens_for_server_verified_import_audio(pg_state: str) -> None:
+    """`reference_audio` 的放行凭据是服务端写下的导入任务行.
 
-    解析器下发的独立音轨可能是背景音乐，所以既有闸门一律拒绝 `reference_audio`；
-    客户端抽出的音轨是同一支视频的音轨，才由本端点在资产上写下标记。本用例固定住
-    「除标记以外一切相同」这个前提。
+    2026-09-30 拍板：链接解析返回的音频可直接用于文案，导入资产可能是
+    reference_audio（不带客户端上传标记）；客户端上传音轨（决策 #15）同样以导入
+    任务行为准。没有导入行的自报元数据仍然一律拒绝——本用例固定住这两个边界。
     """
     from app.script_from_audio import _viral_source
 
     _seed_base(pg_state)
+    # 只有客户端可伪造的元数据、没有服务端导入行：不放行。
     _exec(
         pg_state,
         "INSERT INTO assets(id,project_id,kind,storage_uri,sha256,size_bytes,"
@@ -4020,25 +4021,6 @@ def test_viral_source_gate_only_opens_for_server_marked_copy_audio(pg_state: str
         "'reference_audio','fake://copies/source.m4a',%s,16,'audio/mp4','u1',%s)",
         (
             "b" * 64,
-            json.dumps({"platform": "douyin", "video_id": "123", "duration_seconds": 12}),
-        ),
-    )
-    _exec(
-        pg_state,
-        "INSERT INTO viral_import_tasks(id,owner_user_id,project_id,source_asset_id,"
-        "platform,video_id,purpose,idempotency_key,request_hash,request_json,status) "
-        "VALUES ('imp-audio','u1','proj-1','plain-audio','douyin','123','copy','ik-audio',"
-        "'hash','{}','SUCCEEDED')",
-    )
-    with psycopg.connect(pg_state) as raw:
-        conn = BusinessConnection.postgres(raw)
-        row = conn.execute("SELECT * FROM assets WHERE id='plain-audio'").fetchone()
-        assert row is not None
-        assert _viral_source(conn, row) is None
-    _exec(
-        pg_state,
-        "UPDATE assets SET metadata_json=%s WHERE id='plain-audio'",
-        (
             json.dumps(
                 {
                     "platform": "douyin",
@@ -4048,6 +4030,20 @@ def test_viral_source_gate_only_opens_for_server_marked_copy_audio(pg_state: str
                 }
             ),
         ),
+    )
+    with psycopg.connect(pg_state) as raw:
+        conn = BusinessConnection.postgres(raw)
+        row = conn.execute("SELECT * FROM assets WHERE id='plain-audio'").fetchone()
+        assert row is not None
+        assert _viral_source(conn, row) is None
+    # 服务端导入任务行（无上传标记）即可放行：链接导入直接缓存的解析音频走的就是
+    # 这条路，资产上没有 viral_copy_upload 标记。
+    _exec(
+        pg_state,
+        "INSERT INTO viral_import_tasks(id,owner_user_id,project_id,source_asset_id,"
+        "platform,video_id,purpose,idempotency_key,request_hash,request_json,status) "
+        "VALUES ('imp-audio','u1','proj-1','plain-audio','douyin','123','copy','ik-audio',"
+        "'hash','{}','SUCCEEDED')",
     )
     with psycopg.connect(pg_state) as raw:
         conn = BusinessConnection.postgres(raw)

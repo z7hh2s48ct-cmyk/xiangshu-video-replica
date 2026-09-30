@@ -24,7 +24,8 @@ from app.storage import (
     require_storage_match,
     storage_object_ref_from_uri,
 )
-from app.viral_media import ViralMediaPipeline, ViralMediaResult
+from app.viral_media import ViralMediaPipeline
+from app.viral_media_preparation import ViralMediaBusy
 from app.viral_store import get_viral_video, viral_video_availability
 from app.viral_tikhub import ViralSourceUnavailable, ViralVideo, viral_source_client_from_settings
 
@@ -571,9 +572,9 @@ def prepare_viral_import_task(
             "该爆款视频当前不可用于创作。",
             retryable=False,
         )
-    # A resolver's standalone audio may be background music. The complete video
-    # is the authoritative source for both replication and speech extraction.
-    prefer: Literal["audio", "video"] = "video"
+    # 文案导入直接消费解析返回的音频（2026-09-30 拍板），复刻仍以完整视频为准；
+    # 只归档过视频的同一视频由 perform 的回落兜底（见 perform_viral_import_task）。
+    prefer: Literal["audio", "video"] = "audio" if lease.purpose == "copy" else "video"
     try:
         client = viral_source_client_from_settings(conn)
     except ViralSourceUnavailable:
@@ -589,12 +590,21 @@ def prepare_viral_import_task(
 
 
 def perform_viral_import_task(work: ViralImportWork) -> ViralImportOutcome:
-    media: ViralMediaResult = ViralMediaPipeline(
+    pipeline = ViralMediaPipeline(
         client=None,
         storage=work.storage,
         shared=True,
         cached_only=True,
-    ).fetch(work.video, prefer=work.prefer)
+    )
+    try:
+        media = pipeline.fetch(work.video, prefer=work.prefer)
+    except ViralMediaBusy:
+        # 文案导入首选音频，但同一视频可能此前只归档过视频（复刻解析、采集或旧
+        # 流程）；只读管线报「未就绪」只说明该形态没缓存，回落到视频归档即可，
+        # 不要把可用的归档当成缺失让任务空转重试。
+        if work.lease.purpose != "copy" or work.prefer != "audio":
+            raise
+        media = pipeline.fetch(work.video, prefer="video")
     if media.kind not in {"audio", "video"}:
         raise RuntimeError("viral import returned an unsupported media kind")
     if work.lease.purpose == "replica" and media.kind != "video":

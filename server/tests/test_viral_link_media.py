@@ -353,9 +353,58 @@ def test_preflight_dns_failure_has_actionable_redacted_error(
     assert "token" not in result.value.message
 
 
-def test_copy_preflight_uses_video_audio_track_instead_of_resolver_music(
+def test_copy_preflight_uses_resolver_audio_instead_of_full_video(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """文案预检直接缓存解析返回的音频（2026-09-30 拍板），不再强制下载整条视频。"""
+    preferences: list[str | None] = []
+    fetchers: list[Any] = []
+
+    class Pipeline:
+        def __init__(self, *, fetcher: Any, **kwargs: Any) -> None:
+            fetchers.append(fetcher)
+
+        def fetch(self, video: Any, *, prefer: str | None = None) -> ViralMediaResult:
+            preferences.append(prefer)
+            return ViralMediaResult(
+                kind="audio",
+                storage_uri="cos://media/audio.mp3",
+                url="https://media.example/audio.mp3",
+                size=100,
+                content_type="audio/mpeg",
+                cache_hit=False,
+                sha256="hash",
+            )
+
+    monkeypatch.setattr(viral_import_routes, "ViralMediaPipeline", Pipeline)
+    resolved = ResolvedViralLink(
+        platform="douyin",
+        video_id="7672703482771972081",
+        title="spoken video",
+        author="",
+        cover_url=None,
+        video_url="https://media.example/video.mp4",
+        audio_url="https://media.example/spoken-track.mp3",
+        duration_ms=10_000,
+        source_description="",
+    )
+    viral_import_routes.preflight_resolved_media(
+        resolved,
+        purpose="copy",
+        storage=None,  # type: ignore[arg-type]
+    )
+    assert preferences == ["audio"]
+    # 2026-09-30 拍板：链接下载不再套用上传体的 50MB 上限，25 秒超时保留。
+    default_fetcher = viral_import_routes.UrlFetcher()
+    assert [fetcher.timeout_seconds for fetcher in fetchers] == [25.0]
+    assert [fetcher.max_bytes for fetcher in fetchers] == [default_fetcher.max_bytes]
+    assert default_fetcher.max_bytes > 50 * 1024 * 1024
+
+
+def test_replica_preflight_still_prefers_full_video(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """复刻预检不受文案改用音频的影响：即使解析带上了音频地址也必须取完整视频。"""
     preferences: list[str | None] = []
 
     class Pipeline:
@@ -378,17 +427,17 @@ def test_copy_preflight_uses_video_audio_track_instead_of_resolver_music(
     resolved = ResolvedViralLink(
         platform="douyin",
         video_id="7672703482771972081",
-        title="spoken video",
+        title="replica video",
         author="",
         cover_url=None,
         video_url="https://media.example/video.mp4",
-        audio_url="https://media.example/background-music.m4a",
+        audio_url="https://media.example/spoken-track.mp3",
         duration_ms=10_000,
         source_description="",
     )
     viral_import_routes.preflight_resolved_media(
         resolved,
-        purpose="copy",
+        purpose="replica",
         storage=None,  # type: ignore[arg-type]
     )
     assert preferences == ["video"]
