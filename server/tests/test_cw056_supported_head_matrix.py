@@ -95,8 +95,9 @@ REPO_ROOT = SERVER_DIR.parent
 # （方案 P2-4 团队与权限 + 通知与告警：users 超管标记 + alert_settings 单行配置表）
 # 依次追加其上；20260930T1000_viral_quality_budget（方案 P1 采集质量规则与
 # 月度预算）与 20260930T1100_alert_notify_dedup（方案 P2 告警邮件推送防打扰）
-# 继续追加其上，故链尾为该值。
-HEAD_REVISION = "20260930T1100_alert_notify_dedup"
+# 继续追加其上；20260930T1400_registration_bonus_settings（注册赠送积分单行
+# 配置表）追加在其后，故链尾为该值。
+HEAD_REVISION = "20260930T1400_registration_bonus_settings"
 
 # 最后一个已发布（受支持）起点。其后的 056…090 与本迁移尚未随任何受支持版本发布，
 # 故冻结范围止于此——把未发布 revision 也纳入哈希会让每次新增迁移都必须改常量，
@@ -168,18 +169,25 @@ HEAD_SCHEMA_COUNTS = {
     # 20260930T1100（方案 P2 告警邮件推送防打扰）新建 alert_notify_dedup 单行表
     # （2 列、timestamptz、Integer 主键走序列）：tables/primary_keys 107 → 108、
     # columns 1274 → 1276、sequences 5 → 6、timestamptz_columns 62 → 63；
-    # 无外键 / jsonb / 部分索引增量。以上数字均由 migration_manifest.py
+    # 无外键 / jsonb / 部分索引增量。
+    # 20260930T1400（注册赠送积分）新建 registration_bonus_settings 单行表
+    # （4 列：id / bonus_credits / updated_by_user_id / updated_at，其中
+    # updated_at 为 timestamptz、Integer 主键走序列；1 条 SET NULL 用户外键、
+    # 2 条 CHECK——singleton 与 credits 范围）：tables/primary_keys 108 → 109、
+    # columns 1276 → 1280、foreign_keys 201 → 202、check_constraints 344 → 346、
+    # sequences 6 → 7、timestamptz_columns 63 → 64；jsonb / 部分索引无增量。
+    # 以上数字均由 migration_manifest.py
     # --print-schema 在空库迁移到 head 后实测得出，digest 同法重算（见下）。
-    "check_constraints": 344,
-    "columns": 1276,
-    "foreign_keys": 201,
+    "check_constraints": 346,
+    "columns": 1280,
+    "foreign_keys": 202,
     "identity_columns": 0,
     "jsonb_columns": 9,
     "partial_indexes": 41,
-    "primary_keys": 108,
-    "sequences": 6,
-    "tables": 108,
-    "timestamptz_columns": 63,
+    "primary_keys": 109,
+    "sequences": 7,
+    "tables": 109,
+    "timestamptz_columns": 64,
     "triggers": 27,
     "unique_constraints": 39,
 }
@@ -279,6 +287,7 @@ HEAD_TABLE_NAMES = (
     "publish_records",
     "recharge_orders",
     "recharge_packages",
+    "registration_bonus_settings",
     "runtime_settings",
     "script_from_audio_tasks",
     "script_rewrite_tasks",
@@ -399,6 +408,10 @@ HEAD_TABLE_NAMES = (
 #   配置表（接收人 / 失败率阈值 / 窗口 / 最小样本；7 列、2 条 SET NULL 外键、
 #   4 条 CHECK），counts 与表名集随之更新，digest 由 --print-schema 在全新迁移
 #   到 head 的库上重算。
+# - 20260930T1400_registration_bonus_settings（注册赠送积分）：新建
+#   registration_bonus_settings 单行配置表（4 列、1 条 SET NULL 外键、2 条
+#   CHECK），counts 与表名集随之更新，digest 由 --print-schema 在全新迁移
+#   到 head 的库上重算。
 # digest/counts 以 scripts/ci/migration_manifest.py --print-schema 于 postgres:16 重算
 # （合并后的新 head：sub_account_permissions + 三个 analysis 迁移 + viral 搜索发现表
 #  + main 的 MATERIAL-UX tags_json 列 + REFUND 调账迁移 + 1800 垫片 + 交易号唯一
@@ -406,7 +419,7 @@ HEAD_TABLE_NAMES = (
 #  两侧原来的 digest 都不能用——本分支那条是接在 viral 之后的旧链、main 那条只到
 #  MATERIAL-UX，合并后 head 变成接在 MATERIAL-UX 之后的本分支迁移，约束文本随之变化，
 #  digest 必然要重算。由 scripts/ci/migration_manifest.py --print-schema 在 PG 上重算后粘贴。
-HEAD_SCHEMA_DIGEST = "f2fc446bf487aae01259f6acd2bc55efa5d3dd9a6e8bbb1f0f463618d5d71bb1"
+HEAD_SCHEMA_DIGEST = "faa0ac830ea32f3fdc1dbc98e74e4182d06678019b376bee2bc8e3e81412ba27"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

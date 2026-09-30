@@ -44,6 +44,7 @@ from app.api_errors import http_error as _http
 from app.bootstrap import customer_public_origin, is_customer_production
 from app.db_pg import get_pg_pool, pg_transaction
 from app.password_hashing import PasswordPolicyError, hash_password, verify_password
+from app.registration_bonus_routes import grant_registration_bonus
 from app.sub_account_auth import password_login_account_ok
 
 logger = logging.getLogger(__name__)
@@ -149,11 +150,16 @@ def register_customer(
                     REGISTRATION_SOURCE_SELF,
                 ),
             )
-            # The wallet starts at zero credit; recharge (CW-066/067 lane) tops
-            # it up. Creating it in the same transaction is what makes the
-            # account whole — a customer without a wallet row cannot reserve or
-            # spend, so a partial commit would be a broken account.
+            # The wallet starts at zero credit (any registration bonus is
+            # charged on top below); recharge (CW-066/067 lane) tops it up.
+            # Creating it in the same transaction is what makes the account
+            # whole — a customer without a wallet row cannot reserve or spend,
+            # so a partial commit would be a broken account.
             conn.execute("INSERT INTO wallets (user_id) VALUES (%s)", (user_id,))
+            # 注册赠送（管理端可配置，默认 0 = 关闭）：同一事务内发放，失败则
+            # 整个注册回滚——不产出「注册成功但没积分」的半态。注册端点只创建
+            # 主账号，子账号路径不经过这里，发放范围天然仅限主账号。
+            grant_registration_bonus(conn, user_id)
     except UniqueViolation as exc:
         constraint = exc.diag.constraint_name or ""
         if constraint == USERS_USERNAME_CONSTRAINT:

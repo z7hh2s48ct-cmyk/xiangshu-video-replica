@@ -17,6 +17,7 @@ import { H3AccountsManager } from "./H3AccountsManager";
 import { PaymentSettingsSection } from "./PaymentSettingsSection";
 import { QueueModeSection } from "./QueueModeSection";
 import { RechargePackageManager } from "./RechargePackageManager";
+import { RegistrationBonusSection } from "./RegistrationBonusSection";
 import { TeamManagementSection } from "./TeamManagementSection";
 import { TabBar } from "./ui/TabBar";
 
@@ -101,6 +102,7 @@ export function SystemSettingsPage({
           <CustomerPricingManager readOnly={readOnly} />
           <RechargePackageManager readOnly={readOnly} />
           <BillingRatesManager readOnly={readOnly} />
+          <RegistrationBonusSection readOnly={readOnly} />
         </>
       ) : null}
       {tab === "collection" ? (
