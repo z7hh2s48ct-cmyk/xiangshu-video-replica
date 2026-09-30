@@ -28,6 +28,13 @@ UNMETERED_DELIVERED_CHARGE = (
 )
 
 
+def _username_pattern(username: str | None) -> str | None:
+    """客户名称模糊搜索的模式串；空串视为未筛选（ID 只用于复制，找人用名称）。"""
+    if username is None or not username.strip():
+        return None
+    return f"%{username.strip()}%"
+
+
 def date_bounds(start: date, end: date) -> tuple[datetime, datetime]:
     if end.year > 9998:
         raise HTTPException(422, detail="统计结束年份最多为 9998")
@@ -45,6 +52,7 @@ def operation_rows(
     start: date,
     end: date,
     user_id: str | None = None,
+    username: str | None = None,
     service: str | None = None,
     module: str | None = None,
     provider: str | None = None,
@@ -55,7 +63,7 @@ def operation_rows(
 ) -> list[dict[str, Any]]:
     # 总览待办「今日操作待结算」「成本待核对」要落到条数一致的清单上，
     # 所以筛选口径与下面 cost_fen 的判定共用同一组表达式。
-    if attention not in (None, "pending", "unknown_cost"):
+    if attention not in (None, "pending", "unknown_cost", "unknown_revenue"):
         raise ValueError(f"unsupported attention filter: {attention}")
     lower, upper = date_bounds(start, end)
     # Aggregate provider attempts before joining the single revenue fact.
@@ -79,7 +87,9 @@ def operation_rows(
         ) c ON c.operation_id=o.id
         WHERE COALESCE(o.completed_at,o.created_at)>=%s AND COALESCE(o.completed_at,
           o.created_at)<%s
-          AND (%s::text IS NULL OR o.user_id=%s) AND (%s::text IS NULL OR o.service=%s)
+          AND (%s::text IS NULL OR o.user_id=%s)
+          AND (%s::text IS NULL OR u.username ILIKE %s OR u.display_name ILIKE %s)
+          AND (%s::text IS NULL OR o.service=%s)
           AND (%s::text IS NULL OR o.module=%s) AND (%s::text IS NULL OR o.id=%s)
           AND (%s::text IS NULL OR EXISTS(SELECT 1 FROM billing_attempts a
             JOIN billing_operations parent ON parent.id=a.operation_id
@@ -89,7 +99,9 @@ def operation_rows(
           AND (%s::text IS NULL
             OR (%s='pending' AND o.state='PENDING')
             OR (%s='unknown_cost' AND o.state<>'PENDING'
-              AND (COALESCE(c.unknown_cost_count,0)>0 OR {unmetered})))
+              AND (COALESCE(c.unknown_cost_count,0)>0 OR {unmetered}))
+            OR (%s='unknown_revenue' AND o.state<>'PENDING'
+              AND o.revenue_fen IS NULL))
         ORDER BY COALESCE(o.completed_at,o.created_at) DESC,o.id DESC {PAGE_CLAUSE}
     """,
         (
@@ -97,6 +109,9 @@ def operation_rows(
             upper,
             user_id,
             user_id,
+            _username_pattern(username),
+            _username_pattern(username),
+            _username_pattern(username),
             service,
             service,
             module,
@@ -105,6 +120,7 @@ def operation_rows(
             operation_id,
             provider,
             provider,
+            attention,
             attention,
             attention,
             attention,
@@ -294,6 +310,7 @@ def statistics(
     end: date,
     grain: str = "day",
     user_id: str | None = None,
+    username: str | None = None,
     service: str | None = None,
     module: str | None = None,
     provider: str | None = None,
@@ -312,9 +329,12 @@ def statistics(
           SELECT o.*,COALESCE(c.calls,0) AS calls,COALESCE(c.known_cost,0) AS known_cost,
             COALESCE(c.unknown_cost,0)+CASE WHEN {unmetered} THEN 1 ELSE 0 END AS unknown_cost
           FROM billing_operations o LEFT JOIN costs c ON c.operation_id=o.id
+          LEFT JOIN users u ON u.id=o.user_id
           WHERE COALESCE(o.completed_at,o.created_at)>=%s AND COALESCE(o.completed_at,
             o.created_at)<%s
-            AND (%s::text IS NULL OR o.user_id=%s) AND (%s::text IS NULL OR o.service=%s)
+            AND (%s::text IS NULL OR o.user_id=%s)
+            AND (%s::text IS NULL OR u.username ILIKE %s OR u.display_name ILIKE %s)
+            AND (%s::text IS NULL OR o.service=%s)
             AND (%s::text IS NULL OR o.module=%s)
             AND (%s::text IS NULL OR EXISTS(SELECT 1 FROM billing_attempts a
               JOIN billing_operations parent ON parent.id=a.operation_id
@@ -349,6 +369,9 @@ def statistics(
             upper,
             user_id,
             user_id,
+            _username_pattern(username),
+            _username_pattern(username),
+            _username_pattern(username),
             service,
             service,
             module,
@@ -381,10 +404,24 @@ def statistics(
         )
         SELECT date_trunc(%s,at AT TIME ZONE 'Asia/Shanghai') AS period,
           sum(costs) AS legacy_cost_count,sum(settlements) AS legacy_settlement_count
-        FROM legacy WHERE (%s::text IS NULL OR user_id=%s)
+        FROM legacy
+        WHERE (%s::text IS NULL OR user_id=%s)
+          AND (%s::text IS NULL OR user_id IN (
+            SELECT id FROM users WHERE username ILIKE %s OR display_name ILIKE %s))
         GROUP BY GROUPING SETS ((period),())
         """,
-        (lower, upper, lower, upper, grain, user_id, user_id),
+        (
+            lower,
+            upper,
+            lower,
+            upper,
+            grain,
+            user_id,
+            user_id,
+            _username_pattern(username),
+            _username_pattern(username),
+            _username_pattern(username),
+        ),
     ).fetchall()
     empty = dict.fromkeys(metrics[None], 0)
     for row in legacy_rows:

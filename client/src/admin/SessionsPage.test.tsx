@@ -102,7 +102,7 @@ describe("SessionsPage", () => {
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain(
       `/api/control/customers/${CUSTOMER_ID}/sessions?limit=50`,
     );
-    expect(screen.queryByLabelText("客户 ID")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("客户编号")).not.toBeInTheDocument();
   });
 
   it("delegates embedded customer selection to the shared parent context", async () => {
@@ -114,7 +114,7 @@ describe("SessionsPage", () => {
     render(<SessionsPage onCustomerChange={onCustomerChange} />);
 
     await screen.findByText("customer_one");
-    fireEvent.change(screen.getByLabelText("客户 ID"), {
+    fireEvent.change(screen.getByLabelText("客户编号"), {
       target: { value: "customer-b" },
     });
     fireEvent.click(screen.getByRole("button", { name: "查看客户" }));
@@ -141,7 +141,7 @@ describe("SessionsPage", () => {
     render(<SessionsPage />);
 
     await screen.findByText("customer_one");
-    expect(screen.getByLabelText("客户 ID")).toHaveValue("");
+    expect(screen.getByLabelText("客户编号")).toHaveValue("");
     fireEvent.click(screen.getByRole("button", { name: "选择客户" }));
 
     await waitFor(() =>
@@ -149,7 +149,7 @@ describe("SessionsPage", () => {
         `/api/control/customers/${CUSTOMER_ID}/sessions?limit=50`,
       ),
     );
-    expect(screen.getByLabelText("客户 ID")).toHaveValue(CUSTOMER_ID);
+    expect(screen.getByLabelText("客户编号")).toHaveValue(CUSTOMER_ID);
   });
 
   it("ignores a stale customer response after switching context", async () => {

@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 
 import {
+  type AdminAlertsOverview,
   type AdminFailureRateGroup,
   type AdminFailureRateReport,
   adminActivationErrorMessage,
+  getAlertsOverview,
   getFailureRateAlerts,
 } from "../api.admin";
 import { AlertSettingsPanel } from "./AlertSettingsPanel";
@@ -28,6 +30,7 @@ export function AdminAlertsSection({
   readOnly?: boolean;
 }) {
   const [report, setReport] = useState<AdminFailureRateReport | null>(null);
+  const [overview, setOverview] = useState<AdminAlertsOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -35,7 +38,13 @@ export function AdminAlertsSection({
     setLoading(true);
     setError("");
     try {
-      setReport(await getFailureRateAlerts());
+      const [rateReport, overviewReport] = await Promise.all([
+        getFailureRateAlerts(),
+        // 总览失败不拖垮失败率报告：四类告警各自独立降级。
+        getAlertsOverview().catch(() => null),
+      ]);
+      setReport(rateReport);
+      setOverview(overviewReport);
     } catch (cause) {
       setError(adminActivationErrorMessage(cause, "读取失败率告警失败"));
     } finally {
@@ -59,6 +68,27 @@ export function AdminAlertsSection({
 
   return (
     <>
+      {/* 方案 P2：四类告警总览先于失败率明细——danger 在前、warn 在后。 */}
+      {overview && overview.items.length > 0 ? (
+        <section aria-label="告警总览" className="admin-panel">
+          <h2>告警总览</h2>
+          {overview.items.map((item) => (
+            <p
+              key={item.key}
+              className={
+                item.severity === "danger"
+                  ? "admin-alerts__overview-item admin-alerts__overview-item--danger"
+                  : "admin-alerts__overview-item"
+              }
+              role={item.severity === "danger" ? "alert" : undefined}
+            >
+              <strong>{item.headline}</strong>
+              <small>{item.detail}</small>
+            </p>
+          ))}
+        </section>
+      ) : null}
+
       <section aria-label="失败率告警" className="admin-panel">
         <header className="admin-alerts__header">
           <h2>失败率告警</h2>

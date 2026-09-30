@@ -199,7 +199,7 @@ describe("OrdersPage", () => {
     const fetchMock = installFetch();
     render(<OrdersPage />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "查单同步" }));
+    fireEvent.click(await screen.findByRole("button", { name: "查单补单" }));
 
     // 确认前不发请求。
     expect(
@@ -208,7 +208,7 @@ describe("OrdersPage", () => {
       ),
     ).toBe(false);
 
-    await screen.findByRole("dialog", { name: /查单同步 202608190001/ });
+    await screen.findByRole("dialog", { name: /查单补单 202608190001/ });
     // A4：查单已是管理端写——原因必填。
     fireEvent.click(screen.getByRole("button", { name: "确认查单" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(
@@ -245,7 +245,7 @@ describe("OrdersPage", () => {
     render(<OrdersPage readOnly />);
 
     expect(await screen.findByText("¥100.50")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "查单同步" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "查单补单" })).toBeNull();
   });
 
   it("shows the WeChat trade number and the merged payment method column", async () => {
@@ -266,13 +266,15 @@ describe("OrdersPage", () => {
     ).toBeInTheDocument();
   });
 
-  it("does not offer ZPay-only 查单同步 on a pending WeChat order", async () => {
+  it("offers the unified 查单补单 on a pending WeChat order too", async () => {
     installFetch([pendingWechatOrder]);
     render(<OrdersPage />);
 
     const table = await screen.findByRole("table", { name: "充值订单列表" });
     expect(within(table).getByText("微信")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "查单同步" })).toBeNull();
-    expect(screen.getByText("客户详情核验")).toBeInTheDocument();
+    // 微信订单同样走统一查单补单（后端按渠道分派网关，方案 P1）。
+    expect(
+      screen.getByRole("button", { name: "查单补单" }),
+    ).toBeInTheDocument();
   });
 });

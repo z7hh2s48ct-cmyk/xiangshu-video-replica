@@ -577,3 +577,195 @@ def test_recipient_candidates_list_active_managers(api: TestClient) -> None:
     assert by_id["auditor_u"]["role"] == "auditor"
     assert "inactive_admin" not in by_id
     assert "u-1" not in by_id
+
+
+# ---------------------------------------------------------------------------
+# 告警总览（方案 P2）：失败率 / 成本未配置 / 对账异常 / 高敏审计四合一
+# ---------------------------------------------------------------------------
+
+
+def test_alerts_overview_lists_all_four_sources(api: TestClient, seeded: str) -> None:
+    """构造四类信号各一条，总览按 severity 给出四条告警。"""
+    import psycopg as _psycopg
+
+    from app.admin_audit_routes import SENSITIVE_EVENTS
+
+    with _psycopg.connect(seeded, autocommit=True) as raw:
+        # 高敏审计：一次密钥明文查看（SENSITIVE_EVENTS 内的动作）。
+        raw.execute(
+            "INSERT INTO audit_logs (id, actor_user_id, action, entity_type, entity_id, "
+            "metadata_json) VALUES (%s, 'admin_u', %s, 'provider_settings', 'svc', '{}')",
+            (str(uuid.uuid4()), sorted(SENSITIVE_EVENTS)[0]),
+        )
+        # 对账异常：钱包与流水分桶不齐（钱包有余额、账本无流水）。
+        raw.execute(
+            "INSERT INTO users (id, username, display_name, role, is_active) "
+            "VALUES ('overview-user', 'overview-user', '总览客户', 'customer', 1) "
+            "ON CONFLICT (id) DO NOTHING"
+        )
+        raw.execute(
+            "INSERT INTO wallets (user_id, available_credits, reserved_credits) "
+            "VALUES ('overview-user', 5, 0) ON CONFLICT DO NOTHING"
+        )
+    try:
+        response = api.get("/api/control/alerts/overview")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        keys = {item["key"] for item in body["items"]}
+        # 未配置成本单价：迁移库默认没配任何 tariff → 必然告警。
+        assert "unconfigured_rates" in keys
+        assert "reconciliation" in keys
+        assert "sensitive_events" in keys
+        # 失败率：夹具没有窗口内失败样本，不在告警之列（不冒充）。
+        assert "failure_rate" not in keys
+        for item in body["items"]:
+            assert item["severity"] in {"danger", "warn"}
+            assert item["count"] >= 1
+            assert item["headline"]
+        assert body["recipient_display_name"] is None
+    finally:
+        with _psycopg.connect(seeded, autocommit=True) as raw:
+            raw.execute("DELETE FROM wallets WHERE user_id = 'overview-user'")
+
+
+def test_alerts_overview_flags_paid_without_charge_as_danger(api: TestClient, seeded: str) -> None:
+    """已支付未入账是最危险的一类（客户付了钱没到账），severity 必须是 danger。"""
+    import psycopg as _psycopg
+
+    with _psycopg.connect(seeded, autocommit=True) as raw:
+        raw.execute("DELETE FROM wallets WHERE user_id = 'overview-user'")
+        raw.execute(
+            "INSERT INTO users (id, username, display_name, role, is_active) "
+            "VALUES ('overview-user', 'overview-user', '总览客户', 'customer', 1) "
+            "ON CONFLICT (id) DO NOTHING"
+        )
+        raw.execute(
+            """
+            INSERT INTO recharge_orders (id, user_id, provider, amount_fen, credits,
+                status, merchant_order_no, provider_trade_no,
+                base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot,
+                min_recharge_fen_snapshot, recharge_step_fen_snapshot, paid_at, created_at)
+            VALUES ('overview-orphan', 'overview-user', 'zpay', 10000, 10, 'PAID',
+                    'BIZ-overview-orphan', 'trade-overview', 1000, 1000, 10000, 1000,
+                    to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
+                    to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'))
+            """
+        )
+    try:
+        response = api.get("/api/control/alerts/overview")
+        assert response.status_code == 200
+        recon = next(item for item in response.json()["items"] if item["key"] == "reconciliation")
+        assert recon["severity"] == "danger"
+        assert "已支付未入账 1" in recon["detail"]
+    finally:
+        with _psycopg.connect(seeded, autocommit=True) as raw:
+            raw.execute("DELETE FROM recharge_orders WHERE id = 'overview-orphan'")
+
+
+def test_alerts_overview_quiet_when_everything_is_clean(api: TestClient, seeded: str) -> None:
+    """没有信号时总览为空列表——告警页不放「一切正常」的假条目。"""
+    import psycopg as _psycopg
+
+    from app.billing_catalog import SERVICES
+
+    with _psycopg.connect(seeded, autocommit=True) as raw:
+        raw.execute("DELETE FROM wallets WHERE user_id = 'overview-user'")
+        # 全部对客科目配上成本单价，消掉 unconfigured_rates。
+        for service in SERVICES:
+            if SERVICES[service].customer_charge_allowed:
+                raw.execute(
+                    "INSERT INTO billing_tariffs (service, enabled, unit_credits, "
+                    "unit_cost_fen) VALUES (%s, true, 1, 1) "
+                    "ON CONFLICT (service) DO UPDATE SET unit_cost_fen = 1",
+                    (service,),
+                )
+    try:
+        response = api.get("/api/control/alerts/overview")
+        assert response.status_code == 200
+        assert response.json()["items"] == []
+    finally:
+        with _psycopg.connect(seeded, autocommit=True) as raw:
+            raw.execute("DELETE FROM billing_tariffs")
+            raw.execute("DELETE FROM recharge_orders WHERE id = 'overview-orphan'")
+            raw.execute("DELETE FROM wallets WHERE user_id = 'overview-user'")
+            raw.execute("DELETE FROM users WHERE id = 'overview-user'")
+
+
+def test_alerts_overview_notify_sends_digest_once_per_hour(
+    api: TestClient, seeded: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """notify=1：有 danger 告警且接收人配了邮箱时投递；同一小时不重发。"""
+    import psycopg as _psycopg
+
+    sent: list[dict[str, object]] = []
+
+    class _StubSender:
+        def send_alert_digest(self, **kwargs: object) -> None:
+            sent.append(dict(kwargs))
+
+        # 协议里的其它方法不被本路径触达；占位避免类型不符。
+        def send_code(self, **kwargs: object) -> None: ...
+
+        def send_password_reset_notice(self, **kwargs: object) -> None: ...
+
+        def check_template(self) -> None: ...
+
+    with _psycopg.connect(seeded, autocommit=True) as raw:
+        raw.execute(
+            "INSERT INTO users (id, username, display_name, role, is_active, "
+            "email, email_verified_at) "
+            "VALUES ('alert-recipient', 'alert-recipient', '值班接收人', 'admin', 1, "
+            "'oncall@example.com', clock_timestamp()) ON CONFLICT (id) DO NOTHING"
+        )
+        raw.execute(
+            """
+            INSERT INTO alert_settings
+                (id, recipient_user_id, failure_rate_window_minutes,
+                 failure_rate_threshold_percent, failure_rate_min_sample,
+                 updated_by_user_id, updated_at)
+            VALUES (1, 'alert-recipient', 60, 30, 5, 'alert-recipient',
+                    clock_timestamp())
+            ON CONFLICT (id) DO UPDATE SET recipient_user_id = 'alert-recipient'
+            """
+        )
+        raw.execute("DELETE FROM alert_notify_dedup")
+        # 造一条 danger：PAID 订单无入账。
+        raw.execute(
+            "INSERT INTO users (id, username, display_name, role, is_active) "
+            "VALUES ('digest-user', 'digest-user', '摘要客户', 'customer', 1) "
+            "ON CONFLICT (id) DO NOTHING"
+        )
+        raw.execute(
+            """
+            INSERT INTO recharge_orders (id, user_id, provider, amount_fen, credits,
+                status, merchant_order_no, provider_trade_no,
+                base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot,
+                min_recharge_fen_snapshot, recharge_step_fen_snapshot, paid_at, created_at)
+            VALUES ('digest-orphan', 'digest-user', 'zpay', 10000, 10, 'PAID',
+                    'BIZ-digest-orphan', 'trade-digest', 1000, 1000, 10000, 1000,
+                    to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
+                    to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'))
+            """
+        )
+    # 邮件通道打桩：直接替换 sender 工厂，绕过 provider_settings 的 Fernet 配置
+    # （加密密钥不在本套件的作用域内）。
+    # 局部导入在调用时解析 app.email_delivery 的属性，打桩该模块属性即可。
+    monkeypatch.setattr(
+        "app.email_delivery.email_sender_from_settings",
+        lambda conn: _StubSender(),
+        raising=False,
+    )
+    try:
+        first = api.get("/api/control/alerts/overview?notify=1")
+        assert first.status_code == 200, first.text
+        second = api.get("/api/control/alerts/overview?notify=1")
+        assert second.status_code == 200
+        # 同一小时去重：只发一封。
+        assert len(sent) == 1
+        assert sent[0]["danger_count"] == 1
+    finally:
+        with _psycopg.connect(seeded, autocommit=True) as raw:
+            raw.execute("DELETE FROM alert_notify_dedup")
+            raw.execute("DELETE FROM recharge_orders WHERE id = 'digest-orphan'")
+            raw.execute("DELETE FROM alert_settings")
+            raw.execute("DELETE FROM users WHERE id IN ('alert-recipient','digest-user')")

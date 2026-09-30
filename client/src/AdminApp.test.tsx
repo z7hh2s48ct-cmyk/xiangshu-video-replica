@@ -22,6 +22,9 @@ const adminActor = {
   username: "admin",
   display_name: "管理员一号",
   role: "admin",
+  // 技术配置 / 团队与权限页签仅超管可见（方案 P1 设置收拢），测试会话
+  // 直接给超管标记，普通管理员路径由 SystemSettingsPage 测试单独覆盖。
+  is_super_admin: true,
 };
 
 const adminSession = {
@@ -423,7 +426,10 @@ describe("AdminApp", () => {
     render(<AdminApp />);
 
     expect(await screen.findByLabelText("生成类型")).toHaveValue("ANALYSIS");
-    expect(screen.getByLabelText("生成状态")).toHaveValue("FAILED");
+    // 5 组口径：FAILED 意图归一到「失败」组。
+    expect(screen.getByLabelText("生成状态")).toHaveValue(
+      "FAILED,CANCELED,CANCELLED,ARCHIVE_FAILED",
+    );
     expect(screen.getByLabelText("失败阶段")).toHaveValue("");
     expect(
       fetchMock.mock.calls.some(([url]) =>
@@ -493,7 +499,10 @@ describe("AdminApp", () => {
     expect(
       await screen.findByRole("heading", { level: 1, name: "用户生成记录" }),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("生成状态")).toHaveValue("FAILED");
+    // 5 组口径：FAILED 意图归一到「失败」组。
+    expect(screen.getByLabelText("生成状态")).toHaveValue(
+      "FAILED,CANCELED,CANCELLED,ARCHIVE_FAILED",
+    );
     expect(
       fetchMock.mock.calls.some(([url]) =>
         String(url).includes("status=FAILED"),
@@ -503,7 +512,7 @@ describe("AdminApp", () => {
     window.history.pushState(null, "", "/admin#admin/funds");
     window.dispatchEvent(new PopStateEvent("popstate"));
     expect(
-      await screen.findByRole("heading", { level: 1, name: "资金流水" }),
+      await screen.findByRole("heading", { level: 1, name: "资金中心" }),
     ).toBeInTheDocument();
   });
 
@@ -519,7 +528,9 @@ describe("AdminApp", () => {
     });
     render(<AdminApp />);
 
-    expect(await screen.findByLabelText("生成状态")).toHaveValue("FAILED");
+    expect(await screen.findByLabelText("生成状态")).toHaveValue(
+      "FAILED,CANCELED,CANCELLED,ARCHIVE_FAILED",
+    );
     fireEvent.change(screen.getByLabelText("生成账号"), {
       target: { value: "customer-1" },
     });
@@ -549,7 +560,10 @@ describe("AdminApp", () => {
 
     await act(async () => window.history.back());
     await waitFor(() => expect(window.location.hash).toContain("intent="));
-    expect(screen.getByLabelText("生成状态")).toHaveValue("FAILED");
+    // 5 组口径：FAILED 意图归一到「失败」组。
+    expect(screen.getByLabelText("生成状态")).toHaveValue(
+      "FAILED,CANCELED,CANCELLED,ARCHIVE_FAILED",
+    );
     await act(async () => window.history.forward());
     await waitFor(() =>
       expect(window.location.hash).toBe("#admin/generationRecords"),
@@ -577,8 +591,8 @@ describe("AdminApp", () => {
     render(<AdminApp />);
     await signInWithPassword();
 
-    fireEvent.click(screen.getByRole("button", { name: "资金流水" }));
-    fireEvent.click(screen.getByRole("tab", { name: "充值订单" }));
+    fireEvent.click(screen.getByRole("button", { name: "资金中心" }));
+    fireEvent.click(screen.getByRole("tab", { name: "收款订单" }));
 
     expect(
       await screen.findByText(
@@ -597,7 +611,7 @@ describe("AdminApp", () => {
     ).toBeInTheDocument();
 
     // 查单同步先经"原因必填"确认（A4 写契约），再发请求。
-    fireEvent.click(await screen.findByRole("button", { name: "查单同步" }));
+    fireEvent.click(await screen.findByRole("button", { name: "查单补单" }));
     await screen.findByRole("dialog");
     fireEvent.change(screen.getByLabelText("操作原因"), {
       target: { value: "客服反馈未到账" },
@@ -624,7 +638,9 @@ describe("AdminApp", () => {
         ),
       ).toBe(true),
     );
-    expect(screen.queryByRole("button", { name: /补单|改余额/ })).toBeNull();
+    // 查单补单现在统一覆盖微信订单（后端按渠道分派网关），这里只确认
+    // 没有出现「改余额」这类直接改账的入口。
+    expect(screen.queryByRole("button", { name: /改余额/ })).toBeNull();
     fireEvent.click(screen.getByRole("tab", { name: "积分流水" }));
     const walletExport = await screen.findByRole("button", {
       name: "导出账务流水 CSV",
@@ -651,7 +667,8 @@ describe("AdminApp", () => {
     await signInWithPassword();
 
     fireEvent.click(screen.getByRole("button", { name: "系统设置" }));
-    fireEvent.click(screen.getByRole("tab", { name: "支付与价格" }));
+    // ZPay 商户配置在「收款设置」页签（方案 P1：价格与收款分开）。
+    fireEvent.click(screen.getByRole("tab", { name: "收款设置" }));
     expect(await screen.findByDisplayValue("merchant-1")).toBeInTheDocument();
     expect(screen.getByText("********cret")).toBeInTheDocument();
     expect(screen.queryByLabelText("网关地址")).toBeNull();
@@ -713,7 +730,7 @@ describe("AdminApp", () => {
     await signInWithPassword();
 
     fireEvent.click(screen.getByRole("button", { name: "系统设置" }));
-    fireEvent.click(screen.getByRole("tab", { name: "服务配置" }));
+    fireEvent.click(screen.getByRole("tab", { name: "技术配置" }));
     expect(
       await screen.findByRole("heading", { name: "视频生成 · 多账号" }),
     ).toBeInTheDocument();
@@ -812,7 +829,10 @@ describe("AdminApp", () => {
         ),
       ).toBe(true);
     });
-    expect(screen.getByLabelText("生成状态")).toHaveValue("FAILED");
+    // 5 组口径：FAILED 意图归一到「失败」组。
+    expect(screen.getByLabelText("生成状态")).toHaveValue(
+      "FAILED,CANCELED,CANCELLED,ARCHIVE_FAILED",
+    );
   });
 
   it("restores a writable session after refresh without another login", async () => {
@@ -869,7 +889,7 @@ describe("AdminApp", () => {
       "true",
     );
     fireEvent.click(screen.getByRole("tab", { name: "经营分析" }));
-    expect(screen.getByRole("tab", { name: "成本明细" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "成本核对" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "经营分析" })).toHaveAttribute(
       "aria-current",
       "page",
@@ -885,9 +905,9 @@ describe("AdminApp", () => {
     for (const name of [
       "总览仪表盘",
       "经营分析",
-      "资金流水",
+      "资金中心",
       "客户管理",
-      "会话与设备",
+      "登录与设备",
       "生成记录",
       "审计中心",
       "系统设置",
@@ -895,13 +915,13 @@ describe("AdminApp", () => {
       expect(screen.getByRole("button", { name })).toBeInTheDocument();
     }
 
-    fireEvent.click(screen.getByRole("button", { name: "资金流水" }));
-    expect(screen.getByRole("tab", { name: "充值订单" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "资金中心" }));
+    expect(screen.getByRole("tab", { name: "收款订单" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "积分流水" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "经营分析" }));
-    expect(screen.getByRole("tab", { name: "利润总览" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "成本明细" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "经营看板" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "成本核对" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "客户管理" }));
     expect(
@@ -916,15 +936,20 @@ describe("AdminApp", () => {
     ).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "审计中心" }));
-    expect(screen.getByRole("tab", { name: "审计日志" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "调账记录" })).toBeInTheDocument();
+    // 调账记录已迁入资金中心·人工调整（方案 P1），审计中心只剩审计日志单页。
+    expect(
+      screen.getByRole("region", { name: "审计事件" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "调账记录" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "资金中心" }));
+    expect(screen.getByRole("tab", { name: "人工调整" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "对账异常" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "系统设置" }));
-    expect(screen.getByRole("tab", { name: "支付与价格" })).toBeInTheDocument();
-    expect(
-      screen.getByRole("tab", { name: "API 端点与价格" }),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "服务配置" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "价格与套餐" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "收款设置" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "技术配置" })).toBeInTheDocument();
   });
 
   it("mounts the restored sessions page from the customer-operations group", async () => {
@@ -934,9 +959,9 @@ describe("AdminApp", () => {
     render(<AdminApp />);
     await screen.findByRole("navigation", { name: "管理端导航" });
 
-    fireEvent.click(screen.getByRole("button", { name: "会话与设备" }));
+    fireEvent.click(screen.getByRole("button", { name: "登录与设备" }));
 
-    expect(await screen.findByLabelText("客户 ID")).toBeInTheDocument();
+    expect(await screen.findByLabelText("客户编号")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "查看客户" }),
     ).toBeInTheDocument();
@@ -1234,11 +1259,11 @@ describe("AdminApp", () => {
     render(<AdminApp />);
     await signInWithPassword();
     fireEvent.click(screen.getByRole("button", { name: "展开导航" }));
-    fireEvent.click(screen.getByRole("button", { name: "资金流水" }));
-    fireEvent.click(screen.getByRole("tab", { name: "充值订单" }));
+    fireEvent.click(screen.getByRole("button", { name: "资金中心" }));
+    fireEvent.click(screen.getByRole("tab", { name: "收款订单" }));
 
     expect(
-      await screen.findByRole("button", { name: "查单同步" }),
+      await screen.findByRole("button", { name: "查单补单" }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "导出充值订单 CSV" }),

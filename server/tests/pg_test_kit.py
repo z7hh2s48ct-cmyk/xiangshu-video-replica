@@ -93,6 +93,8 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
         # database, truncated per test (test_admin_customer_annotations.py).
         "customer_annotations_test",
         "w15_dashboard_test",
+        # 经营看板聚合端点（business/overview）专用迁移库。
+        "w15_business_overview_test",
         "w08_profit_test",
         "w10_rates_test",
         "t34_admin_sessions_test",

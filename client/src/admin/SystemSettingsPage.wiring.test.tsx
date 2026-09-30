@@ -69,25 +69,27 @@ vi.mock("../SettingsPanel", () => ({
   ),
 }));
 
-test("defaults to the payment tab with every block writable", () => {
+test("defaults to the pricing tab with every block writable", () => {
   render(<SystemSettingsPage />);
 
   expect(
     screen.getByRole("tablist", { name: "系统设置页签" }),
   ).toBeInTheDocument();
+  // 价格与套餐一页化（方案 P1）：定价、套餐、费率、试算器同页挂载。
   expect(screen.getByTestId("customer-pricing")).toHaveTextContent("ro=false");
   expect(screen.getByTestId("recharge-packages")).toHaveTextContent("ro=false");
-  expect(screen.getByTestId("payment-settings")).toHaveTextContent("ro=false");
+  expect(screen.getByTestId("billing-rates")).toHaveTextContent("ro=false");
   // 其它页签的内容不该提前挂载（各区块都会各自发请求）。
-  expect(screen.queryByTestId("billing-rates")).toBeNull();
+  expect(screen.queryByTestId("payment-settings")).toBeNull();
   expect(screen.queryByTestId("settings-panel")).toBeNull();
 });
 
 test("honours the initialTab prop", () => {
+  // 旧 rates 意图归并到「价格与套餐」：定价区块随之挂载。
   render(<SystemSettingsPage initialTab="rates" />);
 
   expect(screen.getByTestId("billing-rates")).toBeInTheDocument();
-  expect(screen.queryByTestId("customer-pricing")).toBeNull();
+  expect(screen.getByTestId("customer-pricing")).toBeInTheDocument();
 });
 
 test("mounts the alerts tab only when selected", () => {
@@ -98,16 +100,19 @@ test("mounts the alerts tab only when selected", () => {
   expect(screen.queryByTestId("settings-panel")).toBeNull();
 });
 
-test("forwards readOnly into the payment blocks", () => {
+test("forwards readOnly into the pricing blocks", () => {
   render(<SystemSettingsPage readOnly />);
 
   expect(screen.getByTestId("customer-pricing")).toHaveTextContent("ro=true");
   expect(screen.getByTestId("recharge-packages")).toHaveTextContent("ro=true");
+  expect(screen.getByTestId("billing-rates")).toHaveTextContent("ro=true");
+  // 收款设置在独立页签：切过去后同样收到只读态。
+  fireEvent.click(screen.getByRole("tab", { name: "收款设置" }));
   expect(screen.getByTestId("payment-settings")).toHaveTextContent("ro=true");
 });
 
 test("injects the control-plane backend into the shared settings panel", () => {
-  render(<SystemSettingsPage initialTab="services" />);
+  render(<SystemSettingsPage initialTab="services" isSuperAdmin />);
 
   const panel = screen.getByTestId("settings-panel");
   // CW-019：管理端必须走 source="control"（SettingsPanel 据此拒绝 reveal 已保存
@@ -121,7 +126,7 @@ test("injects the control-plane backend into the shared settings panel", () => {
 });
 
 test("switches the service sub-tab to the runtime controls", () => {
-  render(<SystemSettingsPage initialTab="services" />);
+  render(<SystemSettingsPage initialTab="services" isSuperAdmin />);
 
   fireEvent.click(screen.getByRole("tab", { name: "运行控制" }));
 
@@ -129,17 +134,18 @@ test("switches the service sub-tab to the runtime controls", () => {
     "section=runtime",
   );
   expect(screen.getByTestId("queue-mode")).toBeInTheDocument();
-  expect(screen.getByTestId("viral-runtime")).toBeInTheDocument();
   expect(screen.queryByTestId("h3-accounts")).toBeNull();
+  // 采集设置已迁到内容组（方案 P1 内容模块），技术配置里不再出现。
+  expect(screen.queryByTestId("viral-runtime")).toBeNull();
 });
 
 test("keeps the service sub-tab selection inside the services tab", () => {
-  render(<SystemSettingsPage initialTab="services" />);
+  render(<SystemSettingsPage initialTab="services" isSuperAdmin />);
 
   fireEvent.click(screen.getByRole("tab", { name: "运行控制" }));
-  fireEvent.click(screen.getByRole("tab", { name: "支付与价格" }));
+  fireEvent.click(screen.getByRole("tab", { name: "价格与套餐" }));
   // 离开服务配置再回来，子页签保持上一次的选择（状态由本页持有）。
-  fireEvent.click(screen.getByRole("tab", { name: "服务配置" }));
+  fireEvent.click(screen.getByRole("tab", { name: "技术配置" }));
 
   expect(screen.getByTestId("settings-panel")).toHaveTextContent(
     "section=runtime",

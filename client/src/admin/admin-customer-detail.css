@@ -448,31 +448,40 @@
     width: 10%;
   }
   .customers-table th:nth-child(3) {
-    width: 10%;
-  }
-  .customers-table th:nth-child(4) {
-    width: 9%;
-  }
-  .customers-table th:nth-child(5) {
-    width: 9%;
-  }
-  .customers-table th:nth-child(6) {
-    width: 9%;
-  }
-  .customers-table th:nth-child(7) {
     width: 7%;
   }
-  .customers-table th:nth-child(8) {
+  .customers-table th:nth-child(4) {
+    width: 7%;
+  }
+  .customers-table th:nth-child(5) {
     width: 8%;
+  }
+  .customers-table th:nth-child(6) {
+    width: 8%;
+  }
+  .customers-table th:nth-child(7) {
+    width: 6%;
+  }
+  .customers-table th:nth-child(8) {
+    width: 7%;
   }
   .customers-table th:nth-child(9) {
-    width: 8%;
+    width: 7%;
   }
   .customers-table th:nth-child(10) {
-    width: 13%;
+    width: 7%;
   }
   .customers-table th:nth-child(11) {
-    width: 9%;
+    width: 7%;
+  }
+  .customers-table th:nth-child(12) {
+    width: 8%;
+  }
+  .customers-table th:nth-child(13) {
+    width: 4%;
+  }
+  .customers-table th:nth-child(14) {
+    width: 6%;
   }
 }
 /* 任务书 C（2026-09-18）：客户详情设备视图 CustomerDeviceSection。
@@ -566,4 +575,25 @@
   .customers-table :is(.customer-id-copy, .customer-cell-ellipsis) {
     max-width: 180px;
   }
+}
+
+/* 方案 P2 告警总览条：danger 红、warn 黄，一眼分级。 */
+.admin-alerts__overview-item {
+  border-left: 4px solid #d97706;
+  background: rgba(217, 119, 6, 0.08);
+  margin: 6px 0;
+  padding: 8px 12px;
+}
+
+.admin-alerts__overview-item--danger {
+  border-left-color: #dc2626;
+  background: rgba(220, 38, 38, 0.08);
+}
+
+.admin-alerts__overview-item strong {
+  display: block;
+}
+
+.admin-alerts__overview-item small {
+  color: #71717a;
 }

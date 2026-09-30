@@ -95,6 +95,13 @@ class ViralRuntimeResponse(BaseModel):
     platforms: list[ViralPlatformStatus]
     keywords: list[ViralKeywordConfig] = Field(default_factory=list)
     per_keyword_limit: int = 10
+    # 采集质量规则与月度预算（方案 P1 内容模块·采集设置）。
+    quality_min_likes: int | None = None
+    quality_duration_min_ms: int | None = None
+    quality_duration_max_ms: int | None = None
+    quality_exclude_words: list[str] = Field(default_factory=list)
+    monthly_budget_fen: int | None = None
+    month_spend_fen: int = 0
     next_collection_at: str | None = None
     collection_interval_days: int = 7
 
@@ -107,6 +114,11 @@ class ViralRuntimeUpdateRequest(AdminWriteContract):
     keywords: list[ViralKeywordConfig] | None = Field(default=None, max_length=20)
     per_keyword_limit: int | None = Field(default=None, ge=1, le=50)
     collection_interval_days: Literal[1, 7] | None = None
+    quality_min_likes: int | None = Field(default=None, ge=0, le=10_000_000)
+    quality_duration_min_ms: int | None = Field(default=None, ge=0, le=24 * 3600 * 1000)
+    quality_duration_max_ms: int | None = Field(default=None, ge=0, le=24 * 3600 * 1000)
+    quality_exclude_words: list[str] | None = Field(default=None, max_length=50)
+    monthly_budget_fen: int | None = Field(default=None, ge=1, le=10_000_000)
 
     @model_validator(mode="after")
     def unique_keywords(self) -> ViralRuntimeUpdateRequest:
@@ -134,7 +146,9 @@ class ViralAvailabilityResponse(BaseModel):
 def _viral_runtime_response(conn: psycopg.Connection) -> ViralRuntimeResponse:
     controls = conn.execute(
         "SELECT collection_enabled, import_enabled, keywords_json, per_keyword_limit, "
-        "next_collection_at, collection_interval_days FROM viral_runtime_controls WHERE id = 1"
+        "next_collection_at, collection_interval_days, quality_min_likes, "
+        "quality_duration_min_ms, quality_duration_max_ms, quality_exclude_words_json, "
+        "monthly_budget_fen FROM viral_runtime_controls WHERE id = 1"
     ).fetchone()
     counts = {
         str(row[0]): int(row[1])
@@ -210,6 +224,27 @@ def _viral_runtime_response(conn: psycopg.Connection) -> ViralRuntimeResponse:
         per_keyword_limit=int(controls[3]) if controls else 10,
         next_collection_at=str(controls[4]) if controls and controls[4] else None,
         collection_interval_days=int(controls[5]) if controls else 7,
+        quality_min_likes=int(controls[6]) if controls and controls[6] is not None else None,
+        quality_duration_min_ms=int(controls[7]) if controls and controls[7] is not None else None,
+        quality_duration_max_ms=int(controls[8]) if controls and controls[8] is not None else None,
+        quality_exclude_words=[str(word) for word in json.loads(controls[9] or "[]")]
+        if controls
+        else [],
+        monthly_budget_fen=int(controls[10]) if controls and controls[10] is not None else None,
+        # 本月已用：上海挂钟月首之后的平台侧采集成本（用户为空的平台请求行）。
+        month_spend_fen=(lambda _row: int(_row[0]) if _row is not None else 0)(
+            conn.execute(
+                """
+                SELECT COALESCE(SUM(COALESCE(a.cost_fen, 0)), 0)
+                FROM billing_attempts a
+                JOIN billing_operations o ON o.id = a.operation_id
+                WHERE o.user_id IS NULL AND o.collection_batch_id IS NOT NULL
+                  AND a.completed_at::timestamp AT TIME ZONE 'UTC'
+                      >= date_trunc('month', now() AT TIME ZONE 'Asia/Shanghai')
+                         AT TIME ZONE 'Asia/Shanghai'
+                """
+            ).fetchone()
+        ),
     )
 
 
@@ -217,6 +252,145 @@ def _viral_runtime_response(conn: psycopg.Connection) -> ViralRuntimeResponse:
 def read_viral_runtime(_actor: AdminReader) -> ViralRuntimeResponse:
     with pg_transaction() as conn:
         return _viral_runtime_response(conn)
+
+
+# ---------------------------------------------------------------------------
+# 采集关键词的单条增删（方案 P1 内容模块 C-12）：整表覆盖会让两个管理员
+# 的并发编辑互相吞掉；「实时搜索 → 加入采集关键词」也改为走这里的原子
+# 单条写，不再先读后写。
+# ---------------------------------------------------------------------------
+
+
+class ViralKeywordAddRequest(AdminWriteContract):
+    model_config = ConfigDict(extra="forbid")
+
+    platform: Literal["douyin", "wechat_channels"]
+    category: str = Field(min_length=1, max_length=32)
+    keyword: str = Field(min_length=1, max_length=80)
+
+
+class ViralKeywordDeleteRequest(AdminWriteContract):
+    model_config = ConfigDict(extra="forbid")
+
+    platform: Literal["douyin", "wechat_channels"]
+    keyword: str = Field(min_length=1, max_length=80)
+
+
+def _read_keyword_rows(conn: psycopg.Connection) -> list[dict[str, str]]:
+    row = conn.execute(
+        "SELECT keywords_json FROM viral_runtime_controls WHERE id=1 FOR UPDATE"
+    ).fetchone()
+    raw = json.loads(row[0]) if row and row[0] else []
+    return [item for item in raw if isinstance(item, dict)]
+
+
+@router.post("/viral/keywords", status_code=200)
+def add_viral_keyword(
+    payload: ViralKeywordAddRequest,
+    request: Request,
+    response: Response,
+    actor: AdminWriter,
+) -> dict[str, object]:
+    def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
+        rows = _read_keyword_rows(conn)
+        if any(
+            item.get("platform") == payload.platform and item.get("keyword") == payload.keyword
+            for item in rows
+        ):
+            return {"added": False, "total": len(rows), "request_id": request_id}
+        if len(rows) >= 20:
+            raise http_error(409, "VIRAL_KEYWORD_LIMIT", "采集关键词最多 20 个，请先删除不需要的。")
+        rows.append(
+            {
+                "platform": payload.platform,
+                "category": payload.category.strip(),
+                "keyword": payload.keyword.strip(),
+            }
+        )
+        conn.execute(
+            "UPDATE viral_runtime_controls SET keywords_json=%s, "
+            "updated_by_user_id=%s, updated_at=CURRENT_TIMESTAMP WHERE id=1",
+            (json.dumps(rows, ensure_ascii=False), actor.user_id),
+        )
+        conn.execute(
+            """INSERT INTO audit_logs(id,actor_user_id,action,entity_type,entity_id,metadata_json)
+            VALUES(%s,%s,'viral_runtime.keyword_add','viral_keyword',%s,%s)""",
+            (
+                str(uuid.uuid4()),
+                actor.user_id,
+                f"{payload.platform}:{payload.keyword.strip()}",
+                json.dumps(
+                    {
+                        "category": payload.category.strip(),
+                        "reason": payload.reason.strip(),
+                        "request_id": request_id,
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        return {"added": True, "total": len(rows), "request_id": request_id}
+
+    return write_with_idempotency(
+        request,
+        response,
+        actor,
+        payload,
+        business,
+        success_status=200,
+        unavailable_code=RUNTIME_SETTINGS_SERVICE_UNAVAILABLE,
+        unavailable_message=RUNTIME_SETTINGS_SERVICE_UNAVAILABLE_MESSAGE,
+    )
+
+
+@router.post("/viral/keywords/delete", status_code=200)
+def delete_viral_keyword(
+    payload: ViralKeywordDeleteRequest,
+    request: Request,
+    response: Response,
+    actor: AdminWriter,
+) -> dict[str, object]:
+    def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
+        rows = _read_keyword_rows(conn)
+        remaining = [
+            item
+            for item in rows
+            if not (
+                item.get("platform") == payload.platform and item.get("keyword") == payload.keyword
+            )
+        ]
+        if len(remaining) == len(rows):
+            return {"deleted": False, "total": len(rows), "request_id": request_id}
+        conn.execute(
+            "UPDATE viral_runtime_controls SET keywords_json=%s, "
+            "updated_by_user_id=%s, updated_at=CURRENT_TIMESTAMP WHERE id=1",
+            (json.dumps(remaining, ensure_ascii=False), actor.user_id),
+        )
+        conn.execute(
+            """INSERT INTO audit_logs(id,actor_user_id,action,entity_type,entity_id,metadata_json)
+            VALUES(%s,%s,'viral_runtime.keyword_delete','viral_keyword',%s,%s)""",
+            (
+                str(uuid.uuid4()),
+                actor.user_id,
+                f"{payload.platform}:{payload.keyword.strip()}",
+                json.dumps(
+                    {"reason": payload.reason.strip(), "request_id": request_id},
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        return {"deleted": True, "total": len(remaining), "request_id": request_id}
+
+    return write_with_idempotency(
+        request,
+        response,
+        actor,
+        payload,
+        business,
+        success_status=200,
+        unavailable_code=RUNTIME_SETTINGS_SERVICE_UNAVAILABLE,
+        unavailable_message=RUNTIME_SETTINGS_SERVICE_UNAVAILABLE_MESSAGE,
+    )
 
 
 @router.patch("/settings/viral", response_model=ViralRuntimeResponse)
@@ -253,6 +427,34 @@ def update_viral_runtime(
             conn.execute(
                 "UPDATE viral_runtime_controls SET per_keyword_limit=%s WHERE id=1",
                 (payload.per_keyword_limit,),
+            )
+        quality_sets: list[str] = []
+        quality_params: list[object] = []
+        if payload.quality_min_likes is not None:
+            quality_sets.append("quality_min_likes=%s")
+            quality_params.append(payload.quality_min_likes)
+        if payload.quality_duration_min_ms is not None:
+            quality_sets.append("quality_duration_min_ms=%s")
+            quality_params.append(payload.quality_duration_min_ms)
+        if payload.quality_duration_max_ms is not None:
+            quality_sets.append("quality_duration_max_ms=%s")
+            quality_params.append(payload.quality_duration_max_ms)
+        if payload.quality_exclude_words is not None:
+            quality_sets.append("quality_exclude_words_json=%s")
+            quality_params.append(
+                json.dumps(
+                    [word.strip() for word in payload.quality_exclude_words if word.strip()],
+                    ensure_ascii=False,
+                )
+            )
+        if payload.monthly_budget_fen is not None:
+            quality_sets.append("monthly_budget_fen=%s")
+            quality_params.append(payload.monthly_budget_fen)
+        if quality_sets:
+            quality_params.append(1)
+            conn.execute(
+                "UPDATE viral_runtime_controls SET " + ", ".join(quality_sets) + " WHERE id=%s",
+                tuple(quality_params),
             )
         if payload.collection_interval_days is not None:
             conn.execute(
@@ -426,7 +628,9 @@ def collect_viral_now(
 
 class ViralCurationRequest(AdminWriteContract):
     model_config = ConfigDict(extra="forbid")
-    action: Literal["feature", "unfeature", "delete", "pin", "unpin"]
+    # prepare（方案 P1 内容模块 C-2）：只排队准备素材，不改首页状态；
+    # feature 遇到未准备的视频同样自动排队，就绪后由后台自动上首页。
+    action: Literal["feature", "unfeature", "delete", "pin", "unpin", "prepare"]
 
 
 # 视频库与管理端搜索共用的行投影：viral_videos 左联云端媒体准备与单条转存
@@ -554,7 +758,40 @@ _COLLECTED_VIDEO_COLUMNS = (
     "archive_status",
     "archive_error",
     "availability",
+    "usage_detail_count",
+    "usage_copy_count",
+    "usage_favorite_count",
 )
+
+
+# 客户使用计数（方案 P1 内容模块 C-1）：
+# 详情/文案是按次扣费的台账行，source_id 形如
+# `viral-detail:{付费账号}:{platform}:{video_id}`（见 viral_routes._detail_source_id），
+# 用 `LIKE '%:' || platform || ':' || video_id` 命中该视频的全部付费账号；
+# 收藏是独立表。三者都以「平台 + 视频」维度聚合成每条视频的客户使用量。
+_USAGE_DETAIL_SQL = (
+    "(SELECT count(*) FROM billing_operations o WHERE o.service='viral_detail' "
+    "AND o.state='SUCCEEDED' AND o.user_id IS NOT NULL "
+    "AND o.source_id LIKE '%%:' || v.platform || ':' || v.video_id)"
+)
+_USAGE_COPY_SQL = (
+    "(SELECT count(*) FROM billing_operations o WHERE o.service='viral_copy' "
+    "AND o.state='SUCCEEDED' AND o.user_id IS NOT NULL "
+    "AND o.source_id LIKE '%%:' || v.platform || ':' || v.video_id)"
+)
+_USAGE_FAVORITE_SQL = (
+    "(SELECT count(*) FROM viral_video_favorites f "
+    "WHERE f.platform = v.platform AND f.video_id = v.video_id)"
+)
+_USAGE_TOTAL_SQL = f"{_USAGE_DETAIL_SQL} + {_USAGE_COPY_SQL} + {_USAGE_FAVORITE_SQL}"
+
+_SORT_EXPRESSIONS = {
+    # 默认采集时间倒序；likes/published 按内容表现；usage 按客户使用量。
+    "created": "v.created_at DESC,v.platform,v.video_id",
+    "likes": "v.likes DESC,v.created_at DESC,v.platform,v.video_id",
+    "published": "v.published_at DESC NULLS LAST,v.created_at DESC,v.platform,v.video_id",
+    "usage": (f"{_USAGE_TOTAL_SQL} DESC,v.created_at DESC,v.platform,v.video_id"),
+}
 
 
 @router.get("/viral/videos")
@@ -562,6 +799,9 @@ def read_collected_viral_videos(
     _actor: AdminReader,
     platform: Literal["douyin", "wechat_channels"] | None = None,
     status: Literal["ready", "pending", "failed", "featured"] | None = None,
+    category: Annotated[str, Query(max_length=50)] = "",
+    has_usage: bool | None = None,
+    sort: Literal["created", "likes", "published", "usage"] = "created",
     query: Annotated[str, Query(max_length=100)] = "",
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=50)] = 25,
@@ -574,17 +814,35 @@ def read_collected_viral_videos(
     if status:
         # 状态分段在服务端过滤：只筛当前页会给出「这页里没有」的错觉。
         filters += f" AND ({_COLLECTED_STATUS_FILTERS[status]})"
+    if category.strip():
+        filters += " AND v.category=%s"
+        params.append(category.strip())
+    if has_usage is not None:
+        # 有无客户使用（方案 P1 C-1 的筛选维度）：决定「哪些内容值得上首页」。
+        filters += f" AND {_USAGE_TOTAL_SQL} {'> 0' if has_usage else '= 0'}"
     if query.strip():
         filters += " AND (v.title ILIKE %s OR v.author ILIKE %s OR v.video_id ILIKE %s)"
         params.extend([f"%{query.strip()}%"] * 3)
+    order_by = _SORT_EXPRESSIONS[sort]
+    # 使用计数列必须注入 SELECT 列表（FROM 之前）而不是拼在行投影末尾：
+    # 后者会把子查询落成 FROM 的逗号表项，其中引用 v 需要显式 LATERAL。
+    usage_select = (
+        f", {_USAGE_DETAIL_SQL} AS usage_detail_count"
+        f", {_USAGE_COPY_SQL} AS usage_copy_count"
+        f", {_USAGE_FAVORITE_SQL} AS usage_favorite_count"
+    )
+    row_select = _COLLECTED_VIRAL_ROW_SELECT.replace(
+        "        COALESCE(vis.status,'AVAILABLE') AS availability",
+        "        COALESCE(vis.status,'AVAILABLE') AS availability" + usage_select,
+        1,
+    )
     with pg_transaction() as raw:
         conn = BusinessConnection.postgres(raw)
         total = conn.execute(
             f"SELECT count(*) FROM viral_videos v WHERE {filters}", tuple(params)
         ).fetchone()[0]
         rows = conn.execute(
-            f"{_COLLECTED_VIRAL_ROW_SELECT} WHERE {filters} "
-            f"ORDER BY v.created_at DESC,v.platform,v.video_id {PAGE_CLAUSE}",
+            f"{row_select} WHERE {filters} ORDER BY {order_by} {PAGE_CLAUSE}",
             (*params, limit, offset),
         ).fetchall()
     return {
@@ -607,38 +865,82 @@ def read_viral_search_discoveries(
     与内容池 `GET /api/control/viral/videos` 交叉查看。
     """
     search_date_raw = request.query_params.get("date", "")
-    resolved_date = search_date_raw.strip()
-    if not resolved_date:
-        raise HTTPException(
-            status_code=422,
-            detail={"code": "VIRAL_SEARCH_DATE_REQUIRED", "message": "日期参数必填。"},
-        )
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", resolved_date):
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "VIRAL_SEARCH_DATE_INVALID",
-                "message": "日期格式应为 YYYY-MM-DD。",
-            },
-        )
+    date_from_raw = request.query_params.get("from", "")
+    date_to_raw = request.query_params.get("to", "")
+    # 方案 P1 客户需求洞察：单日看趋势不够——支持 from/to 区间（缺省回落
+    # 到单日 date，兼容既有调用），上限 92 天防止全表聚合。
+    if date_from_raw.strip() or date_to_raw.strip():
+        date_from = date_from_raw.strip()
+        date_to = date_to_raw.strip() or date_from
+        for value, code in ((date_from, "from"), (date_to, "to")):
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "VIRAL_SEARCH_DATE_INVALID",
+                        "message": f"{code} 日期格式应为 YYYY-MM-DD。",
+                    },
+                )
+        if date_to < date_from:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "VIRAL_SEARCH_DATE_RANGE_INVALID",
+                    "message": "结束日期不能早于开始日期。",
+                },
+            )
+        span_days = (
+            datetime.strptime(date_to, "%Y-%m-%d") - datetime.strptime(date_from, "%Y-%m-%d")
+        ).days
+        if span_days > 92:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "VIRAL_SEARCH_DATE_RANGE_TOO_LONG",
+                    "message": "区间最多 92 天，请缩小范围。",
+                },
+            )
+        date_filter = "search_date >= %s AND search_date <= %s"
+        date_params: tuple[str, ...] = (date_from, date_to)
+        label = f"{date_from}~{date_to}"
+    else:
+        resolved_date = search_date_raw.strip()
+        if not resolved_date:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "VIRAL_SEARCH_DATE_REQUIRED", "message": "日期参数必填。"},
+            )
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", resolved_date):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "VIRAL_SEARCH_DATE_INVALID",
+                    "message": "日期格式应为 YYYY-MM-DD。",
+                },
+            )
+        date_filter = "search_date=%s"
+        date_params = (resolved_date,)
+        label = resolved_date
     with pg_transaction() as raw:
         conn = BusinessConnection.postgres(raw)
         totals = conn.execute(
             "SELECT count(*),count(DISTINCT user_id),"
             "count(DISTINCT platform || '/' || video_id) "
-            "FROM viral_search_discoveries WHERE search_date=%s",
-            (resolved_date,),
+            f"FROM viral_search_discoveries WHERE {date_filter}",
+            date_params,
         ).fetchone()
         rows = conn.execute(
             "SELECT keyword,platform,count(*) AS discoveries,"
             "count(DISTINCT user_id) AS users,count(DISTINCT video_id) AS videos "
-            "FROM viral_search_discoveries WHERE search_date=%s "
+            f"FROM viral_search_discoveries WHERE {date_filter} "
             "GROUP BY keyword,platform "
             "ORDER BY discoveries DESC,keyword,platform LIMIT 100",
-            (resolved_date,),
+            date_params,
         ).fetchall()
     return {
-        "date": resolved_date,
+        "date": label,
+        "from": date_params[0],
+        "to": date_params[-1],
         "total": int(totals[0]),
         "users": int(totals[1]),
         "videos": int(totals[2]),
@@ -901,6 +1203,85 @@ def search_viral_videos_for_admin(
     )
 
 
+def _enqueue_archive_batch(
+    conn: psycopg.Connection,
+    platform: str,
+    video_ids: list[str],
+    *,
+    feature_after: dict[str, str] | None,
+    actor_user_id: str,
+    reason: str,
+    request_id: str,
+    audit_action: str,
+) -> str:
+    """排队一批同平台视频的素材准备（方案 P1 内容模块 C-2）。
+
+    ``feature_after`` 带上首页意图（操作人 / 原因 / 请求编号）：后台逐条准备
+    成功后当场上首页并按真实操作人写审计。沿用既有「每平台一个活跃任务」
+    的串行约束——同平台冲突时如实 409，而不是并发互相踩存储。
+    """
+    control = conn.execute(
+        "SELECT collection_enabled FROM viral_runtime_controls WHERE id=1 FOR UPDATE"
+    ).fetchone()
+    if control is None or not control[0]:
+        raise http_error(409, "VIRAL_COLLECTION_PAUSED", "后台采集已暂停，请先开启采集服务。")
+    for video_id in video_ids:
+        exists = conn.execute(
+            "SELECT 1 FROM viral_videos WHERE platform=%s AND video_id=%s AND deleted_at IS NULL",
+            (platform, video_id),
+        ).fetchone()
+        if exists is None:
+            raise http_error(404, "VIRAL_VIDEO_NOT_FOUND", "视频不存在或已删除。")
+    active = conn.execute(
+        "SELECT id,collection_config_json FROM viral_refresh_tasks "
+        "WHERE platform=%s AND status IN ('PENDING','RUNNING') FOR UPDATE",
+        (platform,),
+    ).fetchall()
+    config: dict[str, object] = {"kind": "archive_batch", "video_ids": video_ids}
+    if feature_after:
+        config["feature_after"] = feature_after
+    config_json = json.dumps(config, ensure_ascii=False)
+    for task in active:
+        task_config = json.loads(task[1])
+        if task_config.get("kind") == "archive_batch" and task_config.get("video_ids") == video_ids:
+            return str(task[0])
+    if active:
+        raise http_error(409, "VIRAL_ARCHIVE_BUSY", "该平台已有后台任务，请完成后再准备素材。")
+    queued = conn.execute(
+        """INSERT INTO viral_refresh_tasks(id,platform,sort,collection_config_json)
+        VALUES(%s,%s,'latest',%s) ON CONFLICT(platform,sort) DO UPDATE SET
+            status='PENDING',collection_config_json=excluded.collection_config_json,
+            checkpoint_json='{}',retry_count=0,locked_by=NULL,locked_until=NULL,
+            error_code=NULL,error_message_redacted=NULL,retryable=0,
+            started_at=NULL,completed_at=NULL,updated_at=CURRENT_TIMESTAMP RETURNING id""",
+        (str(uuid.uuid4()), platform, config_json),
+    ).fetchone()
+    if queued is None:
+        raise RuntimeError("viral archive batch enqueue did not persist")
+    task_id = str(queued[0])
+    conn.execute(
+        """INSERT INTO audit_logs(id,actor_user_id,action,entity_type,entity_id,metadata_json)
+        VALUES(%s,%s,%s,'viral_video',%s,%s)""",
+        (
+            str(uuid.uuid4()),
+            actor_user_id,
+            audit_action,
+            f"{platform}:{','.join(video_ids)}",
+            json.dumps(
+                {
+                    "request_id": request_id,
+                    "reason": reason,
+                    "task_id": task_id,
+                    "video_ids": video_ids,
+                    "feature_after": bool(feature_after),
+                },
+                ensure_ascii=False,
+            ),
+        ),
+    )
+    return task_id
+
+
 @router.post("/viral/videos/{platform}/{video_id:path}/archive", status_code=202)
 def archive_collected_viral_video(
     platform: Literal["douyin", "wechat_channels"],
@@ -1145,6 +1526,27 @@ def curate_collected_viral_video(
         cover_url, cover_key, homepage_featured, category = row
         if payload.action in ("pin", "unpin") and not homepage_featured:
             raise http_error(409, "VIRAL_VIDEO_NOT_FEATURED", "只有已展示到首页的视频才能置顶。")
+        if payload.action == "prepare":
+            # 只排队准备素材（方案 C-2）：不改首页状态，就绪后运营再决定。
+            task_id = _enqueue_archive_batch(
+                conn,
+                platform,
+                [video_id],
+                feature_after=None,
+                actor_user_id=actor.user_id,
+                reason=payload.reason.strip(),
+                request_id=request_id,
+                audit_action="viral_video.prepare",
+            )
+            return {
+                "platform": platform,
+                "video_id": video_id,
+                "queued_for_preparation": True,
+                "task_id": task_id,
+                "homepage_featured": bool(homepage_featured),
+                "homepage_rank": None,
+                "deleted": False,
+            }
         if payload.action == "feature":
             if str(category or "") == LINK_IMPORT_CATEGORY:
                 # 链接导入是用户自己的项目素材，不进首页内容池；否则它会绕过采集
@@ -1160,9 +1562,31 @@ def curate_collected_viral_video(
                 (platform, video_id),
             ).fetchone()
             if ready is None:
-                raise http_error(
-                    409, "VIRAL_MEDIA_NOT_READY", "视频和封面归档完成后才能展示到首页。"
+                # 方案 C-2：未准备的视频不再整批拒绝——排队准备并在就绪后
+                # 由后台自动上首页（意图与操作人随任务走，审计可追溯）。
+                task_id = _enqueue_archive_batch(
+                    conn,
+                    platform,
+                    [video_id],
+                    feature_after={
+                        "actor_user_id": actor.user_id,
+                        "reason": payload.reason.strip(),
+                        "request_id": request_id,
+                    },
+                    actor_user_id=actor.user_id,
+                    reason=payload.reason.strip(),
+                    request_id=request_id,
+                    audit_action="viral_video.prepare",
                 )
+                return {
+                    "platform": platform,
+                    "video_id": video_id,
+                    "queued_for_preparation": True,
+                    "task_id": task_id,
+                    "homepage_featured": False,
+                    "homepage_rank": None,
+                    "deleted": False,
+                }
             if cover_url and not cover_key:
                 if prepared_cover is None or prepared_cover[0] != cover_url:
                     raise http_error(
@@ -1271,7 +1695,7 @@ class ViralBatchCurationRequest(AdminWriteContract):
 
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["feature", "unfeature", "delete"]
+    action: Literal["feature", "unfeature", "delete", "prepare"]
     items: list[ViralBatchTarget] = Field(min_length=1, max_length=20)
 
     @model_validator(mode="after")
@@ -1300,6 +1724,51 @@ def curate_collected_viral_videos_batch(
             prepared = _prepare_feature_cover(target.platform, target.video_id)
             if prepared is not None:
                 prepared_covers[(target.platform, target.video_id)] = prepared
+    if payload.action == "prepare":
+        # 批量准备素材：同平台的未就绪视频合并为一个后台任务逐条准备
+        # （沿用每平台一个活跃任务的串行约束），跨平台各排一个。
+        def business_prepare(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
+            by_platform: dict[str, list[str]] = {}
+            for target in payload.items:
+                by_platform.setdefault(target.platform, []).append(target.video_id)
+            task_ids: list[str] = []
+            for platform, video_ids in by_platform.items():
+                task_ids.append(
+                    _enqueue_archive_batch(
+                        conn,
+                        platform,
+                        video_ids,
+                        feature_after=None,
+                        actor_user_id=actor.user_id,
+                        reason=payload.reason.strip(),
+                        request_id=request_id,
+                        audit_action="viral_video.prepare",
+                    )
+                )
+            return {
+                "action": "prepare",
+                "count": len(payload.items),
+                "items": [
+                    {
+                        "platform": target.platform,
+                        "video_id": target.video_id,
+                        "queued_for_preparation": True,
+                    }
+                    for target in payload.items
+                ],
+                "task_ids": task_ids,
+            }
+
+        return write_with_idempotency(
+            request,
+            response,
+            actor,
+            payload,
+            business_prepare,
+            success_status=200,
+            unavailable_code=RUNTIME_SETTINGS_SERVICE_UNAVAILABLE,
+            unavailable_message=RUNTIME_SETTINGS_SERVICE_UNAVAILABLE_MESSAGE,
+        )
 
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         updated: list[dict[str, object]] = []
@@ -1327,11 +1796,33 @@ def curate_collected_viral_videos_batch(
                     (target.platform, target.video_id),
                 ).fetchone()
                 if ready is None:
-                    raise http_error(
-                        409,
-                        "VIRAL_MEDIA_NOT_READY",
-                        f"「{title}」尚未归档完成，批量操作未执行。",
+                    # 方案 C-2：未就绪的条目转入「准备后就绪自动上首页」队列；
+                    # 就绪条目照常当场展示，批量不再整批取消。
+                    queued_task = _enqueue_archive_batch(
+                        conn,
+                        target.platform,
+                        [target.video_id],
+                        feature_after={
+                            "actor_user_id": actor.user_id,
+                            "reason": payload.reason.strip(),
+                            "request_id": request_id,
+                        },
+                        actor_user_id=actor.user_id,
+                        reason=payload.reason.strip(),
+                        request_id=request_id,
+                        audit_action="viral_video.prepare",
                     )
+                    updated.append(
+                        {
+                            "platform": target.platform,
+                            "video_id": target.video_id,
+                            "homepage_featured": False,
+                            "deleted": False,
+                            "queued_for_preparation": True,
+                            "task_id": queued_task,
+                        }
+                    )
+                    continue
                 if row[1] and not row[2]:
                     prepared = prepared_covers.get((target.platform, target.video_id))
                     if prepared is None or prepared[0] != row[1]:
@@ -1394,9 +1885,15 @@ def curate_collected_viral_videos_batch(
                     "video_id": target.video_id,
                     "homepage_featured": payload.action == "feature",
                     "deleted": payload.action == "delete",
+                    "queued_for_preparation": False,
                 }
             )
-        return {"action": payload.action, "count": len(updated), "items": updated}
+        return {
+            "action": payload.action,
+            "count": sum(1 for item in updated if not item.get("queued_for_preparation")),
+            "queued_count": sum(1 for item in updated if item.get("queued_for_preparation")),
+            "items": updated,
+        }
 
     return write_with_idempotency(
         request,

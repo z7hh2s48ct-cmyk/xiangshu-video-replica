@@ -434,3 +434,63 @@ def test_source_frame_filters_use_portable_sql_on_postgres(
     scored_row = next(item for item in scored_page.items if item.record_id == seeded["scored"])
     assert scored_row.record_type == "SOURCE_FRAME_AI_SCORE"
     assert scored_row.username == seeded["user"]
+
+
+def test_status_group_filters_and_summary_cards(
+    records_dsn: str, seeded: dict[str, str], owner: CurrentUser
+) -> None:
+    """方案 P1：status_group 5 组口径 + 聚合卡（成功率/失败数/平均耗时）。"""
+    from app.control_routes import list_generation_records, summarize_generation_records
+
+    with psycopg.connect(records_dsn) as raw:
+        conn = BusinessConnection.postgres(raw)
+        failed_view = list_generation_records(
+            conn, owner, record_type="ANALYSIS", status_group="failed", limit=50, offset=0
+        )
+        queued_view = list_generation_records(
+            conn, owner, record_type="ANALYSIS", status_group="queued", limit=50, offset=0
+        )
+        summary = summarize_generation_records(
+            conn, owner, record_type="ANALYSIS", status_group="failed"
+        )
+        full = summarize_generation_records(conn, owner, record_type="ANALYSIS")
+
+    # 「失败」组在拆解分支 = FAILED（夹具无取消/归档失败行）。
+    assert failed_view.total == 3
+    # PENDING 属「排队中」组。
+    assert queued_view.total == 1
+
+    # 组筛选下聚合与列表同口径。
+    assert summary.total == 3
+    assert summary.succeeded_count == 0
+    assert summary.failed_count == 3
+    assert summary.success_rate_pct == 0
+    # 失败视图没有成功样本，平均耗时不给数字而不是假装 0 秒。
+    assert summary.avg_duration_seconds is None
+
+    # 全量视图：1 成功 / 3 失败 / 5 总，成功率 20%。
+    assert full.succeeded_count == 1
+    assert full.failed_count == 3
+    assert full.success_rate_pct == 20.0
+    # 夹具成功任务带 completed_at（比 created_at 晚 60 秒），加权平均 = 60 秒。
+    assert full.avg_duration_seconds == 60.0
+
+
+def test_project_name_filter_matches_video_and_analysis_only(
+    records_dsn: str, seeded: dict[str, str], owner: CurrentUser
+) -> None:
+    """方案 P1：项目名筛选——拆解按 project_id 命中，视频按 batch→projects 命中。"""
+    from app.control_routes import list_generation_records
+
+    with psycopg.connect(records_dsn) as raw:
+        conn = BusinessConnection.postgres(raw)
+        hit = list_generation_records(
+            conn, owner, record_type="ANALYSIS", project_name="拆解观测", limit=50, offset=0
+        )
+        miss = list_generation_records(
+            conn, owner, record_type="ANALYSIS", project_name="不存在的项目", limit=50, offset=0
+        )
+
+    assert hit.total == 5
+    assert {item.record_id for item in hit.items} >= {seeded["ok"], seeded["pending"]}
+    assert miss.total == 0

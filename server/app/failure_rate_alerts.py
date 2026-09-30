@@ -23,7 +23,7 @@ import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 import psycopg
 from fastapi import APIRouter, Request, Response
@@ -309,13 +309,269 @@ def read_failure_rate_report(_actor: AdminReader) -> FailureRateReport:
 
 
 # ---------------------------------------------------------------------------
+# 告警总览（方案 P2「通知与告警」补齐）：四类告警一个数据源。
+# 成本未配置 / 对账异常 / 高敏审计此前只有各自的散落视图，没有告警口径；
+# 这里按「severity + 一句话结论 + 明细数字」聚合，供告警页首屏红黄条渲染。
+# 推送通道（邮件/IM 投递）依赖部署侧出口配置，落地前先以页面醒目提醒承载。
+# ---------------------------------------------------------------------------
+
+
+class AlertOverviewItem(BaseModel):
+    """一条告警：严重度 + 结论 + 跳转线索。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    severity: Literal["danger", "warn"]
+    headline: str
+    detail: str
+    count: int
+
+
+class AlertsOverview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[AlertOverviewItem]
+    recipient_display_name: str | None
+    generated_at: str
+
+
+def _unconfigured_rate_services(conn: BusinessConnection) -> list[str]:
+    """对客收费但未配成本单价的科目（口径同总览待办 unconfigured_rates）。"""
+    from app.billing_catalog import SERVICES
+
+    configured = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT service FROM billing_tariffs WHERE unit_cost_fen IS NOT NULL"
+        ).fetchall()
+    }
+    return sorted(
+        key
+        for key, item in SERVICES.items()
+        if item.customer_charge_allowed and key not in configured
+    )
+
+
+def _reconciliation_bucket_counts(conn: BusinessConnection) -> dict[str, int]:
+    """三类对账异常的分桶计数（与 /billing-reconciliation 汇总逐字同口径）。"""
+    row = conn.execute(
+        """
+        SELECT
+          (SELECT count(*) FROM wallets w
+             LEFT JOIN (
+                 SELECT user_id,
+                        SUM(available_delta) AS available_total,
+                        SUM(reserved_delta) AS reserved_total
+                 FROM wallet_transactions GROUP BY user_id
+             ) AS ledger ON ledger.user_id = w.user_id
+             WHERE w.available_credits <> COALESCE(ledger.available_total, 0)
+                OR w.reserved_credits <> COALESCE(ledger.reserved_total, 0)),
+          (SELECT count(*) FROM recharge_orders o
+             WHERE o.status = 'PAID' AND NOT EXISTS (
+                 SELECT 1 FROM wallet_transactions wt
+                 WHERE wt.recharge_order_id = o.id AND wt.type = 'CHARGE')),
+          (SELECT count(*) FROM wallet_transactions wt
+             WHERE wt.type = 'CHARGE' AND NOT EXISTS (
+                 SELECT 1 FROM recharge_orders o
+                 WHERE o.id = wt.recharge_order_id AND o.status = 'PAID'))
+        """
+    ).fetchone()
+    assert row is not None
+    return {
+        "wallet_mismatch": int(row[0] or 0),
+        "paid_without_charge": int(row[1] or 0),
+        "charge_without_paid_order": int(row[2] or 0),
+    }
+
+
+def _sensitive_audit_digest(conn: BusinessConnection) -> list[dict[str, object]]:
+    """近 24h 高敏审计事件的按动作摘要（口径同 admin_audit_routes.SENSITIVE_EVENTS）。"""
+    from app.admin_audit_routes import SENSITIVE_EVENTS
+
+    rows = conn.execute(
+        f"""
+        SELECT al.action, count(*) AS total, max({utc_timestamp_sql("al.created_at")}) AS last_at
+        FROM audit_logs al
+        WHERE al.action = ANY(%s)
+          AND {utc_timestamp_sql("al.created_at")} >= clock_timestamp() - interval '24 hours'
+        GROUP BY al.action
+        ORDER BY total DESC, al.action
+        """,
+        (sorted(SENSITIVE_EVENTS),),
+    ).fetchall()
+    return [
+        {
+            "action": str(row["action"]),
+            "total": int(row["total"]),
+            "last_at": _iso_timestamp(row["last_at"]),
+        }
+        for row in rows
+    ]
+
+
+def build_alerts_overview(conn: BusinessConnection) -> AlertsOverview:
+    """四类告警聚合：失败率 / 成本未配置 / 对账异常 / 高敏审计（近 24h）。"""
+    failure = build_failure_rate_report(conn)
+    items: list[AlertOverviewItem] = []
+
+    breach = [group for group in failure.groups if group.exceeded]
+    if breach:
+        worst = max(breach, key=lambda group: group.failure_rate_percent)
+        items.append(
+            AlertOverviewItem(
+                key="failure_rate",
+                severity="danger",
+                headline=f"{worst.record_type} 失败率 {worst.failure_rate_percent}% 超过阈值",
+                detail=(
+                    f"近 {failure.window_minutes} 分钟 "
+                    f"{worst.failed}/{worst.total} 条失败；"
+                    "按类型展开见下方失败率报告。"
+                ),
+                count=sum(group.failed for group in breach),
+            )
+        )
+    unconfigured = _unconfigured_rate_services(conn)
+    if unconfigured:
+        items.append(
+            AlertOverviewItem(
+                key="unconfigured_rates",
+                severity="warn",
+                headline=f"{len(unconfigured)} 个对客业务未配置成本单价",
+                detail=(
+                    "未配置的成本不会记 0，也不会进毛利；在「系统设置 → 服务配置」"
+                    "补齐后毛利口径才完整。"
+                ),
+                count=len(unconfigured),
+            )
+        )
+    buckets = _reconciliation_bucket_counts(conn)
+    recon_total = sum(buckets.values())
+    if recon_total:
+        items.append(
+            AlertOverviewItem(
+                key="reconciliation",
+                severity="danger" if buckets["paid_without_charge"] else "warn",
+                headline=f"资金对账异常 {recon_total} 条",
+                detail=(
+                    f"已支付未入账 {buckets['paid_without_charge']} · "
+                    f"入账但订单未支付 {buckets['charge_without_paid_order']} · "
+                    f"钱包与流水不符 {buckets['wallet_mismatch']}；"
+                    "明细在「资金中心 → 对账异常」。"
+                ),
+                count=recon_total,
+            )
+        )
+    sensitive = _sensitive_audit_digest(conn)
+    if sensitive:
+        sensitive_total = sum(int(str(item["total"])) for item in sensitive)
+        top_action = str(sensitive[0]["action"])
+        items.append(
+            AlertOverviewItem(
+                key="sensitive_events",
+                severity="warn",
+                headline=f"近 24 小时高敏操作 {sensitive_total} 次",
+                detail=(
+                    f"最集中在 {top_action}（{int(str(sensitive[0]['total']))} 次）；"
+                    "明细在「审计中心」，按分组「密钥与导出」筛选。"
+                ),
+                count=sensitive_total,
+            )
+        )
+    settings = load_failure_rate_settings(conn)
+    return AlertsOverview(
+        items=items,
+        recipient_display_name=settings.recipient_display_name,
+        generated_at=datetime.now(UTC).isoformat(),
+    )
+
+
+@router.get("/alerts/overview", response_model=AlertsOverview)
+def read_alerts_overview(
+    _actor: AdminReader,
+    response: Response,
+    notify: bool = False,
+) -> AlertsOverview:
+    """告警总览（方案 P2）：四类告警的首屏红黄条数据源。
+
+    ``notify=1`` 时在有 danger 级告警且接收人配了邮箱的情况下，后台投递一封
+    摘要邮件（失败只记日志，不影响响应）；防打扰：同一小时只发一封，
+    以 ``alert_notify_dedup`` 里的最近投递时间为准。
+    """
+    response.headers["Cache-Control"] = "no-store"
+    with pg_transaction() as raw:
+        overview = build_alerts_overview(BusinessConnection.postgres(raw))
+    if notify:
+        dangerous = [item for item in overview.items if item.severity == "danger"]
+        if dangerous:
+            _deliver_alert_email_quietly(overview)
+    return overview
+
+
+def _alert_recipient_email(conn: BusinessConnection) -> str | None:
+    row = conn.execute(
+        "SELECT u.email FROM alert_settings s "
+        "JOIN users u ON u.id = s.recipient_user_id "
+        "WHERE s.id = 1 AND u.email IS NOT NULL AND u.email != ''"
+    ).fetchone()
+    return str(row[0]) if row is not None else None
+
+
+def _deliver_alert_email_quietly(overview: AlertsOverview) -> None:
+    """把 danger 告警摘要发给接收人；发送失败只记日志（P2 推送通道）。"""
+
+    def _send() -> None:
+        from app.db_pg import pg_transaction as _pg
+        from app.email_delivery import deliver_quietly, email_sender_from_settings
+
+        with _pg() as raw:
+            conn = BusinessConnection.postgres(raw)
+            email = _alert_recipient_email(conn)
+            if email is None:
+                return
+            # 防打扰：同一小时已发过就跳过（dedup 行存最近投递时刻）。
+            recent = conn.execute(
+                "SELECT 1 FROM alert_notify_dedup WHERE id = 1 "
+                "AND last_sent_at::timestamptz > clock_timestamp() - interval '1 hour'"
+            ).fetchone()
+            if recent is not None:
+                return
+            conn.execute(
+                "INSERT INTO alert_notify_dedup (id, last_sent_at) VALUES (1, "
+                "clock_timestamp()) ON CONFLICT (id) DO UPDATE SET "
+                "last_sent_at = clock_timestamp()"
+            )
+            sender = email_sender_from_settings(conn)
+        if sender is None:
+            logger.info("alert email skipped: email provider not configured")
+            return
+        dangerous = [item for item in overview.items if item.severity == "danger"]
+        lines = "\n".join(f"- {item.headline}（{item.detail}）" for item in dangerous)
+        deliver_quietly(
+            lambda: sender.send_alert_digest(
+                to=email,
+                total=len(overview.items),
+                danger_count=len(dangerous),
+                items=lines,
+                generated_at=overview.generated_at,
+            ),
+            kind="alert_digest",
+        )
+
+    try:
+        _send()
+    except Exception as exc:  # pragma: no cover - 通知绝不拖垮告警页
+        logger.warning("alert email dispatch failed: %s", type(exc).__name__)
+
+
+# ---------------------------------------------------------------------------
 # 通知与告警设置（P2-4）：接收人与失败率口径的读写
 # ---------------------------------------------------------------------------
 
 _SETTINGS_SELECT = (
     "SELECT s.recipient_user_id, u.display_name, s.failure_rate_window_minutes, "
     "       s.failure_rate_threshold_percent, s.failure_rate_min_sample, "
-    "       s.updated_by_user_id, s.updated_at "
+    "       s.updated_by_user_id, s.updated_at, u.email "
     "FROM alert_settings AS s "
     "LEFT JOIN users AS u ON u.id = s.recipient_user_id "
     "WHERE s.id = 1"

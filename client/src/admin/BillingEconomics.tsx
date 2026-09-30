@@ -107,7 +107,11 @@ function today() {
     day: "2-digit",
   }).format(new Date());
 }
-export type BillingAttention = "" | "pending" | "unknown_cost";
+export type BillingAttention =
+  | ""
+  | "pending"
+  | "unknown_cost"
+  | "unknown_revenue";
 // attention 保持枚举类型而不是擦成 string：下拉值经 narrowAttention 窄化，
 // 请求参数与服务端 attention 枚举始终同口径。
 type BillingFilters = {
@@ -115,20 +119,43 @@ type BillingFilters = {
   end: string;
   grain: string;
   user_id: string;
+  username: string;
   service: string;
   module: string;
   provider: string;
   attention: BillingAttention;
 };
 function narrowAttention(value: string): BillingAttention {
-  return value === "pending" || value === "unknown_cost" ? value : "";
+  return value === "pending" ||
+    value === "unknown_cost" ||
+    value === "unknown_revenue"
+    ? value
+    : "";
 }
-const initialFilters = (attention: BillingAttention = ""): BillingFilters => ({
-  // 带着总览「今日」待办进来时只看今天，条数才与待办计数一致。
-  start: attention ? today() : `${today().slice(0, 7)}-01`,
+// 界面文案保持中性：服务商下拉只给职能名，供应商内部 key 不出现在主视图。
+const providerLabels: Record<string, string> = {
+  metaso: "视频生成服务",
+  apilio: "图像服务",
+  hifly: "数字人服务",
+  deepseek: "文案理解服务",
+  dashscope: "语音识别服务",
+  tikhub: "爆款数据服务",
+  douyidou: "链接解析服务",
+  cos: "云存储",
+  zpay: "支付通道",
+  platform: "平台内部",
+};
+const initialFilters = (
+  attention: BillingAttention = "",
+  start?: string,
+): BillingFilters => ({
+  // 带着总览「今日」待办进来时只看今天，条数才与待办计数一致；
+  // 队列卡「历史待核对」用 initialStart 放宽起点。
+  start: start ?? (attention ? today() : `${today().slice(0, 7)}-01`),
   end: today(),
   grain: "day",
   user_id: "",
+  username: "",
   service: "",
   module: "",
   provider: "",
@@ -145,18 +172,20 @@ export function BillingEconomics({
   readOnly = false,
   view = "profit",
   initialAttention = "",
+  initialStart,
 }: {
   readOnly?: boolean;
   view?: "profit" | "cost";
   initialAttention?: BillingAttention;
+  initialStart?: string;
 }) {
   const costView = view === "cost";
   const detailRequest = useRef(0);
   const [filters, setFilters] = useState(() =>
-    initialFilters(initialAttention),
+    initialFilters(initialAttention, initialStart),
   );
   const [query, setQuery] = useState(() =>
-    params(initialFilters(initialAttention)),
+    params(initialFilters(initialAttention, initialStart)),
   );
   const [revision, setRevision] = useState(0);
   const [offset, setOffset] = useState(0);
@@ -308,44 +337,14 @@ export function BillingEconomics({
           />
         </label>
         <label>
-          统计周期
-          <select
-            value={filters.grain}
-            onChange={(event) =>
-              setFilters({ ...filters, grain: event.target.value })
-            }
-          >
-            <option value="day">天</option>
-            <option value="week">周（周一开始）</option>
-            <option value="month">月 / 多月</option>
-            <option value="year">年</option>
-          </select>
-        </label>
-        <label>
-          用户 ID
+          客户
           <input
-            value={filters.user_id}
+            value={filters.username}
             onChange={(event) =>
-              setFilters({ ...filters, user_id: event.target.value })
+              setFilters({ ...filters, username: event.target.value })
             }
-            placeholder="全部用户及平台后台"
+            placeholder="用户名或公司名"
           />
-        </label>
-        <label>
-          业务
-          <select
-            value={filters.service}
-            onChange={(event) =>
-              setFilters({ ...filters, service: event.target.value })
-            }
-          >
-            <option value="">全部业务</option>
-            {catalog.map((item) => (
-              <option key={item.service} value={item.service}>
-                {item.name}
-              </option>
-            ))}
-          </select>
         </label>
         <label>
           业务模块
@@ -364,20 +363,6 @@ export function BillingEconomics({
           </select>
         </label>
         <label>
-          涉及服务商
-          <select
-            value={filters.provider}
-            onChange={(event) =>
-              setFilters({ ...filters, provider: event.target.value })
-            }
-          >
-            <option value="">全部服务商</option>
-            {[...new Set(catalog.map((item) => item.provider))].map((key) => (
-              <option key={key}>{key}</option>
-            ))}
-          </select>
-        </label>
-        <label>
           只看
           <select
             value={filters.attention}
@@ -391,8 +376,70 @@ export function BillingEconomics({
             <option value="">全部生成</option>
             <option value="pending">待结算</option>
             <option value="unknown_cost">成本待核对</option>
+            <option value="unknown_revenue">收入待核对</option>
           </select>
         </label>
+        {/* 科目、服务商与用户编号属于排查口径，收进高级筛选（方案：主筛选只留
+            时间 + 客户 + 业务模块）。 */}
+        <details className="billing-economics-advanced">
+          <summary>高级筛选</summary>
+          <label>
+            统计周期
+            <select
+              value={filters.grain}
+              onChange={(event) =>
+                setFilters({ ...filters, grain: event.target.value })
+              }
+            >
+              <option value="day">天</option>
+              <option value="week">周（周一开始）</option>
+              <option value="month">月 / 多月</option>
+              <option value="year">年</option>
+            </select>
+          </label>
+          <label>
+            业务科目
+            <select
+              value={filters.service}
+              onChange={(event) =>
+                setFilters({ ...filters, service: event.target.value })
+              }
+            >
+              <option value="">全部科目</option>
+              {catalog.map((item) => (
+                <option key={item.service} value={item.service}>
+                  {item.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            服务商
+            <select
+              value={filters.provider}
+              onChange={(event) =>
+                setFilters({ ...filters, provider: event.target.value })
+              }
+            >
+              <option value="">全部服务商</option>
+              {[...new Set(catalog.map((item) => item.provider))].map((key) => (
+                <option key={key} value={key}>
+                  {providerLabels[key] ?? key}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            用户 ID
+            <input
+              value={filters.user_id}
+              onChange={(event) =>
+                setFilters({ ...filters, user_id: event.target.value })
+              }
+              placeholder="排查用，全部用户及平台后台"
+            />
+          </label>
+        </details>
         <div className="billing-economics-filters__actions">
           <button type="submit" disabled={busy}>
             查询

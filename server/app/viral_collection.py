@@ -41,6 +41,25 @@ def enqueue_due_viral_collections(conn: BusinessConnection) -> None:
     ]
     if not keywords:
         return
+    # 月度预算门槛（方案 P1 采集设置）：本月平台侧采集成本已达预算时跳过
+    # 定时入队（手动「立即采集」不拦——运营知情下的手动动作仍可用）。
+    budget_row = conn.execute(
+        "SELECT monthly_budget_fen FROM viral_runtime_controls WHERE id=1"
+    ).fetchone()
+    if budget_row is not None and budget_row["monthly_budget_fen"] is not None:
+        spent = conn.execute(
+            """
+            SELECT COALESCE(SUM(COALESCE(a.cost_fen, 0)), 0)
+            FROM billing_attempts a
+            JOIN billing_operations o ON o.id = a.operation_id
+            WHERE o.user_id IS NULL AND o.collection_batch_id IS NOT NULL
+              AND a.completed_at::timestamp AT TIME ZONE 'UTC'
+                  >= date_trunc('month', now() AT TIME ZONE 'Asia/Shanghai')
+                     AT TIME ZONE 'Asia/Shanghai'
+            """
+        ).fetchone()
+        if spent is not None and int(spent[0] or 0) >= int(budget_row["monthly_budget_fen"]):
+            return
     due = conn.execute(
         "SELECT 1 FROM viral_runtime_controls WHERE id=1 "
         "AND (next_collection_at IS NULL OR next_collection_at <= CURRENT_TIMESTAMP)"
@@ -194,6 +213,45 @@ def run_viral_collection(lease: ViralRefreshLease, storage: StorageAdapter) -> N
         config, progress = json.loads(row[0]), json.loads(row[1])
     if config.get("kind") == "single_archive":
         _run_single_archive(lease, storage, str(config["video_id"]))
+        return
+    if config.get("kind") == "archive_batch":
+        # 批量素材准备（方案 P1 内容模块 C-2）：逐条复用单条转存管线；
+        # 带 feature_after 意图时，每条就绪后当场上首页并按原始操作人写审计
+        # ——操作发生在后台，但责任落在发起「上首页」的那个人身上。
+        feature_after = config.get("feature_after") or None
+        for video_id in config.get("video_ids", []):
+            _run_single_archive(lease, storage, str(video_id))
+            if not feature_after:
+                continue
+            with _connection() as conn:
+                _require_lease(conn, lease)
+                applied = conn.execute(
+                    "UPDATE viral_videos SET homepage_featured=1, collection_published=1 "
+                    "WHERE platform=%s AND video_id=%s AND deleted_at IS NULL "
+                    "RETURNING platform, video_id",
+                    (lease.platform, str(video_id)),
+                ).fetchone()
+                if applied is None:
+                    continue
+                conn.execute(
+                    """INSERT INTO audit_logs(
+                        id,actor_user_id,action,entity_type,entity_id,metadata_json)
+                    VALUES(%s,%s,'viral_video.curation','viral_video',%s,%s)""",
+                    (
+                        str(uuid4()),
+                        str(feature_after.get("actor_user_id") or ""),
+                        f"{lease.platform}:{video_id}",
+                        json.dumps(
+                            {
+                                "action": "feature",
+                                "reason": str(feature_after.get("reason") or ""),
+                                "request_id": str(feature_after.get("request_id") or ""),
+                                "prepared_then_featured": True,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ),
+                )
         return
     with _connection() as conn:
         _require_lease(conn, lease)

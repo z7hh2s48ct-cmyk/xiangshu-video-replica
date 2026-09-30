@@ -15,6 +15,12 @@ vi.mock("../api.admin", () => ({
   exportBillingReportCsv: vi.fn(),
 }));
 
+/** 新导航：默认页签是经营看板，计费明细在「成本核对」页签下。 */
+async function openCostTab() {
+  fireEvent.click(screen.getByRole("tab", { name: "成本核对" }));
+  return screen.findByRole("table", { name: "生成明细" });
+}
+
 test.each([
   ["68.000000", "68.0 秒"],
   ["12.350000", "12.4 秒"],
@@ -47,7 +53,7 @@ test.each([
       } as never;
     });
     render(<AnalyticsPage />);
-    const table = await screen.findByRole("table", { name: "生成明细" });
+    const table = await openCostTab();
     expect(
       within(table).getByRole("cell", { name: expected }),
     ).toBeInTheDocument();
@@ -102,19 +108,14 @@ test.each([
       return { items: [operation], total: 1 } as never;
     });
     render(<AnalyticsPage readOnly />);
-    const table = await screen.findByRole("table", { name: "生成明细" });
+    const table = await openCostTab();
+    // 成本核对页签的明细表只含成本口径列（收入结论在经营看板），按售价折合
+    // 与确认收入两列随利润总览页签移除；金额口径由详情抽屉承载。
     const headers = within(table)
       .getAllByRole("columnheader")
       .map((cell) => cell.textContent);
-    const cells = within(within(table).getAllByRole("row")[1]).getAllByRole(
-      "cell",
-    );
-    expect(headers).toContain("按售价折合");
-    expect(headers).toContain("确认收入");
-    expect(cells[headers.indexOf("按售价折合")]).toHaveTextContent(
-      nominalDisplay,
-    );
-    expect(cells[headers.indexOf("确认收入")]).toHaveTextContent(paidDisplay);
+    expect(headers).not.toContain("按售价折合");
+    expect(headers).not.toContain("确认收入");
     fireEvent.click(within(table).getByRole("button", { name: "查看详情" }));
     const detail = await screen.findByRole("complementary", {
       name: "生成核算详情",
@@ -126,67 +127,161 @@ test.each([
     expect(
       within(detail).getByRole("cell", { name: "68.3 秒" }),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("tab", { name: "成本明细" }));
-    expect(
-      within(table).queryByRole("columnheader", { name: "确认收入" }),
-    ).not.toBeInTheDocument();
-    expect(
-      within(table).queryByRole("columnheader", { name: "按售价折合" }),
-    ).not.toBeInTheDocument();
   },
 );
 
-test("switches profit and cost columns while retaining filters and loaded data", async () => {
-  const totals = {
-    operation_count: 2,
-    charged_credits: 5,
-    known_revenue_fen: 200,
-    known_cost_fen: 50,
-    profit_fen: null,
-    legacy_cost_count: 2,
-    legacy_settlement_count: 1,
-    platform_cost_fen: 10,
-    unknown_cost_count: 0,
-    unknown_revenue_count: 0,
-    pending_count: 0,
-    refunded_credits: 0,
-    seconds: "3",
-    images: "0",
-    calls: "0",
-  };
+test("lands on the business dashboard by default and keeps cost page behind its tab", async () => {
   vi.mocked(adminRead).mockImplementation(async (url) => {
+    if (url.includes("business/overview"))
+      return {
+        start: "2026-09-01",
+        end: "2026-09-30",
+        prev_start: "2026-08-01",
+        prev_end: "2026-08-31",
+        metrics: {
+          recharge_fen: 15000,
+          paying_customers: 2,
+          new_paying_customers: 1,
+          revenue_fen: 100,
+          cost_fen: 2.5,
+          unknown_cost_count: 1,
+          pending_count: 0,
+          prepaid_credits: 355,
+          prepaid_fen: 355,
+        },
+        prev: {
+          recharge_fen: 0,
+          paying_customers: 0,
+          new_paying_customers: 0,
+          revenue_fen: 0,
+          cost_fen: 0,
+          unknown_cost_count: 0,
+          pending_count: 0,
+          prepaid_credits: 0,
+          prepaid_fen: 0,
+        },
+        daily: [],
+        modules: [],
+        top_customers: [],
+      } as never;
     if (url.includes("catalog")) return { services: [] } as never;
     if (url.includes("statistics"))
-      return {
-        totals,
-        periods: [{ ...totals, period: "2026-09-13" }],
-        basis: "",
-      } as never;
+      return { totals: {}, periods: [], basis: "" } as never;
     return { items: [], total: 0 } as never;
   });
   render(<AnalyticsPage />);
-  const profit = await screen.findByRole("table", { name: "周期汇总" });
+
+  const dashboard = await screen.findByRole("region", { name: "经营看板" });
+  expect(within(dashboard).getByText("¥150.00")).toBeInTheDocument();
   expect(
-    screen.getByText(/2 条历史成本、1 条历史结算待核对/),
-  ).toBeInTheDocument();
-  expect(within(profit).getByText("待核对")).toBeInTheDocument();
+    within(dashboard).getAllByText(/含 1 项待核对/).length,
+  ).toBeGreaterThan(0);
   expect(
-    within(profit).getByRole("columnheader", { name: "利润" }),
-  ).toBeInTheDocument();
-  fireEvent.change(screen.getByLabelText("用户 ID"), {
-    target: { value: "test-customer" },
-  });
-  const calls = vi.mocked(adminRead).mock.calls.length;
-  fireEvent.click(screen.getByRole("tab", { name: "成本明细" }));
-  const cost = screen.getByRole("table", { name: "周期汇总" });
-  expect(
-    within(cost).queryByRole("columnheader", { name: "利润" }),
-  ).not.toBeInTheDocument();
+    within(dashboard).queryByRole("table", { name: "生成明细" }),
+  ).toBeNull();
+
+  fireEvent.click(screen.getByRole("tab", { name: "成本核对" }));
+  const cost = await screen.findByRole("table", { name: "周期汇总" });
   expect(
     within(cost).getByRole("columnheader", { name: "平台承担成本" }),
   ).toBeInTheDocument();
-  expect(screen.getByLabelText("用户 ID")).toHaveValue("test-customer");
-  expect(adminRead).toHaveBeenCalledTimes(calls);
+  // 队列卡就位：三个队列与清单同口径。
+  expect(screen.getByRole("button", { name: /待结算/ })).toBeInTheDocument();
+});
+
+test("cost queue cards count with the same scope as the filtered list", async () => {
+  vi.mocked(adminRead).mockImplementation(async (url) => {
+    if (url.includes("business/overview")) return { metrics: null } as never;
+    if (url.includes("catalog")) return { services: [] } as never;
+    if (url.includes("statistics"))
+      return { totals: {}, periods: [], basis: "" } as never;
+    if (url.includes("attention=pending"))
+      return { items: [], total: 3 } as never;
+    if (
+      url.includes("attention=unknown_cost") &&
+      url.includes("start=2019-01-01")
+    )
+      return { items: [], total: 7 } as never;
+    if (url.includes("attention=unknown_cost"))
+      return { items: [], total: 5 } as never;
+    return { items: [], total: 0 } as never;
+  });
+  render(<AnalyticsPage />);
+  fireEvent.click(screen.getByRole("tab", { name: "成本核对" }));
+
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: /待结算/ })).toHaveTextContent(
+      "3",
+    ),
+  );
+  expect(screen.getByRole("button", { name: /待核对成本/ })).toHaveTextContent(
+    "5",
+  );
+  expect(screen.getByRole("button", { name: /历史待核对/ })).toHaveTextContent(
+    "7",
+  );
+
+  // 点击「历史待核对」→ 明细区以全历史 + unknown_cost 筛选重挂（明细请求带 limit=100）。
+  fireEvent.click(screen.getByRole("button", { name: /历史待核对/ }));
+  await waitFor(() => {
+    const called = vi
+      .mocked(adminRead)
+      .mock.calls.some(
+        ([url]) =>
+          String(url).includes("start=2019-01-01") &&
+          String(url).includes("attention=unknown_cost") &&
+          String(url).includes("limit=100"),
+      );
+    expect(called).toBe(true);
+  });
+});
+
+test("attention dropdown offers revenue-pending alongside cost filters", async () => {
+  vi.mocked(adminRead).mockImplementation(async (url) => {
+    if (url.includes("business/overview")) return { metrics: null } as never;
+    if (url.includes("catalog")) return { services: [] } as never;
+    if (url.includes("statistics"))
+      return { totals: {}, periods: [], basis: "" } as never;
+    return { items: [], total: 0 } as never;
+  });
+  render(<AnalyticsPage />);
+  await openCostTab();
+
+  const attention = screen.getByLabelText("只看");
+  expect(
+    within(attention).getByRole("option", { name: "收入待核对" }),
+  ).toBeInTheDocument();
+  fireEvent.change(attention, { target: { value: "unknown_revenue" } });
+  fireEvent.click(screen.getByRole("button", { name: "查询" }));
+  await waitFor(() => {
+    const called = vi
+      .mocked(adminRead)
+      .mock.calls.some(([url]) => String(url).includes("unknown_revenue"));
+    expect(called).toBe(true);
+  });
+});
+
+test("customer name search reaches the operations query", async () => {
+  vi.mocked(adminRead).mockImplementation(async (url) => {
+    if (url.includes("business/overview")) return { metrics: null } as never;
+    if (url.includes("catalog")) return { services: [] } as never;
+    if (url.includes("statistics"))
+      return { totals: {}, periods: [], basis: "" } as never;
+    return { items: [], total: 0 } as never;
+  });
+  render(<AnalyticsPage />);
+  await openCostTab();
+
+  fireEvent.change(screen.getByLabelText("客户"), {
+    target: { value: "某某公司" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "查询" }));
+  await waitFor(() => {
+    const called = vi
+      .mocked(adminRead)
+      .mock.calls.some(([url]) => String(url).includes("username="));
+    expect(called).toBe(true);
+  });
 });
 
 describe("billing report export", () => {
@@ -268,7 +363,7 @@ describe("billing report export", () => {
   test("hides the export entry from auditor sessions", async () => {
     render(<AnalyticsPage readOnly />);
 
-    await screen.findByRole("table", { name: "生成明细" });
+    await screen.findByRole("region", { name: "经营看板" });
     expect(screen.queryByRole("region", { name: "计费报表导出" })).toBeNull();
   });
 });

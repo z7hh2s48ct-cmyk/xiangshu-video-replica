@@ -196,13 +196,16 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       "客户 ID",
       "注册时间",
       "状态",
+      "当前权益",
       "可用积分",
-      "累计消耗",
+      "累计充值",
+      "本月消耗",
       "生成情况",
+      "最近活跃",
       "操作",
     ]);
-    expect(screen.getByLabelText("customer-1 已结算消耗")).toHaveTextContent(
-      "5",
+    expect(screen.getByLabelText("customer-1 累计充值")).toHaveTextContent(
+      "¥0.00",
     );
     const firstDataRow = screen
       .getAllByRole("row")
@@ -226,9 +229,13 @@ describe("CustomersPage (ADM-02 / T33)", () => {
         timeZone: "Asia/Shanghai",
       }),
       "活跃",
+      // 无生效专项折扣显示「原价」（方案 P1 经营字段）。
+      "原价",
       "0 积分",
-      "5 积分",
+      "¥0.00",
+      "0 积分",
       "成功 5 / 8 失败 1 · 进行中 1",
+      "—",
       "展开详情",
     ]);
   });
@@ -940,6 +947,9 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     expect(toggle).toHaveAttribute("aria-expanded", "false");
 
     fireEvent.click(toggle);
+    // 六页签（方案 P1）：资金数据在「充值与积分」、设备在「登录与设备」。
+    fireEvent.click(screen.getByRole("tab", { name: "充值与积分" }));
+    fireEvent.click(screen.getByRole("tab", { name: "登录与设备" }));
 
     expect(screen.queryByRole("table", { name: "客户列表" })).toBeNull();
     const detailPanel = screen
@@ -981,7 +991,12 @@ describe("CustomersPage (ADM-02 / T33)", () => {
         userId: "user-1",
         limit: 50,
       });
-      expect(adminApi.listCustomerSessions).not.toHaveBeenCalled();
+      // 方案 P1「登录与设备」页签：设备 + 该客户的在线会话一并挂载；
+      // 调账历史仍不在详情内直连（资金中心入口）。
+      expect(adminApi.listCustomerSessions).toHaveBeenCalledWith(
+        "user-1",
+        expect.anything(),
+      );
       expect(adminApi.listAdminAdjustments).not.toHaveBeenCalled();
     });
     expect(
@@ -1058,6 +1073,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
 
     render(<CustomersPage />);
     fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    fireEvent.click(screen.getByRole("tab", { name: "充值与积分" }));
 
     const toggle = await screen.findByRole("button", { name: "查单日志" });
     // 懒加载：没点之前不发请求。
@@ -1103,6 +1119,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
 
     render(<CustomersPage />);
     fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    fireEvent.click(screen.getByRole("tab", { name: "价格与权益" }));
 
     expect(await screen.findByText(/当前 ¥10.00 \/ 秒/)).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("售价（元/秒）"), {
@@ -1154,6 +1171,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
 
     let view = render(<CustomersPage operatorId="admin-retry" />);
     fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    fireEvent.click(screen.getByRole("tab", { name: "充值与积分" }));
 
     fireEvent.change(await screen.findByLabelText("发放积分"), {
       target: { value: "10" },
@@ -1203,6 +1221,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "← 返回客户列表" }));
     fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    fireEvent.click(screen.getByRole("tab", { name: "充值与积分" }));
     expect(screen.getByLabelText("发放积分")).toBeDisabled();
     expect(
       screen.getByRole("button", { name: "重试确认上次发放" }),
@@ -1213,12 +1232,14 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       <CustomersPage operatorId="other-admin" />,
     );
     fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    fireEvent.click(screen.getByRole("tab", { name: "充值与积分" }));
     expect(screen.getByLabelText("发放积分")).toBeEnabled();
     expect(screen.getByRole("button", { name: "发放赠送积分" })).toBeEnabled();
     otherOperatorView.unmount();
 
     view = render(<CustomersPage operatorId="admin-retry" />);
     fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    fireEvent.click(screen.getByRole("tab", { name: "充值与积分" }));
     expect(screen.getByLabelText("发放积分")).toBeDisabled();
 
     fireEvent.click(screen.getByRole("button", { name: "重试确认上次发放" }));
@@ -1303,6 +1324,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
 
     render(<CustomersPage operatorId="admin-ticket" />);
     fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    fireEvent.click(screen.getByRole("tab", { name: "充值与积分" }));
 
     fireEvent.change(await screen.findByLabelText("积分来源"), {
       target: { value: "CS_TICKET" },
@@ -1383,6 +1405,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
 
     let view = render(<CustomersPage operatorId="admin-in-flight" />);
     fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    fireEvent.click(screen.getByRole("tab", { name: "充值与积分" }));
     fireEvent.change(await screen.findByLabelText("发放积分"), {
       target: { value: "12" },
     });
@@ -1402,6 +1425,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     view.unmount();
     view = render(<CustomersPage operatorId="admin-in-flight" />);
     fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    fireEvent.click(screen.getByRole("tab", { name: "充值与积分" }));
     expect(screen.getByLabelText("发放积分")).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "重试确认上次发放" }));
     fireEvent.click(
@@ -1420,6 +1444,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     view.unmount();
     view = render(<CustomersPage operatorId="admin-in-flight" />);
     fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    fireEvent.click(screen.getByRole("tab", { name: "充值与积分" }));
     expect(screen.getByLabelText("发放积分")).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "重试确认上次发放" }));
     fireEvent.click(
@@ -1491,6 +1516,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
 
     render(<CustomersPage operatorId="admin-late-success" />);
     fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    fireEvent.click(screen.getByRole("tab", { name: "充值与积分" }));
     fireEvent.change(await screen.findByLabelText("发放积分"), {
       target: { value: "10" },
     });
@@ -1509,6 +1535,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "← 返回客户列表" }));
     fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    fireEvent.click(screen.getByRole("tab", { name: "充值与积分" }));
     fireEvent.click(screen.getByRole("button", { name: "重试确认上次发放" }));
     fireEvent.click(
       within(
@@ -1571,6 +1598,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
 
     render(<CustomersPage operatorId="admin-storage-failure" />);
     fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    fireEvent.click(screen.getByRole("tab", { name: "充值与积分" }));
     fireEvent.change(await screen.findByLabelText("发放积分"), {
       target: { value: "8" },
     });
@@ -1612,6 +1640,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
 
     render(<CustomersPage operatorId="admin-rejected" />);
     fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    fireEvent.click(screen.getByRole("tab", { name: "充值与积分" }));
     fireEvent.change(await screen.findByLabelText("发放积分"), {
       target: { value: "10" },
     });
@@ -1651,6 +1680,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
 
     render(<CustomersPage readOnly />);
     fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    fireEvent.click(screen.getByRole("tab", { name: "价格与权益" }));
 
     expect(
       await screen.findByText("审计员仅可查看定价，不能修改。"),
@@ -1739,8 +1769,9 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       ).toHaveFocus();
 
       fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+      // 意图自动切到「充值与积分」（赠送表单所在页签）并滚动定位。
       expect(
-        screen.getByRole("button", { name: "发放赠送积分" }),
+        await screen.findByRole("button", { name: "发放赠送积分" }),
       ).toBeInTheDocument();
       await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
     });
@@ -1763,12 +1794,10 @@ describe("CustomersPage (ADM-02 / T33)", () => {
         await screen.findByText(/退款扣减在客户详情内完成/),
       ).toBeInTheDocument();
       fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+      // 退款意图自动落「充值与积分」；顶部「开通套餐」按钮跨页签可达（P0-1）。
       expect(screen.queryByRole("button", { name: "后台加款" })).toBeNull();
       expect(
-        screen.getByRole("button", { name: "开通套餐（已收款）" }),
-      ).toBeInTheDocument();
-      expect(
-        screen.getByRole("button", { name: "提交退款扣减" }),
+        await screen.findByRole("button", { name: "提交退款扣减" }),
       ).toBeInTheDocument();
       await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
     });

@@ -1,12 +1,13 @@
-import { type FormEvent, useState } from "react";
-import { exportBillingReportCsv } from "../api.admin";
+import { type FormEvent, useEffect, useState } from "react";
+import { adminRead, exportBillingReportCsv } from "../api.admin";
 import { type BillingAttention, BillingEconomics } from "./BillingEconomics";
+import { BusinessDashboard } from "./BusinessDashboard";
 import "./economics.css";
 import { TabBar } from "./ui/TabBar";
 
 const tabs = [
-  { id: "profit", label: "利润总览" },
-  { id: "cost", label: "成本明细" },
+  { id: "dashboard", label: "经营看板" },
+  { id: "cost", label: "成本核对" },
 ];
 
 /** 镜像服务端 export_controller._MAX_EXPORT_DAYS，用于提交前的本地拦截。 */
@@ -129,20 +130,95 @@ function ReportExport() {
   );
 }
 
-/**
- * v4 导航合并 — 经营分析：利润总览（每日对外售价 + 收入/成本/毛利报表）
- * 与成本明细（按日成本构成，随成本统计任务接入）。
- */
+/** 成本核对队列卡：点击即把下方明细筛到对应队列，条数与清单同口径。 */
+function CostQueues({ onPick }: { onPick: (queue: CostQueue) => void }) {
+  const [counts, setCounts] = useState<Record<CostQueue, number | undefined>>({
+    pending: undefined,
+    unknown_cost: undefined,
+    legacy: undefined,
+  });
+  const [error, setError] = useState("");
+  const monthStart = `${today().slice(0, 7)}-01`;
+
+  useEffect(() => {
+    let active = true;
+    // 队列计数用 limit=1 的明细请求拿 total：与点击后清单完全同口径。
+    const queues: { key: CostQueue; query: string }[] = [
+      {
+        key: "pending",
+        query: `start=${monthStart}&end=${today()}&attention=pending&limit=1`,
+      },
+      {
+        key: "unknown_cost",
+        query: `start=${monthStart}&end=${today()}&attention=unknown_cost&limit=1`,
+      },
+      {
+        key: "legacy",
+        query: `start=2019-01-01&end=${today()}&attention=unknown_cost&limit=1`,
+      },
+    ];
+    void Promise.all(
+      queues.map(async ({ key, query }) =>
+        adminRead<{ total: number }>(
+          `/api/control/billing/operations?${query}`,
+          "读取待核对队列失败",
+        ).then((result) => [key, result.total] as const),
+      ),
+    )
+      .then((entries) => {
+        if (active)
+          setCounts(Object.fromEntries(entries) as Record<CostQueue, number>);
+      })
+      .catch((cause: unknown) => {
+        if (active)
+          setError(
+            cause instanceof Error ? cause.message : "读取待核对队列失败",
+          );
+      });
+    return () => {
+      active = false;
+    };
+  }, [monthStart]);
+
+  const cards: { key: CostQueue; label: string }[] = [
+    { key: "pending", label: "待结算" },
+    { key: "unknown_cost", label: "待核对成本" },
+    { key: "legacy", label: "历史待核对" },
+  ];
+  return (
+    <section
+      className="economics-kpis economics-kpis--four"
+      aria-label="待核对队列"
+    >
+      {error && <p role="alert">{error}</p>}
+      {cards.map((card) => (
+        <article key={card.key}>
+          <button type="button" onClick={() => onPick(card.key)}>
+            <span>{card.label}</span>
+            <strong>{counts[card.key] ?? "…"}</strong>
+          </button>
+        </article>
+      ))}
+    </section>
+  );
+}
+
+type CostQueue = "pending" | "unknown_cost" | "legacy";
+
+/** 经营分析 v2：经营看板（老板看结论）与成本核对（财务处理待核对）两页签。 */
 export function AnalyticsPage({
   readOnly = false,
-  initialTab = "profit",
+  initialTab = "dashboard",
   initialAttention = "",
+  initialStart,
 }: {
   readOnly?: boolean;
-  initialTab?: "profit" | "cost";
+  initialTab?: "dashboard" | "cost";
   initialAttention?: BillingAttention;
+  initialStart?: string;
 }) {
   const [tab, setTab] = useState<string>(initialTab);
+  const [queue, setQueue] = useState<{ key: CostQueue; seq: number }>();
   return (
     <div>
       <TabBar
@@ -151,13 +227,33 @@ export function AnalyticsPage({
         items={tabs}
         onChange={setTab}
       />
-      {/* 导出端点要求 AdminWriter，auditor 会话不渲染入口。 */}
-      {readOnly ? null : <ReportExport />}
-      <BillingEconomics
-        initialAttention={initialAttention}
-        readOnly={readOnly}
-        view={tab === "cost" ? "cost" : "profit"}
-      />
+      {tab === "cost" && (
+        <CostQueues
+          onPick={(key) => setQueue({ key, seq: (queue?.seq ?? 0) + 1 })}
+        />
+      )}
+      {tab === "cost" && (
+        <BillingEconomics
+          key={`cost:${queue?.seq ?? 0}`}
+          initialAttention={
+            queue?.key === "pending"
+              ? "pending"
+              : queue?.key === "legacy" || queue?.key === "unknown_cost"
+                ? "unknown_cost"
+                : initialAttention
+          }
+          initialStart={queue?.key === "legacy" ? "2019-01-01" : initialStart}
+          readOnly={readOnly}
+          view="cost"
+        />
+      )}
+      {tab === "dashboard" && (
+        <>
+          <BusinessDashboard readOnly={readOnly} />
+          {/* 导出端点要求 AdminWriter，auditor 会话不渲染入口。 */}
+          {readOnly ? null : <ReportExport />}
+        </>
+      )}
     </div>
   );
 }

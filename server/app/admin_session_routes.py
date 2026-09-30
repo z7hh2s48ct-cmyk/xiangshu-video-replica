@@ -85,6 +85,7 @@ def revoke_customer_session(
 @router.get("/customer-sessions/live")
 def list_live_sessions(
     actor: AdminReader,
+    keyword: str = "",
     limit: int = DEFAULT_LIST_LIMIT,
     offset: int = 0,
 ) -> dict[str, object]:
@@ -93,8 +94,20 @@ def list_live_sessions(
     Same liveness semantics as the per-customer view (DB-clock lease check),
     across all users instead of one — the console "今日概览/会话" entry point
     so operators no longer need to know a customer id upfront.
+
+    ``keyword`` 同时匹配用户名与公司名（方案 P1 登录与设备改造：用名称找人），
+    客户编号只在详情链路里出现。
     """
     bounded_limit, bounded_offset = page_bounds(limit, offset, max_limit=MAX_LIST_LIMIT)
+    # 用户名/公司名子查询：KEYWORD 在两处 LIKE 复用，空串不过滤。
+    keyword_filter = ""
+    params: list[object] = []
+    if keyword.strip():
+        pattern = f"%{keyword.strip()}%"
+        keyword_filter = (
+            " AND (u.username ILIKE %s OR u.display_name ILIKE %s OR css.user_id ILIKE %s)"
+        )
+        params.extend([pattern, pattern, pattern])
 
     try:
         with pg_transaction() as conn:
@@ -109,20 +122,22 @@ def list_live_sessions(
                 JOIN customer_devices cd ON cd.id = css.device_id
                 JOIN users u ON u.id = css.user_id
                 WHERE cd.status = 'BOUND'
-                  AND css.lease_until::timestamptz > clock_timestamp()
+                  AND css.lease_until::timestamptz > clock_timestamp(){keyword_filter}
                 ORDER BY css.created_at DESC, css.session_id
                 {PAGE_CLAUSE}
                 """,
-                (bounded_limit, bounded_offset),
+                (*params, bounded_limit, bounded_offset),
             ).fetchall()
 
             total_row = conn.execute(
-                """
+                f"""
                 SELECT COUNT(*) FROM customer_session_state css
                 JOIN customer_devices cd ON cd.id = css.device_id
+                JOIN users u ON u.id = css.user_id
                 WHERE cd.status = 'BOUND'
-                  AND css.lease_until::timestamptz > clock_timestamp()
-                """
+                  AND css.lease_until::timestamptz > clock_timestamp(){keyword_filter}
+                """,
+                tuple(params),
             ).fetchone()
     except (RuntimeError, MissingDatabaseConfigError) as exc:
         raise _http(

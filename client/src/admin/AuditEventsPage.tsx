@@ -1,11 +1,91 @@
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 
-import { type AuditLogItem, listAuditLog } from "../api.admin";
+import {
+  type AuditLogItem,
+  downloadAuditLogCsv,
+  listAuditLog,
+} from "../api.admin";
 import { DataTable } from "./ui/DataTable";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
-import { formatDateTime } from "./ui/vocabulary";
+import { formatDateTime, formatFen } from "./ui/vocabulary";
 import "./admin-audit.css";
+
+/** 审计事件分组（方案 P1）：「分组 → 事件」两级筛选；键与服务端一致。 */
+const EVENT_GROUP_OPTIONS = [
+  ["", "全部分组"],
+  ["funds", "资金"],
+  ["pricing", "价格与套餐"],
+  ["account", "账号与设备"],
+  ["system", "系统配置"],
+  ["secret_export", "密钥与导出"],
+  ["login", "登录"],
+] as const;
+
+/** 分组包含的事件类型；与服务端 EVENT_GROUPS 同口径，用于过滤事件下拉。 */
+const EVENT_GROUP_MEMBERS: Record<string, ReadonlySet<string>> = {
+  funds: new Set(["ADMIN_ADJUSTMENT", "payment.sync"]),
+  pricing: new Set([
+    "operation_rate.update",
+    "billing.tariff.update",
+    "customer_pricing.update",
+    "customer_unit_price.update",
+    "customer_unit_price.reset",
+    "recharge_package.create",
+    "recharge_package.update",
+    "customer_discount.create",
+    "customer_discount.deactivate",
+    "customer_package.grant",
+  ]),
+  account: new Set([
+    "ADMIN_DEVICE_DISABLE",
+    "ADMIN_DEVICE_UNBIND",
+    "ADMIN_SESSION_LOGOUT",
+    "h3.account.update",
+    "admin.activation_code_batch.created",
+    "ACTIVATION_CODE_ISSUED",
+    "ACTIVATION_CODE_ARCHIVED",
+    "ACTIVATION_CODE_DELIVERED",
+  ]),
+  system: new Set([
+    "provider_settings.update",
+    "provider_settings.paid_test",
+    "runtime_settings.update",
+    "payment.provider.update",
+    "payment.wechat.update",
+    "control.reconciliation.read",
+  ]),
+  secret_export: new Set([
+    "provider_settings.secret_reveal",
+    "admin.activation_code.revealed",
+    "admin.activation_code.revealed_replay",
+    "external_call.response_view",
+    "control.export",
+  ]),
+  login: new Set(["admin_session.password_login", "admin_session.exchange"]),
+};
+
+/** 计费科目 key → 业务名（方案 P1：科目不再直出英文 key）。 */
+const SUBJECT_LABELS: Record<string, string> = {
+  video_generation_768p: "视频生成 · 768P",
+  video_generation_2k: "视频生成 · 2K",
+  video_analysis_768p: "视频分析 · 768P",
+  video_analysis_2k: "视频分析 · 2K",
+  external_price_768p: "外部售价 · 768P",
+  external_price_2k: "外部售价 · 2K",
+  first_frame_image: "首帧图片",
+  character_sheet_image: "人物五视图",
+  image_generation: "图片生成",
+  character_sheet: "人物表",
+  character_view: "人物单视图",
+  context_ir: "上下文改写",
+  customer_unit_price: "客户单价",
+};
+
+function subjectLabel(subject: string | null | undefined): string {
+  if (!subject) return "";
+  return SUBJECT_LABELS[subject] ?? subject;
+}
 
 const EVENT_OPTIONS = [
   ["", "全部事件"],
@@ -99,7 +179,7 @@ function compactText(value: string, maxLength = 20) {
 }
 
 function priceUnit(item: AuditLogItem) {
-  if (item.event_type.startsWith("customer_unit_price.")) return "分/秒";
+  if (item.event_type.startsWith("customer_unit_price.")) return "/秒";
   switch (item.change_subject) {
     case "video_generation_768p":
     case "video_generation_2k":
@@ -107,18 +187,24 @@ function priceUnit(item: AuditLogItem) {
     case "video_analysis_2k":
     case "external_price_768p":
     case "external_price_2k":
-      return "分/秒";
+      return "/秒";
     case "first_frame_image":
     case "character_sheet_image":
     case "image_generation":
     case "character_sheet":
     case "character_view":
-      return "分/张";
+      return "/张";
     case "context_ir":
-      return "分/次";
+      return "/次";
     default:
-      return "分";
+      return "";
   }
+}
+
+/** 金额统一 ¥x.xx（方案 P1 词典：审计里不再出现裸「分」）。 */
+function fenAmount(value: string | number | null | undefined): string {
+  if (value === null || value === undefined || value === "") return "—";
+  return formatFen(Number(value));
 }
 
 function compactAmount(value?: string | null) {
@@ -140,7 +226,7 @@ function tariffChange(item: AuditLogItem) {
     if (after?.unit_credits)
       parts.push(`售价 ${compactAmount(after.unit_credits)} 积分`);
     if (after?.unit_cost_fen)
-      parts.push(`成本 ${compactAmount(after.unit_cost_fen)} 分`);
+      parts.push(`成本 ${fenAmount(after.unit_cost_fen)}`);
   } else {
     if ((before.unit_credits ?? null) !== (after?.unit_credits ?? null))
       parts.push(
@@ -148,13 +234,14 @@ function tariffChange(item: AuditLogItem) {
       );
     if ((before.unit_cost_fen ?? null) !== (after?.unit_cost_fen ?? null))
       parts.push(
-        `成本 ${compactAmount(before.unit_cost_fen)} → ${compactAmount(after?.unit_cost_fen)} 分`,
+        `成本 ${fenAmount(before.unit_cost_fen)} → ${fenAmount(after?.unit_cost_fen)}`,
       );
     if (Boolean(before.enabled) !== Boolean(after?.enabled))
       parts.push(after?.enabled ? "启用用户扣费" : "停用用户扣费");
   }
   if (parts.length === 0) return "未变更";
-  const prefix = item.change_subject ? `${item.change_subject}：` : "";
+  const label = subjectLabel(item.change_subject);
+  const prefix = label ? `${label}：` : "";
   return `${prefix}${parts.join(" · ")}`;
 }
 
@@ -167,14 +254,15 @@ function priceChange(item: AuditLogItem) {
   const newPrice = item.new_unit_price_fen;
   const unit = priceUnit(item);
   if (typeof oldPrice === "number" && typeof newPrice === "number") {
-    return `${oldPrice} → ${newPrice} ${unit}`;
+    return `${fenAmount(oldPrice)} → ${fenAmount(newPrice)} ${unit}`;
   }
-  if (typeof newPrice === "number") return `设置为 ${newPrice} ${unit}`;
+  if (typeof newPrice === "number")
+    return `设置为 ${fenAmount(newPrice)} ${unit}`;
   if (
     item.event_type === "customer_unit_price.reset" &&
     typeof oldPrice === "number"
   ) {
-    return `恢复默认（原 ${oldPrice} ${unit}）`;
+    return `恢复默认（原 ${fenAmount(oldPrice)} ${unit}）`;
   }
   if (item.change_subject) return "历史记录未保存变更值";
   return "—";
@@ -202,14 +290,17 @@ export function AuditEventsPage() {
   const [total, setTotal] = useState(0);
   const [actorDraft, setActorDraft] = useState("");
   const [targetDraft, setTargetDraft] = useState("");
+  const [groupDraft, setGroupDraft] = useState("");
   const [typeDraft, setTypeDraft] = useState("");
   const [scopeDraft, setScopeDraft] = useState<AuditScope>("admin");
   const [fromDraft, setFromDraft] = useState("");
   const [toDraft, setToDraft] = useState("");
+  const [detail, setDetail] = useState<AuditLogItem | null>(null);
   const [filters, setFilters] = useState<{
     scope: AuditScope;
     actor: string;
     target: string;
+    eventGroup: string;
     eventType: string;
     from: string;
     to: string;
@@ -217,6 +308,7 @@ export function AuditEventsPage() {
     scope: "admin",
     actor: "",
     target: "",
+    eventGroup: "",
     eventType: "",
     from: "",
     to: "",
@@ -230,6 +322,7 @@ export function AuditEventsPage() {
         scope: filters.scope,
         actorUsername: filters.actor || undefined,
         targetUsername: filters.target || undefined,
+        eventGroup: filters.eventGroup || undefined,
         eventType: filters.eventType || undefined,
         createdFrom: filters.from || undefined,
         createdTo: filters.to || undefined,
@@ -261,6 +354,7 @@ export function AuditEventsPage() {
       scope: scopeDraft,
       actor: actorDraft.trim(),
       target: targetDraft.trim(),
+      eventGroup: groupDraft,
       eventType: typeDraft.trim(),
       from: fromDraft.trim(),
       to: toDraft.trim(),
@@ -270,6 +364,7 @@ export function AuditEventsPage() {
   function handleReset() {
     setActorDraft("");
     setTargetDraft("");
+    setGroupDraft("");
     setTypeDraft("");
     setScopeDraft("admin");
     setFromDraft("");
@@ -279,10 +374,27 @@ export function AuditEventsPage() {
       scope: "admin",
       actor: "",
       target: "",
+      eventGroup: "",
       eventType: "",
       from: "",
       to: "",
     });
+  }
+
+  async function exportCsv() {
+    try {
+      await downloadAuditLogCsv({
+        scope: filters.scope,
+        actorUsername: filters.actor || undefined,
+        targetUsername: filters.target || undefined,
+        eventGroup: filters.eventGroup || undefined,
+        eventType: filters.eventType || undefined,
+        createdFrom: filters.from || undefined,
+        createdTo: filters.to || undefined,
+      });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "导出失败");
+    }
   }
 
   return (
@@ -308,13 +420,38 @@ export function AuditEventsPage() {
           </select>
         </label>
         <label>
+          事件分组
+          <select
+            aria-label="事件分组"
+            value={groupDraft}
+            onChange={(event) => {
+              // 切组后事件下拉只留该组事件；已选事件不属于新组时一并清空。
+              const nextGroup = event.target.value;
+              setGroupDraft(nextGroup);
+              const members = EVENT_GROUP_MEMBERS[nextGroup];
+              if (members && typeDraft && !members.has(typeDraft)) {
+                setTypeDraft("");
+              }
+            }}
+          >
+            {EVENT_GROUP_OPTIONS.map(([value, label]) => (
+              <option key={value || "all"} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
           事件类型
           <select
             aria-label="事件类型"
             value={typeDraft}
             onChange={(event) => setTypeDraft(event.target.value)}
           >
-            {EVENT_OPTIONS.map(([value, label]) => (
+            {EVENT_OPTIONS.filter(([value]) => {
+              const members = EVENT_GROUP_MEMBERS[groupDraft];
+              return !value || !members || members.has(value);
+            }).map(([value, label]) => (
               <option key={value || "all"} value={value}>
                 {label}
               </option>
@@ -367,6 +504,15 @@ export function AuditEventsPage() {
           >
             重置
           </button>
+          {/* 方案 P1：审计可导出，与列表同筛选口径（服务端 control.export 审计）。 */}
+          <button
+            className="secondary-button"
+            disabled={loading}
+            type="button"
+            onClick={() => void exportCsv()}
+          >
+            导出 CSV
+          </button>
         </div>
       </form>
 
@@ -389,7 +535,11 @@ export function AuditEventsPage() {
           }
         >
           {items.map((item) => (
-            <tr key={item.event_id}>
+            <tr
+              key={item.event_id}
+              className={item.sensitive ? "audit-row--sensitive" : undefined}
+              onClick={() => setDetail(item)}
+            >
               <td>{formatDateTime(item.created_at)}</td>
               <td>
                 <span
@@ -397,6 +547,7 @@ export function AuditEventsPage() {
                   title={item.event_type}
                 >
                   {eventLabel(item.event_type)}
+                  {item.sensitive ? " ·高敏" : ""}
                 </span>
               </td>
               <td>{item.actor_username || item.actor_user_id}</td>
@@ -433,6 +584,48 @@ export function AuditEventsPage() {
         total={total}
         onPageChange={setOffset}
       />
+
+      {detail && (
+        <aside className="audit-detail-drawer" aria-label="审计事件详情">
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => setDetail(null)}
+          >
+            关闭详情
+          </button>
+          <h3>
+            {eventLabel(detail.event_type)}
+            {detail.sensitive ? "（高敏）" : ""}
+          </h3>
+          <dl>
+            <dt>时间</dt>
+            <dd>{formatDateTime(detail.created_at)}</dd>
+            <dt>操作人</dt>
+            <dd>{detail.actor_username || detail.actor_user_id || "系统"}</dd>
+            <dt>目标客户</dt>
+            <dd>
+              {detail.target_username || "—"}
+              <small>
+                {detail.target_user_id ? `（${detail.target_user_id}）` : ""}
+              </small>
+            </dd>
+            <dt>来源单</dt>
+            <dd>
+              {detail.source_document_type} /{" "}
+              {detail.source_document_ref || "—"}
+            </dd>
+            <dt>变更明细</dt>
+            <dd>{priceChange(detail)}</dd>
+            <dt>原因</dt>
+            <dd>{detail.reason || "—"}</dd>
+            <dt>请求编号</dt>
+            <dd>
+              <code>{detail.request_id || "—"}</code>
+            </dd>
+          </dl>
+        </aside>
+      )}
     </section>
   );
 }

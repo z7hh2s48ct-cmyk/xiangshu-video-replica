@@ -292,6 +292,12 @@ class ControlGenerationRecordSummary(BaseModel):
     total: int
     counts: list[GenerationRecordCount]
     failure_reasons: list[AnalysisFailureReason]
+    # 方案 P1「顶部聚合 4 张卡」的后端数据：成功率 / 失败数由 counts 推出，
+    # 平均耗时只统计成功任务（失败任务的耗时没有运营含义）。
+    succeeded_count: int = 0
+    failed_count: int = 0
+    success_rate_pct: float | None = None
+    avg_duration_seconds: float | None = None
 
 
 class AnalysisDiagnosticAttempt(BaseModel):
@@ -859,17 +865,22 @@ def list_generation_records(
     _actor: ControlUser,
     username: str | None = None,
     status: str | None = None,
+    status_group: Literal["queued", "running", "succeeded", "failed", "attention"] | None = None,
     record_type: GenerationRecordType | None = None,
     failure_phase: str | None = None,
     created_from: str | None = None,
     created_to: str | None = None,
     task_ref: Annotated[str | None, Query(max_length=200)] = None,
+    project_name: Annotated[str | None, Query(max_length=100)] = None,
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> ControlGenerationRecordPage:
     """``task_ref``：我方任务编号、8 位短编号、第三方任务号或第三方请求编号，
-    任填一个都落到同一条记录（方案 P0-12）。"""
+    任填一个都落到同一条记录（方案 P0-12）。``status_group`` 是 5 组运营口径
+    （方案 P1），与显式 ``status`` 合并；``project_name`` 按项目名筛视频与
+    拆解记录。"""
     records: list[ControlGenerationRecord] = []
+    status = _merge_status(status, status_group)
     ref_filter = _task_ref_filter(conn, task_ref)
     scan_limit = offset + limit
     video_where, video_params = _generation_record_filters(
@@ -881,6 +892,7 @@ def list_generation_records(
         created_from=created_from,
         created_to=created_to,
         task_ref=ref_filter,
+        project_name=project_name,
     )
     oral_where, oral_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -891,6 +903,7 @@ def list_generation_records(
         created_from=created_from,
         created_to=created_to,
         task_ref=ref_filter,
+        project_name=project_name,
     )
     first_where, first_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -901,6 +914,7 @@ def list_generation_records(
         created_from=created_from,
         created_to=created_to,
         task_ref=ref_filter,
+        project_name=project_name,
     )
     sheet_where, sheet_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -911,6 +925,7 @@ def list_generation_records(
         created_from=created_from,
         created_to=created_to,
         task_ref=ref_filter,
+        project_name=project_name,
     )
     view_where, view_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -921,6 +936,7 @@ def list_generation_records(
         created_from=created_from,
         created_to=created_to,
         task_ref=ref_filter,
+        project_name=project_name,
     )
     source_where, source_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -931,6 +947,7 @@ def list_generation_records(
         created_from=created_from,
         created_to=created_to,
         task_ref=ref_filter,
+        project_name=project_name,
     )
     analysis_where, analysis_params = _analysis_record_filters(
         postgres=conn.is_postgres,
@@ -941,6 +958,7 @@ def list_generation_records(
         created_from=created_from,
         created_to=created_to,
         task_ref=ref_filter,
+        project_name=project_name,
     )
     if record_type in {"SOURCE_FRAME_PROCESS", "SOURCE_FRAME_AI_SCORE"}:
         # 与 summary 聚合同口径：按审计留痕归类。json_valid/json_extract 只有
@@ -1743,11 +1761,13 @@ def summarize_generation_records(
     _actor: ControlUser,
     username: str | None = None,
     status: str | None = None,
+    status_group: Literal["queued", "running", "succeeded", "failed", "attention"] | None = None,
     record_type: GenerationRecordType | None = None,
     failure_phase: str | None = None,
     created_from: str | None = None,
     created_to: str | None = None,
     task_ref: Annotated[str | None, Query(max_length=200)] = None,
+    project_name: Annotated[str | None, Query(max_length=100)] = None,
 ) -> ControlGenerationRecordSummary:
     """与列表同筛选口径的聚合。
 
@@ -1759,6 +1779,7 @@ def summarize_generation_records(
     否则列表能搜到、聚合却还算全量，两边数字又对不上。
     """
     ref_filter = _task_ref_filter(conn, task_ref)
+    status = _merge_status(status, status_group)
     video_where, video_params = _generation_record_filters(
         postgres=conn.is_postgres,
         record_types=("VIDEO",),
@@ -1768,6 +1789,7 @@ def summarize_generation_records(
         created_from=created_from,
         created_to=created_to,
         task_ref=ref_filter,
+        project_name=project_name,
     )
     oral_where, oral_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -1778,6 +1800,7 @@ def summarize_generation_records(
         created_from=created_from,
         created_to=created_to,
         task_ref=ref_filter,
+        project_name=project_name,
     )
     first_where, first_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -1788,6 +1811,7 @@ def summarize_generation_records(
         created_from=created_from,
         created_to=created_to,
         task_ref=ref_filter,
+        project_name=project_name,
     )
     sheet_where, sheet_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -1798,6 +1822,7 @@ def summarize_generation_records(
         created_from=created_from,
         created_to=created_to,
         task_ref=ref_filter,
+        project_name=project_name,
     )
     view_where, view_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -1808,6 +1833,7 @@ def summarize_generation_records(
         created_from=created_from,
         created_to=created_to,
         task_ref=ref_filter,
+        project_name=project_name,
     )
     source_where, source_params = _generation_record_filters(
         postgres=conn.is_postgres,
@@ -1818,6 +1844,7 @@ def summarize_generation_records(
         created_from=created_from,
         created_to=created_to,
         task_ref=ref_filter,
+        project_name=project_name,
     )
     analysis_where, analysis_params = _analysis_record_filters(
         postgres=conn.is_postgres,
@@ -1828,6 +1855,7 @@ def summarize_generation_records(
         created_from=created_from,
         created_to=created_to,
         task_ref=ref_filter,
+        project_name=project_name,
     )
     # 源画面分支按审计留痕归类：列表里的 json_valid/json_extract 只有 SQLite 有，
     # PG 上会直接报函数不存在。列表还会按 payload 的 semantic_quality_status 兜底，
@@ -1841,41 +1869,72 @@ def summarize_generation_records(
     """
     rows = conn.execute(
         f"""
-        SELECT record_type, status, COUNT(*) AS total FROM (
-            SELECT 'VIDEO' AS record_type, task.status AS status
+        SELECT record_type, status, COUNT(*) AS total,
+           AVG(duration) AS avg_duration FROM (
+            SELECT 'VIDEO' AS record_type, task.status,
+                   CASE WHEN task.status = 'SUCCEEDED'
+                        THEN EXTRACT(EPOCH FROM (
+                          task.completed_at::timestamp AT TIME ZONE 'UTC'
+                          - task.created_at_utc))
+                        ELSE NULL END AS duration
             FROM generation_tasks AS task
             JOIN generation_batches AS batch ON batch.id = task.batch_id
             JOIN users ON users.id = batch.created_by_user_id
             {video_where}
             UNION ALL
-            SELECT 'ORAL_VIDEO', task.status
+            SELECT 'ORAL_VIDEO', task.status, NULL AS duration
             FROM oral_tasks AS task
             JOIN users ON users.id = task.owner_user_id
             {oral_where}
             UNION ALL
-            SELECT 'FIRST_FRAME_IMAGE', task.status
+            SELECT 'FIRST_FRAME_IMAGE', task.status,
+                   CASE WHEN task.status = 'SUCCEEDED'
+                        THEN EXTRACT(EPOCH FROM (
+                          task.completed_at::timestamp AT TIME ZONE 'UTC'
+                          - task.created_at::timestamp AT TIME ZONE 'UTC'))
+                        ELSE NULL END AS duration
             FROM first_frame_tasks AS task
             JOIN users ON users.id = task.created_by_user_id
             {first_where}
             UNION ALL
-            SELECT 'CHARACTER_SHEET_IMAGE', task.status
+            SELECT 'CHARACTER_SHEET_IMAGE', task.status,
+                   CASE WHEN task.status = 'SUCCEEDED'
+                        THEN EXTRACT(EPOCH FROM (
+                          task.completed_at::timestamp AT TIME ZONE 'UTC'
+                          - task.created_at::timestamp AT TIME ZONE 'UTC'))
+                        ELSE NULL END AS duration
             FROM character_sheet_tasks AS task
             JOIN users ON users.id = task.created_by_user_id
             {sheet_where}
             UNION ALL
-            SELECT 'CHARACTER_VIEW_IMAGE', task.status
+            SELECT 'CHARACTER_VIEW_IMAGE', task.status,
+                   CASE WHEN task.status = 'SUCCEEDED'
+                        THEN EXTRACT(EPOCH FROM (
+                          task.completed_at::timestamp AT TIME ZONE 'UTC'
+                          - task.created_at::timestamp AT TIME ZONE 'UTC'))
+                        ELSE NULL END AS duration
             FROM character_generation_tasks AS task
             JOIN users ON users.id = task.created_by
             {view_where}
             UNION ALL
             SELECT CASE WHEN {semantic_requested_sql}
                         THEN 'SOURCE_FRAME_AI_SCORE' ELSE 'SOURCE_FRAME_PROCESS' END,
-                   task.status
+                   task.status,
+                   CASE WHEN task.status = 'SUCCEEDED'
+                        THEN EXTRACT(EPOCH FROM (
+                          task.completed_at::timestamp AT TIME ZONE 'UTC'
+                          - task.created_at::timestamp AT TIME ZONE 'UTC'))
+                        ELSE NULL END AS duration
             FROM source_frame_tasks AS task
             JOIN users ON users.id = task.created_by_user_id
             {source_where}
             UNION ALL
-            SELECT 'ANALYSIS', task.status
+            SELECT 'ANALYSIS', task.status,
+                   CASE WHEN task.status = 'SUCCEEDED'
+                        THEN EXTRACT(EPOCH FROM (
+                          task.completed_at::timestamp AT TIME ZONE 'UTC'
+                          - task.created_at::timestamp AT TIME ZONE 'UTC'))
+                        ELSE NULL END AS duration
             FROM analysis_tasks AS task
             JOIN users ON users.id = task.created_by_user_id
             {analysis_where}
@@ -1901,8 +1960,23 @@ def summarize_generation_records(
         )
         for row in rows
     ]
+    # 4 张聚合卡的派生口径（方案 P1）：
+    # - 成功 = SUCCEEDED；失败 = 5 组口径里的「失败」组成员（含两种取消拼写）。
+    # - 平均耗时 = 成功任务耗时的加权平均（各类型 AVG(duration) × 样本数），
+    #   只有 PG 能算出 duration，SQLite 开发库上保持 None 而不是假装 0 秒。
+    succeeded = sum(item.count for item in counts if item.status == "SUCCEEDED")
+    failed_statuses = set(_status_values(_STATUS_GROUPS["failed"]))
+    failed = sum(item.count for item in counts if item.status in failed_statuses)
+    total_count = sum(item.count for item in counts)
+    duration_weighted = 0.0
+    duration_samples = 0
+    for row in rows:
+        avg = row["avg_duration"]
+        if avg is not None and str(row["status"]) == "SUCCEEDED":
+            duration_weighted += float(avg) * int(row["total"])
+            duration_samples += int(row["total"])
     return ControlGenerationRecordSummary(
-        total=sum(item.count for item in counts),
+        total=total_count,
         counts=counts,
         failure_reasons=_generation_failure_reasons(
             conn,
@@ -1913,6 +1987,13 @@ def summarize_generation_records(
             created_from=created_from,
             created_to=created_to,
             task_ref=ref_filter,
+            project_name=project_name,
+        ),
+        succeeded_count=succeeded,
+        failed_count=failed,
+        success_rate_pct=(None if total_count == 0 else round(succeeded / total_count * 100, 1)),
+        avg_duration_seconds=(
+            None if duration_samples == 0 else round(duration_weighted / duration_samples, 1)
         ),
     )
 
@@ -2047,6 +2128,94 @@ def read_reconciliation(conn: Database, actor: ControlUser) -> ReconciliationSum
         """
     ).fetchone()
     return ReconciliationSummary(**dict(row))
+
+
+@router.get("/billing-reconciliation/items")
+def read_reconciliation_items(
+    conn: Database,
+    actor: ControlUser,
+    anomaly: Literal["wallet_mismatch", "paid_without_charge", "charge_without_paid_order"] = Query(
+        ...
+    ),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """对账异常明细（方案 P1 资金中心）：三类清单按类型分页，条数与汇总一致。
+
+    总览待办与资金中心的异常数字必须「点进去条数一致」，所以这里的筛选口径
+    逐字复用 /billing-reconciliation 汇总里的三个子查询，只加客户信息与分页。
+    """
+    write_audit(
+        conn,
+        actor=actor,
+        action="control.reconciliation.read",
+        entity_type="control_ledger",
+        entity_id=f"billing_reconciliation:{anomaly}",
+    )
+    page = " LIMIT %s OFFSET %s"
+    if anomaly == "wallet_mismatch":
+        base = """
+            FROM wallets w
+            JOIN users u ON u.id = w.user_id
+            LEFT JOIN (
+                SELECT user_id,
+                       SUM(available_delta) AS available_total,
+                       SUM(reserved_delta) AS reserved_total
+                FROM wallet_transactions
+                GROUP BY user_id
+            ) AS ledger ON ledger.user_id = w.user_id
+            WHERE w.available_credits <> COALESCE(ledger.available_total, 0)
+               OR w.reserved_credits <> COALESCE(ledger.reserved_total, 0)
+        """
+        select = (
+            "SELECT w.user_id, u.username, "
+            "COALESCE(NULLIF(u.display_name, ''), u.username) AS display_name, "
+            "w.available_credits, w.reserved_credits, "
+            "COALESCE(ledger.available_total, 0) AS ledger_available_credits, "
+            "COALESCE(ledger.reserved_total, 0) AS ledger_reserved_credits "
+        )
+        order = " ORDER BY w.user_id"
+    elif anomaly == "paid_without_charge":
+        base = """
+            FROM recharge_orders o
+            LEFT JOIN users u ON u.id = o.user_id
+            WHERE o.status = 'PAID' AND NOT EXISTS (
+                SELECT 1 FROM wallet_transactions wt
+                WHERE wt.recharge_order_id = o.id AND wt.type = 'CHARGE')
+        """
+        select = (
+            "SELECT o.id AS order_id, o.user_id, u.username, "
+            "COALESCE(NULLIF(u.display_name, ''), u.username) AS display_name, "
+            "o.provider, o.amount_fen, o.credits, o.paid_at, o.created_at "
+        )
+        order = " ORDER BY o.paid_at DESC, o.id"
+    else:
+        base = """
+            FROM wallet_transactions tx
+            JOIN recharge_orders o ON o.id = tx.recharge_order_id
+            LEFT JOIN users u ON u.id = tx.user_id
+            WHERE tx.type = 'CHARGE' AND o.status <> 'PAID'
+        """
+        select = (
+            "SELECT tx.id AS transaction_id, tx.user_id, u.username, "
+            "COALESCE(NULLIF(u.display_name, ''), u.username) AS display_name, "
+            "tx.available_delta, tx.recharge_order_id AS order_id, "
+            "tx.created_at, o.status AS order_status, o.provider "
+        )
+        order = " ORDER BY tx.created_at DESC, tx.id"
+    rows = conn.execute(
+        f"{select}{base}{order}{page}",  # noqa: S608 -- 排序方向为常量，无用户输入。
+        (limit, offset),
+    ).fetchall()
+    total_row = conn.execute(f"SELECT COUNT(*) {base}").fetchone()  # noqa: S608
+    assert total_row is not None
+    return {
+        "anomaly": anomaly,
+        "items": [dict(row) for row in rows],
+        "total": int(total_row[0]),
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @router.get("/settings", response_model=ControlSettingsSnapshot)
@@ -2685,6 +2854,29 @@ def _attach_credit_refunds(
         record.credits_refunded = record.record_id in refunded
 
 
+# 5 组运营口径（方案 P1 生成记录改造）：与前端 GENERATION_STATUS_FILTERS 同集。
+# 后端提供 status_group 入参，避免每个调用方都背一份逗号拼写表。
+_STATUS_GROUPS: dict[str, str] = {
+    "queued": "CREATED,QUEUED,PENDING",
+    "running": "SUBMITTING,SUBMITTED,RUNNING,RETRYING,ARCHIVING",
+    "succeeded": "SUCCEEDED",
+    "failed": "FAILED,CANCELED,CANCELLED,ARCHIVE_FAILED",
+    "attention": "UNKNOWN,SUBMISSION_UNCERTAIN",
+}
+
+
+def _merge_status(status: str | None, status_group: str | None) -> str | None:
+    """status_group 展开成底层状态后与显式 status 合并（去重、保序）。"""
+    merged: list[str] = []
+    for source in (status, _STATUS_GROUPS.get(status_group or "", None)):
+        if not source:
+            continue
+        for value in _status_values(source):
+            if value not in merged:
+                merged.append(value)
+    return ",".join(merged) if merged else None
+
+
 def _status_values(status: str | None) -> list[str]:
     """状态筛选接受逗号分隔的多个值。
 
@@ -2706,6 +2898,7 @@ def _generation_record_filters(
     created_from: str | None,
     created_to: str | None,
     task_ref: TaskRefFilter | None = None,
+    project_name: str | None = None,
 ) -> tuple[str, tuple[str, ...]]:
     clauses: list[str] = []
     params: list[str] = []
@@ -2721,6 +2914,18 @@ def _generation_record_filters(
     if username:
         clauses.append("users.username LIKE %s")
         params.append(f"%{username}%")
+    if project_name and project_name.strip():
+        # 项目名筛选（方案 P1）：只有视频任务挂在项目下（batch → projects）；
+        # 其余类型（口播/图片/拆解）没有项目维度，筛项目时如实不出现在结果里。
+        if "VIDEO" in record_types:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM generation_batches gb "
+                "JOIN projects p ON p.id = gb.project_id "
+                "WHERE gb.id = task.batch_id AND p.name LIKE %s)"
+            )
+            params.append(f"%{project_name.strip()}%")
+        else:
+            clauses.append("1 = 0")
     statuses = _status_values(status)
     if statuses:
         clauses.append(f"task.status IN ({', '.join(['%s'] * len(statuses))})")
@@ -2746,6 +2951,7 @@ def _analysis_record_filters(
     created_from: str | None,
     created_to: str | None,
     task_ref: TaskRefFilter | None = None,
+    project_name: str | None = None,
 ) -> tuple[str, tuple[str, ...]]:
     """拆解分支的过滤器。
 
@@ -2761,7 +2967,18 @@ def _analysis_record_filters(
         created_from=created_from,
         created_to=created_to,
         task_ref=task_ref,
+        # 拆解任务自带 project_id，项目名条件在下方用真表达式拼，
+        # 不走通用分支的 1 = 0。
+        project_name=None,
     )
+    if project_name and project_name.strip():
+        conjunction = "AND" if where else "WHERE"
+        where = (
+            f"{where} {conjunction} EXISTS ("
+            "SELECT 1 FROM projects p WHERE p.id = task.project_id "
+            "AND p.name LIKE %s)"
+        )
+        params = (*params, f"%{project_name.strip()}%")
     if failure_phase:
         conjunction = "AND" if where else "WHERE"
         where = f"{where} {conjunction} task.failure_phase = %s"
@@ -2779,6 +2996,7 @@ def _generation_failure_reasons(
     created_from: str | None,
     created_to: str | None,
     task_ref: TaskRefFilter | None = None,
+    project_name: str | None = None,
 ) -> list[AnalysisFailureReason]:
     """按「为什么失败」聚合失败行：类型 × 错误码 × 失败阶段（方案 P1-3）。
 
@@ -2805,6 +3023,7 @@ def _generation_failure_reasons(
             created_from=created_from,
             created_to=created_to,
             task_ref=task_ref,
+            project_name=project_name,
         )
 
     video_where, video_params = group_where(("VIDEO",))

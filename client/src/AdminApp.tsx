@@ -15,6 +15,7 @@ import { SessionsPage } from "./admin/SessionsPage";
 import { SystemSettingsPage } from "./admin/SystemSettingsPage";
 import { shanghaiDate } from "./admin/ui/vocabulary";
 import { ViralDiscoveriesPage } from "./admin/ViralDiscoveriesPage";
+import { ViralRuntimeSection } from "./admin/ViralRuntimeSection";
 import { ViralVideosPage } from "./admin/ViralVideosPage";
 import "./admin/admin-login.css";
 import { PageBanner } from "./admin/ui/PageBanner";
@@ -84,7 +85,7 @@ const tabGroups: Array<{
     tabs: [
       { id: "overview", label: "总览仪表盘", helper: "核心指标与经营总览" },
       { id: "analytics", label: "经营分析", helper: "利润、成本与趋势" },
-      { id: "funds", label: "资金流水", helper: "充值订单与积分流水" },
+      { id: "funds", label: "资金中心", helper: "收款、流水、调账与对账" },
     ],
   },
   {
@@ -98,8 +99,8 @@ const tabGroups: Array<{
       },
       {
         id: "sessions",
-        label: "会话与设备",
-        helper: "在线会话、强制下线与设备解绑",
+        label: "登录与设备",
+        helper: "在线客户、登录设备与下线管理",
       },
       {
         id: "generationRecords",
@@ -134,9 +135,9 @@ const tabGroups: Array<{
 const tabPageTitles: Record<AdminTab, string> = {
   overview: "总览仪表盘",
   analytics: "经营分析",
-  funds: "资金流水",
+  funds: "资金中心",
   customersMgmt: "客户管理",
-  sessions: "会话与设备",
+  sessions: "登录与设备",
   generationRecords: "用户生成记录",
   viralVideos: "爆款视频库",
   viralDiscoveries: "用户搜索发现",
@@ -806,20 +807,31 @@ export function AdminApp() {
               initialTab={
                 navigationIntent === "costDetails" ||
                 navigationIntent === "pendingOperations" ||
-                navigationIntent === "unknownCost"
+                navigationIntent === "unknownCost" ||
+                navigationIntent === "unknownRevenue"
                   ? "cost"
-                  : "profit"
+                  : "dashboard"
               }
               initialAttention={
                 navigationIntent === "pendingOperations"
                   ? "pending"
                   : navigationIntent === "unknownCost"
                     ? "unknown_cost"
-                    : ""
+                    : navigationIntent === "unknownRevenue"
+                      ? "unknown_revenue"
+                      : ""
               }
             />
           ) : null}
-          {activeTab === "funds" ? <FundsPage readOnly={readOnly} /> : null}
+          {activeTab === "funds" ? (
+            // 总览「对账不一致」待办带 recon 意图进来时直达对账异常页签
+            // （方案 P0-5：待办点击后落到的清单与待办数一致）。
+            <FundsPage
+              initialTab={
+                navigationIntent === "recon" ? "reconciliation" : "overview"
+              }
+            />
+          ) : null}
           {activeTab === "customersMgmt" ? (
             /* 总览快捷入口（开通套餐 / 赠送积分 / 退款扣减）都落在本页：把
                intent 透传下去，客户管理页才能定位到对应表单，否则点完只是
@@ -852,7 +864,11 @@ export function AdminApp() {
           ) : null}
           {activeTab === "auditCenter" ? <AuditCenterPage /> : null}
           {activeTab === "viralVideos" ? (
-            <ViralVideosPage readOnly={readOnly} />
+            <>
+              <ViralVideosPage readOnly={readOnly} />
+              {/* 采集设置迁入内容组（方案 P1 内容模块：采集设置不再藏在系统设置）。 */}
+              <ViralRuntimeSection readOnly={readOnly} />
+            </>
           ) : null}
           {activeTab === "viralDiscoveries" ? (
             <ViralDiscoveriesPage readOnly={readOnly} />

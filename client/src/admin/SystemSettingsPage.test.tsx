@@ -150,7 +150,7 @@ describe("SystemSettingsPage 付费探针入口", () => {
   it("renders the paid probe beside the free connection test in the providers tab", async () => {
     setAdminCsrfToken("csrf-token-1");
     installFetch();
-    const { container } = render(<SystemSettingsPage initialTab="services" />);
+    const { container } = render(<SystemSettingsPage initialTab="services" isSuperAdmin />);
 
     const scope = within(await apilioCard(container));
     // 「真正并列」：同一张服务卡上，免费连接测试与付费探针并排。
@@ -161,7 +161,7 @@ describe("SystemSettingsPage 付费探针入口", () => {
   it("sends the admin write envelope (CSRF + idempotency key + confirm + reason)", async () => {
     setAdminCsrfToken("csrf-token-1");
     const fetchMock = installFetch();
-    const { container } = render(<SystemSettingsPage initialTab="services" />);
+    const { container } = render(<SystemSettingsPage initialTab="services" isSuperAdmin />);
 
     const card = await apilioCard(container);
     confirmPaidProbe(card);
@@ -185,7 +185,7 @@ describe("SystemSettingsPage 付费探针入口", () => {
   it("surfaces the unwired stub honestly without claiming a charge", async () => {
     setAdminCsrfToken("csrf-token-1");
     installFetch({ paidProbe: "not-implemented" });
-    const { container } = render(<SystemSettingsPage initialTab="services" />);
+    const { container } = render(<SystemSettingsPage initialTab="services" isSuperAdmin />);
 
     const card = await apilioCard(container);
     confirmPaidProbe(card);
@@ -202,7 +202,7 @@ describe("SystemSettingsPage 付费探针入口", () => {
   it("does not render a paid probe on the runtime service tab", async () => {
     setAdminCsrfToken("csrf-token-1");
     installFetch();
-    const { container } = render(<SystemSettingsPage initialTab="services" />);
+    const { container } = render(<SystemSettingsPage initialTab="services" isSuperAdmin />);
 
     await apilioCard(container);
     fireEvent.click(screen.getByRole("tab", { name: "运行控制" }));

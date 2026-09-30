@@ -1017,6 +1017,11 @@ export interface CustomerListItem {
   note?: string;
   owner_user_id?: string;
   owner_username?: string;
+  /** 经营字段（方案 P1 客户管理）：列表直接展示。 */
+  total_recharge_fen?: number;
+  last_active_at?: string;
+  month_consumed_credits?: number;
+  current_benefit?: string;
 }
 
 export interface CustomerListResponse {
@@ -1036,6 +1041,8 @@ export interface CustomerListOptions {
   createdTo?: string;
   balanceMin?: number;
   balanceMax?: number;
+  /** 排序（方案 P1）：激活时间（默认）/ 累计充值 / 本月消耗 / 最近活跃。 */
+  sort?: "activated" | "recharge" | "month_consumed" | "last_active";
 }
 
 /**
@@ -1061,6 +1068,8 @@ export async function listCustomers(
     params.set("balance_min", String(options.balanceMin));
   if (options.balanceMax !== undefined)
     params.set("balance_max", String(options.balanceMax));
+  if (options.sort && options.sort !== "activated")
+    params.set("sort", options.sort);
 
   const response = await requestControl(
     `/api/control/customers?${params.toString()}`,
@@ -1072,6 +1081,76 @@ export async function listCustomers(
   }
 
   return response.json() as Promise<CustomerListResponse>;
+}
+
+/** 客户暂停 / 恢复（方案 P1 客户管理第 4 主操作）：
+ *  暂停只禁止新登录与新任务并吊销当前会话，余额不动。走完整写契约。 */
+export async function suspendCustomer(
+  userId: string,
+  reason: string,
+  idempotencyKey: string,
+): Promise<{ user_id: string; is_active: number; session_revoked: boolean }> {
+  return adminWrite(
+    `/api/control/customers/${encodeURIComponent(userId)}/suspend`,
+    {},
+    reason,
+    "暂停客户失败",
+    idempotencyKey,
+  );
+}
+
+export async function resumeCustomer(
+  userId: string,
+  reason: string,
+  idempotencyKey: string,
+): Promise<{ user_id: string; is_active: number }> {
+  return adminWrite(
+    `/api/control/customers/${encodeURIComponent(userId)}/resume`,
+    {},
+    reason,
+    "恢复客户失败",
+    idempotencyKey,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 价格试算（方案 P1 价格与套餐）：POST /api/control/billing/quote
+// ---------------------------------------------------------------------------
+
+export type BillingQuoteResult = {
+  service: string;
+  label: string;
+  units: string;
+  unit: "second" | "image" | "call";
+  credits: string;
+  unit_credits: string;
+  discount_basis_points?: number | null;
+  discount_rate?: string | null;
+  discount_source?: string | null;
+  nominal_fen: string | null;
+  cost_fen: string | null;
+  gross_fen: string | null;
+  request_id?: string;
+};
+
+/** 只读试算走写契约（confirm+reason+幂等键）：服务端只留痕不落业务数据。 */
+export async function submitBillingQuote(input: {
+  service: string;
+  units: number;
+  userId?: string;
+}): Promise<BillingQuoteResult> {
+  return adminWrite(
+    "/api/control/billing/quote",
+    {
+      confirm: true,
+      reason: "价格试算",
+      service: input.service,
+      units: input.units,
+      user_id: input.userId ?? null,
+    },
+    "价格试算",
+    "试算失败",
+  );
 }
 
 export interface CustomerUnitPrice {
@@ -1455,9 +1534,10 @@ export interface CustomerSessionListOptions {
  * GET /api/control/customer-sessions/live?limit=&offset=
  */
 export async function listLiveSessions(
-  options: { limit?: number; offset?: number } = {},
+  options: { keyword?: string; limit?: number; offset?: number } = {},
 ): Promise<CustomerSessionListResponse> {
   const params = new URLSearchParams();
+  if (options.keyword) params.set("keyword", options.keyword);
   if (options.limit !== undefined) params.set("limit", String(options.limit));
   if (options.offset !== undefined)
     params.set("offset", String(options.offset));
@@ -1550,6 +1630,8 @@ export interface AuditLogItem {
     old?: AuditTariffSnapshot | null;
     new?: AuditTariffSnapshot | null;
   } | null;
+  /** 方案 P1：高敏事件（退款扣减、密钥明文、数据导出等），列表整行标红。 */
+  sensitive?: boolean;
 }
 
 export interface AuditLogResponse {
@@ -1562,6 +1644,8 @@ export interface AuditLogResponse {
 export interface AuditLogOptions {
   scope?: "admin" | "customer" | "all";
   eventType?: string;
+  /** 方案 P1：分组筛选，逗号分隔多组（funds,login）；服务端映射成事件集合。 */
+  eventGroup?: string;
   actorUserId?: string;
   targetUserId?: string;
   actorUsername?: string;
@@ -1589,6 +1673,7 @@ export async function listAuditLog(
   const params = new URLSearchParams();
   if (options.scope) params.set("scope", options.scope);
   if (options.eventType) params.set("event_type", options.eventType);
+  if (options.eventGroup) params.set("event_group", options.eventGroup);
   if (options.actorUserId) params.set("actor_user_id", options.actorUserId);
   if (options.targetUserId) params.set("target_user_id", options.targetUserId);
   if (options.actorUsername)
@@ -1613,6 +1698,36 @@ export async function listAuditLog(
   return response.json() as Promise<AuditLogResponse>;
 }
 
+/** 审计导出（方案 P1）：与列表同筛选口径的 audit-log.csv。 */
+export async function downloadAuditLogCsv(
+  options: AuditLogOptions = {},
+): Promise<void> {
+  const params = new URLSearchParams();
+  if (options.scope) params.set("scope", options.scope);
+  if (options.eventType) params.set("event_type", options.eventType);
+  if (options.eventGroup) params.set("event_group", options.eventGroup);
+  if (options.actorUsername)
+    params.set("actor_username", options.actorUsername);
+  if (options.targetUsername)
+    params.set("target_username", options.targetUsername);
+  if (options.createdFrom) params.set("created_from", options.createdFrom);
+  if (options.createdTo) params.set("created_to", options.createdTo);
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const response = await requestControl(`/api/control/audit-log.csv${suffix}`, {
+    method: "GET",
+  });
+  if (!response.ok) {
+    throw new Error(`下载审计导出失败（${response.status}）`);
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = "audit-log.csv";
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 // ---------------------------------------------------------------------------
 // Generation records — paid media and AI-operation traceability
 // ---------------------------------------------------------------------------
@@ -1623,6 +1738,14 @@ export type AdminGenerationRecordPage =
   components["schemas"]["ControlGenerationRecordPage"];
 export type AdminGenerationRecordSummary =
   components["schemas"]["ControlGenerationRecordSummary"];
+/** 方案 P1 聚合卡字段：服务端已返回，OpenAPI 类型待整体重生成前先本地补齐
+ * （与失败率报告同一处理方式）。 */
+export type AdminGenerationRecordSummaryCards = AdminGenerationRecordSummary & {
+  succeeded_count?: number;
+  failed_count?: number;
+  success_rate_pct?: number | null;
+  avg_duration_seconds?: number | null;
+};
 
 export async function getAdminGenerationRecords(
   options: {
@@ -1669,7 +1792,7 @@ export async function getAdminGenerationRecordSummary(
     createdFrom?: string;
     createdTo?: string;
   } = {},
-): Promise<AdminGenerationRecordSummary> {
+): Promise<AdminGenerationRecordSummaryCards> {
   const params = new URLSearchParams();
   if (options.username) params.set("username", options.username);
   if (options.status) params.set("status", options.status);
@@ -1687,7 +1810,32 @@ export async function getAdminGenerationRecordSummary(
   if (!response.ok) {
     throw await parseActivationError(response, "读取生成记录聚合失败");
   }
-  return response.json() as Promise<AdminGenerationRecordSummary>;
+  return response.json() as Promise<AdminGenerationRecordSummaryCards>;
+}
+
+/** 告警总览单条（方案 P2）：四类告警（失败率/成本未配置/对账异常/高敏审计）。 */
+export type AdminAlertOverviewItem = {
+  key: string;
+  severity: "danger" | "warn";
+  headline: string;
+  detail: string;
+  count: number;
+};
+
+export type AdminAlertsOverview = {
+  items: AdminAlertOverviewItem[];
+  recipient_display_name: string | null;
+  generated_at: string;
+};
+
+export async function getAlertsOverview(): Promise<AdminAlertsOverview> {
+  const response = await requestControl("/api/control/alerts/overview", {
+    method: "GET",
+  });
+  if (!response.ok) {
+    throw await parseActivationError(response, "读取告警总览失败");
+  }
+  return response.json() as Promise<AdminAlertsOverview>;
 }
 
 // ---------------------------------------------------------------------------
@@ -2285,6 +2433,13 @@ export type ViralRuntimeControls = {
   per_keyword_limit?: number;
   next_collection_at?: string | null;
   collection_interval_days?: number;
+  /** 采集质量规则与月度预算（方案 P1 采集设置）。 */
+  quality_min_likes?: number | null;
+  quality_duration_min_ms?: number | null;
+  quality_duration_max_ms?: number | null;
+  quality_exclude_words?: string[];
+  monthly_budget_fen?: number | null;
+  month_spend_fen?: number;
   platforms: Array<{
     platform: "douyin" | "wechat_channels";
     cached_videos: number;
@@ -2317,6 +2472,11 @@ export async function updateViralRuntimeControls(
     | "keywords"
     | "per_keyword_limit"
     | "collection_interval_days"
+    | "quality_min_likes"
+    | "quality_duration_min_ms"
+    | "quality_duration_max_ms"
+    | "quality_exclude_words"
+    | "monthly_budget_fen"
   >,
   reason: string,
   idempotencyKey?: string,
@@ -2385,6 +2545,10 @@ export type CollectedViralVideo = {
   tags?: string[];
   duration_ms: number;
   likes: number;
+  /** 方案 P1 内容模块 C-1：客户使用计数（详情查看 / 文案提取 / 收藏）。 */
+  usage_detail_count?: number;
+  usage_copy_count?: number;
+  usage_favorite_count?: number;
   comments: number | null;
   shares: number | null;
   collects: number | null;
@@ -2416,9 +2580,27 @@ function withManagedCover<T extends { cover_url?: string | null }>(item: T): T {
     : item;
 }
 
+/** 采集关键词单条新增（方案 P1 C-12）：不再先读后整表覆盖。 */
+export function addViralKeyword(
+  input: { platform: string; category: string; keyword: string },
+  reason: string,
+  idempotencyKey: string,
+) {
+  return adminWrite(
+    "/api/control/viral/keywords",
+    { ...input, confirm: true },
+    reason,
+    "加入采集关键词失败",
+    idempotencyKey,
+  );
+}
+
 export async function listCollectedViralVideos(options: {
   platform?: string;
   status?: CollectedViralStatus;
+  category?: string;
+  hasUsage?: boolean;
+  sort?: "created" | "likes" | "published" | "usage";
   query?: string;
   offset?: number;
 }): Promise<{ items: CollectedViralVideo[]; total: number }> {
@@ -2428,6 +2610,11 @@ export async function listCollectedViralVideos(options: {
   });
   if (options.platform) query.set("platform", options.platform);
   if (options.status) query.set("status", options.status);
+  if (options.category) query.set("category", options.category);
+  if (options.hasUsage !== undefined && options.hasUsage !== null)
+    query.set("has_usage", String(options.hasUsage));
+  if (options.sort && options.sort !== "created")
+    query.set("sort", options.sort);
   if (options.query) query.set("query", options.query);
   const response = await requestControl(
     `/api/control/viral/videos?${query}`,
@@ -2459,7 +2646,7 @@ export function archiveCollectedViralVideo(
 
 export function curateViralVideo(
   video: CollectedViralVideo,
-  action: "feature" | "unfeature" | "delete" | "pin" | "unpin",
+  action: "feature" | "unfeature" | "delete" | "pin" | "unpin" | "prepare",
   reason: string,
   idempotencyKey: string,
 ) {
@@ -2490,7 +2677,7 @@ export type ViralBatchCurationResult = {
  */
 export function curateViralVideosBatch(
   items: Pick<CollectedViralVideo, "platform" | "video_id">[],
-  action: "feature" | "unfeature" | "delete",
+  action: "feature" | "unfeature" | "delete" | "prepare",
   reason: string,
   idempotencyKey: string,
 ): Promise<ViralBatchCurationResult> {
@@ -2639,9 +2826,15 @@ export type ViralDiscoveryAggregate = {
 
 export async function listViralDiscoveries(
   date: string,
+  range?: { from: string; to: string },
 ): Promise<ViralDiscoveryAggregate> {
+  // 方案 P1 客户需求洞察：给了 range 就按区间聚合（近 7/30 天），
+  // 否则回落到单日 date，兼容既有调用。
+  const query = range
+    ? `from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`
+    : `date=${encodeURIComponent(date)}`;
   const response = await requestControl(
-    `/api/control/viral/discoveries?date=${encodeURIComponent(date)}`,
+    `/api/control/viral/discoveries?${query}`,
     {},
   );
   if (!response.ok)

@@ -2455,3 +2455,143 @@ def test_reconcile_invariants_stay_green_after_a_refund(client: TestClient) -> N
         (CUSTOMER_USER_ID,),
     )
     assert wallet_total == ledger_total
+
+
+def test_adjustments_csv_exports_rows_with_same_filters(client: TestClient) -> None:
+    """资金中心·人工调整导出：与 /adjustments 同筛选口径，走 control.export 审计。"""
+    headers = _admin_session(client)
+    created = _create_adjustment(
+        client,
+        headers,
+        reason="资金中心导出：月度对账用",
+        key=f"csv-{uuid.uuid4()}",
+    )
+    assert created.status_code == 201, created.text
+
+    exported = client.get(
+        "/api/control/adjustments.csv?target_username=customer_u", headers=headers
+    )
+    assert exported.status_code == 200, exported.text
+    assert exported.headers["content-type"].startswith("text/csv")
+    assert "customer_u" in exported.text
+    assert "资金中心导出：月度对账用" in exported.text
+    # 表头与列表字段同口径。
+    assert exported.text.splitlines()[0].startswith("created_at,")
+
+    # 筛选不匹配时只有表头，不泄漏其他客户行。
+    empty = client.get("/api/control/adjustments.csv?target_username=nobody", headers=headers)
+    assert empty.status_code == 200
+    assert len(empty.text.splitlines()) == 1
+
+
+def _suspend_headers(client: TestClient, key: str) -> dict[str, str]:
+    headers = _admin_session(client)
+    headers[IDEMPOTENCY_KEY_HEADER] = key
+    return headers
+
+
+def test_suspend_and_resume_customer_with_audit_and_session_revoke(
+    client: TestClient,
+) -> None:
+    """方案 P1 客户管理：暂停吊销会话并写审计；恢复只翻回标记；幂等重放一致。"""
+    with psycopg.connect(_t23_dsn(), autocommit=True) as conn:
+        # 给目标客户一台在绑设备 + 一条在线会话：暂停必须在同一事务里把它吊销。
+        conn.execute(
+            """
+            INSERT INTO customer_devices
+                (id, activation_code_id, user_id, slot_no, display_name,
+                 platform, status, bound_at, fingerprint_hmac,
+                 fingerprint_key_version, token_digest, token_key_version)
+            VALUES ('dev-suspend-1', NULL, %s, 1, '暂停用设备', 'windows',
+                    'BOUND', now(), 'test-fingerprint', 1, 'test-token-digest', 1)
+            ON CONFLICT (id) DO NOTHING
+            """,
+            (CUSTOMER_USER_ID,),
+        )
+        conn.execute(
+            """
+            INSERT INTO customer_session_state
+                (session_id, user_id, device_id, session_epoch, lease_until,
+                 last_heartbeat_at, token_digest)
+            VALUES ('sess-suspend-1', %s, 'dev-suspend-1',
+                    1, now() + interval '30 minutes', now(),
+                    'sess-token-digest')
+            ON CONFLICT (session_id) DO NOTHING
+            """,
+            (CUSTOMER_USER_ID,),
+        )
+
+    headers = _suspend_headers(client, f"suspend-{uuid.uuid4()}")
+    suspended = client.post(
+        f"/api/control/customers/{CUSTOMER_USER_ID}/suspend",
+        json={"confirm": True, "reason": "客户申请暂停使用"},
+        headers=headers,
+    )
+    assert suspended.status_code == 200, suspended.text
+    assert suspended.json()["is_active"] == 0
+    assert suspended.json()["session_revoked"] in (True, False)
+
+    with psycopg.connect(_t23_dsn(), autocommit=True) as conn:
+        active = conn.execute(
+            "SELECT is_active FROM users WHERE id = %s",
+            (CUSTOMER_USER_ID,),
+        ).fetchone()
+        assert active == (0,)
+        audit_rows = conn.execute(
+            "SELECT action FROM audit_logs WHERE action = 'customer.suspend' AND entity_id = %s",
+            (CUSTOMER_USER_ID,),
+        ).fetchall()
+        assert len(audit_rows) == 1
+
+    # 幂等重放：同一键返回同一结果，不写第二条审计。
+    replay = client.post(
+        f"/api/control/customers/{CUSTOMER_USER_ID}/suspend",
+        json={"confirm": True, "reason": "客户申请暂停使用"},
+        headers=headers,
+    )
+    assert replay.status_code == 200
+    with psycopg.connect(_t23_dsn(), autocommit=True) as conn:
+        audit_rows = conn.execute(
+            "SELECT action FROM audit_logs WHERE action = 'customer.suspend' AND entity_id = %s",
+            (CUSTOMER_USER_ID,),
+        ).fetchall()
+        assert len(audit_rows) == 1
+
+    resume = client.post(
+        f"/api/control/customers/{CUSTOMER_USER_ID}/resume",
+        json={"confirm": True, "reason": "客户结清欠款，恢复使用"},
+        headers=_suspend_headers(client, f"resume-{uuid.uuid4()}"),
+    )
+    assert resume.status_code == 200, resume.text
+    assert resume.json()["is_active"] == 1
+    with psycopg.connect(_t23_dsn(), autocommit=True) as conn:
+        resumed = conn.execute(
+            "SELECT is_active FROM users WHERE id = %s", (CUSTOMER_USER_ID,)
+        ).fetchone()
+        assert resumed == (1,)
+        conn.execute(
+            "DELETE FROM audit_logs WHERE action IN ('customer.suspend', "
+            "'customer.resume') AND entity_id = %s",
+            (CUSTOMER_USER_ID,),
+        )
+        conn.execute("UPDATE users SET is_active = 1 WHERE id = %s", (CUSTOMER_USER_ID,))
+        # 设备/会话/事件行留在专用测试库：customer_session_events 是
+        # append-only（触发器拒绝 DELETE），强清会让清理本身失败。
+        conn.execute("DELETE FROM customer_session_state WHERE session_id = 'sess-suspend-1'")
+
+
+def test_suspend_rejects_blank_reason_and_missing_user(client: TestClient) -> None:
+    headers = _suspend_headers(client, f"blank-{uuid.uuid4()}")
+    blank = client.post(
+        f"/api/control/customers/{CUSTOMER_USER_ID}/suspend",
+        json={"confirm": True, "reason": "   "},
+        headers=headers,
+    )
+    assert blank.status_code == 400
+
+    missing = client.post(
+        "/api/control/customers/no-such-user/suspend",
+        json={"confirm": True, "reason": "不存在"},
+        headers=_suspend_headers(client, f"missing-{uuid.uuid4()}"),
+    )
+    assert missing.status_code == 404

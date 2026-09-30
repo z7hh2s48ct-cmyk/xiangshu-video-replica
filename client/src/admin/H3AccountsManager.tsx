@@ -49,7 +49,7 @@ export function H3AccountsManager({
       <header className="h3-accounts__header">
         <div>
           <h3>视频生成 · 多账号</h3>
-          <p>按账号额度设置并发，空闲账号依次接收任务。</p>
+          <p>按账号上限设置并发，空闲账号依次接收任务。</p>
         </div>
         {data && <strong>总并发 {data.total_concurrency}</strong>}
       </header>
@@ -153,7 +153,7 @@ function AccountForm({
       const result = await adminWrite<Snapshot>(
         `${endpoint}/${encodeURIComponent(id.current)}`,
         payload,
-        "配置视频生成账号及并发额度",
+        "配置视频生成账号及并发数",
         "保存视频账号失败",
         retry.current.key,
         "PUT",
@@ -210,7 +210,7 @@ function AccountForm({
           required
           disabled={readOnly || busy}
           value={limit}
-          placeholder="按账号额度填写"
+          placeholder="按账号上限填写"
           onChange={(e) => setLimit(e.target.value)}
         />
       </label>

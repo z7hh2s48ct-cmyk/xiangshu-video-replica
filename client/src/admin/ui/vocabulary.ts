@@ -130,6 +130,20 @@ export const ANALYSIS_ATTEMPT_STATUS_LABELS: LabelMap = {
   SUPERSEDED: "已被重试取代",
 };
 
+/**
+ * 内容状态（方案 P1 内容模块）：归档×首页×可见性三套底层状态收敛为运营
+ * 只看的 6 态。键是状态 id，值是界面文案；判定函数在视频库页
+ * （contentStateOf），词典只管文案，避免循环依赖。
+ */
+export const CONTENT_STATE_LABELS: LabelMap = {
+  pending_prepare: "待准备",
+  prepare_failed: "准备失败",
+  ready: "可上首页",
+  featured: "首页展示中",
+  removed: "已下架",
+  blocked: "已屏蔽",
+};
+
 export const GENERATION_STATUS_LABELS: LabelMap = {
   CREATED: "已创建",
   QUEUED: "排队中",
@@ -149,24 +163,27 @@ export const GENERATION_STATUS_LABELS: LabelMap = {
 };
 
 /**
- * 生成状态筛选项：同一中文标签只出现一次，值为逗号拼接的全部底层状态。
- *
- * CANCELED / CANCELLED 两种拼写都映射为「已取消」，逐项渲染会让下拉出现两个
- * 「已取消」（方案 P0-6）；服务端状态筛选接受逗号分隔的多值。
+ * 生成状态筛选项：15 个底层状态收敛为运营可读的 5 组（方案 P1 生成记录
+ * 改造：排队中 / 生成中 / 成功 / 失败 / 需人工核对），值为逗号拼接的全部
+ * 底层状态——服务端状态筛选接受逗号分隔的多值，两种「已取消」拼写与
+ * UNKNOWN / SUBMISSION_UNCERTAIN 分别在组内合并（P0-6 的口径延续）。
  */
 export const GENERATION_STATUS_FILTERS: Array<{
   value: string;
   label: string;
-}> = (() => {
-  const grouped = new Map<string, string[]>();
-  for (const [value, label] of Object.entries(GENERATION_STATUS_LABELS)) {
-    grouped.set(label, [...(grouped.get(label) ?? []), value]);
-  }
-  return [...grouped].map(([label, values]) => ({
-    value: values.join(","),
-    label,
-  }));
-})();
+}> = [
+  { value: "CREATED,QUEUED,PENDING", label: "排队中" },
+  {
+    value: "SUBMITTING,SUBMITTED,RUNNING,RETRYING,ARCHIVING",
+    label: "生成中",
+  },
+  { value: "SUCCEEDED", label: "成功" },
+  {
+    value: "FAILED,CANCELED,CANCELLED,ARCHIVE_FAILED",
+    label: "失败",
+  },
+  { value: "UNKNOWN,SUBMISSION_UNCERTAIN", label: "需人工核对" },
+];
 
 /** 查词典并回退到原始值——未知状态原样展示，便于发现新枚举。 */
 export function labelFrom(labels: LabelMap, value: string): string {

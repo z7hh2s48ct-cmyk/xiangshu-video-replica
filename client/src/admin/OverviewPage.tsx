@@ -162,7 +162,8 @@ export function OverviewPage({
       label: "对账不一致",
       count: todos.reconciliation_problems,
       tone: "warn",
-      tab: "funds",
+      // 落到资金中心的对账异常清单，条数与该清单一致（方案 P0-5）。
+      tab: "recon",
     },
     {
       key: "rates",

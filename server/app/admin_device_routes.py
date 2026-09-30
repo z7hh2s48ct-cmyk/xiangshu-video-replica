@@ -153,6 +153,31 @@ def list_devices(
                 LEFT JOIN customer_session_state css ON css.device_id = cd.id
                 """
             ).fetchone()
+            # 方案 P1「登录与设备」顶部三张卡的后两项：
+            # 达上限 = 在绑设备数 ≥ users.max_devices 的客户；频繁更换 = 近 24h
+            # 解绑+再绑定动作 ≥ 2 的客户（只有解绑或只有绑定不算「换」）。
+            attention_row = conn.execute(
+                """
+                SELECT
+                  (SELECT COUNT(*) FROM (
+                     SELECT cd.user_id FROM customer_devices cd
+                     JOIN users u ON u.id = cd.user_id
+                     WHERE cd.status = 'BOUND'
+                     GROUP BY cd.user_id, u.max_devices
+                     HAVING COUNT(*) >= u.max_devices
+                  ) full_users),
+                  (SELECT COUNT(*) FROM (
+                     SELECT cd.user_id FROM customer_devices cd
+                     WHERE (cd.unbound_at::timestamptz >= clock_timestamp() - interval '24 hours'
+                            OR cd.revoked_at::timestamptz
+                                >= clock_timestamp() - interval '24 hours')
+                       AND cd.bound_at::timestamptz
+                            >= clock_timestamp() - interval '24 hours'
+                     GROUP BY cd.user_id
+                     HAVING COUNT(*) >= 2
+                  ) churny_users)
+                """
+            ).fetchone()
     except RuntimeError as exc:
         raise _http(503, DEVICE_SERVICE_UNAVAILABLE, DEVICE_SERVICE_UNAVAILABLE_MESSAGE) from exc
     items = [
@@ -185,6 +210,8 @@ def list_devices(
             "online": int(summary_row[1]) if summary_row else 0,
             "revoked_today": int(summary_row[2]) if summary_row else 0,
             "unbound": int(summary_row[3]) if summary_row else 0,
+            "at_slot_limit": int(attention_row[0]) if attention_row else 0,
+            "frequent_swaps_24h": int(attention_row[1]) if attention_row else 0,
         },
     }
 

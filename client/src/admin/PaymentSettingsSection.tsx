@@ -288,7 +288,7 @@ export function PaymentSettingsSection({
             className="admin-checks admin-payment-channels"
             disabled={disabled}
           >
-            <legend>支付渠道</legend>
+            <legend>支付方式</legend>
             <label>
               <input
                 checked={channels.includes("alipay")}

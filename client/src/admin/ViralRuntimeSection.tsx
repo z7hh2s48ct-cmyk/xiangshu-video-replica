@@ -35,6 +35,12 @@ export function ViralRuntimeSection({
   >([]);
   const [perKeywordLimit, setPerKeywordLimit] = useState(10);
   const [intervalDays, setIntervalDays] = useState(7);
+  // 采集质量规则与月度预算（方案 P1 采集设置）。
+  const [qualityMinLikes, setQualityMinLikes] = useState("");
+  const [qualityDurationMin, setQualityDurationMin] = useState("");
+  const [qualityDurationMax, setQualityDurationMax] = useState("");
+  const [qualityExcludeWords, setQualityExcludeWords] = useState("");
+  const [monthlyBudget, setMonthlyBudget] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState(false);
@@ -63,6 +69,25 @@ export function ViralRuntimeSection({
       );
       setPerKeywordLimit(value.per_keyword_limit ?? 10);
       setIntervalDays(value.collection_interval_days ?? 7);
+      setQualityMinLikes(
+        value.quality_min_likes == null ? "" : String(value.quality_min_likes),
+      );
+      setQualityDurationMin(
+        value.quality_duration_min_ms == null
+          ? ""
+          : String(value.quality_duration_min_ms),
+      );
+      setQualityDurationMax(
+        value.quality_duration_max_ms == null
+          ? ""
+          : String(value.quality_duration_max_ms),
+      );
+      setQualityExcludeWords((value.quality_exclude_words ?? []).join("、"));
+      setMonthlyBudget(
+        value.monthly_budget_fen == null
+          ? ""
+          : String(value.monthly_budget_fen),
+      );
     } catch (cause) {
       setError(adminActivationErrorMessage(cause, "读取爆款视频运行状态失败"));
     }
@@ -144,6 +169,28 @@ export function ViralRuntimeSection({
                   })),
                   per_keyword_limit: perKeywordLimit,
                   collection_interval_days: intervalDays,
+                  // 质量规则与预算（方案 P1）：空输入 = 清除该规则。
+                  quality_min_likes:
+                    qualityMinLikes.trim() === ""
+                      ? null
+                      : Number(qualityMinLikes),
+                  quality_duration_min_ms:
+                    qualityDurationMin.trim() === ""
+                      ? null
+                      : Number(qualityDurationMin),
+                  quality_duration_max_ms:
+                    qualityDurationMax.trim() === ""
+                      ? null
+                      : Number(qualityDurationMax),
+                  quality_exclude_words:
+                    qualityExcludeWords.trim() === ""
+                      ? []
+                      : qualityExcludeWords
+                          .split(/[,，、]/)
+                          .map((word) => word.trim())
+                          .filter(Boolean),
+                  monthly_budget_fen:
+                    monthlyBudget.trim() === "" ? null : Number(monthlyBudget),
                 }
               : {}),
           },
@@ -306,6 +353,70 @@ export function ViralRuntimeSection({
                 }
               />
             </label>
+            {/* 质量规则与月度预算（方案 P1 采集设置）：入池门槛 + 成本封顶。 */}
+            <label>
+              最低点赞数
+              <input
+                type="number"
+                min={0}
+                placeholder="不限"
+                disabled={readOnly || saving}
+                value={qualityMinLikes}
+                onChange={(event) => setQualityMinLikes(event.target.value)}
+              />
+            </label>
+            <label>
+              时长下限（毫秒）
+              <input
+                type="number"
+                min={0}
+                placeholder="不限"
+                disabled={readOnly || saving}
+                value={qualityDurationMin}
+                onChange={(event) => setQualityDurationMin(event.target.value)}
+              />
+            </label>
+            <label>
+              时长上限（毫秒）
+              <input
+                type="number"
+                min={0}
+                placeholder="不限"
+                disabled={readOnly || saving}
+                value={qualityDurationMax}
+                onChange={(event) => setQualityDurationMax(event.target.value)}
+              />
+            </label>
+            <label>
+              排除词（顿号或逗号分隔）
+              <input
+                placeholder="例：广告、抽奖"
+                disabled={readOnly || saving}
+                value={qualityExcludeWords}
+                onChange={(event) => setQualityExcludeWords(event.target.value)}
+              />
+            </label>
+            <label>
+              月度预算（元）
+              <input
+                type="number"
+                min={1}
+                placeholder="不限"
+                disabled={readOnly || saving}
+                value={monthlyBudget}
+                onChange={(event) => setMonthlyBudget(event.target.value)}
+              />
+            </label>
+            {controls.monthly_budget_fen != null ? (
+              <p className="admin-hint">
+                本月采集已用{" "}
+                {((controls.month_spend_fen ?? 0) / 100).toFixed(2)} 元 / 预算{" "}
+                {(controls.monthly_budget_fen / 100).toFixed(2)} 元
+                {(controls.month_spend_fen ?? 0) >= controls.monthly_budget_fen
+                  ? "（已达上限，定时采集暂停；手动「立即采集」仍可用）"
+                  : ""}
+              </p>
+            ) : null}
             {!readOnly && (
               <div className="admin-actions">
                 <button

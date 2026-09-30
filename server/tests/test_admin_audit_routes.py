@@ -867,3 +867,69 @@ def test_list_audit_log_created_to_includes_whole_day(client: TestClient, route_
     )
     assert next_day.status_code == 200
     assert next_day.json()["total"] == 1
+
+
+@pytest.mark.pg
+def test_audit_event_group_filters_and_sensitive_flag(client: TestClient, route_state: str):
+    """方案 P1 审计分组：event_group 多值筛选 + 高敏标记逐行返回。"""
+    _admin_session(client, "admin_u")
+    with psycopg.connect(_t34_dsn(), autocommit=True) as conn:
+        _insert_adjustment(
+            conn,
+            actor="admin_u",
+            target="customer_u",
+            source_type="CS_TICKET",
+            reason="客服补偿",
+        )
+        _insert_adjustment(
+            conn,
+            actor="admin_u",
+            target="customer_u",
+            source_type="REFUND_APPROVAL",
+            reason="退款扣减",
+        )
+
+    funds = client.get(AUDIT_PATH, params={"event_group": "funds"})
+    assert funds.status_code == 200, funds.text
+    funds_data = funds.json()
+    assert funds_data["total"] == 2
+    assert {item["event_type"] for item in funds_data["items"]} == {"ADMIN_ADJUSTMENT"}
+
+    # 多组逗号筛选：资金 2 条 + 本次登录自身写入的 password_login 1 条。
+    multi = client.get(AUDIT_PATH, params={"event_group": "funds,login"})
+    assert multi.status_code == 200
+    assert multi.json()["total"] == 3
+
+    # 未知分组显式 422，不静默空列表。
+    unknown = client.get(AUDIT_PATH, params={"event_group": "nope"})
+    assert unknown.status_code == 422
+
+    # 敏感标记：普通补偿为 False；退款扣减（REFUND_APPROVAL 来源）为 True。
+    sensitive_by_reason = {item["reason"]: item["sensitive"] for item in funds_data["items"]}
+    assert sensitive_by_reason == {"客服补偿": False, "退款扣减": True}
+
+
+@pytest.mark.pg
+def test_audit_csv_export_streams_rows(client: TestClient, route_state: str):
+    """审计导出：与列表同筛选口径，走 control.export 审计并限流。"""
+    headers = _admin_session(client, "admin_u")
+    with psycopg.connect(_t34_dsn(), autocommit=True) as conn:
+        _insert_adjustment(
+            conn,
+            actor="admin_u",
+            target="customer_u",
+            source_type="CS_TICKET",
+            reason="导出核对",
+        )
+
+    exported = client.get(AUDIT_PATH + ".csv", params={"event_group": "funds"})
+    assert exported.status_code == 200, exported.text
+    assert exported.headers["content-type"].startswith("text/csv")
+    lines = exported.text.splitlines()
+    assert lines[0].startswith("event_type,")
+    assert any("导出核对" in line for line in lines[1:])
+
+    # 导出动作本身落在审计里（control.export）。
+    listed = client.get(AUDIT_PATH, params={"event_type": "control.export"}, headers=headers)
+    assert listed.status_code == 200
+    assert listed.json()["total"] >= 1

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   type AdminGenerationRecord,
-  type AdminGenerationRecordSummary,
+  type AdminGenerationRecordSummaryCards,
   createCustomerAdjustment,
   getAdminGenerationRecordSummary,
   getAdminGenerationRecords,
@@ -11,6 +11,7 @@ import {
   retryGenerationRecord,
 } from "../api.admin";
 import { AnalysisDiagnosticPanel } from "./AnalysisDiagnosticPanel";
+import { AnalysisRecentFailures } from "./AnalysisRecentFailures";
 import { RecordCallsPanel } from "./RecordCallsPanel";
 import { RecordThumbnail } from "./RecordThumbnail";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
@@ -64,10 +65,13 @@ const VIDEO_PREVIEW_TYPES = new Set([VIDEO_RECORD_TYPE, "ORAL_VIDEO"]);
 export function GenerationRecordsPage({
   initialStatus = "",
   initialRecordType = "",
+  initialUsername = "",
   readOnly = false,
 }: {
   initialStatus?: string;
   initialRecordType?: string;
+  /** 客户详情「生成记录」页签带入的客户用户名（方案 P1 六页签）。 */
+  initialUsername?: string;
   readOnly?: boolean;
 }) {
   const [items, setItems] = useState<AdminGenerationRecord[]>([]);
@@ -75,19 +79,26 @@ export function GenerationRecordsPage({
   const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [summary, setSummary] = useState<AdminGenerationRecordSummary | null>(
-    null,
+  const [summary, setSummary] =
+    useState<AdminGenerationRecordSummaryCards | null>(null);
+  const [username, setUsername] = useState(initialUsername);
+  // 意图带来的单状态（如总览「失败任务」的 FAILED）归一到所属组：
+  // 下拉只表达 5 组，单值会让 select 显示成空选项。
+  const [status, setStatus] = useState(() =>
+    initialStatus
+      ? (GENERATION_STATUS_FILTERS.find(({ value }) =>
+          value.split(",").includes(initialStatus),
+        )?.value ?? initialStatus)
+      : initialStatus,
   );
-  const [username, setUsername] = useState("");
-  const [status, setStatus] = useState(initialStatus);
   const [recordType, setRecordType] = useState(initialRecordType);
   const [failurePhase, setFailurePhase] = useState("");
   const [taskRef, setTaskRef] = useState("");
   const [createdFrom, setCreatedFrom] = useState("");
   const [createdTo, setCreatedTo] = useState("");
   const [filters, setFilters] = useState({
-    username: "",
-    status: initialStatus,
+    username: initialUsername,
+    status,
     recordType: initialRecordType,
     failurePhase: "",
     taskRef: "",
@@ -381,17 +392,23 @@ export function GenerationRecordsPage({
         ariaLabel="生成记录页签"
         items={[
           { id: "records", label: "生成记录" },
-          { id: "diagnostics", label: "任务诊断" },
+          { id: "diagnostics", label: "失败诊断" },
         ]}
         onChange={(id) =>
           setView(id === "diagnostics" ? "diagnostics" : "records")
         }
       />
       {view === "diagnostics" ? (
-        <AnalysisDiagnosticPanel
-          initialTaskId={diagnosticTaskId}
-          key={`diagnostics:${diagnosticTaskId}`}
-        />
+        <>
+          {/* 方案 P1：页签默认先给近 7 天失败清单；交接了具体任务编号时让位。 */}
+          {diagnosticTaskId ? null : (
+            <AnalysisRecentFailures onDiagnose={setDiagnosticTaskId} />
+          )}
+          <AnalysisDiagnosticPanel
+            initialTaskId={diagnosticTaskId}
+            key={`diagnostics:${diagnosticTaskId}`}
+          />
+        </>
       ) : (
         <>
           <div className="admin-actions">
@@ -527,6 +544,49 @@ export function GenerationRecordsPage({
 
           {summary && summary.total > 0 ? (
             <section className="admin-panel" aria-label="记录聚合">
+              {/* 方案 P1：顶部聚合 4 张卡——先结论后明细。 */}
+              <div className="economics-kpis economics-kpis--four">
+                <article>
+                  <span>成功率</span>
+                  <strong>
+                    {summary.success_rate_pct == null
+                      ? "—"
+                      : `${summary.success_rate_pct}%`}
+                  </strong>
+                  <small>
+                    成功 {summary.succeeded_count ?? 0} / 共 {summary.total}
+                  </small>
+                </article>
+                <article>
+                  <span>平均耗时</span>
+                  <strong>
+                    {summary.avg_duration_seconds == null
+                      ? "—"
+                      : `${Math.round(summary.avg_duration_seconds)} 秒`}
+                  </strong>
+                  <small>仅统计成功任务</small>
+                </article>
+                <article>
+                  <span>失败数</span>
+                  <strong>{summary.failed_count ?? 0}</strong>
+                  <small>含已取消与归档失败</small>
+                </article>
+                <article>
+                  <span>失败原因 Top 3</span>
+                  <strong>
+                    {summary.failure_reasons.length === 0 ? "—" : ""}
+                  </strong>
+                  <small>
+                    {summary.failure_reasons
+                      .slice(0, 3)
+                      .map(
+                        (reason) =>
+                          `${reason.error_code ?? "未记录"} × ${reason.count}`,
+                      )
+                      .join(" · ")}
+                  </small>
+                </article>
+              </div>
               <h2>当前筛选聚合</h2>
               <p>
                 {summary.counts
@@ -695,33 +755,14 @@ export function GenerationRecordsPage({
                         <span>查看详情</span>
                         <small>{formatResult(item)}</small>
                       </summary>
+                      {/* 方案 P1：详情分「概要 / 技术详情」——运营先看结论
+                          （分类、谁来处理、积分是否退回），编号、凭证、状态码
+                          这类排查字段收进折叠区。 */}
                       <dl>
-                        <dt>记录编号</dt>
-                        <dd>{item.record_id}</dd>
-                        <dt>结果引用</dt>
-                        <dd>{item.result_reference ?? "—"}</dd>
-                        <dt>供应商任务凭证</dt>
-                        <dd>{item.provider_reference ?? "—"}</dd>
-                        <dt>错误码</dt>
-                        <dd>{item.error_code ?? "—"}</dd>
-                        <dt>错误说明</dt>
-                        <dd>{item.error_message ?? "—"}</dd>
-                        {item.provider_error_code ? (
+                        {item.error_message ? (
                           <>
-                            <dt>服务商错误码</dt>
-                            <dd>{item.provider_error_code}</dd>
-                          </>
-                        ) : null}
-                        {item.provider_message ? (
-                          <>
-                            <dt>服务商原话</dt>
-                            <dd>{item.provider_message}</dd>
-                          </>
-                        ) : null}
-                        {item.advice ? (
-                          <>
-                            <dt>修复建议</dt>
-                            <dd>{item.advice}</dd>
+                            <dt>错误说明</dt>
+                            <dd>{item.error_message}</dd>
                           </>
                         ) : null}
                         {item.failure_category && item.failure_owner ? (
@@ -753,10 +794,10 @@ export function GenerationRecordsPage({
                             </dd>
                           </>
                         ) : null}
-                        {item.status === "FAILED" && item.retryable != null ? (
+                        {item.advice ? (
                           <>
-                            <dt>可否重试</dt>
-                            <dd>{item.retryable ? "可重试" : "不可重试"}</dd>
+                            <dt>修复建议</dt>
+                            <dd>{item.advice}</dd>
                           </>
                         ) : null}
                         {item.credits_refunded != null ? (
@@ -767,25 +808,57 @@ export function GenerationRecordsPage({
                             </dd>
                           </>
                         ) : null}
-                        {item.upstream_status != null ? (
-                          <>
-                            <dt>上游状态码</dt>
-                            <dd>{item.upstream_status}</dd>
-                          </>
-                        ) : null}
-                        {item.upstream_reason ? (
-                          <>
-                            <dt>上游说明</dt>
-                            <dd>{item.upstream_reason}</dd>
-                          </>
-                        ) : null}
-                        <dt>记录数据</dt>
-                        <dd>
-                          {item.record_data_status === "CORRUPTED"
-                            ? "记录数据损坏"
-                            : "正常"}
-                        </dd>
                       </dl>
+                      <details className="admin-generation-records__technical">
+                        <summary>技术详情</summary>
+                        <dl>
+                          <dt>记录编号</dt>
+                          <dd>{item.record_id}</dd>
+                          <dt>结果引用</dt>
+                          <dd>{item.result_reference ?? "—"}</dd>
+                          <dt>供应商任务凭证</dt>
+                          <dd>{item.provider_reference ?? "—"}</dd>
+                          <dt>错误码</dt>
+                          <dd>{item.error_code ?? "—"}</dd>
+                          {item.provider_error_code ? (
+                            <>
+                              <dt>服务商错误码</dt>
+                              <dd>{item.provider_error_code}</dd>
+                            </>
+                          ) : null}
+                          {item.provider_message ? (
+                            <>
+                              <dt>服务商原话</dt>
+                              <dd>{item.provider_message}</dd>
+                            </>
+                          ) : null}
+                          {item.status === "FAILED" &&
+                          item.retryable != null ? (
+                            <>
+                              <dt>可否重试</dt>
+                              <dd>{item.retryable ? "可重试" : "不可重试"}</dd>
+                            </>
+                          ) : null}
+                          {item.upstream_status != null ? (
+                            <>
+                              <dt>上游状态码</dt>
+                              <dd>{item.upstream_status}</dd>
+                            </>
+                          ) : null}
+                          {item.upstream_reason ? (
+                            <>
+                              <dt>上游说明</dt>
+                              <dd>{item.upstream_reason}</dd>
+                            </>
+                          ) : null}
+                          <dt>记录数据</dt>
+                          <dd>
+                            {item.record_data_status === "CORRUPTED"
+                              ? "记录数据损坏"
+                              : "正常"}
+                          </dd>
+                        </dl>
+                      </details>
                       <RecordThumbnail
                         active={openedDetails.has(recordKey(item))}
                         recordId={item.record_id}
