@@ -66,6 +66,9 @@ PG_ONLY_TABLES: frozenset[str] = frozenset(
         "activation_code_events",
         # 089_customer_api_keys: 客户程序 API Key 泳道，PG-only（089 明确 SQLite lane 不建表）。
         "customer_api_keys",
+        # 20260930T1100_alert_notify_dedup: 告警邮件推送防打扰单行表，PG-only
+        # （非 postgresql 方言 return）。
+        "alert_notify_dedup",
         # 20260912T1353_customer_discounts: 客户消耗侧折扣配置，PG-only
         # （非 postgresql 方言 return）。
         "customer_discounts",
@@ -173,7 +176,19 @@ PG_ONLY_COLUMNS: dict[str, frozenset[str]] = {
     "viral_videos": frozenset({"homepage_featured", "deleted_at", "collection_published"}),
     "viral_media_preparations": frozenset({"cache_scope", "storage_uri"}),
     "viral_runtime_controls": frozenset(
-        {"collection_interval_days", "keywords_json", "per_keyword_limit", "next_collection_at"}
+        {
+            "collection_interval_days",
+            "keywords_json",
+            "per_keyword_limit",
+            "next_collection_at",
+            # 20260930T1000（方案 P1 采集质量规则与月度预算）：SQLite 源 schema
+            # 冻结于其前基线，质量门槛与预算列仅存在于 PG。
+            "quality_min_likes",
+            "quality_duration_min_ms",
+            "quality_duration_max_ms",
+            "quality_exclude_words_json",
+            "monthly_budget_fen",
+        }
     ),
     "viral_refresh_tasks": frozenset({"collection_config_json", "checkpoint_json", "retry_count"}),
     "runtime_settings": frozenset({"fair_queue_enabled", "active_payment_provider"}),

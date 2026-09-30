@@ -57,9 +57,11 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 # 给 external_call_logs 追加原始响应、任务归属与第三方任务号列（管理端报错排查），
 # 20260929T1000_customer_annotations 新建客户标注表（标签 / 备注 / 负责人，方案 P2-3），
 # 20260929T1200_admin_team_and_alert_settings 为 users 增加超管标记并新建通知与告警
+# 设置表；20260930T1000（采集质量规则与月度预算）与 20260930T1100（告警推送防
+# 打扰去重表）继续追加其上，故链尾为 20260930T1100_alert_notify_dedup。
 # 单行配置表（方案 P2-4）。
 # 迁移后 alembic 版本头即该值，9 处 assert version == HEAD_REVISION 依赖此值。
-HEAD_REVISION = "20260929T1200_admin_team_and_alert_settings"
+HEAD_REVISION = "20260930T1100_alert_notify_dedup"
 
 
 def test_viral_script_cache_migration_preserves_results_without_task_foreign_keys(
