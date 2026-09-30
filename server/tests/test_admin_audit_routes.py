@@ -933,3 +933,22 @@ def test_audit_csv_export_streams_rows(client: TestClient, route_state: str):
     listed = client.get(AUDIT_PATH, params={"event_type": "control.export"}, headers=headers)
     assert listed.status_code == 200
     assert listed.json()["total"] >= 1
+
+
+@pytest.mark.pg
+def test_auditor_cannot_export_the_audit_table(client: TestClient, route_state: str):
+    """回归：整表导出是数据出境动作，读级角色（auditor）不放行——与 customers.csv 一致。"""
+    _admin_session(client, "auditor_u")
+
+    denied = client.get(AUDIT_PATH + ".csv")
+    assert denied.status_code == 403, denied.text
+    assert denied.json()["detail"]["code"] == "AUDITOR_READ_ONLY"
+
+    # 被拒的导出不能留下 control.export 审计（否则审计里会出现一次并未发生的导出）。
+    with psycopg.connect(_t34_dsn(), autocommit=True) as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM audit_logs WHERE action = 'control.export'"
+        ).fetchone() == (0,)
+
+    # 列表仍然对 auditor 开放（只读）。
+    assert client.get(AUDIT_PATH).status_code == 200

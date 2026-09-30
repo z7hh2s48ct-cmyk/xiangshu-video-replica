@@ -238,18 +238,24 @@ def email_sender_from_settings(conn: BusinessConnection) -> EmailSender | None:
     return TemplateEmailSender(config)
 
 
-def deliver_quietly(send: Callable[[], None], *, kind: str) -> None:
-    """后台发信：失败只告警。
+def deliver_quietly(send: Callable[[], None], *, kind: str) -> bool:
+    """后台发信：失败只告警。返回是否确认发出。
 
     请求在发信之前就已答复（见 customer_email_routes 的防枚举说明），这里没有
     调用方可以报错；验证码邮件没收到，用户可以在冷却后重发。
+
+    返回值给需要「发成功了才记账」的调用方（如告警摘要的防打扰标记）：吞掉异常
+    的同时把结果告诉它，避免它在没发出去时也认为已经发过。
     """
     try:
         send()
     except EmailDeliveryError as exc:
         logger.warning("email delivery failed kind=%s code=%s", kind, exc.code)
+        return False
     except Exception as exc:  # pragma: no cover - 后台任务不得把异常抛进事件循环
         logger.warning("email delivery failed kind=%s error=%s", kind, type(exc).__name__)
+        return False
+    return True
 
 
 class EmailProviderTester:

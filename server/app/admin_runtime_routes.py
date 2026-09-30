@@ -585,8 +585,9 @@ def collect_viral_now(
     """立即采集：置 ``next_collection_at`` 为当前并直接入队一次关键词采集.
 
     与定时采集共用 ``enqueue_due_viral_collections``：关键词、平台、每词上限与
-    共享账单批次都在同一事务内建立；若已有在队/在制的采集任务则本次不重复入队
-    （与定时调度一致，避免并发采集互踩）。
+    共享账单批次都在同一事务内建立。手动触发不受月度预算门槛拦截（运营知情下的
+    动作）；若已有在队/在制的采集任务则如实回 409，而不是回「已入队」却什么都没排
+    ——事务随之回滚，``next_collection_at`` 也不会被白白改动。
     """
     from app.viral_collection import enqueue_due_viral_collections
 
@@ -602,7 +603,12 @@ def collect_viral_now(
         conn.execute(
             "UPDATE viral_runtime_controls SET next_collection_at = CURRENT_TIMESTAMP WHERE id = 1"
         )
-        enqueue_due_viral_collections(BusinessConnection.postgres(conn))
+        if not enqueue_due_viral_collections(BusinessConnection.postgres(conn), manual=True):
+            raise http_error(
+                409,
+                "VIRAL_COLLECTION_BUSY",
+                "已有采集任务在队列或运行中，请等它完成后再立即采集。",
+            )
         conn.execute(
             "INSERT INTO audit_logs(id,actor_user_id,action,entity_type,entity_id,metadata_json) "
             "VALUES(%s,%s,'viral_collection.collect_now','viral_runtime_controls','1',%s)",
@@ -1772,6 +1778,11 @@ def curate_collected_viral_videos_batch(
 
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
         updated: list[dict[str, object]] = []
+        # 未就绪的条目先记下，循环结束后每个平台只排一个任务：每平台同一时刻只允许
+        # 一个后台任务，在循环里逐条排队，第二条就会撞上第一条刚排的任务而 409，
+        # 连同已排的第一条一起回滚——同平台两条未就绪视频的批量根本做不成。
+        unready_by_platform: dict[str, list[str]] = {}
+        unready_entries: dict[str, list[dict[str, object]]] = {}
         for target in payload.items:
             row = conn.execute(
                 "SELECT title,cover_url,cover_key,category FROM viral_videos "
@@ -1798,30 +1809,17 @@ def curate_collected_viral_videos_batch(
                 if ready is None:
                     # 方案 C-2：未就绪的条目转入「准备后就绪自动上首页」队列；
                     # 就绪条目照常当场展示，批量不再整批取消。
-                    queued_task = _enqueue_archive_batch(
-                        conn,
-                        target.platform,
-                        [target.video_id],
-                        feature_after={
-                            "actor_user_id": actor.user_id,
-                            "reason": payload.reason.strip(),
-                            "request_id": request_id,
-                        },
-                        actor_user_id=actor.user_id,
-                        reason=payload.reason.strip(),
-                        request_id=request_id,
-                        audit_action="viral_video.prepare",
-                    )
-                    updated.append(
-                        {
-                            "platform": target.platform,
-                            "video_id": target.video_id,
-                            "homepage_featured": False,
-                            "deleted": False,
-                            "queued_for_preparation": True,
-                            "task_id": queued_task,
-                        }
-                    )
+                    entry: dict[str, object] = {
+                        "platform": target.platform,
+                        "video_id": target.video_id,
+                        "homepage_featured": False,
+                        "deleted": False,
+                        "queued_for_preparation": True,
+                        "task_id": None,
+                    }
+                    updated.append(entry)
+                    unready_by_platform.setdefault(target.platform, []).append(target.video_id)
+                    unready_entries.setdefault(target.platform, []).append(entry)
                     continue
                 if row[1] and not row[2]:
                     prepared = prepared_covers.get((target.platform, target.video_id))
@@ -1888,6 +1886,23 @@ def curate_collected_viral_videos_batch(
                     "queued_for_preparation": False,
                 }
             )
+        for platform, video_ids in unready_by_platform.items():
+            queued_task = _enqueue_archive_batch(
+                conn,
+                platform,
+                video_ids,
+                feature_after={
+                    "actor_user_id": actor.user_id,
+                    "reason": payload.reason.strip(),
+                    "request_id": request_id,
+                },
+                actor_user_id=actor.user_id,
+                reason=payload.reason.strip(),
+                request_id=request_id,
+                audit_action="viral_video.prepare",
+            )
+            for entry in unready_entries[platform]:
+                entry["task_id"] = queued_task
         return {
             "action": payload.action,
             "count": sum(1 for item in updated if not item.get("queued_for_preparation")),

@@ -830,6 +830,7 @@ export function AdminApp() {
               initialTab={
                 navigationIntent === "recon" ? "reconciliation" : "overview"
               }
+              readOnly={readOnly}
             />
           ) : null}
           {activeTab === "customersMgmt" ? (
@@ -862,7 +863,9 @@ export function AdminApp() {
               readOnly={readOnly}
             />
           ) : null}
-          {activeTab === "auditCenter" ? <AuditCenterPage /> : null}
+          {activeTab === "auditCenter" ? (
+            <AuditCenterPage readOnly={readOnly} />
+          ) : null}
           {activeTab === "viralVideos" ? (
             <>
               <ViralVideosPage readOnly={readOnly} />

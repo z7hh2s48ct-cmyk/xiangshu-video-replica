@@ -6,6 +6,7 @@ import json
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -25,28 +26,88 @@ from app.viral_store import (
     upsert_viral_videos,
     viral_runtime_controls,
 )
-from app.viral_tikhub import ViralSourceError, viral_source_client_from_settings
+from app.viral_tikhub import ViralSourceError, ViralVideo, viral_source_client_from_settings
 
 
-def enqueue_due_viral_collections(conn: BusinessConnection) -> None:
-    """Singleton row lock makes each daily/weekly schedule unique across workers."""
+@dataclass(frozen=True)
+class ViralQualityRules:
+    """采集质量门槛（方案 P1 采集设置）：入池前过滤低质内容。
+
+    四项都是「不设即不限」。这些值由管理端写入 ``viral_runtime_controls``；此前只存不用，
+    运营配了「点赞不低于 5000」，低于它的视频照样被采集、下载、占存储和成本。
+    """
+
+    min_likes: int | None = None
+    duration_min_ms: int | None = None
+    duration_max_ms: int | None = None
+    exclude_words: tuple[str, ...] = ()
+
+    def rejects(self, video: ViralVideo) -> bool:
+        if self.min_likes is not None and video.likes < self.min_likes:
+            return True
+        # 时长为 0 表示上游没给（并非真的 0 毫秒）：无法判断就不因时长规则误杀，
+        # 否则一个不返回时长的平台会被「最短 15 秒」整批拒光。
+        if video.duration_ms > 0:
+            if self.duration_min_ms is not None and video.duration_ms < self.duration_min_ms:
+                return True
+            if self.duration_max_ms is not None and video.duration_ms > self.duration_max_ms:
+                return True
+        if self.exclude_words:
+            text = " ".join(
+                [
+                    video.title,
+                    *video.tags,
+                    str(video.native.get("source_description") or ""),
+                ]
+            ).lower()
+            if any(word.lower() in text for word in self.exclude_words):
+                return True
+        return False
+
+
+def load_quality_rules(conn: BusinessConnection) -> ViralQualityRules:
+    row = conn.execute(
+        "SELECT quality_min_likes, quality_duration_min_ms, quality_duration_max_ms, "
+        "quality_exclude_words_json FROM viral_runtime_controls WHERE id=1"
+    ).fetchone()
+    if row is None:
+        return ViralQualityRules()
+    try:
+        words = json.loads(row["quality_exclude_words_json"] or "[]")
+    except json.JSONDecodeError:
+        words = []
+    return ViralQualityRules(
+        min_likes=row["quality_min_likes"],
+        duration_min_ms=row["quality_duration_min_ms"],
+        duration_max_ms=row["quality_duration_max_ms"],
+        exclude_words=tuple(str(word) for word in words if str(word).strip()),
+    )
+
+
+def enqueue_due_viral_collections(conn: BusinessConnection, *, manual: bool = False) -> bool:
+    """Singleton row lock makes each daily/weekly schedule unique across workers.
+
+    返回本次调用是否真的入队了一批采集任务（False：未启用 / 无关键词 / 预算已满 /
+    未到期 / 已有任务在队）。手动「立即采集」据此如实回答运营，而不是不管有没有入队
+    都说「已入队」。``manual=True`` 表示运营知情下的手动触发，不受月度预算门槛拦截。
+    """
     row = conn.execute(
         "SELECT * FROM viral_runtime_controls WHERE id=1 AND collection_enabled=1 "
         "FOR UPDATE SKIP LOCKED"
     ).fetchone()
     if row is None:
-        return
+        return False
     keywords = [
         ViralKeywordConfig.model_validate(item) for item in json.loads(row["keywords_json"])
     ]
     if not keywords:
-        return
+        return False
     # 月度预算门槛（方案 P1 采集设置）：本月平台侧采集成本已达预算时跳过
-    # 定时入队（手动「立即采集」不拦——运营知情下的手动动作仍可用）。
+    # 定时入队；手动「立即采集」不拦——运营知情下的手动动作仍可用。
     budget_row = conn.execute(
         "SELECT monthly_budget_fen FROM viral_runtime_controls WHERE id=1"
     ).fetchone()
-    if budget_row is not None and budget_row["monthly_budget_fen"] is not None:
+    if not manual and budget_row is not None and budget_row["monthly_budget_fen"] is not None:
         spent = conn.execute(
             """
             SELECT COALESCE(SUM(COALESCE(a.cost_fen, 0)), 0)
@@ -59,7 +120,7 @@ def enqueue_due_viral_collections(conn: BusinessConnection) -> None:
             """
         ).fetchone()
         if spent is not None and int(spent[0] or 0) >= int(budget_row["monthly_budget_fen"]):
-            return
+            return False
     due = conn.execute(
         "SELECT 1 FROM viral_runtime_controls WHERE id=1 "
         "AND (next_collection_at IS NULL OR next_collection_at <= CURRENT_TIMESTAMP)"
@@ -69,7 +130,7 @@ def enqueue_due_viral_collections(conn: BusinessConnection) -> None:
             "SELECT 1 FROM viral_refresh_tasks WHERE status IN ('PENDING','RUNNING') LIMIT 1"
         ).fetchone()
         if busy is not None:
-            return
+            return False
         window_end = conn.execute(
             "SELECT extract(epoch FROM CURRENT_TIMESTAMP)::bigint"
         ).fetchone()[0]
@@ -97,6 +158,7 @@ def enqueue_due_viral_collections(conn: BusinessConnection) -> None:
             "CURRENT_TIMESTAMP + (%s * interval '1 day') WHERE id=1",
             (int(row["collection_interval_days"]),),
         )
+        return True
     else:
         # Two retries per scheduled batch. Completed keywords and media remain
         # checkpointed, so retries only resume missing work, never restart a batch.
@@ -109,6 +171,7 @@ def enqueue_due_viral_collections(conn: BusinessConnection) -> None:
                 AND updated_at::timestamptz <=
                     CURRENT_TIMESTAMP - interval '15 minutes'"""
         )
+        return False
 
 
 @contextmanager
@@ -269,6 +332,8 @@ def run_viral_collection(lease: ViralRefreshLease, storage: StorageAdapter) -> N
                 (json.dumps(config), lease.id),
             )
         client = viral_source_client_from_settings(conn)
+        # 质量门槛按本轮开始时的设置执行；跑到一半改设置不影响这一轮的一致性。
+        quality_rules = load_quality_rules(conn)
     entries = [ViralKeywordConfig.model_validate(item) for item in config.get("keywords", [])]
     if not entries:
         raise ViralSourceError("请先在管理后台配置采集关键词。")
@@ -290,7 +355,11 @@ def run_viral_collection(lease: ViralRefreshLease, storage: StorageAdapter) -> N
                 except Exception:
                     failures += 1
                     continue
-                videos = videos[: int(config["limit"])]
+                # 先过质量门槛再取每词上限：上限应当数「合格的」，而不是让被拒的
+                # 视频占掉名额、合格的反而被截掉。被拒的既不入池也不下载。
+                videos = [video for video in videos if not quality_rules.rejects(video)][
+                    : int(config["limit"])
+                ]
                 keywords_done[step] = list(dict.fromkeys(video.video_id for video in videos))
                 with _connection() as conn:
                     _require_lease(conn, lease)

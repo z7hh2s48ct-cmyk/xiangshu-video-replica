@@ -12,13 +12,15 @@ vi.mock("./OrdersPage", () => ({
   ),
 }));
 vi.mock("./AccountsPage", () => ({
-  // AccountsPage 刻意不接 readOnly：它整页只有查询与重新读取，没有任何写操作
-  // 或危险按钮可收敛（无 adminWrite、无 ConfirmDialog），所以不透传是对的 ——
-  // 加一个什么都不做的 prop 只会误导。
-  AccountsPage: () => <div data-testid="accounts">积分流水</div>,
+  // 整表导出（账务流水 CSV）是写级动作，只读角色不渲染入口，所以要接 readOnly。
+  AccountsPage: ({ readOnly }: { readOnly?: boolean }) => (
+    <div data-testid="accounts">{`readOnly=${String(readOnly)}`}</div>
+  ),
 }));
 vi.mock("./AdjustmentsPage", () => ({
-  AdjustmentsPage: () => <div data-testid="adjustments">人工调整</div>,
+  AdjustmentsPage: ({ readOnly }: { readOnly?: boolean }) => (
+    <div data-testid="adjustments">{`readOnly=${String(readOnly)}`}</div>
+  ),
 }));
 vi.mock("./ReconciliationPage", () => ({
   ReconciliationPage: () => <div data-testid="reconciliation">对账异常</div>,
@@ -58,6 +60,15 @@ test("keeps the writable state on the orders tab when not read-only", () => {
   fireEvent.click(screen.getByRole("tab", { name: "收款订单" }));
 
   expect(screen.getByTestId("orders")).toHaveTextContent("readOnly=false");
+});
+
+test("forwards readOnly to every tab that carries a whole-table export", () => {
+  render(<FundsPage readOnly />);
+
+  fireEvent.click(screen.getByRole("tab", { name: "积分流水" }));
+  expect(screen.getByTestId("accounts")).toHaveTextContent("readOnly=true");
+  fireEvent.click(screen.getByRole("tab", { name: "人工调整" }));
+  expect(screen.getByTestId("adjustments")).toHaveTextContent("readOnly=true");
 });
 
 test("switches between ledger, adjustments and reconciliation tabs", () => {

@@ -47,7 +47,13 @@ const emptyFilters: Filters = {
   createdTo: "",
 };
 
-export function AdjustmentsPage({ userId }: { userId?: string }) {
+export function AdjustmentsPage({
+  userId,
+  readOnly = false,
+}: {
+  userId?: string;
+  readOnly?: boolean;
+}) {
   const [adjustments, setAdjustments] = useState<AdjustmentListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -184,9 +190,12 @@ export function AdjustmentsPage({ userId }: { userId?: string }) {
             />
           </label>
           <button type="submit">查询</button>
-          <button type="button" onClick={() => void exportCsv()}>
-            导出 CSV
-          </button>
+          {/* 整表导出是写级动作（服务端 AdminWriter）：只读角色不渲染入口。 */}
+          {readOnly ? null : (
+            <button type="button" onClick={() => void exportCsv()}>
+              导出 CSV
+            </button>
+          )}
         </form>
       ) : null}
 

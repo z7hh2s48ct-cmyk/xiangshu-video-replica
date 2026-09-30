@@ -282,7 +282,7 @@ function priceChange(item: AuditLogItem) {
 // 伪装成状态（2026-09-12 评审 P3 的「伪状态反模式」）。
 const PAGE_SIZE = 20;
 
-export function AuditEventsPage() {
+export function AuditEventsPage({ readOnly = false }: { readOnly?: boolean }) {
   const [items, setItems] = useState<AuditLogItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -504,15 +504,19 @@ export function AuditEventsPage() {
           >
             重置
           </button>
-          {/* 方案 P1：审计可导出，与列表同筛选口径（服务端 control.export 审计）。 */}
-          <button
-            className="secondary-button"
-            disabled={loading}
-            type="button"
-            onClick={() => void exportCsv()}
-          >
-            导出 CSV
-          </button>
+          {/* 方案 P1：审计可导出，与列表同筛选口径（服务端 control.export 审计）。
+              整表导出是数据出境动作，服务端只放行写级角色；只读角色（auditor）
+              不渲染入口，免得点了才收到 403。 */}
+          {readOnly ? null : (
+            <button
+              className="secondary-button"
+              disabled={loading}
+              type="button"
+              onClick={() => void exportCsv()}
+            >
+              导出 CSV
+            </button>
+          )}
         </div>
       </form>
 

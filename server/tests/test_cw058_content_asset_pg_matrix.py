@@ -3535,3 +3535,105 @@ def test_material_video_completion_persists_probed_duration(
     metadata = json.loads(row["metadata_json"])
     assert metadata["video_duration_verified"] is True
     assert "audio_duration_verified" not in metadata
+
+
+# ---------------------------------------------------------------------------
+# PR #35 评审修复：采集质量规则真正生效
+# ---------------------------------------------------------------------------
+
+
+def test_quality_rules_reject_by_likes_duration_and_words() -> None:
+    from dataclasses import replace
+
+    from app.viral_collection import ViralQualityRules
+
+    base = viral_video("douyin", "q", likes=1000, duration_ms=30_000, title="老房改造 案例")
+    rules = ViralQualityRules(
+        min_likes=1000,
+        duration_min_ms=15_000,
+        duration_max_ms=120_000,
+        exclude_words=("广告", "Giveaway"),
+    )
+    assert not rules.rejects(base)  # 边界值都算合格（最小点赞、时长上下限均含端点）
+    assert rules.rejects(replace(base, likes=999))
+    assert rules.rejects(replace(base, duration_ms=14_999))
+    assert rules.rejects(replace(base, duration_ms=120_001))
+    # 时长为 0 = 上游没给：无法判断就不因时长误杀。
+    assert not rules.rejects(replace(base, duration_ms=0))
+    # 排除词：不分大小写，标题 / 标签 / 来源描述任一命中都拒。
+    assert rules.rejects(replace(base, title="限时广告 优惠"))
+    assert rules.rejects(replace(base, title="GIVEAWAY time"))
+    assert rules.rejects(replace(base, tags=["装修", "广告"]))
+    assert rules.rejects(replace(base, native={"source_description": "含有广告合作"}))
+    # 没配任何规则时什么都不拒。
+    assert not ViralQualityRules().rejects(replace(base, likes=0, duration_ms=1))
+
+
+def test_collection_applies_saved_quality_rules_before_admitting_videos(
+    lane_env: str, pg: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回归：质量规则此前只存不用，低质内容照样被采集、下载、占成本。
+
+    每词上限 2：被拒的视频不能占名额——合格的前两条才是最终入池的。
+    """
+    from dataclasses import replace
+
+    from app.generation_worker import run_pg_collection_once
+    from app.viral_collection import enqueue_due_viral_collections
+
+    bus = BusinessConnection.postgres(pg)
+    pg.execute(
+        "UPDATE viral_runtime_controls SET collection_enabled=1, keywords_json=%s, "
+        "next_collection_at=NULL, per_keyword_limit=2, quality_min_likes=1000, "
+        "quality_duration_min_ms=15000, quality_duration_max_ms=120000, "
+        "quality_exclude_words_json=%s WHERE id=1",
+        (
+            json.dumps([{"platform": "douyin", "category": "测试", "keyword": "质量"}]),
+            json.dumps(["广告"], ensure_ascii=False),
+        ),
+    )
+
+    def make(video_id: str, **overrides: Any) -> ViralVideo:
+        values: dict[str, Any] = {
+            "likes": 5000,
+            "duration_ms": 30_000,
+            "cover_url": None,
+            "play_url": f"https://cdn.example/{video_id}.mp4",
+            "audio_url": None,
+        }
+        values.update(overrides)
+        return replace(viral_video("douyin", video_id), **values)
+
+    candidates = [
+        make("low-likes", likes=10),
+        make("too-short", duration_ms=5_000),
+        make("too-long", duration_ms=300_000),
+        make("ad", title="限时广告 优惠"),
+        make("unknown-duration", duration_ms=0),
+        make("good-1"),
+        make("good-2"),
+    ]
+    streams: list[str] = []
+
+    class Source:
+        def douyin_search(self, *, keyword: str, category: str) -> list[ViralVideo]:
+            return candidates
+
+    def stream(self, url):
+        streams.append(url)
+        yield b"\x00\x00\x00\x18ftypisom"
+
+    monkeypatch.setattr(
+        "app.viral_collection.viral_source_client_from_settings", lambda conn: Source()
+    )
+    monkeypatch.setattr("app.viral_media.UrlFetcher.iter_fetch", stream)
+
+    enqueue_due_viral_collections(bus)
+    storage = FakeStorageAdapter(provider="fake", bucket="quality")
+    assert run_pg_collection_once(worker_id="collector", storage=storage) == 1
+
+    admitted = {row[0] for row in pg.execute("SELECT video_id FROM viral_videos").fetchall()}
+    # 前两条合格的（时长未知的不误杀）入池；低质的既不入池也没有被下载。
+    assert admitted == {"unknown-duration", "good-1"}
+    assert all("low-likes" not in url and "ad.mp4" not in url for url in streams)
+    assert pg.execute("SELECT status FROM viral_refresh_tasks").fetchone()[0] == "SUCCEEDED"

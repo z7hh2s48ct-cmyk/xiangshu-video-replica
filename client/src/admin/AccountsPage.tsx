@@ -24,7 +24,11 @@ const PAGE_SIZE = 20;
  * 积分流水页（从 AdminApp 内联表格抽出，2026-09-02 评估 §0.5）：
  * 补上此前被忽略的分页——服务端一直返回 total 并支持 limit/offset。
  */
-export function AccountsPage() {
+export function AccountsPage({
+  readOnly = false,
+}: {
+  readOnly?: boolean;
+} = {}) {
   const [transactions, setTransactions] = useState<AdminWalletTransaction[]>(
     [],
   );
@@ -101,13 +105,16 @@ export function AccountsPage() {
   return (
     <section aria-label="积分流水" className="admin-panel">
       <div className="admin-actions">
-        <button
-          type="button"
-          disabled={exporting || loading}
-          onClick={() => void exportTransactions()}
-        >
-          导出账务流水 CSV
-        </button>
+        {/* 整表导出是写级动作（服务端 ControlWriter）：只读角色不渲染入口。 */}
+        {readOnly ? null : (
+          <button
+            type="button"
+            disabled={exporting || loading}
+            onClick={() => void exportTransactions()}
+          >
+            导出账务流水 CSV
+          </button>
+        )}
         <button
           aria-pressed={autoRefresh}
           type="button"
