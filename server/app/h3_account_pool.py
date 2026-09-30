@@ -106,6 +106,32 @@ def account_api_key(conn: BusinessConnection, *, task_id: str | None = None) -> 
         raise SettingsDecryptError("H3 account credentials cannot be read") from exc
 
 
+def paid_probe_config(
+    conn: BusinessConnection, provider: str, config: dict[str, str]
+) -> dict[str, str]:
+    """付费探针的配置：视频生成的密钥取自真正会接任务的账号，而不是设置页里的旧密钥。
+
+    启用账号池后，生产调度只从池里取钥（``account_api_key``），设置页里的旧
+    ``metaso.api_key`` 可能早已过期或根本没配；探针若仍读旧密钥，要么误报「未配置」，
+    要么去验证一个不接任何任务的凭据，等于没测。这里与调度同源：池里有账号就取
+    第一个启用的账号，池为空才回落到旧密钥。账号池里有多个账号时只会验证其中一个，
+    界面文案对此有如实说明。
+    """
+    if provider != "metaso":
+        return config
+    try:
+        return {**config, "api_key": account_api_key(conn)}
+    except SettingsDecryptError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "VIDEO_PAID_PROBE_ACCOUNT_UNAVAILABLE",
+                "failure_phase": "configuration",
+                "message": "视频生成账号池里没有已启用的账号，或账号密钥无法读取；未创建收费任务。",
+            },
+        ) from exc
+
+
 def read_accounts(conn: BusinessConnection) -> dict[str, Any]:
     rows = conn.execute(
         f"SELECT id,name,concurrency_limit,enabled,version,{_usage_sql('a')} AS active_tasks "

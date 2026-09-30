@@ -251,6 +251,8 @@ export class AdminActivationError extends AdminControlError {
 /** Drop the in-memory session state (logout, expiry, tests). */
 export function clearAdminActivationSession(): void {
   clearAdminCsrfToken();
+  // 未确认的付费探针属于上一个登录身份，不得带进下一个会话。
+  unresolvedPaidProbes.clear();
 }
 
 function requireCsrfToken(): string {
@@ -2808,6 +2810,29 @@ export function applyLegacyCreditConversion(
 // 付费探针（管理端入口）—— POST /api/control/settings/providers/{provider}/paid-test
 // ---------------------------------------------------------------------------
 
+// 探针一次最长要等：服务端最多依次调用供应商两次（提交 + 回查），每次最长 90 秒。
+// 取 200 秒既覆盖最坏情况，又小于网关 300 秒的读超时；默认 5 秒会在服务端还在
+// 执行时就把请求掐掉，操作者再点一次就是第二笔真实费用。
+const PAID_PROBE_TIMEOUT_MS = 200_000;
+
+// 结果未确认的探针：按服务保留幂等键与当时的操作原因，见 paidTestControlProvider。
+const unresolvedPaidProbes = new Map<
+  ProviderName,
+  { reason: string; key: string }
+>();
+
+/**
+ * 这次探针有没有拿到服务端的明确回应。
+ *
+ * 没有回应（超时、断网，错误上没有 HTTP 状态）算「未确认」；网关自己答的 5xx
+ * （没有业务错误码）也算——它不能证明业务进程没跑。业务进程返回的失败都带错误码。
+ */
+function paidProbeOutcomeIsUnconfirmed(error: unknown): boolean {
+  if (!(error instanceof AdminControlError)) return true;
+  if (error.status === undefined) return true;
+  return error.status >= 500 && error.code === undefined;
+}
+
 /**
  * 向供应商发起一次**计费**探针调用，验证该服务的账号能否真正跑通。
  *
@@ -2817,24 +2842,55 @@ export function applyLegacyCreditConversion(
  * `requestControl` 不会自动补 `X-Admin-CSRF`，而控制面上的 POST 是 CSRF 门
  * （缺头即 403 `ADMIN_CSRF_REQUIRED`——reconcileFirstFrameTask 的同类教训）。
  *
- * 幂等键在这里不是仪式而是防重复扣费：一次网络歧义重试只会回放首次结果
- * （服务端回 `X-Idempotent-Replay: true`），不会第二次真的调用供应商。
+ * 幂等键在这里不是仪式而是防重复扣费：服务端只在探针**成功**时保存快照，同一个键
+ * 的重试会回放首次结果（`X-Idempotent-Replay: true`），不会第二次真的调用供应商；
+ * 探针失败会整体回滚，此时重试本来就会重新执行，键换不换都无所谓。
  *
- * 现状：数字人口播已接入真实客户端，执行会真实提交一次最小计费调用（短文本
- * 语音合成），可能产生供应商侧费用；其余服务尚未接入，对它们服务端恒抛
+ * 真正危险的是「请求发出后没拿到回应」（超时、断网）：服务端可能仍在执行、随后
+ * 成功并已计费，操作者再点一次若换了新键就是第二笔真实费用。所以这里只在这种
+ * 「结果未确认」的情形下按服务保留同一个键，并要求用同一个操作原因重试（原因是
+ * 请求指纹的一部分，换了原因服务端会判为键冲突）；一旦拿到服务端的明确回应
+ * （成功或带错误码的失败）就释放，下一次是全新的操作。刷新页面会丢失这份记忆。
+ *
+ * 现状：数字人口播与视频生成已接入真实客户端，执行会真实提交一次最小计费调用
+ * （分别是短文本语音合成、4 秒 768P 纯文本视频任务），可能产生供应商侧费用；
+ * 其余服务尚未接入，对它们服务端恒抛
  * 501 `PROVIDER_TEST_NOT_IMPLEMENTED`，不会创建供应商任务、不会产生任何费用。
  * 调用方必须按服务如实呈现，不得对未接入的服务提示「会产生真实费用」。
  */
-export function paidTestControlProvider(
+export async function paidTestControlProvider(
   provider: ProviderName,
   reason: string,
 ): Promise<ProviderTestResult> {
-  return adminWrite<ProviderTestResult>(
-    `/api/control/settings/providers/${encodeURIComponent(provider)}/paid-test`,
-    {},
-    reason,
-    "付费探针执行失败",
-  );
+  const pending = unresolvedPaidProbes.get(provider);
+  if (pending && pending.reason !== reason) {
+    throw new AdminActivationError(
+      `上一次付费探针的结果尚未确认（请求超时或网络中断），服务端可能已经执行并产生费用。请使用与上次相同的操作原因「${pending.reason}」重试：服务端会回放首次结果，不会重复计费。`,
+    );
+  }
+  const idempotencyKey = pending?.key ?? newIdempotencyKey();
+  unresolvedPaidProbes.set(provider, { reason, key: idempotencyKey });
+  try {
+    const result = await adminWrite<ProviderTestResult>(
+      `/api/control/settings/providers/${encodeURIComponent(provider)}/paid-test`,
+      {},
+      reason,
+      "付费探针执行失败",
+      idempotencyKey,
+      "POST",
+      PAID_PROBE_TIMEOUT_MS,
+    );
+    unresolvedPaidProbes.delete(provider);
+    return result;
+  } catch (error) {
+    if (!paidProbeOutcomeIsUnconfirmed(error)) {
+      unresolvedPaidProbes.delete(provider);
+      throw error;
+    }
+    throw new AdminActivationError(
+      "付费探针的结果未能确认（请求超时或网络中断）：服务端可能仍在执行并已产生费用。请稍后使用相同的操作原因重试——服务端会回放首次结果，不会重复计费——并核对账单。",
+    );
+  }
 }
 
 export async function downloadBillingCsv(query: string): Promise<string> {
