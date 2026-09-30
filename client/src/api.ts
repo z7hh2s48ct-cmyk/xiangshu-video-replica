@@ -7522,6 +7522,53 @@ export type CustomerWalletTransactionPage = WalletTransactionPage & {
   sub_account_summary?: CustomerSubAccountSummary[] | null;
 };
 
+/** 合并后的一条流水：一个计费周期（一条任务）或一笔独立记账。 */
+export type WalletLedgerEntry = components["schemas"]["WalletLedgerEntry"];
+export type WalletLedgerOutcome = WalletLedgerEntry["outcome"];
+export type WalletLedgerPage = components["schemas"]["WalletLedgerPage"];
+/** 结果筛选：`refunded` 含部分成功与整笔退回，`posted` 是入账 / 转换 / 调账。 */
+export type WalletLedgerOutcomeFilter =
+  | "pending"
+  | "completed"
+  | "refunded"
+  | "posted";
+/** 同上：`sub_account_summary` 在生成契约里是宽松字典，这里收窄到真实形状。 */
+export type CustomerWalletLedgerPage = Omit<
+  components["schemas"]["WalletLedgerPage"],
+  "sub_account_summary"
+> & {
+  sub_account_summary?: CustomerSubAccountSummary[] | null;
+};
+
+/**
+ * 消费记录（按任务合并）：GET /api/customer/wallet/ledger。
+ *
+ * 分页以「条」为单位，一条任务的暂扣 / 实扣 / 退回始终在同一条里；逐笔流水与 CSV
+ * 导出仍走 `customerListWalletTransactions`，那是对账的事实来源。
+ */
+export async function customerListWalletLedger(
+  credential: CustomerSessionCredential,
+  {
+    limit = 20,
+    offset = 0,
+    filters = {},
+  }: {
+    limit?: number;
+    offset?: number;
+    filters?: Record<string, string>;
+  } = {},
+): Promise<CustomerWalletLedgerPage> {
+  const { body } = await customerJson<CustomerWalletLedgerPage>(
+    `/api/customer/wallet/ledger?${new URLSearchParams({
+      limit: String(limit),
+      offset: String(offset),
+      ...filters,
+    })}`,
+    { credential },
+  );
+  return body;
+}
+
 /**
  * B3：把当前筛选下的流水导出成 CSV。
  *
@@ -8568,6 +8615,8 @@ export type CustomerCenterSummary = {
   available_credits: number;
   reserved_credits: number;
   total_consumed_credits: number;
+  /** 累计退回：失败与多暂扣的部分已回到可用积分的总数。 */
+  total_returned_credits: number;
   active_tokens: number;
 };
 export async function customerGetCenterSummary(

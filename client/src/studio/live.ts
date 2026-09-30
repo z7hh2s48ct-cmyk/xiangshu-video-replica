@@ -829,7 +829,7 @@ export const CREATION_KIND_LABELS: Record<string, StudioTask["type"]> = {
   replacement: "人物置换",
 };
 
-/** MATERIAL-PERF-D（P1-3）：任务清单是否无实质变化（id/名称/状态/进度/提交时间一致）。
+/** MATERIAL-PERF-D（P1-3）：任务清单是否无实质变化（id/名称/状态/进度/提交时间/积分去向一致）。
  * 任务轮询据此在无变化时返回原 data 引用，避免每 20s 全树重渲染。 */
 export function sameTasks(a: StudioTask[], b: StudioTask[]): boolean {
   if (a.length !== b.length) return false;
@@ -841,9 +841,22 @@ export function sameTasks(a: StudioTask[], b: StudioTask[]): boolean {
       task.title === other.title &&
       task.status === other.status &&
       task.progress === other.progress &&
-      task.submitted === other.submitted
+      task.submitted === other.submitted &&
+      // 退回金额可能比状态晚一拍落账；不比较它，轮询会一直沿用旧引用，
+      // 失败卡片就永远停在「还没退」。
+      task.credits?.charged === other.credits?.charged &&
+      task.credits?.refunded === other.credits?.refunded
     );
   });
+}
+
+/** 服务端批次的积分去向 → 任务上的精简形状；旧服务端没有该字段时保持 undefined。 */
+function taskCredits(
+  credits: { charged_credits: number; refunded_credits: number } | undefined,
+): StudioTask["credits"] {
+  return credits
+    ? { charged: credits.charged_credits, refunded: credits.refunded_credits }
+    : undefined;
 }
 
 function studioTask(batch: GenerationBatchListItem): StudioTask {
@@ -857,6 +870,7 @@ function studioTask(batch: GenerationBatchListItem): StudioTask {
     title: batch.display_name?.trim() || batch.project_name || batch.id,
     type: CREATION_KIND_LABELS[batch.creation_kind] ?? "视频生成",
     status: studioTaskStatus(batch),
+    credits: taskCredits(batch.credits),
     progress: batch.progress.progress_percent,
     submitted: batch.created_at,
     resultId:
@@ -884,6 +898,7 @@ function studioTaskFromBatch(batch: GenerationBatch): StudioTask {
       status: batch.status,
       needs_attention_count: needsAttention,
     }),
+    credits: taskCredits(batch.credits),
     progress: batch.progress.progress_percent,
     submitted:
       batch.tasks.find((task) => task.submitted_at)?.submitted_at ?? "—",

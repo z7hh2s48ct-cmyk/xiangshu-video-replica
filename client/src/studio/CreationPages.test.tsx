@@ -2069,6 +2069,50 @@ describe("V1.4 创作页面", () => {
   );
 
   it.each([
+    [
+      "failed",
+      { charged: 0, refunded: 8 },
+      "已自动退回 8 积分，可用积分已恢复。",
+    ],
+    ["failed", undefined, "暂扣的积分会在失败处理完成后自动退回"],
+    ["cancelled", { charged: 0, refunded: 16 }, "暂扣的 16 积分已退回"],
+  ] as const)(
+    "%s 任务卡片直接交代积分去向（%j）",
+    (status, credits, expected) => {
+      const value = studio();
+      value.state = {
+        ...value.state,
+        page: "video",
+        draft: {
+          ...value.state.draft,
+          firstFrameId: undefined,
+          videoBatchId: "done",
+        },
+      };
+      value.data = {
+        ...value.data,
+        tasks: [
+          {
+            id: "done",
+            backendKind: "generation_batch",
+            backendId: "done",
+            title: "庭院",
+            type: "视频生成",
+            status,
+            submitted: "2026-09-15T03:45:09+00:00",
+            credits,
+          },
+        ],
+      };
+      useStudio.mockReturnValue(value);
+      render(<VideoPage />);
+      expect(screen.getByText(new RegExp(expected))).toBeInTheDocument();
+      // 旧文案与用户刚看到的余额矛盾（提交时已经暂扣过），不能再出现。
+      expect(screen.queryByText(/不会扣费/)).not.toBeInTheDocument();
+    },
+  );
+
+  it.each([
     "2026-09-15T03:45:09+00:00",
     "2026-09-15T03:45:09Z",
     "2026-09-15 03:45:09",

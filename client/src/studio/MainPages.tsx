@@ -1217,7 +1217,7 @@ export function TasksPage() {
       notify(
         result.billingStatus === "RELEASED" ||
           result.billingStatus === "RELEASE"
-          ? "任务已取消，预扣积分已退回。"
+          ? "任务已取消，暂扣的积分已退回。"
           : result.billingStatus
             ? "任务已取消，计费状态处理中，请稍后刷新核对。"
             : "任务已取消，请刷新核对计费状态。",

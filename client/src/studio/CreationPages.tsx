@@ -108,6 +108,7 @@ import {
   resolveVideoMode,
   validateReferences,
 } from "./state";
+import { cancelledTaskCreditsNote, failedTaskCreditsNote } from "./taskCredits";
 import type {
   AssetKind,
   StudioAsset,
@@ -3634,24 +3635,32 @@ function VideoProgressView({ task }: { task: StudioTask }) {
   }, [failed, completed, cancelled]);
 
   if (cancelled) {
+    const note = cancelledTaskCreditsNote(task);
     return (
       <div className="creation-progress" role="status">
         <div className="creation-progress-headline">任务已取消</div>
-        <p className="creation-progress-copy">
-          本次任务已结束，计费结果可在账户流水中查看。
-        </p>
+        {note ? (
+          <p className={`creation-progress-credits is-${note.tone}`}>
+            {note.text}
+          </p>
+        ) : (
+          <p className="creation-progress-copy">
+            本次任务已结束，计费结果可在消费记录中查看。
+          </p>
+        )}
       </div>
     );
   }
 
   if (failed) {
+    const note = failedTaskCreditsNote(task);
     return (
       <div className="creation-progress failed" role="alert">
         <div className="creation-progress-headline">
           生成未完成{task.status === "uncertain" ? "（状态待确认）" : ""}
         </div>
-        <p className="creation-progress-copy">
-          积分未结算的失败不会扣费；可在任务中心重试或对账。
+        <p className={`creation-progress-credits is-${note.tone}`}>
+          {note.text}
         </p>
         <Empty
           title="这条视频没有生成成功"

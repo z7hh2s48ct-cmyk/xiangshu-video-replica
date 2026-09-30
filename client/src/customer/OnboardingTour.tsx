@@ -37,7 +37,7 @@ export const ONBOARDING_STEPS: ReadonlyArray<{ title: string; body: string }> =
     },
     {
       title: "消费记录",
-      body: "每一笔预扣、结算与退回都在这里，可按业务、子账号和时间筛选，也能导出 CSV 对账。",
+      body: "每一笔暂扣、实扣与退回都在这里，可按业务、子账号和时间筛选，也能导出 CSV 对账。",
     },
     {
       title: "账号设置",

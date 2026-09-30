@@ -125,6 +125,19 @@ it("sameTasks 判定任务清单是否无实质变化（P1-3）", () => {
   expect(sameTasks([task], [{ ...task, progress: 60 }])).toBe(false);
   expect(sameTasks([task], [{ ...task, title: "已重命名视频" }])).toBe(false);
   expect(sameTasks([task], [])).toBe(false);
+  // 退回金额可能比状态晚一拍落账：它变了就不能沿用旧引用，否则失败卡片永远停在「还没退」。
+  const failed = {
+    ...task,
+    status: "failed" as const,
+    credits: { charged: 0, refunded: 0 },
+  };
+  expect(
+    sameTasks([failed], [{ ...failed, credits: { charged: 0, refunded: 0 } }]),
+  ).toBe(true);
+  expect(
+    sameTasks([failed], [{ ...failed, credits: { charged: 0, refunded: 8 } }]),
+  ).toBe(false);
+  expect(sameTasks([failed], [{ ...failed, credits: undefined }])).toBe(false);
 });
 
 const user: CurrentUser = {
@@ -1563,6 +1576,33 @@ describe("批次类型映射与取消", () => {
         }),
       ]),
     );
+  });
+
+  it("把批次的实扣与退回积分映射到任务上，旧服务端缺字段时保持 undefined", async () => {
+    api.listGenerationBatches.mockResolvedValue({
+      ...batchPage,
+      items: [
+        {
+          ...batchPage.items[0],
+          id: "batch-with-credits",
+          credits: { charged_credits: 6, refunded_credits: 2 },
+        },
+        { ...batchPage.items[0], id: "batch-legacy" },
+      ],
+    });
+    api.listOralTasks.mockResolvedValue([]);
+
+    const tasks = await reloadTasks(user);
+
+    expect(
+      tasks.find((task) => task.id === "batch-with-credits")?.credits,
+    ).toEqual({
+      charged: 6,
+      refunded: 2,
+    });
+    expect(
+      tasks.find((task) => task.id === "batch-legacy")?.credits,
+    ).toBeUndefined();
   });
 
   it("轮询时某类任务失败仍保留另一类", async () => {

@@ -748,6 +748,13 @@
   color: var(--text-muted);
   font-size: var(--font-caption);
 }
+.uc-record-totals b {
+  color: var(--text);
+}
+/* 累计退回用绿色：用户只看到扣钱、看不到退回是这块最常见的误解，退回要有存在感。 */
+.uc-record-totals .uc-record-totals__returned b {
+  color: #8bcca0;
+}
 
 /* 密码强度提示（P1#12）：三档颜色 + 一根短条，输入时实时变化。 */
 .uc-password-strength {
@@ -1014,22 +1021,6 @@
   /* 触摸目标：原来 6px 的内边距在手机上太小（audit-35）。 */
   .uc-responsive-table .uc-row-actions button {
     padding: 12px;
-  }
-
-  .uc-ledger-table > tbody > tr > td:nth-of-type(1)::before {
-    content: "时间";
-  }
-  .uc-ledger-table > tbody > tr > td:nth-of-type(2)::before {
-    content: "业务";
-  }
-  .uc-ledger-table > tbody > tr > td:nth-of-type(3)::before {
-    content: "来源";
-  }
-  .uc-ledger-table > tbody > tr > td:nth-of-type(4)::before {
-    content: "可用积分变化";
-  }
-  .uc-ledger-table > tbody > tr > td:nth-of-type(5)::before {
-    content: "待结算变化";
   }
 
   .uc-orders-table > tbody > tr > td:nth-of-type(1)::before {
