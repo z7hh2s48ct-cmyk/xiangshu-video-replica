@@ -639,7 +639,7 @@ describe("SettingsPanel", () => {
   it("runs the paid probe through the injected write-contract backend", async () => {
     const testPaidProvider = vi.fn().mockResolvedValue({
       status: "ok",
-      provider: "metaso",
+      provider: "deepseek",
       test_kind: "paid_probe",
     });
     const { container } = render(
@@ -655,40 +655,40 @@ describe("SettingsPanel", () => {
     );
 
     await screen.findByText("视频生成");
-    const metaso = providerCard(container, "metaso");
+    const deepseek = providerCard(container, "deepseek");
     // 免费连接测试与付费探针在每个服务卡上并列。
     expect(
-      metaso.getByRole("button", { name: "测试连接" }),
+      deepseek.getByRole("button", { name: "测试连接" }),
     ).toBeInTheDocument();
-    fireEvent.click(metaso.getByRole("button", { name: "付费探针" }));
+    fireEvent.click(deepseek.getByRole("button", { name: "付费探针" }));
 
     // 现状必须如实说明：供应商客户端未接入，执行不会产生费用。
-    expect(metaso.getByText(/真实供应商客户端尚未接入/)).toBeInTheDocument();
-    expect(metaso.getByText(/也不会产生任何费用/)).toBeInTheDocument();
+    expect(deepseek.getByText(/真实供应商客户端尚未接入/)).toBeInTheDocument();
+    expect(deepseek.getByText(/也不会产生任何费用/)).toBeInTheDocument();
 
     // 服务端要求非空 reason：空原因不得发起调用。
-    fireEvent.click(metaso.getByRole("button", { name: "确认执行付费探针" }));
+    fireEvent.click(deepseek.getByRole("button", { name: "确认执行付费探针" }));
     expect(testPaidProvider).not.toHaveBeenCalled();
-    expect(metaso.getByRole("alert")).toHaveTextContent(
+    expect(deepseek.getByRole("alert")).toHaveTextContent(
       "请填写付费探针的操作原因（会写入审计）",
     );
 
-    fireEvent.change(metaso.getByLabelText("操作原因（必填，写入审计）"), {
+    fireEvent.change(deepseek.getByLabelText("操作原因（必填，写入审计）"), {
       target: { value: "  上线前核对付费通道  " },
     });
-    fireEvent.click(metaso.getByRole("button", { name: "确认执行付费探针" }));
+    fireEvent.click(deepseek.getByRole("button", { name: "确认执行付费探针" }));
 
     await waitFor(() =>
       expect(testPaidProvider).toHaveBeenCalledWith(
-        "metaso",
+        "deepseek",
         "上线前核对付费通道",
       ),
     );
     expect(
-      await metaso.findByText("付费探针通过：供应商账号可完成一次计费调用"),
+      await deepseek.findByText("付费探针通过：供应商账号可完成一次计费调用"),
     ).toBeInTheDocument();
     // 成功后确认面板收起（原因输入框随面板一起消失）。
-    expect(metaso.queryByLabelText("操作原因（必填，写入审计）")).toBeNull();
+    expect(deepseek.queryByLabelText("操作原因（必填，写入审计）")).toBeNull();
   });
 
   it("states that nothing was charged while the provider client is unwired", async () => {
@@ -712,20 +712,84 @@ describe("SettingsPanel", () => {
     );
 
     await screen.findByText("视频生成");
-    const metaso = providerCard(container, "metaso");
-    fireEvent.click(metaso.getByRole("button", { name: "付费探针" }));
-    fireEvent.change(metaso.getByLabelText("操作原因（必填，写入审计）"), {
+    const deepseek = providerCard(container, "deepseek");
+    fireEvent.click(deepseek.getByRole("button", { name: "付费探针" }));
+    fireEvent.change(deepseek.getByLabelText("操作原因（必填，写入审计）"), {
       target: { value: "上线前核对付费通道" },
     });
-    fireEvent.click(metaso.getByRole("button", { name: "确认执行付费探针" }));
+    fireEvent.click(deepseek.getByRole("button", { name: "确认执行付费探针" }));
 
-    const alert = await metaso.findByRole("alert");
+    const alert = await deepseek.findByRole("alert");
     expect(alert).toHaveTextContent(
       "付费探针未执行：该服务尚未接入真实供应商客户端（服务端 501 未实现），未产生任何费用。",
     );
     // 现状下不得出现「会产生真实费用」这类不成立的提示。
     expect(alert).not.toHaveTextContent(/已产生费用/);
     expect(alert).not.toHaveTextContent(/已发起计费/);
+  });
+
+  it("tells the operator the video generation probe submits a real minimal task", async () => {
+    const { container } = render(
+      <SettingsPanel
+        controlBackend={{
+          ...controlTestBackend,
+          load: vi.fn().mockResolvedValue(settingsSnapshot),
+          testPaidProvider: vi.fn(),
+        }}
+        section="providers"
+        source="control"
+      />,
+    );
+
+    await screen.findByText("视频生成");
+    const metaso = providerCard(container, "metaso");
+    fireEvent.click(metaso.getByRole("button", { name: "付费探针" }));
+
+    // 视频生成已接入真实客户端：必须如实说明会真实提交并产生费用，不得沿用「未接入」。
+    expect(
+      metaso.getByText(/最小规格的视频生成任务（4 秒 · 768P · 纯文本）/),
+    ).toBeInTheDocument();
+    expect(
+      metaso.getByText(/任务受理后即产生供应商侧费用/),
+    ).toBeInTheDocument();
+    expect(metaso.getByText(/不会等待成片/)).toBeInTheDocument();
+    expect(metaso.getByText(/只会测第一个启用的账号/)).toBeInTheDocument();
+    expect(metaso.queryByText(/尚未接入/)).toBeNull();
+    expect(metaso.queryByText(/不会产生任何费用/)).toBeNull();
+  });
+
+  it("keeps the digital-human probe description and the unwired ones apart", async () => {
+    const { container } = render(
+      <SettingsPanel
+        controlBackend={{
+          ...controlTestBackend,
+          load: vi.fn().mockResolvedValue(settingsSnapshot),
+          testPaidProvider: vi.fn(),
+        }}
+        section="providers"
+        source="control"
+      />,
+    );
+
+    await screen.findByText("视频生成");
+    const hifly = providerCard(container, "hifly");
+    fireEvent.click(hifly.getByRole("button", { name: "付费探针" }));
+    expect(hifly.getByText(/短文本语音合成/)).toBeInTheDocument();
+    expect(hifly.queryByText(/尚未接入/)).toBeNull();
+
+    // 仍未接入的服务继续如实说明「不会产生任何费用」。
+    for (const provider of [
+      "apilio",
+      "deepseek",
+      "tikhub",
+      "dashscope",
+      "douyidou",
+    ]) {
+      const card = providerCard(container, provider);
+      fireEvent.click(card.getByRole("button", { name: "付费探针" }));
+      expect(card.getByText(/真实供应商客户端尚未接入/)).toBeInTheDocument();
+      expect(card.getByText(/也不会产生任何费用/)).toBeInTheDocument();
+    }
   });
 
   it("keeps provider settings and checks disabled for read-only operators", async () => {

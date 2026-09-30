@@ -34,6 +34,7 @@ from app.csv_export import spreadsheet_safe_cell
 from app.db_portable import BusinessConnection
 from app.external_calls import summarize_provider_message
 from app.failure_runbook import failure_advice, failure_explanation
+from app.h3_account_pool import paid_probe_config
 from app.material_thumbs import THUMBNAIL_URL_EXPIRES_IN
 from app.media_routes import storage_for_asset
 from app.ops_metrics import get_or_create_request_id
@@ -2319,7 +2320,11 @@ def paid_test_control_provider(
     provider_name = require_supported_provider(provider)
 
     def business(current_conn: BusinessConnection, request_id: str) -> dict[str, object]:
-        config = SettingsRepository(current_conn).load_provider_config(provider_name)
+        config = paid_probe_config(
+            current_conn,
+            provider_name,
+            SettingsRepository(current_conn).load_provider_config(provider_name),
+        )
         result = tester.paid_test(provider_name, config)
         write_audit(
             current_conn,

@@ -15,6 +15,7 @@ from fastapi import HTTPException
 import app.settings_routes as settings_routes
 from app.settings import (
     HiflyProviderTester,
+    MetasoProviderTester,
     NoopProviderTester,
     ProviderTester,
     ProviderTestResult,
@@ -121,14 +122,15 @@ def test_require_supported_provider_rejects_unknown_with_422() -> None:
     }
 
 
-def test_get_provider_tester_composes_storage_over_hifly_over_email_over_noop() -> None:
+def test_get_provider_tester_composes_storage_hifly_metaso_email_noop() -> None:
     from app.email_delivery import EmailProviderTester
 
     tester = get_provider_tester()
     assert isinstance(tester, StorageProviderTester)
     assert isinstance(tester.fallback, HiflyProviderTester)
-    assert isinstance(tester.fallback.fallback, EmailProviderTester)
-    assert isinstance(tester.fallback.fallback.fallback, NoopProviderTester)
+    assert isinstance(tester.fallback.fallback, MetasoProviderTester)
+    assert isinstance(tester.fallback.fallback.fallback, EmailProviderTester)
+    assert isinstance(tester.fallback.fallback.fallback.fallback, NoopProviderTester)
 
 
 def test_storage_tester_empty_cos_config_falls_through_to_noop() -> None:

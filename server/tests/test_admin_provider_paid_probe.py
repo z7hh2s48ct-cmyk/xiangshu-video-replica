@@ -19,8 +19,9 @@
 - 成功路径落审计 `provider_settings.paid_test`，含操作原因与 request_id；
 - 审计器（auditor）只读 → 403 `AUDITOR_READ_ONLY`；无会话 → 401。
 
-另有一条**如实呈现**断言：对尚未接入真实客户端的服务（本文件以 metaso 为例），
-默认测试器（`get_provider_tester` → `NoopProviderTester`）对 paid_test 恒抛
+另有一条**如实呈现**断言：对尚未接入真实客户端的服务（本文件以 deepseek 为例；
+metaso 已接入真实探针，见 `test_metaso_paid_probe.py`），默认测试器
+（`get_provider_tester` → `NoopProviderTester`）对 paid_test 恒抛
 501 `PROVIDER_TEST_NOT_IMPLEMENTED`，且**不落审计**（没有任何付费动作发生）。
 前端文案必须与这条事实一致，不得对这类服务宣称「会产生真实费用」。
 
@@ -157,7 +158,7 @@ def route_state(probe_dsn: str) -> Iterator[str]:
         conn.execute(
             "TRUNCATE audit_logs, admin_write_idempotency, admin_sessions, "
             "admin_password_credentials, provider_settings, security_rate_limit_counters, "
-            "security_auth_failures, users CASCADE"
+            "security_auth_failures, h3_provider_accounts, users CASCADE"
         )
         conn.execute("SET session_replication_role = DEFAULT")
         conn.execute(
@@ -348,6 +349,50 @@ def test_paid_probe_audits_the_operator_and_their_reason(
     assert isinstance(metadata["request_id"], str) and metadata["request_id"]
 
 
+def test_paid_probe_hands_the_pool_account_key_to_the_tester(
+    client: TestClient,
+    tester: RecordingProviderTester,
+    paid_probe_headers: dict[str, str],
+) -> None:
+    """视频生成：启用账号池时，探针拿到的是池里会接任务的账号密钥，不是旧的设置页密钥。"""
+    from app.db_pg import pg_transaction
+    from app.db_portable import BusinessConnection
+    from app.h3_account_pool import save_account
+    from app.settings import SettingsRepository
+
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        # save_account 要先锁共享并发容量行；探针专属库默认没有这一行。
+        raw.execute(
+            "INSERT INTO runtime_settings "
+            "(id, max_generation_count_per_batch, max_concurrent_h3_tasks, "
+            " internal_base_unit_price_fen, min_recharge_fen, recharge_step_fen) "
+            "VALUES (1, 4, 100, 1000, 10000, 1000) ON CONFLICT (id) DO NOTHING"
+        )
+        save_account(
+            conn,
+            account_id="pool-a",
+            name="pool-a",
+            api_key="synthetic-pool-a",
+            concurrency_limit=2,
+            enabled=True,
+            expected_version=0,
+        )
+        # 建池之后设置页里的旧密钥被改成了别的值：探针不得拿它去测。
+        SettingsRepository(conn).save_provider_config(
+            "metaso", {"api_key": "synthetic-stale"}, actor_user_id="admin_u"
+        )
+
+    response = client.post(
+        "/api/control/settings/providers/metaso/paid-test",
+        headers=paid_probe_headers,
+        json=_payload(),
+    )
+    assert response.status_code == 200, response.text
+    assert [call[0] for call in tester.paid_calls] == ["metaso"]
+    assert tester.paid_calls[0][1]["api_key"] == "synthetic-pool-a"
+
+
 def test_paid_probe_replays_the_snapshot_instead_of_probing_twice(
     client: TestClient,
     tester: RecordingProviderTester,
@@ -399,7 +444,7 @@ def test_paid_probe_reports_the_unwired_stub_honestly(
     该断言是前端文案的事实来源——未接入就是未接入，不得提示「会产生真实费用」。
     """
     response = client.post(
-        "/api/control/settings/providers/metaso/paid-test",
+        "/api/control/settings/providers/deepseek/paid-test",
         headers=paid_probe_headers,
         json=_payload(),
     )

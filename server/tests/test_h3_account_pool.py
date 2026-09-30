@@ -15,7 +15,7 @@ from test_customer_queue_fairness import (
 
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
-from app.h3_account_pool import account_api_key, read_accounts, save_account
+from app.h3_account_pool import account_api_key, paid_probe_config, read_accounts, save_account
 
 
 @pytest.fixture()
@@ -140,6 +140,74 @@ def test_initial_pool_pins_legacy_tasks(pool_state: str) -> None:
         conn = BusinessConnection.postgres(raw)
         assert account_api_key(conn, task_id="task-u1-0") == "synthetic-legacy"
         assert len(read_accounts(conn)["accounts"]) == 2
+
+
+def _save_legacy_key(key: str) -> None:
+    from app.settings import SettingsRepository
+
+    with pg_transaction() as raw:
+        SettingsRepository(BusinessConnection.postgres(raw)).save_provider_config(
+            "metaso", {"api_key": key}, actor_user_id="u1"
+        )
+
+
+def _probe_config(provider: str = "metaso") -> dict[str, str]:
+    with pg_transaction() as raw:
+        conn = BusinessConnection.postgres(raw)
+        from app.settings import SettingsRepository
+
+        legacy = SettingsRepository(conn).load_provider_config(provider)
+        return paid_probe_config(conn, provider, legacy)
+
+
+def test_paid_probe_uses_the_legacy_key_until_a_pool_exists(pool_state: str) -> None:
+    _save_legacy_key("synthetic-legacy")
+    assert _probe_config()["api_key"] == "synthetic-legacy"
+
+
+def test_paid_probe_tests_the_pool_account_not_the_stale_legacy_key(pool_state: str) -> None:
+    """启用账号池后生产只从池里取钥：探针测设置页里的旧密钥等于没测，还可能误报未配置。
+
+    建池时旧密钥会被迁成池内账号；此后设置页里的密钥再被改动，就与池账号不一致了。
+    """
+    save("a", 2)
+    _save_legacy_key("synthetic-stale")
+    assert _probe_config()["api_key"] == "synthetic-a"
+    # 与调度同源：同一个函数、同样的取法，探针拿到的就是真实接任务的账号密钥。
+    with pg_transaction() as raw:
+        assert account_api_key(BusinessConnection.postgres(raw)) == "synthetic-a"
+
+
+def test_paid_probe_works_for_a_pool_created_without_any_legacy_key(pool_state: str) -> None:
+    save("a", 2)
+    assert _probe_config()["api_key"] == "synthetic-a"
+
+
+def test_paid_probe_skips_disabled_pool_accounts(pool_state: str) -> None:
+    save("a", 2, enabled=False)
+    save("b", 2)
+    assert _probe_config()["api_key"] == "synthetic-b"
+
+
+def test_paid_probe_without_an_enabled_pool_account_never_reaches_the_provider(
+    pool_state: str,
+) -> None:
+    save("a", 2, enabled=False)
+    _save_legacy_key("synthetic-stale")
+    with pytest.raises(HTTPException) as excinfo:
+        _probe_config()
+    assert excinfo.value.status_code == 422
+    detail = excinfo.value.detail
+    assert isinstance(detail, dict)
+    assert detail["code"] == "VIDEO_PAID_PROBE_ACCOUNT_UNAVAILABLE"
+    assert "未创建收费任务" in str(detail["message"])
+    # 池里没有可用账号时不得悄悄回落到旧密钥去花钱。
+    assert "synthetic-stale" not in str(detail)
+
+
+def test_paid_probe_config_leaves_other_providers_untouched(pool_state: str) -> None:
+    save("a", 2)
+    assert _probe_config("hifly") == {}
 
 
 def test_uncertain_submission_keeps_account_slot_until_reconciled(pool_state: str) -> None:

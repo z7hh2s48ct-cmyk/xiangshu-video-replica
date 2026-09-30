@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, StrictInt
 from app.auth import AuthenticatedUser, CurrentUser, Database
 from app.auth import get_database as auth_get_database
 from app.db_portable import BusinessConnection
+from app.h3_account_pool import paid_probe_config
 from app.permissions import require_role
 from app.settings import (
     ProviderTester,
@@ -298,7 +299,9 @@ def paid_test(
     tester: ProviderTester = Depends(get_provider_tester),
 ) -> ProviderTestResult:
     provider_name = require_supported_provider(provider)
-    config = SettingsRepository(conn).load_provider_config(provider_name)
+    config = paid_probe_config(
+        conn, provider_name, SettingsRepository(conn).load_provider_config(provider_name)
+    )
     return tester.paid_test(provider_name, config)
 
 

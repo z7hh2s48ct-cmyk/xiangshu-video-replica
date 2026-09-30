@@ -855,6 +855,107 @@ class HiflyProviderTester:
         )
 
 
+class MetasoPaidProbe(Protocol):
+    """视频生成付费探针需要的客户端面：一次最小计费提交 + 一次只读回查。"""
+
+    def submit_minimal_video(self) -> str: ...
+
+    def read_back(self, task_id: str) -> None: ...
+
+
+def _default_metaso_client(config: Mapping[str, str]) -> MetasoPaidProbe:
+    # app.metaso_probe 顶层导入 app.generation，后者反向依赖本模块的 SettingsRepository；
+    # 默认客户端工厂只能在调用期解析，否则形成模块级循环导入（同 hifly）。
+    from app.metaso_probe import MetasoPaidProbeClient
+
+    return MetasoPaidProbeClient(api_key=config.get("api_key", ""))
+
+
+class MetasoProviderTester:
+    """视频生成服务的付费探针；免费连接测试没有只读端点可用，原样交给下一级。"""
+
+    def __init__(
+        self,
+        *,
+        fallback: ProviderTester | None = None,
+        client_factory: Callable[[Mapping[str, str]], MetasoPaidProbe] | None = None,
+    ) -> None:
+        self.fallback = fallback or NoopProviderTester()
+        self.client_factory = client_factory or _default_metaso_client
+
+    def connection_test(self, provider: str, config: dict[str, str]) -> ProviderTestResult:
+        return self.fallback.connection_test(provider, config)
+
+    def paid_test(self, provider: str, config: dict[str, str]) -> ProviderTestResult:
+        if provider != "metaso":
+            return self.fallback.paid_test(provider, config)
+        from app.metaso_probe import (
+            MetasoProbeReadBackFailed,
+            MetasoProbeRejected,
+            MetasoProbeSettingsUnavailable,
+            MetasoProbeUncertain,
+        )
+
+        # 计费提交只有一步，它之前（构造客户端）的失败都可以无歧义地断言「未创建
+        # 收费任务」；提交之后才可能出现「已受理但回查失败」，措辞必须相反。
+        try:
+            probe = self.client_factory(config)
+            task_id = probe.submit_minimal_video()
+            probe.read_back(task_id)
+        except MetasoProbeSettingsUnavailable as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "VIDEO_PAID_PROBE_SETTINGS_INVALID",
+                    "failure_phase": "configuration",
+                    "message": "视频生成服务尚未保存 API Key；未创建收费任务。",
+                },
+            ) from exc
+        except MetasoProbeRejected as exc:
+            # 供应商凭据失败是「保存的设置有误」，不是管理员会话过期：返回 401 会让
+            # 两个设置页客户端都把操作者登出，所以同 hifly 一样映射为 422。
+            is_auth_failure = exc.http_status in {401, 403}
+            raise HTTPException(
+                status_code=422 if is_auth_failure else 503,
+                detail={
+                    "code": (
+                        "VIDEO_PAID_PROBE_AUTH_FAILED"
+                        if is_auth_failure
+                        else "VIDEO_PAID_PROBE_REJECTED"
+                    ),
+                    "failure_phase": "authenticate" if is_auth_failure else "submit",
+                    "message": (
+                        f"视频生成服务凭据认证失败（{exc.reason}）；未创建收费任务。"
+                        if is_auth_failure
+                        else f"视频生成服务拒绝了这次计费调用（{exc.reason}）；未创建收费任务。"
+                    ),
+                },
+            ) from exc
+        except MetasoProbeUncertain as exc:
+            # 请求可能已到达供应商：不得断言未计费。
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "code": "VIDEO_PAID_PROBE_UNCERTAIN",
+                    "failure_phase": "submit",
+                    "message": "视频生成计费调用结果无法确认；可能已产生费用，请核对账单后再重试。",
+                },
+            ) from exc
+        except MetasoProbeReadBackFailed as exc:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "code": "VIDEO_PAID_PROBE_READBACK_FAILED",
+                    "failure_phase": "query",
+                    "message": (
+                        f"计费任务已受理（任务编号 {exc.task_id}），可能已产生费用；"
+                        "但读取任务状态失败，请核对账单并检查查询权限。"
+                    ),
+                },
+            ) from exc
+        return ProviderTestResult(status="ok", provider=provider, test_kind="paid_probe")
+
+
 class StorageProviderTester:
     def __init__(
         self,
@@ -1002,7 +1103,11 @@ def get_provider_tester() -> ProviderTester:
     from app.email_delivery import EmailProviderTester
 
     return StorageProviderTester(
-        fallback=HiflyProviderTester(fallback=EmailProviderTester(fallback=NoopProviderTester()))
+        fallback=HiflyProviderTester(
+            fallback=MetasoProviderTester(
+                fallback=EmailProviderTester(fallback=NoopProviderTester())
+            )
+        )
     )
 
 
