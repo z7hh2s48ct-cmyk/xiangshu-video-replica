@@ -1893,6 +1893,31 @@ def reclaim_expired_content_objects_throttled(storage: StorageAdapter) -> dict[s
     return result
 
 
+# 告警摘要邮件的定时推送：``notify=1`` 只在有人打开控制台时才触发，夜里无人值守就
+# 永远不推。Worker 每轮都会经过这里，按进程节流（10 分钟一次）；真正的「同一小时
+# 只发一封」由 ``alert_notify_dedup`` 保证，所以这里节流只是为了少算几次总览。
+ALERT_DIGEST_INTERVAL_SECONDS = 600.0
+_last_alert_digest_at: float | None = None
+
+
+def dispatch_alert_digest_throttled() -> None:
+    """每个 Worker 进程至多每 10 分钟检查一次告警并按需推送摘要邮件。"""
+    global _last_alert_digest_at
+    now = time.monotonic()
+    if (
+        _last_alert_digest_at is not None
+        and now - _last_alert_digest_at < ALERT_DIGEST_INTERVAL_SECONDS
+    ):
+        return
+    _last_alert_digest_at = now
+    try:
+        from app.failure_rate_alerts import dispatch_alert_digest
+
+        dispatch_alert_digest()
+    except Exception:  # noqa: BLE001 - 告警推送是旁路，绝不拖住任务处理
+        logger.warning("alert digest dispatch failed", exc_info=True)
+
+
 def run_pg_worker_round(
     *, worker_id: str, max_tasks: int | None = None, viral_collection: bool = False
 ) -> int:
@@ -1903,6 +1928,7 @@ def run_pg_worker_round(
             conn = BusinessConnection.postgres(raw_conn)
             asset_storage = get_media_storage(conn)
         reclaim_expired_content_objects_throttled(asset_storage)
+        dispatch_alert_digest_throttled()
         if viral_collection:
             return run_pg_collection_once(worker_id=worker_id, storage=asset_storage)
         return run_pg_worker_once(

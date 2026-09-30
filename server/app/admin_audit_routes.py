@@ -40,7 +40,7 @@ from typing import Literal, cast
 from fastapi import APIRouter
 from fastapi import Response as HttpResponse
 
-from app.admin_auth_routes import AdminReader
+from app.admin_auth_routes import AdminReader, AdminWriter
 from app.admin_dates import append_admin_date_filters, utc_timestamp_sql
 from app.api_errors import http_error as _http
 from app.auth import CurrentUser, Role
@@ -244,7 +244,7 @@ _UNION_SQL = _UNION_SQL.replace("al.created_at::timestamptz", utc_timestamp_sql(
 
 @router.get("/audit-log.csv")
 def export_audit_log_csv(
-    actor: AdminReader,
+    actor: AdminWriter,
     event_type: str | None = None,
     event_group: str | None = None,
     actor_user_id: str | None = None,
@@ -259,7 +259,8 @@ def export_audit_log_csv(
     """审计导出（方案 P1）：与列表同筛选口径的整表 CSV，走 control.export 审计。
 
     复用 customers.csv 的限流维度：导出是数据出境动作，读级角色不放行整表
-    转储，auditor 需要导出时由管理员执行或走行级查看。
+    转储，auditor 需要导出时由管理员执行或走行级查看——所以依赖写级门槛
+    （``AdminWriter``，与 customers.csv 及其它整表导出一致），而不只是能登录即可。
     """
     import csv as csv_mod
     import hashlib as hashlib_mod

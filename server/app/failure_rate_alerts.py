@@ -502,10 +502,26 @@ def read_alerts_overview(
     with pg_transaction() as raw:
         overview = build_alerts_overview(BusinessConnection.postgres(raw))
     if notify:
-        dangerous = [item for item in overview.items if item.severity == "danger"]
-        if dangerous:
-            _deliver_alert_email_quietly(overview)
+        notify_if_dangerous(overview)
     return overview
+
+
+def notify_if_dangerous(overview: AlertsOverview) -> None:
+    """有 danger 级告警才走投递；其余情况什么都不做。"""
+    if any(item.severity == "danger" for item in overview.items):
+        _deliver_alert_email_quietly(overview)
+
+
+def dispatch_alert_digest() -> None:
+    """不依赖任何人打开控制台的告警推送入口（后台 Worker 定时调用）。
+
+    ``notify=1`` 只在有人请求总览时才触发——夜里没人开后台，「推送通道」就永远不推。
+    这里自己算一遍总览再投递；防打扰仍以 ``alert_notify_dedup`` 为准，所以调用得
+    再勤，同一小时也最多一封。
+    """
+    with pg_transaction() as raw:
+        overview = build_alerts_overview(BusinessConnection.postgres(raw))
+    notify_if_dangerous(overview)
 
 
 def _alert_recipient_email(conn: BusinessConnection) -> str | None:
@@ -536,18 +552,13 @@ def _deliver_alert_email_quietly(overview: AlertsOverview) -> None:
             ).fetchone()
             if recent is not None:
                 return
-            conn.execute(
-                "INSERT INTO alert_notify_dedup (id, last_sent_at) VALUES (1, "
-                "clock_timestamp()) ON CONFLICT (id) DO UPDATE SET "
-                "last_sent_at = clock_timestamp()"
-            )
             sender = email_sender_from_settings(conn)
         if sender is None:
             logger.info("alert email skipped: email provider not configured")
             return
         dangerous = [item for item in overview.items if item.severity == "danger"]
         lines = "\n".join(f"- {item.headline}（{item.detail}）" for item in dangerous)
-        deliver_quietly(
+        delivered = deliver_quietly(
             lambda: sender.send_alert_digest(
                 to=email,
                 total=len(overview.items),
@@ -557,6 +568,16 @@ def _deliver_alert_email_quietly(overview: AlertsOverview) -> None:
             ),
             kind="alert_digest",
         )
+        if not delivered:
+            # 没发出去就不记账：先记再发会让一次发送失败（没配发信通道、模板缺失、
+            # 网络抖动）把接下来一小时的重试全部挡掉，而告警其实一封都没送到。
+            return
+        with _pg() as raw:
+            BusinessConnection.postgres(raw).execute(
+                "INSERT INTO alert_notify_dedup (id, last_sent_at) VALUES (1, "
+                "clock_timestamp()) ON CONFLICT (id) DO UPDATE SET "
+                "last_sent_at = clock_timestamp()"
+            )
 
     try:
         _send()

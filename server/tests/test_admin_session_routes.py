@@ -2259,3 +2259,167 @@ def test_viral_quality_rules_and_monthly_budget_round_trip(
         },
     )
     assert bad.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# PR #35 评审修复：手动采集的预算口径、批量上首页的同平台合并
+# ---------------------------------------------------------------------------
+
+_COLLECT_PATH = "/api/control/viral/collect"
+
+
+def _exhaust_monthly_collection_budget(conn: psycopg.Connection) -> None:
+    """预算 1 分，并造一笔本月已完成的平台采集成本（100 分）：预算已用尽。"""
+    conn.execute(
+        "UPDATE viral_runtime_controls SET collection_enabled=1, keywords_json=%s, "
+        "monthly_budget_fen=1, next_collection_at=NULL WHERE id=1",
+        (
+            json.dumps(
+                [{"platform": "douyin", "category": "推荐", "keyword": "老房改造"}],
+                ensure_ascii=False,
+            ),
+        ),
+    )
+    conn.execute("DELETE FROM viral_refresh_tasks")
+    conn.execute(
+        "INSERT INTO viral_collection_batches (id, platform, config_json, pricing_snapshot_json) "
+        "VALUES ('budget-batch', 'douyin', '{}', '{}') ON CONFLICT (id) DO NOTHING"
+    )
+    conn.execute(
+        "INSERT INTO billing_operations (id, user_id, service, module, source_id, unit, "
+        "budget_units, pricing_snapshot_json, state, completed_at, collection_batch_id) "
+        "VALUES ('budget-op', NULL, 'viral_search', 'viral', 'budget-src', 'call', 1, '{}', "
+        "'SUCCEEDED', now(), 'budget-batch') ON CONFLICT (id) DO NOTHING"
+    )
+    conn.execute(
+        "INSERT INTO billing_attempts (id, operation_id, attempt_key, service, provider, unit, "
+        "cost_fen, state, completed_at) "
+        "VALUES ('budget-attempt', 'budget-op', 'k1', 'viral_search', 'source', 'call', 100, "
+        "'ACTUAL', now()) ON CONFLICT (id) DO NOTHING"
+    )
+
+
+def _clear_collection_budget_fixture(conn: psycopg.Connection) -> None:
+    # 计费事实表受「只追加」触发器保护；专属测试库里像 route_state 清库那样临时绕过。
+    conn.execute("SET session_replication_role = replica")
+    conn.execute("DELETE FROM billing_attempts WHERE id='budget-attempt'")
+    conn.execute("DELETE FROM billing_operations WHERE id='budget-op'")
+    conn.execute("DELETE FROM viral_collection_batches WHERE id='budget-batch'")
+    conn.execute("SET session_replication_role = DEFAULT")
+    conn.execute("DELETE FROM viral_refresh_tasks")
+    conn.execute("UPDATE viral_runtime_controls SET monthly_budget_fen=NULL WHERE id=1")
+
+
+def test_scheduled_collection_stops_at_the_budget_but_manual_collection_does_not(
+    client: TestClient, route_state: str
+) -> None:
+    """定时入队受月度预算拦截；运营手动触发是知情动作，不拦。返回值如实说明有没有入队。"""
+    from app.db_portable import BusinessConnection
+    from app.viral_collection import enqueue_due_viral_collections
+
+    with psycopg.connect(route_state) as conn:
+        _exhaust_monthly_collection_budget(conn)
+        conn.execute("UPDATE viral_runtime_controls SET next_collection_at=NULL WHERE id=1")
+    try:
+        with psycopg.connect(route_state) as conn:
+            scheduled = enqueue_due_viral_collections(BusinessConnection.postgres(conn))
+            assert scheduled is False
+            # BusinessConnection 会把这条连接换成具名行工厂，下标取值最稳。
+            assert conn.execute("SELECT count(*) FROM viral_refresh_tasks").fetchone()[0] == 0
+            conn.commit()
+        with psycopg.connect(route_state) as conn:
+            manual = enqueue_due_viral_collections(BusinessConnection.postgres(conn), manual=True)
+            assert manual is True
+            assert conn.execute("SELECT count(*) FROM viral_refresh_tasks").fetchone()[0] == 1
+            conn.commit()
+        # 已有任务在队：再来一次如实回 False，不重复入队。
+        with psycopg.connect(route_state) as conn:
+            again = enqueue_due_viral_collections(BusinessConnection.postgres(conn), manual=True)
+            assert again is False
+    finally:
+        with psycopg.connect(route_state) as conn:
+            _clear_collection_budget_fixture(conn)
+
+
+def test_collect_now_route_bypasses_budget_and_answers_busy_truthfully(
+    client: TestClient, route_state: str
+) -> None:
+    headers = _admin_session(client)
+    with psycopg.connect(route_state) as conn:
+        _exhaust_monthly_collection_budget(conn)
+    body = {"reason": "运营知情下的手动采集", "confirm": True}
+    try:
+        first = client.post(
+            _COLLECT_PATH, headers={**headers, "Idempotency-Key": "collect-now-1"}, json=body
+        )
+        # 预算已用尽，手动「立即采集」仍要成功入队。
+        assert first.status_code == 202, first.text
+        assert first.json() == {"queued": True}
+        with psycopg.connect(route_state) as conn:
+            assert conn.execute("SELECT count(*) FROM viral_refresh_tasks").fetchone() == (1,)
+
+        # 再点一次：已有任务在队，不能再回「已入队」。
+        second = client.post(
+            _COLLECT_PATH, headers={**headers, "Idempotency-Key": "collect-now-2"}, json=body
+        )
+        assert second.status_code == 409, second.text
+        assert second.json()["detail"]["code"] == "VIRAL_COLLECTION_BUSY"
+        with psycopg.connect(route_state) as conn:
+            assert conn.execute("SELECT count(*) FROM viral_refresh_tasks").fetchone() == (1,)
+    finally:
+        with psycopg.connect(route_state) as conn:
+            _clear_collection_budget_fixture(conn)
+
+
+def test_viral_batch_feature_queues_unready_items_of_one_platform_together(
+    client: TestClient, route_state: str
+) -> None:
+    """回归：同平台两条未就绪视频批量上首页，逐条排队会撞第一条刚排的任务而整批 409。"""
+    headers = _admin_session(client)
+    with psycopg.connect(route_state) as conn:
+        conn.execute("DELETE FROM viral_refresh_tasks")
+        conn.execute(
+            "INSERT INTO viral_videos(platform,video_id,title) VALUES "
+            "('douyin','unready-a','未就绪甲'),('douyin','unready-b','未就绪乙'),"
+            "('wechat_channels','unready-c','未就绪丙')"
+        )
+    try:
+        response = client.post(
+            "/api/control/viral/videos/curation:batch",
+            headers={**headers, "Idempotency-Key": "batch-feature-multi-unready"},
+            json={
+                "action": "feature",
+                "items": [
+                    {"platform": "douyin", "video_id": "unready-a"},
+                    {"platform": "wechat_channels", "video_id": "unready-c"},
+                    {"platform": "douyin", "video_id": "unready-b"},
+                ],
+                "reason": "多条未就绪一起上首页",
+                "confirm": True,
+            },
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["queued_count"] == 3
+        by_video = {item["video_id"]: item for item in body["items"]}
+        # 同平台的两条共用一个任务，另一个平台单独一个；每条都带回任务编号。
+        assert by_video["unready-a"]["task_id"] == by_video["unready-b"]["task_id"]
+        assert by_video["unready-c"]["task_id"] not in {None, by_video["unready-a"]["task_id"]}
+
+        with psycopg.connect(route_state) as conn:
+            tasks = {
+                row[0]: json.loads(row[1])
+                for row in conn.execute(
+                    "SELECT platform, collection_config_json FROM viral_refresh_tasks "
+                    "WHERE status='PENDING'"
+                ).fetchall()
+            }
+        assert sorted(tasks["douyin"]["video_ids"]) == ["unready-a", "unready-b"]
+        assert tasks["wechat_channels"]["video_ids"] == ["unready-c"]
+        assert tasks["douyin"]["feature_after"]["reason"] == "多条未就绪一起上首页"
+    finally:
+        with psycopg.connect(route_state) as conn:
+            conn.execute("DELETE FROM viral_refresh_tasks")
+            conn.execute(
+                "DELETE FROM viral_videos WHERE video_id IN ('unready-a','unready-b','unready-c')"
+            )

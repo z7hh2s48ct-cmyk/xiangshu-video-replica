@@ -769,3 +769,192 @@ def test_alerts_overview_notify_sends_digest_once_per_hour(
             raw.execute("DELETE FROM recharge_orders WHERE id = 'digest-orphan'")
             raw.execute("DELETE FROM alert_settings")
             raw.execute("DELETE FROM users WHERE id IN ('alert-recipient','digest-user')")
+
+
+# ---------------------------------------------------------------------------
+# PR #35 评审修复：摘要邮件的去重只在确认发出之后记；Worker 定时推送
+# ---------------------------------------------------------------------------
+
+
+class _DigestSender:
+    """记录 send_alert_digest 调用的桩；``fail_with`` 给定时模拟发信失败。"""
+
+    def __init__(self, fail_with: str | None = None) -> None:
+        self.sent: list[dict[str, object]] = []
+        self.fail_with = fail_with
+
+    def send_alert_digest(self, **kwargs: object) -> None:
+        if self.fail_with is not None:
+            from app.email_delivery import EmailDeliveryError
+
+            raise EmailDeliveryError(self.fail_with)
+        self.sent.append(dict(kwargs))
+
+    def send_code(self, **kwargs: object) -> None: ...
+
+    def send_password_reset_notice(self, **kwargs: object) -> None: ...
+
+    def check_template(self) -> None: ...
+
+
+def _seed_digest_scenario(dsn: str) -> None:
+    """接收人配了邮箱 + 一条 danger 告警（PAID 订单无入账）。"""
+    import psycopg as _psycopg
+
+    with _psycopg.connect(dsn, autocommit=True) as raw:
+        raw.execute(
+            "INSERT INTO users (id, username, display_name, role, is_active, "
+            "email, email_verified_at) "
+            "VALUES ('alert-recipient', 'alert-recipient', '值班接收人', 'admin', 1, "
+            "'oncall@example.com', clock_timestamp()) ON CONFLICT (id) DO NOTHING"
+        )
+        raw.execute(
+            """
+            INSERT INTO alert_settings
+                (id, recipient_user_id, failure_rate_window_minutes,
+                 failure_rate_threshold_percent, failure_rate_min_sample,
+                 updated_by_user_id, updated_at)
+            VALUES (1, 'alert-recipient', 60, 30, 5, 'alert-recipient',
+                    clock_timestamp())
+            ON CONFLICT (id) DO UPDATE SET recipient_user_id = 'alert-recipient'
+            """
+        )
+        raw.execute("DELETE FROM alert_notify_dedup")
+        raw.execute(
+            "INSERT INTO users (id, username, display_name, role, is_active) "
+            "VALUES ('digest-user', 'digest-user', '摘要客户', 'customer', 1) "
+            "ON CONFLICT (id) DO NOTHING"
+        )
+        raw.execute(
+            """
+            INSERT INTO recharge_orders (id, user_id, provider, amount_fen, credits,
+                status, merchant_order_no, provider_trade_no,
+                base_unit_price_fen_snapshot, charged_unit_price_fen_snapshot,
+                min_recharge_fen_snapshot, recharge_step_fen_snapshot, paid_at, created_at)
+            VALUES ('digest-orphan', 'digest-user', 'zpay', 10000, 10, 'PAID',
+                    'BIZ-digest-orphan', 'trade-digest', 1000, 1000, 10000, 1000,
+                    to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
+                    to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'))
+            """
+        )
+
+
+def _clear_digest_scenario(dsn: str) -> None:
+    import psycopg as _psycopg
+
+    with _psycopg.connect(dsn, autocommit=True) as raw:
+        raw.execute("DELETE FROM alert_notify_dedup")
+        raw.execute("DELETE FROM recharge_orders WHERE id = 'digest-orphan'")
+        raw.execute("DELETE FROM alert_settings")
+        raw.execute("DELETE FROM users WHERE id IN ('alert-recipient','digest-user')")
+
+
+def _dedup_rows(dsn: str) -> int:
+    import psycopg as _psycopg
+
+    with _psycopg.connect(dsn, autocommit=True) as raw:
+        return int(raw.execute("SELECT count(*) FROM alert_notify_dedup").fetchone()[0])
+
+
+def test_alert_digest_dedup_is_recorded_only_after_a_confirmed_send(
+    api: TestClient, seeded: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回归：先记去重再发，会让一次发送失败把接下来一小时的重试全部挡掉。"""
+    _seed_digest_scenario(seeded)
+    try:
+        # 1) 发信通道没配：什么都没发，不记账。
+        monkeypatch.setattr(
+            "app.email_delivery.email_sender_from_settings", lambda conn: None, raising=False
+        )
+        assert api.get("/api/control/alerts/overview?notify=1").status_code == 200
+        assert _dedup_rows(seeded) == 0
+
+        # 2) 通道配了但发送失败：同样不记账。
+        failing = _DigestSender(fail_with="Timeout")
+        monkeypatch.setattr(
+            "app.email_delivery.email_sender_from_settings", lambda conn: failing, raising=False
+        )
+        assert api.get("/api/control/alerts/overview?notify=1").status_code == 200
+        assert failing.sent == []
+        assert _dedup_rows(seeded) == 0
+
+        # 3) 通道恢复后的下一次请求立刻能发出去（没有被上面的失败挡住），发出后才记账。
+        working = _DigestSender()
+        monkeypatch.setattr(
+            "app.email_delivery.email_sender_from_settings", lambda conn: working, raising=False
+        )
+        assert api.get("/api/control/alerts/overview?notify=1").status_code == 200
+        assert len(working.sent) == 1
+        assert _dedup_rows(seeded) == 1
+
+        # 4) 记账之后同一小时不重发。
+        assert api.get("/api/control/alerts/overview?notify=1").status_code == 200
+        assert len(working.sent) == 1
+    finally:
+        _clear_digest_scenario(seeded)
+
+
+def test_dispatch_alert_digest_pushes_without_anyone_opening_the_console(
+    api: TestClient, seeded: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回归：notify=1 只在有人请求总览时触发，无人值守时「推送通道」从不推。"""
+    from app.failure_rate_alerts import dispatch_alert_digest
+
+    _seed_digest_scenario(seeded)
+    sender = _DigestSender()
+    monkeypatch.setattr(
+        "app.email_delivery.email_sender_from_settings", lambda conn: sender, raising=False
+    )
+    try:
+        dispatch_alert_digest()
+        assert len(sender.sent) == 1
+        assert sender.sent[0]["danger_count"] == 1
+        # 定时器再勤，同一小时也最多一封。
+        dispatch_alert_digest()
+        assert len(sender.sent) == 1
+    finally:
+        _clear_digest_scenario(seeded)
+
+
+def test_dispatch_alert_digest_stays_silent_when_nothing_is_dangerous(
+    api: TestClient, seeded: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.failure_rate_alerts import dispatch_alert_digest
+
+    sender = _DigestSender()
+    monkeypatch.setattr(
+        "app.email_delivery.email_sender_from_settings", lambda conn: sender, raising=False
+    )
+    dispatch_alert_digest()
+    assert sender.sent == []
+
+
+def test_worker_alert_tick_is_throttled_and_never_blocks_the_round(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time
+
+    import app.generation_worker as worker
+
+    calls: list[int] = []
+    monkeypatch.setattr(
+        "app.failure_rate_alerts.dispatch_alert_digest", lambda: calls.append(1), raising=True
+    )
+    monkeypatch.setattr(worker, "_last_alert_digest_at", None)
+
+    worker.dispatch_alert_digest_throttled()
+    worker.dispatch_alert_digest_throttled()
+    assert calls == [1]  # 第二次落在节流窗口内
+
+    monkeypatch.setattr(
+        worker, "_last_alert_digest_at", time.monotonic() - worker.ALERT_DIGEST_INTERVAL_SECONDS - 1
+    )
+    worker.dispatch_alert_digest_throttled()
+    assert calls == [1, 1]  # 窗口过了才会再检查
+
+    def boom() -> None:
+        raise RuntimeError("smtp exploded")
+
+    monkeypatch.setattr("app.failure_rate_alerts.dispatch_alert_digest", boom)
+    monkeypatch.setattr(worker, "_last_alert_digest_at", None)
+    worker.dispatch_alert_digest_throttled()  # 推送是旁路：异常不能外抛去拖住任务处理
