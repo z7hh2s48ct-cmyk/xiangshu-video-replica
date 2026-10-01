@@ -400,6 +400,61 @@ def test_broken_copy_backend_cannot_fail_an_import(pg_state, monkeypatch):
     assert cached.cache_hit and len(calls) == 1
 
 
+def test_copy_import_prefers_audio_and_falls_back_to_archived_video(pg_state, monkeypatch):
+    """文案导入首选音频归档；只归档过视频的同一视频回落到视频对象，不空转重试。
+
+    「只归档过视频」对应三类真实来路：复刻解析（旧决策强制缓存整条视频）、每周
+    采集、以及本次改动之前完成的文案解析。2026-09-30 拍板后文案解析只归档音频，
+    两种形态必须都能被只读导入 Worker 消费。
+    """
+    from test_viral_media import _video
+
+    from app import viral_media
+    from app.storage import FakeStorageAdapter
+    from app.viral_import import ViralImportWork, perform_viral_import_task
+
+    _exec(pg_state, "DELETE FROM viral_media_preparations")
+    storage = FakeStorageAdapter(provider="cos", bucket="shared")
+    video = _video("douyin", "copy-mixed-archive")
+
+    def stream(self, url):
+        yield b"\x00\x00\x00\x18ftypisom" + b"bytes"
+
+    monkeypatch.setattr(viral_media.UrlFetcher, "iter_fetch", stream)
+
+    def work():
+        return ViralImportWork(
+            lease=ViralImportLease(
+                id="copy-task",
+                worker_id="worker",
+                owner_user_id="u1",
+                project_id="project",
+                platform=video.platform,
+                video_id=video.video_id,
+                purpose="copy",
+                attempt=1,
+            ),
+            video=video,
+            client=None,
+            storage=storage,
+            prefer="audio",
+        )
+
+    # 场景一：此前只归档过视频（复刻解析/采集/旧流程）→ 首选音频报未就绪后回落。
+    viral_media.ViralMediaPipeline(client=None, storage=storage, shared=True).fetch(
+        video, prefer="video"
+    )
+    outcome = perform_viral_import_task(work())
+    assert outcome.media_kind == "video"
+
+    # 场景二：音频归档就位（新文案解析的常态）→ 首选直接命中，不再碰视频。
+    viral_media.ViralMediaPipeline(client=None, storage=storage, shared=True).fetch(
+        video, prefer="audio"
+    )
+    outcome = perform_viral_import_task(work())
+    assert outcome.media_kind == "audio"
+
+
 def test_changed_storage_namespace_and_missing_object_prepare_again(pg_state):
     from app.storage import FakeStorageAdapter
     from app.viral_media_preparation import ViralMediaPreparation

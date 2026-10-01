@@ -1094,7 +1094,9 @@ def test_password_customer_xiaohongshu_resolution_import_and_replay_on_postgres(
 
         def fetch(self, video: ViralVideo, *, prefer: str | None = None) -> ViralMediaResult:
             assert video.platform == "xiaohongshu"
-            assert prefer == "video"
+            # 文案导入 Worker 首选音频归档（2026-09-30 拍板）；本桩固定回视频对象，
+            # copy 导入对归档形态不挑（perform 只对 replica 强制视频）。
+            assert prefer == "audio"
             stored = self.storage.put_object(
                 "viral/xiaohongshu/note.mp4", b"contract-video", content_type="video/mp4"
             )

@@ -184,14 +184,6 @@ class ScriptCachePending(Exception):
     """Another durable task owns this video's one upstream transcription."""
 
 
-def _viral_copy_upload(asset: sqlite3.Row) -> bool:
-    try:
-        metadata = json.loads(str(asset["metadata_json"] or "{}"))
-    except (ValueError, TypeError):
-        return False
-    return metadata.get("viral_copy_upload") is True
-
-
 def _viral_source(conn: BusinessConnection, asset: sqlite3.Row) -> tuple[str, str] | None:
     # Only server-verified imports can participate in cross-user reuse. User
     # supplied asset metadata is not proof of a public video's identity.
@@ -202,14 +194,11 @@ def _viral_source(conn: BusinessConnection, asset: sqlite3.Row) -> tuple[str, st
     ).fetchone()
     if row is None:
         return None
-    if asset["kind"] == "reference_video":
-        return str(row["platform"]), str(row["video_id"])
-    # 客户端本地抽音轨上传（决策 #15）：身份仍由服务端在内容池里按
-    # platform+videoId 校验后写进 viral_import_tasks，音轨取自客户端缓存的
-    # **整支视频**。解析器下发的独立音轨可能是背景音乐，所以只有本端点写下的
-    # 标记能放行其余 reference_audio——标记写在资产上，而该资产由服务端创建，
-    # 客户端无法自证。
-    if asset["kind"] == "reference_audio" and _viral_copy_upload(asset):
+    # 视频与音频素材都凭服务端写下的导入任务行放行：音频有两条来路——链接导入直接
+    # 缓存的解析音频（2026-09-30 拍板可用于转写）与客户端本地抽取后上传的音轨
+    # （决策 #15）。两者都由服务端创建资产并在内容池校验过视频身份，客户端自报的
+    # 元数据一律不算数。
+    if asset["kind"] in ("reference_video", "reference_audio"):
         return str(row["platform"]), str(row["video_id"])
     return None
 

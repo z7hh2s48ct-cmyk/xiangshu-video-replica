@@ -29,7 +29,6 @@ from app.db_portable import BusinessConnection
 from app.media import (
     DURATION_ROUNDING_TOLERANCE_SECONDS,
     MAX_DURATION_SECONDS,
-    MAX_UPLOAD_BYTES,
     FFprobeVideoProbe,
     VideoProbe,
     VideoProbeFailed,
@@ -303,10 +302,10 @@ def preflight_resolved_media(
             "无法复刻；请截取 15 秒以内片段后重试。",
             retryable=False,
         )
-    # Resolver audio URLs may point to a video's background music instead of its
-    # spoken soundtrack. Always cache the full video so copy extraction uses the
-    # audio track embedded in the original upload.
-    prefer = "video"
+    # 文案链路直接缓存解析返回的音频（2026-09-30 拍板：上游音频已可直接用于转写），
+    # 不再为抽口播强制下载整条视频；复刻仍以完整视频为准。解析未带音频地址时管线
+    # 自动回落到视频下载（见 viral_media._resolve_kind）。
+    prefer = "audio" if purpose == "copy" else "video"
 
     def validate(content: Path, kind: str, content_type: str | None) -> None:
         validate_resolved_media_content(
@@ -321,7 +320,9 @@ def preflight_resolved_media(
         ViralMediaPipeline(
             client=None,
             storage=storage,
-            fetcher=UrlFetcher(timeout_seconds=25.0, max_bytes=MAX_UPLOAD_BYTES),
+            # 2026-09-30 拍板：链接下载不再套用上传体的 50MB 上限（长视频/长音频照常
+            # 拉取），25 秒超时保留；UrlFetcher 自带的 512MB 防滥用硬顶仍在。
+            fetcher=UrlFetcher(timeout_seconds=25.0),
             validator=validate,
             shared=True,
         ).fetch(_resolved_video(resolved), prefer=prefer)
