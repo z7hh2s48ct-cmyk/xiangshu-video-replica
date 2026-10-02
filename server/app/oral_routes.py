@@ -26,10 +26,13 @@ from app.internal_billing import (
     InsufficientCreditsError,
     reconcile_oral_billing_by_evidence,
 )
+from app.media_routes import MediaStorage
 from app.oral import (
     MAX_CLONE_TITLE_CHARS,
     ORAL_CONSENT_TEXT_VERSION,
     VOICE_SETTING_RANGES,
+    AvatarCompatibilityRepairResult,
+    OralCompatibilityRepairError,
     OralConflictError,
     OralDomainError,
     OralResourceInUseError,
@@ -57,8 +60,10 @@ from app.oral import (
     read_avatar_clone,
     read_oral_task,
     read_voice_clone,
+    reconcile_avatar_video_compatibility_after_write_error,
     rename_avatar_clone,
     rename_voice_clone,
+    repair_avatar_video_compatibility,
     start_avatar_clone,
     start_voice_clone,
 )
@@ -336,6 +341,61 @@ def create_avatar_clone(
         "submission_state": result.submission_state,
         "replayed": result.replayed,
     }
+
+
+@router.post("/avatars/{avatar_id}/compatibility")
+def repair_avatar_compatibility(
+    avatar_id: str, db: BusinessDbDep, storage: MediaStorage
+) -> dict[str, Any]:
+    result: AvatarCompatibilityRepairResult | None = None
+    repair_error: OralCompatibilityRepairError | None = None
+    write_exit_error: Exception | None = None
+    try:
+        with db.write() as (conn, actor):
+            result = repair_avatar_video_compatibility(
+                conn, actor=actor, avatar_id=avatar_id, storage=storage
+            )
+    except OralCompatibilityRepairError as exc:
+        repair_error = exc
+    except OralDomainError as exc:
+        raise _domain_guard(exc) from exc
+    except Exception as exc:
+        # The repair body succeeded, but the writer's __exit__ may have failed
+        # after PostgreSQL committed.  Reconcile exactly once with a new writer.
+        if result is None:
+            raise
+        write_exit_error = exc
+
+    if repair_error is not None or write_exit_error is not None:
+        if repair_error is not None:
+            original_asset_id = repair_error.original_asset_id
+            compatible_object_key = repair_error.compatible_object_key
+        else:
+            assert result is not None
+            original_asset_id = result.original_asset_id
+            compatible_object_key = result.compatible_object_key
+        try:
+            with db.write() as (conn, actor):
+                reconciled = reconcile_avatar_video_compatibility_after_write_error(
+                    conn,
+                    actor=actor,
+                    avatar_id=avatar_id,
+                    original_asset_id=original_asset_id,
+                    compatible_object_key=compatible_object_key,
+                    storage=storage,
+                )
+        except Exception as reconciliation_error:
+            if write_exit_error is not None:
+                raise write_exit_error from reconciliation_error
+            raise
+        if reconciled is not None:
+            return _serialize(reconciled)
+        if repair_error is not None:
+            raise _domain_guard(repair_error) from repair_error
+        assert write_exit_error is not None
+        raise write_exit_error
+    assert result is not None
+    return _serialize(result.avatar)
 
 
 @router.post("/avatars/{avatar_id}/refresh")

@@ -18,6 +18,7 @@ const api = vi.hoisted(() => ({
   ),
   completeMaterialUpload: vi.fn(),
   putMaterial: vi.fn(),
+  repairOralAvatarCompatibility: vi.fn(),
   confirmOralVoice: vi.fn(),
   createMaterialUploadIntent: vi.fn(),
   createOralAvatarClone: vi.fn(),
@@ -347,8 +348,9 @@ describe("PeoplePages", () => {
       allowedUses: ["voice_clone"],
     });
     api.putMaterial.mockImplementation(
-      async (intent, file, onProgress, signal) => {
+      async (intent, file, onProgress, signal, onBeforeComplete) => {
         await api.uploadMaterial(intent, file, onProgress, signal);
+        onBeforeComplete?.();
         return api.completeMaterialUpload(intent.asset_id);
       },
     );
@@ -1083,6 +1085,41 @@ describe("PeoplePages", () => {
     );
   });
 
+  it("shows a video compatibility stage after transfer and before completion", async () => {
+    currentPage = "person-avatars";
+    review = false;
+    api.createMaterialUploadIntent.mockResolvedValue({
+      asset_id: "compat-video",
+    });
+    api.uploadMaterial.mockResolvedValue(undefined);
+    let finishCompletion!: (item: { asset_id: string }) => void;
+    api.completeMaterialUpload.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishCompletion = resolve;
+        }),
+    );
+    render(<PersonPage />);
+
+    const create = screen
+      .getAllByRole("button")
+      .find((button) => button.textContent?.includes("MP4 / MOV"));
+    expect(create).toBeDefined();
+    fireEvent.click(create as HTMLButtonElement);
+    const input = document.querySelector('input[type="file"]');
+    expect(input).not.toBeNull();
+    fireEvent.change(input as HTMLInputElement, {
+      target: {
+        files: [new File(["video"], "compat.mp4", { type: "video/mp4" })],
+      },
+    });
+
+    expect(
+      await screen.findByText("正在处理视频兼容版本…"),
+    ).toBeInTheDocument();
+    await act(async () => finishCompletion({ asset_id: "compat-video" }));
+  });
+
   it("carries a scene photo into replacement without overwriting the original frame contract", () => {
     currentPage = "person-photos";
     render(<PersonPage />);
@@ -1134,6 +1171,7 @@ describe("PeoplePages", () => {
       expect.any(File),
       expect.any(Function),
       expect.any(AbortSignal),
+      expect.any(Function),
     );
     await vi.waitFor(() =>
       expect(api.createOralAvatarClone).toHaveBeenCalledWith(
@@ -1789,6 +1827,69 @@ describe("PeoplePages", () => {
     expect(api.createOralAvatarClone).not.toHaveBeenCalled();
     expect(api.createOralVoiceClone).not.toHaveBeenCalled();
     expect(api.confirmOralVoice).not.toHaveBeenCalled();
+  });
+
+  it("repairs a legacy preview once and refreshes the library", async () => {
+    currentPage = "person-avatars";
+    review = false;
+    let finishRepair!: () => void;
+    api.repairOralAvatarCompatibility.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finishRepair = resolve;
+        }),
+    );
+    render(<PersonPage />);
+
+    const repair = screen.getByRole("button", { name: "修复预览" });
+    fireEvent.click(repair);
+    fireEvent.click(repair);
+    expect(api.repairOralAvatarCompatibility).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole("button", { name: "正在修复预览…" }),
+    ).toBeDisabled();
+
+    await act(async () => finishRepair());
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+    expect(notify).toHaveBeenCalledWith("视频预览已修复");
+    expect(screen.getByRole("button", { name: "修复预览" })).toBeEnabled();
+  });
+
+  it("keeps failed preview repair retryable and ignores a late response after leave", async () => {
+    currentPage = "person-avatars";
+    review = false;
+    api.repairOralAvatarCompatibility.mockRejectedValue(
+      new Error("repair failed"),
+    );
+    const view = render(<PersonPage />);
+    const repair = screen.getByRole("button", { name: "修复预览" });
+    fireEvent.click(repair);
+    await waitFor(() =>
+      expect(api.repairOralAvatarCompatibility).toHaveBeenCalledTimes(1),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "修复视频预览失败",
+    );
+    expect(repair).toBeEnabled();
+    fireEvent.click(repair);
+    await waitFor(() =>
+      expect(api.repairOralAvatarCompatibility).toHaveBeenCalledTimes(2),
+    );
+    await waitFor(() => expect(repair).toBeEnabled());
+
+    let finishRepair!: () => void;
+    api.repairOralAvatarCompatibility.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishRepair = resolve;
+        }),
+    );
+    const late = screen.getByRole("button", { name: "修复预览" });
+    fireEvent.click(late);
+    const beforeLeaveRefreshes = refresh.mock.calls.length;
+    view.unmount();
+    await act(async () => finishRepair());
+    expect(refresh).toHaveBeenCalledTimes(beforeLeaveRefreshes);
   });
 
   it("does not silently switch to another person when the selected id is stale", () => {

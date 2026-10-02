@@ -97,7 +97,7 @@ REPO_ROOT = SERVER_DIR.parent
 # 月度预算）与 20260930T1100_alert_notify_dedup（方案 P2 告警邮件推送防打扰）
 # 继续追加其上；20260930T1400_registration_bonus_settings（注册赠送积分单行
 # 配置表）追加在其后，故链尾为该值。
-HEAD_REVISION = "20260930T1400_registration_bonus_settings"
+HEAD_REVISION = "20261002T1000_oral_video_compatibility"
 
 # 最后一个已发布（受支持）起点。其后的 056…090 与本迁移尚未随任何受支持版本发布，
 # 故冻结范围止于此——把未发布 revision 也纳入哈希会让每次新增迁移都必须改常量，
@@ -178,16 +178,16 @@ HEAD_SCHEMA_COUNTS = {
     # sequences 6 → 7、timestamptz_columns 63 → 64；jsonb / 部分索引无增量。
     # 以上数字均由 migration_manifest.py
     # --print-schema 在空库迁移到 head 后实测得出，digest 同法重算（见下）。
-    "check_constraints": 346,
-    "columns": 1280,
-    "foreign_keys": 202,
+    "check_constraints": 347,
+    "columns": 1286,
+    "foreign_keys": 205,
     "identity_columns": 0,
     "jsonb_columns": 9,
     "partial_indexes": 41,
-    "primary_keys": 109,
+    "primary_keys": 110,
     "sequences": 7,
-    "tables": 109,
-    "timestamptz_columns": 64,
+    "tables": 110,
+    "timestamptz_columns": 65,
     "triggers": 27,
     "unique_constraints": 39,
 }
@@ -303,6 +303,7 @@ HEAD_TABLE_NAMES = (
     "user_queue_cursors",
     "users",
     "versions",
+    "video_compat_derivatives",
     "viral_collection_batches",
     "viral_collection_charges",
     "viral_collection_members",
@@ -419,7 +420,7 @@ HEAD_TABLE_NAMES = (
 #  两侧原来的 digest 都不能用——本分支那条是接在 viral 之后的旧链、main 那条只到
 #  MATERIAL-UX，合并后 head 变成接在 MATERIAL-UX 之后的本分支迁移，约束文本随之变化，
 #  digest 必然要重算。由 scripts/ci/migration_manifest.py --print-schema 在 PG 上重算后粘贴。
-HEAD_SCHEMA_DIGEST = "faa0ac830ea32f3fdc1dbc98e74e4182d06678019b376bee2bc8e3e81412ba27"
+HEAD_SCHEMA_DIGEST = "bcdf984cf18b09598cfda91007a3ab05f7686b3d1d4644fb0d8f5aebe03dff06"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (

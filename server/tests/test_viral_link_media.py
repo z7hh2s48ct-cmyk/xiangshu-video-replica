@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -93,7 +94,7 @@ def _normalized_probe(path: Path, *, audio_packets: bool = False) -> dict[str, A
     )
 
 
-def test_generated_video_normalizes_display_shape_and_copies_audio(
+def test_generated_video_normalizes_display_shape_and_browser_codecs(
     generated_aspect_media: dict[str, Path], tmp_path: Path
 ) -> None:
     original = generated_aspect_media["anamorphic"].read_bytes()
@@ -106,11 +107,22 @@ def test_generated_video_normalizes_display_shape_and_copies_audio(
     assert result.source_display_aspect_ratio == "4:7"
     assert result.sample_aspect_ratio == "1:1"
     assert result.display_aspect_ratio == "9:16"
-    assert result.duration_seconds == pytest.approx(0.5)
-    assert (
-        _normalized_probe(target, audio_packets=True)["packets"]
-        == _normalized_probe(generated_aspect_media["anamorphic"], audio_packets=True)["packets"]
-    )
+    normalized_probe = _normalized_probe(target)
+    normalized_streams = normalized_probe["streams"]
+    assert normalized_streams[0]["codec_name"] == "h264"
+    audio = next(stream for stream in normalized_streams if stream["codec_name"] == "aac")
+    audio_duration = Fraction(int(audio["duration_ts"])) * Fraction(audio["time_base"])
+    muxed_duration = Fraction(normalized_probe["format"]["duration"])
+    # The AAC encoder/muxer pair can expose its 384 priming samples in either
+    # the stream duration, the container duration, both, or neither. Keep the
+    # assertion sample-exact so this remains a codec contract instead of a
+    # generic wall-clock tolerance.
+    sample_rate = int(audio["sample_rate"])
+    stream_padding_samples = (audio_duration - Fraction(1, 2)) * sample_rate
+    container_padding_samples = (muxed_duration - audio_duration) * sample_rate
+    assert stream_padding_samples in {Fraction(0), Fraction(384)}
+    assert container_padding_samples in {Fraction(0), Fraction(384)}
+    assert result.duration_seconds == pytest.approx(float(muxed_duration), abs=0.000001)
     # The 4:7 active picture becomes 144x252 with two black rows on each side.
     pixels = subprocess.run(
         [
@@ -145,6 +157,182 @@ def test_generated_video_preserves_valid_bytes_and_accepts_no_audio(
     result = media_tools.normalize_generated_video(original, target_width=144, target_height=256)
     assert result.content == original
     assert result.transformed is False
+
+
+def test_generated_video_transcodes_hevc_to_h264_aac(
+    generated_aspect_media: dict[str, Path], tmp_path: Path
+) -> None:
+    ffmpeg = media_tools.resolve_media_binary("ffmpeg")
+    source = tmp_path / "hevc.mp4"
+    subprocess.run(
+        [
+            ffmpeg,
+            "-v",
+            "error",
+            "-i",
+            str(generated_aspect_media["anamorphic"]),
+            "-c:v",
+            "libx265",
+            "-tag:v",
+            "hvc1",
+            "-c:a",
+            "copy",
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
+    result = media_tools.normalize_generated_video(
+        source.read_bytes(), target_width=144, target_height=256
+    )
+    target = tmp_path / "hevc-normalized.mp4"
+    target.write_bytes(result.content)
+    streams = _normalized_probe(target)["streams"]
+    assert result.transformed is True
+    assert streams[0]["codec_name"] == "h264"
+    assert any(stream["codec_name"] == "aac" for stream in streams)
+
+
+@pytest.mark.parametrize(
+    ("pixel_format", "profile"),
+    [("yuv420p10le", "high10"), ("yuv444p", "high444")],
+)
+def test_generated_video_transcodes_h264_non_browser_pixel_formats(
+    generated_aspect_media: dict[str, Path],
+    tmp_path: Path,
+    pixel_format: str,
+    profile: str,
+) -> None:
+    ffmpeg = media_tools.resolve_media_binary("ffmpeg")
+    source = tmp_path / f"{pixel_format}.mp4"
+    subprocess.run(
+        [
+            ffmpeg,
+            "-v",
+            "error",
+            "-i",
+            str(generated_aspect_media["square"]),
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            profile,
+            "-pix_fmt",
+            pixel_format,
+            "-an",
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
+    result = media_tools.normalize_generated_video(
+        source.read_bytes(), target_width=144, target_height=256
+    )
+    target = tmp_path / f"{pixel_format}-normalized.mp4"
+    target.write_bytes(result.content)
+    stream = _normalized_probe(target)["streams"][0]
+    assert result.transformed is True
+    assert stream["codec_name"] == "h264"
+    assert stream["pix_fmt"] == "yuv420p"
+
+
+def test_generated_video_keeps_only_the_first_audio_track(
+    generated_aspect_media: dict[str, Path], tmp_path: Path
+) -> None:
+    ffmpeg = media_tools.resolve_media_binary("ffmpeg")
+    source = tmp_path / "two-audio-tracks.mp4"
+    subprocess.run(
+        [
+            ffmpeg,
+            "-v",
+            "error",
+            "-i",
+            str(generated_aspect_media["square"]),
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=32000",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=880:sample_rate=32000",
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-map",
+            "2:a:0",
+            "-t",
+            "0.5",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
+    result = media_tools.normalize_generated_video(
+        source.read_bytes(), target_width=144, target_height=256
+    )
+    target = tmp_path / "one-audio-track.mp4"
+    target.write_bytes(result.content)
+    streams = _normalized_probe(target)["streams"]
+    assert result.transformed is True
+    assert [stream["codec_name"] for stream in streams if stream["codec_type"] == "audio"] == [
+        "aac"
+    ]
+
+
+@pytest.mark.parametrize("transfer", ["smpte2084", "arib-std-b67"])
+def test_generated_video_tonemaps_hdr_to_bt709(
+    generated_aspect_media: dict[str, Path], tmp_path: Path, transfer: str
+) -> None:
+    ffmpeg = media_tools.resolve_media_binary("ffmpeg")
+    source = tmp_path / f"hdr-{transfer}.mp4"
+    subprocess.run(
+        [
+            ffmpeg,
+            "-v",
+            "error",
+            "-i",
+            str(generated_aspect_media["square"]),
+            "-c:v",
+            "libx264",
+            "-x264-params",
+            f"colorprim=bt2020:transfer={transfer}:colormatrix=bt2020nc",
+            "-an",
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
+    source_stream = _normalized_probe(source)["streams"][0]
+    assert source_stream["color_transfer"] == transfer
+    result = media_tools.normalize_generated_video(
+        source.read_bytes(), target_width=144, target_height=256
+    )
+    target = tmp_path / "hdr-sdr.mp4"
+    target.write_bytes(result.content)
+    stream = _normalized_probe(target)["streams"][0]
+    assert result.transformed is True
+    assert stream["pix_fmt"] == "yuv420p"
+    assert stream["color_transfer"] == "bt709"
+    assert stream["color_primaries"] == "bt709"
+
+
+def test_generated_video_rotated_coded_target_becomes_portrait(
+    generated_aspect_media: dict[str, Path],
+) -> None:
+    result = media_tools.normalize_generated_video(
+        generated_aspect_media["rotated"].read_bytes(), target_width=256, target_height=144
+    )
+    assert result.transformed is True
+    assert (result.width, result.height) == (144, 256)
 
 
 def test_generated_video_applies_rotation_before_fitting(
@@ -207,7 +395,7 @@ def test_generated_video_timeout_is_redacted_and_temp_files_are_cleaned(
     "field,value",
     [
         ("duration", "NaN"),
-        ("duration", "61"),
+        ("duration", "1801"),
         ("width", 16384),
         ("sample_aspect_ratio", "-1:1"),
         ("sample_aspect_ratio", "1:0"),

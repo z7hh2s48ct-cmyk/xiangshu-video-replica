@@ -3503,7 +3503,7 @@ def test_material_video_completion_persists_probed_duration(
     bus: BusinessConnection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from app import materials
-    from app.media_tools import MediaInspection
+    from app.media_tools import MediaInspection, NormalizedGeneratedVideo
 
     storage = FakeStorageAdapter(provider="fake", bucket="cw058-tests")
     admin = actor("admin_1", "admin")
@@ -3516,7 +3516,26 @@ def test_material_video_completion_persists_probed_duration(
             media_type="video", duration_seconds=12.066667, width=720, height=1372
         )
 
+    def normalize(
+        content_bytes: bytes, *, target_width: int, target_height: int
+    ) -> NormalizedGeneratedVideo:
+        assert content_bytes == content
+        assert (target_width, target_height) == (720, 1372)
+        return NormalizedGeneratedVideo(
+            content=content,
+            duration_seconds=12.066667,
+            width=720,
+            height=1372,
+            source_sample_aspect_ratio="1:1",
+            source_display_aspect_ratio="180:343",
+            sample_aspect_ratio="1:1",
+            display_aspect_ratio="180:343",
+            source_rotation_degrees=0,
+            transformed=False,
+        )
+
     monkeypatch.setattr(materials, "inspect_media_bytes", inspect, raising=False)
+    monkeypatch.setattr(materials, "normalize_generated_video", normalize)
     intent = materials.create_material_upload_intent(
         bus,
         actor=admin,

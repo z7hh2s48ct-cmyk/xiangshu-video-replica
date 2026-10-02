@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20260930T1400_registration_bonus_settings"
+      "20261002T1000_oral_video_compatibility"
     ],
     "parents": {
       "001_core": null,
@@ -150,9 +150,10 @@
       "20260929T1200_admin_team_and_alert_settings": "20260929T1000_customer_annotations",
       "20260930T1000_viral_quality_budget": "20260929T1200_admin_team_and_alert_settings",
       "20260930T1100_alert_notify_dedup": "20260930T1000_viral_quality_budget",
-      "20260930T1400_registration_bonus_settings": "20260930T1100_alert_notify_dedup"
+      "20260930T1400_registration_bonus_settings": "20260930T1100_alert_notify_dedup",
+      "20261002T1000_oral_video_compatibility": "20260930T1400_registration_bonus_settings"
     },
-    "revision_count": 134
+    "revision_count": 135
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -702,6 +703,10 @@
     "20260930T1400_registration_bonus_settings": {
       "file": "versions/20260930T1400_registration_bonus_settings.py",
       "sha256": "6e71a1a7bd02568f051800828894b60b5741148bff4e4e103f69c526d7c7a63d"
+    },
+    "20261002T1000_oral_video_compatibility": {
+      "file": "versions/20261002T1000_oral_video_compatibility.py",
+      "sha256": "953f0215cd31d3d8bfc8f984d7a7f9f7e1c6a046fe866e45191ad650013942a2"
     }
   },
   "task": "MIGRATION-GUARD-20260912"

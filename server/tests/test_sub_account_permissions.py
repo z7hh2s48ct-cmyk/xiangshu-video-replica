@@ -71,7 +71,7 @@ PERMISSIONS_DB = "t_sub_account_permission"
 # 20260924T0100 口播提交时刻列、20260924T0200 口播隐藏偏好表、
 # 20260926T0000 爆款首页策展排行与 20260925T1400 计费触发器追加修复，
 # 故链尾为该值。
-_HEAD_REVISION = "20260930T1400_registration_bonus_settings"
+_HEAD_REVISION = "20261002T1000_oral_video_compatibility"
 _PRIOR_REVISION = "20260921T1200_sub_account_quotas"
 
 

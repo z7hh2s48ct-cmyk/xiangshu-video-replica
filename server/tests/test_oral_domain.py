@@ -43,6 +43,7 @@ import json
 import os
 import subprocess
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -67,6 +68,7 @@ from pg_test_kit import (
     upgrade_test_database_to_head,
 )
 
+from app import content_store
 from app.auth import CurrentUser, get_current_user
 from app.character_image_generation import deterministic_png
 from app.customer_fence import get_business_db
@@ -81,6 +83,7 @@ from app.internal_billing import (
     reconcile_oral_billing_by_evidence,
 )
 from app.main import app
+from app.media_routes import get_media_storage
 from app.media_tools import resolve_media_binary
 from app.oral import (
     ORAL_CONSENT_TEXT_VERSION,
@@ -128,7 +131,7 @@ from app.oral_worker import (
     request_oral_archive_retry,
 )
 from app.permissions import AuditedSecurityDenial, persist_security_denial
-from app.storage import StoredObject
+from app.storage import FakeStorageAdapter, StoredObject
 
 CW010_ORAL_DB_NAME = "cw010_oral_test"
 
@@ -710,6 +713,162 @@ def _seed_ready_assets() -> tuple[str, str]:
     return "avatar-ready", "voice-ready"
 
 
+def _seed_legacy_ready_video_avatar(
+    storage: FakeStorageAdapter,
+    media: OralTestMedia,
+    *,
+    avatar_id: str = "avatar-ready",
+    consent_id: str | None = None,
+) -> str:
+    """Seed the pre-compatibility shape: READY clone points directly at source."""
+    source = storage.put_object("legacy/avatar-source.mp4", media.video, content_type="video/mp4")
+    _exec(
+        "UPDATE assets SET storage_uri = %s, sha256 = %s, size_bytes = %s, "
+        "content_type = 'video/mp4' WHERE id = 'asset-src'",
+        (source.uri, source.sha256, source.size),
+    )
+    consent = consent_id or _consent_for(purpose="AVATAR_CLONE", source_asset_id="asset-src")
+    _exec(
+        "INSERT INTO oral_avatars ("
+        "id, identity_id, owner_user_id, title, vendor_avatar_id, status, "
+        "source_kind, source_asset_id, consent_id"
+        ") VALUES (%s, 'ident-1', 'employee_1', %s, %s, 'READY', 'VIDEO', 'asset-src', %s)",
+        (avatar_id, f"旧视频分身-{avatar_id}", f"vendor-{avatar_id}", consent),
+    )
+    return consent
+
+
+@contextmanager
+def _avatar_compatibility_client(
+    current_actor: CurrentUser, storage: FakeStorageAdapter
+) -> Iterator[tuple[TestClient, _PgBusinessDb]]:
+    db_override, holder = _make_business_db_override(current_actor)
+    app.dependency_overrides[get_business_db] = db_override
+    app.dependency_overrides[get_media_storage] = lambda: storage
+    try:
+        yield TestClient(app, raise_server_exceptions=False), holder
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_avatar_compatibility_http_preserves_legacy_clone_and_reuses_derivative(
+    scene: str, oral_test_media: OralTestMedia
+) -> None:
+    storage = FakeStorageAdapter(provider="fake", bucket="oral-compat")
+    consent_id = _seed_legacy_ready_video_avatar(storage, oral_test_media)
+    before_wallet_entries = _count("SELECT COUNT(*) FROM wallet_transactions")
+    before_tasks = _count("SELECT COUNT(*) FROM oral_tasks")
+
+    with _avatar_compatibility_client(actor(), storage) as (client, holder):
+        first = client.post("/api/oral/avatars/avatar-ready/compatibility")
+        assert first.status_code == 200, first.text
+        assert "vendor_avatar_id" not in first.json()
+        second = client.post("/api/oral/avatars/avatar-ready/compatibility")
+        assert second.status_code == 200, second.text
+        holder.current_actor = actor("employee_2")
+        foreign = client.post("/api/oral/avatars/avatar-ready/compatibility")
+        assert foreign.status_code == 404, foreign.text
+
+    avatar = _fetch(
+        "SELECT source_asset_id, original_source_asset_id, vendor_avatar_id, status, consent_id "
+        "FROM oral_avatars WHERE id = 'avatar-ready'"
+    )
+    derivative = _fetch(
+        "SELECT compatible_asset_id, status FROM video_compat_derivatives "
+        "WHERE original_asset_id = 'asset-src'"
+    )
+    assert avatar is not None and derivative is not None
+    compatible_id = str(derivative["compatible_asset_id"])
+    assert derivative["status"] == "READY"
+    assert avatar["source_asset_id"] == compatible_id
+    assert avatar["original_source_asset_id"] == "asset-src"
+    assert avatar["vendor_avatar_id"] == "vendor-avatar-ready"
+    assert avatar["status"] == "READY"
+    assert avatar["consent_id"] == consent_id
+    assert _count("SELECT COUNT(*) FROM assets WHERE kind = 'oral_compatible_video'") == 1
+    assert _count("SELECT COUNT(*) FROM wallet_transactions") == before_wallet_entries
+    assert _count("SELECT COUNT(*) FROM oral_tasks") == before_tasks
+    assert storage.get_object("legacy/avatar-source.mp4") == oral_test_media.video
+
+
+def test_avatar_compatibility_http_records_storage_failure_and_retries(
+    scene: str, oral_test_media: OralTestMedia
+) -> None:
+    storage = FakeStorageAdapter(provider="fake", bucket="oral-compat")
+    _seed_legacy_ready_video_avatar(storage, oral_test_media)
+    wrong_backend = FakeStorageAdapter(provider="fake", bucket="other-bucket")
+    db_override, _holder = _make_business_db_override(actor())
+    active_storage = [wrong_backend]
+    app.dependency_overrides[get_business_db] = db_override
+    app.dependency_overrides[get_media_storage] = lambda: active_storage[0]
+    try:
+        client = TestClient(app, raise_server_exceptions=False)
+        failed = client.post("/api/oral/avatars/avatar-ready/compatibility")
+        assert failed.status_code == 422, failed.text
+        failed_relation = _fetch(
+            "SELECT compatible_asset_id, status FROM video_compat_derivatives "
+            "WHERE original_asset_id = 'asset-src'"
+        )
+        assert failed_relation is not None
+        assert failed_relation["compatible_asset_id"] is None
+        assert failed_relation["status"] == "FAILED"
+
+        active_storage[0] = storage
+        retried = client.post("/api/oral/avatars/avatar-ready/compatibility")
+        assert retried.status_code == 200, retried.text
+    finally:
+        app.dependency_overrides.clear()
+
+    repaired = _fetch(
+        "SELECT source_asset_id, original_source_asset_id FROM oral_avatars "
+        "WHERE id = 'avatar-ready'"
+    )
+    relation = _fetch(
+        "SELECT compatible_asset_id, status FROM video_compat_derivatives "
+        "WHERE original_asset_id = 'asset-src'"
+    )
+    assert repaired is not None and relation is not None
+    assert repaired["source_asset_id"] == relation["compatible_asset_id"]
+    assert repaired["original_source_asset_id"] == "asset-src"
+    assert relation["status"] == "READY"
+
+
+def test_avatar_compatibility_http_concurrent_legacy_clones_share_one_winner(
+    scene: str, oral_test_media: OralTestMedia
+) -> None:
+    storage = FakeStorageAdapter(provider="fake", bucket="oral-compat")
+    consent_id = _seed_legacy_ready_video_avatar(storage, oral_test_media)
+    _seed_legacy_ready_video_avatar(
+        storage, oral_test_media, avatar_id="avatar-ready-2", consent_id=consent_id
+    )
+
+    with _avatar_compatibility_client(actor(), storage):
+
+        def repair(avatar_id: str) -> int:
+            with TestClient(app, raise_server_exceptions=False) as client:
+                return client.post(f"/api/oral/avatars/{avatar_id}/compatibility").status_code
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            statuses = list(pool.map(repair, ["avatar-ready", "avatar-ready-2"]))
+    assert statuses == [200, 200]
+
+    relation = _fetch(
+        "SELECT compatible_asset_id, status FROM video_compat_derivatives "
+        "WHERE original_asset_id = 'asset-src'"
+    )
+    assert relation is not None and relation["status"] == "READY"
+    compatible_id = relation["compatible_asset_id"]
+    avatars = _fetchall(
+        "SELECT source_asset_id, original_source_asset_id FROM oral_avatars "
+        "WHERE id IN ('avatar-ready', 'avatar-ready-2') ORDER BY id"
+    )
+    assert [(row["source_asset_id"], row["original_source_asset_id"]) for row in avatars] == [
+        (compatible_id, "asset-src"),
+        (compatible_id, "asset-src"),
+    ]
+    assert _count("SELECT COUNT(*) FROM assets WHERE kind = 'oral_compatible_video'") == 1
+
+
 # --------------------------------------------------------------------------- #
 # Route doubles. The oral *write* routes ride the session fence, which always
 # yields a ``customer`` actor, so the route tests inject a chosen actor
@@ -740,6 +899,32 @@ class _PgBusinessDb:
             raise
 
 
+class _WriteExitFaultBusinessDb(_PgBusinessDb):
+    """Make only the first route writer fail during __exit__ on real PG."""
+
+    def __init__(self, current_actor: CurrentUser, *, commit_succeeds: bool) -> None:
+        super().__init__(current_actor)
+        self.commit_succeeds = commit_succeeds
+        self.write_calls = 0
+
+    @contextmanager
+    def write(self, *, isolation: Any = None) -> Iterator[tuple[BusinessConnection, CurrentUser]]:
+        self.write_calls += 1
+        should_fail = self.write_calls == 1
+        try:
+            with pg_transaction() as raw:
+                yield BusinessConnection.postgres(raw), self.current_actor
+                if should_fail and not self.commit_succeeds:
+                    raise RuntimeError("synthetic write-exit rollback")
+        except AuditedSecurityDenial as exc:
+            persist_security_denial(exc)
+            raise
+        if should_fail and self.commit_succeeds:
+            # ``pg_transaction`` has committed above; simulate a lost commit
+            # acknowledgement from the database driver.
+            raise RuntimeError("synthetic write-exit commit acknowledgement lost")
+
+
 def _read_actor_override(user_id: str = "employee_1", role: str = "employee") -> None:
     """Pin the read-owner dependency to a test actor.
 
@@ -758,6 +943,78 @@ def _make_business_db_override(
     mid-test to change the acting user for subsequent requests."""
     holder = _PgBusinessDb(current_actor)
     return (lambda: holder), holder
+
+
+@pytest.mark.parametrize(
+    ("commit_succeeds", "expected_status"),
+    [(True, 200), (False, 500)],
+    ids=["commit-survived", "rolled-back"],
+)
+def test_avatar_compatibility_http_reconciles_ambiguous_write_exit(
+    scene: str,
+    oral_test_media: OralTestMedia,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    commit_succeeds: bool,
+    expected_status: int,
+) -> None:
+    """A route-level write-exit error gets one fresh, ref-aware reconciliation."""
+    storage = FakeStorageAdapter(provider="fake", bucket="oral-compat")
+    _seed_legacy_ready_video_avatar(storage, oral_test_media)
+    db = _WriteExitFaultBusinessDb(actor(), commit_succeeds=commit_succeeds)
+    deleted_keys: list[str] = []
+    original_delete = content_store.delete_object_if_unreferenced
+
+    def record_reference_gated_delete(*args: Any, **kwargs: Any) -> bool:
+        deleted_keys.append(str(args[2]))
+        return original_delete(*args, **kwargs)
+
+    monkeypatch.setattr(
+        content_store, "delete_object_if_unreferenced", record_reference_gated_delete
+    )
+    before_wallet_entries = _count("SELECT COUNT(*) FROM wallet_transactions")
+    before_tasks = _count("SELECT COUNT(*) FROM oral_tasks")
+    app.dependency_overrides[get_business_db] = lambda: db
+    app.dependency_overrides[get_media_storage] = lambda: storage
+    try:
+        response = TestClient(app, raise_server_exceptions=False).post(
+            "/api/oral/avatars/avatar-ready/compatibility"
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == expected_status, response.text
+    assert db.write_calls == 2
+    assert _count("SELECT COUNT(*) FROM wallet_transactions") == before_wallet_entries
+    assert _count("SELECT COUNT(*) FROM oral_tasks") == before_tasks
+    avatar = _fetch(
+        "SELECT source_asset_id, original_source_asset_id, vendor_avatar_id "
+        "FROM oral_avatars WHERE id = 'avatar-ready'"
+    )
+    relation = _fetch(
+        "SELECT compatible_asset_id, status FROM video_compat_derivatives "
+        "WHERE original_asset_id = 'asset-src'"
+    )
+    assert avatar is not None and relation is not None
+    assert avatar["vendor_avatar_id"] == "vendor-avatar-ready"
+    assert avatar["original_source_asset_id"] in (None, "asset-src")
+
+    if commit_succeeds:
+        assert deleted_keys == []
+        compatible_id = str(relation["compatible_asset_id"])
+        assert relation["status"] == "READY"
+        assert avatar["source_asset_id"] == compatible_id
+        compatible_asset = _fetch("SELECT storage_uri FROM assets WHERE id = %s", (compatible_id,))
+        assert compatible_asset is not None
+        key = str(compatible_asset["storage_uri"]).removeprefix("fake://oral-compat/")
+        assert storage.head_object(key) is not None
+    else:
+        assert len(deleted_keys) == 1
+        assert relation["compatible_asset_id"] is None
+        assert relation["status"] == "FAILED"
+        assert avatar["source_asset_id"] == "asset-src"
+        assert _count("SELECT COUNT(*) FROM assets WHERE kind = 'oral_compatible_video'") == 0
+        assert storage.head_object(deleted_keys[0]) is None
 
 
 def test_create_and_list_consent_snapshots_source_and_audits(scene: str) -> None:

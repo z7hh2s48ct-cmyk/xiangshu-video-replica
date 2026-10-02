@@ -4,6 +4,7 @@ import os
 import sqlite3
 import stat
 import sys
+from datetime import UTC
 from pathlib import Path
 
 import pytest
@@ -941,8 +942,8 @@ def test_real_pg_import_preserves_t37_typed_companion_timestamps(tmp_path: Path)
             task_at = conn.execute(
                 "SELECT created_at_utc FROM generation_tasks WHERE id = 't-t07'"
             ).fetchone()[0]
-        assert audit_at.isoformat() == "2024-01-02T03:04:05+00:00"
-        assert task_at.isoformat() == "2024-01-02T03:04:05+00:00"
+        assert audit_at.astimezone(UTC).isoformat() == "2024-01-02T03:04:05+00:00"
+        assert task_at.astimezone(UTC).isoformat() == "2024-01-02T03:04:05+00:00"
     finally:
         _drop_database(name)
 

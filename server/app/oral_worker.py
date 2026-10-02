@@ -34,11 +34,13 @@ from app.media_tools import (
     MediaValidationFailed,
     inspect_media_bytes,
     normalize_audio_to_mp3,
+    normalize_generated_video,
 )
 from app.oral import DEFAULT_VOICE_LANGUAGE
 from app.storage import StorageAdapter, StoredObject
 
 logger = logging.getLogger(__name__)
+ORAL_ARCHIVE_MAX_BYTES = 512 * 1024 * 1024
 
 # 与 generation 侧的 GENERATION_MAX_POLL_AGE_SECONDS 同款看播：供应商任务停在
 # 非终态超过该窗口即转入 SUBMISSION_UNCERTAIN 并释放队列槽。口播 RUNNING 占住
@@ -501,13 +503,24 @@ def _perform_oral_work(
                 return OralWorkResult("failed", message="口播成片地址缺失")
             content = vendor.download(result_url)
             verified = inspect_media_bytes(content, suffix=".mp4", expected_type="video")
+            if verified.width is None or verified.height is None:
+                return OralWorkResult("failed", message="口播成片尺寸无效")
+            normalized = normalize_generated_video(
+                content,
+                target_width=verified.width,
+                target_height=verified.height,
+                max_bytes=ORAL_ARCHIVE_MAX_BYTES,
+                # Archive validation must not invent a duration limit after
+                # the task has already been accepted and reserved.
+                max_duration_seconds=float("inf"),
+            )
             stored = storage.put_object(
                 f"generation-results/oral/{lease.record_id}/attempt-{lease.attempt_count}-"
                 f"{lease.lease_token}.mp4",
-                content,
+                normalized.content,
                 content_type="video/mp4",
             )
-            return OralWorkResult("ready", stored=stored, duration_sec=verified.duration_seconds)
+            return OralWorkResult("ready", stored=stored, duration_sec=normalized.duration_seconds)
     except MediaValidationFailed:
         logger.warning("oral media validation failed: kind=%s", lease.kind)
         return OralWorkResult("failed", message=_invalid_media_message(lease.kind))

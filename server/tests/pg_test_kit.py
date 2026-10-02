@@ -177,6 +177,11 @@ RECORDED_TEST_DATABASES: frozenset[str] = frozenset(
         # reclaim-grace matrix (test_dedup_cas_pg.py), migrated to alembic head
         # so content_objects and assets.content_object_id exist.
         "dedup_cas_test",
+        # ORAL-VIDEO-COMPAT-20261002: a fresh database for the HTTP material
+        # completion rollback and HEVC compatibility-derivative reuse matrix.
+        # It is recreated from migrations per module so legacy fixture schemas
+        # cannot mask the derivative relation's non-unique compatible asset id.
+        "oral_video_compat_test",
         # PUBLISH-DELIVERY-20260917 phase-2 publish records: dedicated database
         # for the records lifecycle / scheduling / per-account claim / finalize
         # matrix (test_publish_records.py), migrated to alembic head so

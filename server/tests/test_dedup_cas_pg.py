@@ -25,8 +25,13 @@
 
 from __future__ import annotations
 
+import subprocess
+import tempfile
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from pathlib import Path
+from threading import Barrier
 from typing import Any
 
 import psycopg
@@ -51,9 +56,11 @@ from app.db_portable import BusinessConnection
 from app.materials import (
     MaterialUploadIntentRequest,
     ProbedMaterialUpload,
+    cleanup_unpersisted_compatible_upload,
     create_material_upload_intent,
     persist_material_upload,
     prepare_material_upload,
+    probe_material_upload,
 )
 from app.storage import FakeStorageAdapter
 
@@ -687,6 +694,192 @@ def _material_request(payload: bytes, digest: str, filename: str) -> MaterialUpl
         size_bytes=len(payload),
         sha256=digest,
     )
+
+
+def _video_payload() -> tuple[bytes, str]:
+    import hashlib
+
+    from app.media_tools import resolve_media_binary
+
+    with tempfile.TemporaryDirectory(prefix="dedup-video-") as directory:
+        path = Path(directory) / "source.mp4"
+        subprocess.run(
+            [
+                resolve_media_binary("ffmpeg"),
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=s=144x256:r=12",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+        payload = path.read_bytes()
+    return payload, hashlib.sha256(payload).hexdigest()
+
+
+def _video_request(payload: bytes, digest: str) -> MaterialUploadIntentRequest:
+    return MaterialUploadIntentRequest(
+        filename="source.mp4", content_type="video/mp4", size_bytes=len(payload), sha256=digest
+    )
+
+
+def test_video_complete_replay_and_race_keep_one_derived_asset(pg_state: str) -> None:
+    """Two probes can race, but only one derivative row/object may survive."""
+
+    def run(conn: BusinessConnection) -> None:
+        storage = FakeStorageAdapter(provider="fake", bucket="cas")
+        payload, digest = _video_payload()
+        actor = _actor("owner_a")
+        intent = create_material_upload_intent(
+            conn, actor=actor, storage=storage, request=_video_request(payload, digest)
+        )
+        assert intent.upload_required is True
+        assert intent.storage_key is not None
+        storage.put_object(intent.storage_key, payload, content_type="video/mp4")
+        prepared = prepare_material_upload(conn, actor=actor, asset_id=intent.asset_id)
+        first = probe_material_upload(prepared, storage=storage)
+        second = probe_material_upload(prepared, storage=storage)
+        assert first.compatible_asset_id != second.compatible_asset_id
+        assert first.compatible_stored is not None and second.compatible_stored is not None
+
+        persisted = persist_material_upload(conn, actor=actor, probed=first, storage=storage)
+        replay = persist_material_upload(conn, actor=actor, probed=second, storage=storage)
+        assert persisted.asset_id == replay.asset_id == intent.asset_id
+        relation = conn.execute(
+            "SELECT compatible_asset_id FROM video_compat_derivatives WHERE original_asset_id = %s",
+            (intent.asset_id,),
+        ).fetchall()
+        assert len(relation) == 1
+        assert str(relation[0]["compatible_asset_id"]) == first.compatible_asset_id
+        loser_key = second.compatible_stored.uri.removeprefix("fake://cas/")
+        assert storage.head_object(loser_key) is None
+
+    _with_conn(pg_state, run)
+
+
+def test_video_complete_concurrent_requests_keep_one_derived_asset(pg_state: str) -> None:
+    """Two actual database transactions may complete the same upload together."""
+    storage = FakeStorageAdapter(provider="fake", bucket="cas")
+    payload, digest = _video_payload()
+    actor = _actor("owner_a")
+    intent = _with_conn(
+        pg_state,
+        lambda conn: create_material_upload_intent(
+            conn, actor=actor, storage=storage, request=_video_request(payload, digest)
+        ),
+    )
+    assert intent.storage_key is not None
+    storage.put_object(intent.storage_key, payload, content_type="video/mp4")
+    barrier = Barrier(2)
+
+    def complete_once() -> str:
+        prepared = _with_conn(
+            pg_state,
+            lambda conn: prepare_material_upload(conn, actor=actor, asset_id=intent.asset_id),
+        )
+        probed = probe_material_upload(prepared, storage=storage)
+        barrier.wait(timeout=20)
+        return _with_conn(
+            pg_state,
+            lambda conn: (
+                persist_material_upload(conn, actor=actor, probed=probed, storage=storage).asset_id
+            ),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        completed = list(executor.map(lambda _: complete_once(), range(2)))
+
+    assert completed == [intent.asset_id, intent.asset_id]
+    relations = _rows(
+        pg_state,
+        "SELECT compatible_asset_id FROM video_compat_derivatives WHERE original_asset_id = %s",
+        (intent.asset_id,),
+    )
+    assert len(relations) == 1
+    compatible_assets = _rows(
+        pg_state,
+        "SELECT id FROM assets WHERE kind = 'oral_compatible_video'",
+    )
+    assert len(compatible_assets) == 1
+
+
+def test_failed_video_persist_cleans_derivative_and_retry_succeeds(
+    pg_state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed DB commit leaves the source retryable, not a derived orphan."""
+    import app.materials as materials_module
+
+    storage = FakeStorageAdapter(provider="fake", bucket="cas")
+    payload, digest = _video_payload()
+    actor = _actor("owner_a")
+    intent = _with_conn(
+        pg_state,
+        lambda conn: create_material_upload_intent(
+            conn, actor=actor, storage=storage, request=_video_request(payload, digest)
+        ),
+    )
+    assert intent.storage_key is not None
+    storage.put_object(intent.storage_key, payload, content_type="video/mp4")
+    prepared = _with_conn(
+        pg_state,
+        lambda conn: prepare_material_upload(conn, actor=actor, asset_id=intent.asset_id),
+    )
+    failed_probe = probe_material_upload(prepared, storage=storage)
+    assert failed_probe.compatible_stored is not None
+    failed_key = failed_probe.compatible_stored.uri.removeprefix("fake://cas/")
+
+    def fail_audit(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("injected database write failure")
+
+    monkeypatch.setattr(materials_module, "write_audit", fail_audit)
+    with pytest.raises(RuntimeError, match="injected"):
+        _with_conn(
+            pg_state,
+            lambda conn: persist_material_upload(
+                conn, actor=actor, probed=failed_probe, storage=storage
+            ),
+        )
+
+    _with_conn(
+        pg_state,
+        lambda conn: cleanup_unpersisted_compatible_upload(
+            conn, actor=actor, probed=failed_probe, storage=storage
+        ),
+    )
+    assert storage.head_object(failed_key) is None
+    assert (
+        _rows(
+            pg_state,
+            "SELECT * FROM video_compat_derivatives WHERE original_asset_id = %s",
+            (intent.asset_id,),
+        )
+        == []
+    )
+
+    monkeypatch.undo()
+    retry_prepared = _with_conn(
+        pg_state,
+        lambda conn: prepare_material_upload(conn, actor=actor, asset_id=intent.asset_id),
+    )
+    retry_probe = probe_material_upload(retry_prepared, storage=storage)
+    completed = _with_conn(
+        pg_state,
+        lambda conn: persist_material_upload(
+            conn, actor=actor, probed=retry_probe, storage=storage
+        ),
+    )
+    assert completed.asset_id == intent.asset_id
 
 
 def _upload_material_once(

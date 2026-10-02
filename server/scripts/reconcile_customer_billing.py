@@ -72,6 +72,8 @@ PG_ONLY_TABLES: frozenset[str] = frozenset(
         # 20260930T1400_registration_bonus_settings: 注册赠送积分单行配置表，
         # PG-only（非 postgresql 方言 return）；出厂默认行由迁移种子写入。
         "registration_bonus_settings",
+        # 兼容件仅在 PostgreSQL 保存；历史 SQLite 源不含派生视频事实，目标必须为空。
+        "video_compat_derivatives",
         # 20260912T1353_customer_discounts: 客户消耗侧折扣配置，PG-only
         # （非 postgresql 方言 return）。
         "customer_discounts",
@@ -256,7 +258,8 @@ PG_ONLY_COLUMNS: dict[str, frozenset[str]] = {
     "assets": frozenset({"content_object_id"}),
     # 20260919T1000_oral_soft_delete: 口播分身/声音克隆的软删列仅存在于 PG
     # （SQLite 内部泳道在 065 后退役，无历史软删事实）。
-    "oral_avatars": frozenset({"deleted_at", "deleted_by_user_id"}),
+    # 原片关联随兼容件新增，历史 SQLite 口播记录没有可回填的原片关系。
+    "oral_avatars": frozenset({"deleted_at", "deleted_by_user_id", "original_source_asset_id"}),
     "oral_voices": frozenset({"deleted_at", "deleted_by_user_id"}),
     # 20260919T1000_browser_account_probe: 健康探针调度列仅存在于 PG。
     "publish_browser_accounts": frozenset(

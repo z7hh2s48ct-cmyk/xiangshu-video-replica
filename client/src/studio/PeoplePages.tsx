@@ -24,6 +24,7 @@ import {
   refreshOralVoice,
   renameOralAvatar,
   renameOralVoice,
+  repairOralAvatarCompatibility,
   updateOralVoiceSettings,
   updateSimpleCharacterProfile,
 } from "../api";
@@ -117,12 +118,19 @@ async function uploadOralSource(
   group: string,
   onProgress: (progress: number) => void,
   signal?: AbortSignal,
+  onCompatibility?: () => void,
 ): Promise<UploadedOralSource> {
   const intent = await createMaterialUploadIntent(file, {
     title: file.name,
     group,
   });
-  const material = await putMaterial(intent, file, onProgress, signal);
+  const material = await putMaterial(
+    intent,
+    file,
+    onProgress,
+    signal,
+    onCompatibility,
+  );
   const assetId = material.asset_id ?? intent.asset_id;
   return { assetId, fileName: file.name };
 }
@@ -1092,6 +1100,8 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
   const [renamingAvatarId, setRenamingAvatarId] = useState<string>();
   const [renameError, setRenameError] = useState<string>();
   const [uploadProgress, setUploadProgress] = useState<number>();
+  const [uploadStage, setUploadStage] = useState<"upload" | "compatibility">();
+  const [repairingAvatarId, setRepairingAvatarId] = useState<string>();
   const [uploadedVideo, setUploadedVideo] = useState<UploadedOralSource>();
   const inputRef = useRef<HTMLInputElement>(null);
   const uploadAbortRef = useRef<AbortController | undefined>(undefined);
@@ -1145,6 +1155,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
     uploadAbortRef.current = undefined;
     setBusy(false);
     setUploadProgress(undefined);
+    setUploadStage(undefined);
     if (inputRef.current) inputRef.current.value = "";
   };
   const handleVideoUpload = async (file: File) => {
@@ -1163,6 +1174,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
     setConsentedSourceId(undefined);
     cloneSubmissionRef.current = undefined;
     setUploadProgress(0);
+    setUploadStage("upload");
     try {
       const uploaded = await uploadOralSource(
         file,
@@ -1171,6 +1183,9 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
           if (isCurrent(operation)) setUploadProgress(progress);
         },
         controller.signal,
+        () => {
+          if (isCurrent(operation)) setUploadStage("compatibility");
+        },
       );
       if (isCurrent(operation)) setUploadedVideo(uploaded);
     } catch (cause) {
@@ -1180,6 +1195,7 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
       if (isCurrent(operation)) {
         setBusy(false);
         setUploadProgress(undefined);
+        setUploadStage(undefined);
         uploadAbortRef.current = undefined;
         if (inputRef.current) inputRef.current.value = "";
       }
@@ -1251,6 +1267,29 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
         setError(customerVisibleErrorMessage(cause, "口播分身状态刷新失败"));
     } finally {
       if (isCurrent(operation)) setBusy(false);
+    }
+  };
+  const repairPreview = async (avatarId: string) => {
+    if (review || readOnly || busy || repairingAvatarId) return;
+    const operation = ++operationRef.current;
+    setBusy(true);
+    setRepairingAvatarId(avatarId);
+    setError(undefined);
+    try {
+      await repairOralAvatarCompatibility(avatarId);
+      if (!isCurrent(operation)) return;
+      refresh();
+      notify("视频预览已修复");
+    } catch (cause) {
+      if (!isCurrent(operation)) return;
+      const message = customerVisibleErrorMessage(cause, "修复视频预览失败");
+      setError(message);
+      notify(message);
+    } finally {
+      if (isCurrent(operation)) {
+        setBusy(false);
+        setRepairingAvatarId(undefined);
+      }
     }
   };
   const openCreate = () => {
@@ -1394,14 +1433,26 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
               </div>
               <div className="oral-library-card-body">
                 {avatarName(avatar)}
-                <div>
+                <div className="oral-library-card-actions">
                   <span className="oral-ready">
                     <Icon name="check" size={14} />
                     可用于口播
                   </span>
                   <Button
+                    disabled={
+                      review || readOnly || busy || Boolean(repairingAvatarId)
+                    }
+                    variant="quiet"
+                    onClick={() => void repairPreview(avatar.id)}
+                  >
+                    {repairingAvatarId === avatar.id
+                      ? "正在修复预览…"
+                      : "修复预览"}
+                  </Button>
+                  <Button
                     disabled={readOnly}
                     variant="primary"
+                    className="oral-library-card-actions__use"
                     onClick={() => {
                       patchDraft({ ipId: person.id, avatarId: avatar.id });
                       navigate("oral", {
@@ -1412,10 +1463,17 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
                   >
                     使用此分身
                   </Button>
-                  <DeleteIconButton
+                  <button
+                    type="button"
+                    className="oral-library-card-actions__delete"
                     disabled={readOnly || busy}
+                    aria-label="删除"
+                    title={`删除分身 ${avatar.name}`}
                     onClick={() => setPendingDelete(avatar)}
-                  />
+                  >
+                    <Icon name="trash" size={15} />
+                    删除
+                  </button>
                 </div>
               </div>
             </article>
@@ -1595,6 +1653,9 @@ function AvatarPanel({ person }: { person: StudioPerson }) {
             {uploadProgress !== undefined ? (
               <div className="oral-upload-progress" role="status">
                 <span>上传中 {uploadProgress}%</span>
+                {uploadStage === "compatibility" ? (
+                  <span>正在处理视频兼容版本…</span>
+                ) : null}
                 <progress value={uploadProgress} max={100} />
                 <Button variant="quiet" onClick={cancelUpload}>
                   取消上传

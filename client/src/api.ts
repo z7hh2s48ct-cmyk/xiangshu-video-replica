@@ -1248,6 +1248,16 @@ export async function refreshOralAvatar(
   );
 }
 
+export async function repairOralAvatarCompatibility(
+  avatarId: string,
+): Promise<OralAvatarRecord> {
+  return requestApiJson<OralAvatarRecord>(
+    `/api/oral/avatars/${encodeURIComponent(avatarId)}/compatibility`,
+    "修复视频预览失败",
+    { method: "POST" },
+  );
+}
+
 export async function refreshOralVoice(
   voiceId: string,
 ): Promise<OralVoiceRecord> {
@@ -2848,6 +2858,7 @@ export async function putMaterial(
   file: File,
   onProgress: (progressPercent: number) => void,
   signal?: AbortSignal,
+  onBeforeComplete?: () => void,
 ): Promise<MaterialItem> {
   signal?.throwIfAborted();
   if (intent.upload_required === false) {
@@ -2861,6 +2872,7 @@ export async function putMaterial(
     return item;
   }
   await uploadMaterial(intent, file, onProgress, signal);
+  onBeforeComplete?.();
   return completeMaterialUpload(intent.asset_id, signal);
 }
 
