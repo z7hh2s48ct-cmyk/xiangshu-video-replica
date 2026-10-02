@@ -1,5 +1,5 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { useState } from "react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { Profiler, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -158,6 +158,40 @@ describe("DataTable", () => {
 });
 
 describe("ConfirmDialog", () => {
+  it("打开即输入的原因不会被延后的初始化清空", async () => {
+    const onConfirm = vi.fn();
+    let entered = false;
+    await act(async () => {
+      render(
+        <Profiler
+          id="early-reason"
+          onRender={() => {
+            if (entered) return;
+            entered = true;
+            // 在提交周期尾部模拟已展示表单立即收到输入，钉住被动 effect 延迟时的丢字。
+            const input = screen.getByLabelText("操作原因") as HTMLInputElement;
+            const setValue = Object.getOwnPropertyDescriptor(
+              HTMLInputElement.prototype,
+              "value",
+            )?.set;
+            setValue?.call(input, "知晓预估后手动补货");
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+          }}
+        >
+          <ConfirmDialog
+            open
+            title="立即采集"
+            onConfirm={onConfirm}
+            onClose={vi.fn()}
+          />
+        </Profiler>,
+      );
+    });
+    expect(screen.getByLabelText("操作原因")).toHaveValue("知晓预估后手动补货");
+    fireEvent.click(screen.getByRole("button", { name: "确认执行" }));
+    expect(onConfirm).toHaveBeenCalledWith("知晓预估后手动补货");
+  });
+
   function Harness({
     level,
     onConfirm,
