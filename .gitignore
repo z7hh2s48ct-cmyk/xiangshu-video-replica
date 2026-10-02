@@ -92,3 +92,4 @@ outputs/
 archive/
 .qoder/
 .zcode/
+.test-postgres-data/

@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20261002T0800_alert_delivery_rules"
+      "20261002T1015_merge_oral_compatibility_alerts"
     ],
     "parents": {
       "001_core": null,
@@ -168,9 +168,14 @@
       "20261002T0430_payment_methods": "20261002T0340_video_collection_outcomes",
       "20261002T0600_call_diagnostics": "20261002T0430_payment_methods",
       "20261002T0630_task_diagnostic_refs": "20261002T0600_call_diagnostics",
-      "20261002T0800_alert_delivery_rules": "20261002T0630_task_diagnostic_refs"
+      "20261002T0800_alert_delivery_rules": "20261002T0630_task_diagnostic_refs",
+      "20261002T1000_oral_video_compatibility": "20260930T1400_registration_bonus_settings",
+      "20261002T1015_merge_oral_compatibility_alerts": [
+        "20261002T0800_alert_delivery_rules",
+        "20261002T1000_oral_video_compatibility"
+      ]
     },
-    "revision_count": 152
+    "revision_count": 154
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -792,6 +797,14 @@
     "20261002T0800_alert_delivery_rules": {
       "file": "versions/20261002T0800_alert_delivery_rules.py",
       "sha256": "177cbe04b99b48778d0e98bbc34a9b37d01565dbd5fa6ce0a94f55647c6bc4c8"
+    },
+    "20261002T1000_oral_video_compatibility": {
+      "file": "versions/20261002T1000_oral_video_compatibility.py",
+      "sha256": "953f0215cd31d3d8bfc8f984d7a7f9f7e1c6a046fe866e45191ad650013942a2"
+    },
+    "20261002T1015_merge_oral_compatibility_alerts": {
+      "file": "versions/20261002T1015_merge_oral_compatibility_alerts.py",
+      "sha256": "5d412f7978ff156ec3616794cf9314a8e1d52ccdafbd76b640749ab42645dfcc"
     }
   },
   "task": "MIGRATION-GUARD-20260912"

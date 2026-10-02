@@ -31,10 +31,16 @@ from app.db_portable import BusinessConnection
 from app.hifly import HiflyClient, HiflyError, HiflySubmissionUncertain, validate_oral_subtitle
 from app.internal_billing import finalize_oral_billing, reserve_oral_billing
 from app.media_routes import get_media_storage, storage_for_asset
-from app.media_tools import inspect_media_bytes
+from app.media_tools import inspect_media_bytes, normalize_generated_video
 from app.permissions import require_asset_access, require_not_auditor, write_audit
 from app.sql_pagination import PAGE_CLAUSE, page_bounds
-from app.storage import StorageAdapter
+from app.storage import (
+    StorageAdapter,
+    StorageBackendUnavailable,
+    read_uploaded_object,
+    require_storage_match,
+    storage_object_ref_from_uri,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +74,24 @@ TaskStatus = str  # QUEUED/RUNNING/SUCCEEDED/FAILED/CANCELLED
 
 class OralDomainError(Exception):
     """Customer-safe oral-domain failure (message is UI-renderable)."""
+
+
+class OralCompatibilityRepairError(OralDomainError):
+    """A repair failed after the route needs a fresh transaction to record it."""
+
+    def __init__(self, original_asset_id: str, compatible_object_key: str | None = None) -> None:
+        super().__init__("视频兼容处理失败，请重试。")
+        self.original_asset_id = original_asset_id
+        self.compatible_object_key = compatible_object_key
+
+
+@dataclass(frozen=True)
+class AvatarCompatibilityRepairResult:
+    """Durable repair result plus the object whose commit outcome may be unknown."""
+
+    avatar: dict[str, Any]
+    original_asset_id: str
+    compatible_object_key: str | None
 
 
 class OralConflictError(OralDomainError):
@@ -381,6 +405,64 @@ class CloneStartResult:
     replayed: bool
 
 
+def _ready_video_compatible_asset(
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    original_asset_id: str,
+    storage: StorageAdapter | None,
+) -> str | None:
+    """返回可用派生件，并将失效 READY 关系标为可重试。"""
+    relation = conn.execute(
+        """
+        SELECT compatible_asset_id
+        FROM video_compat_derivatives
+        WHERE original_asset_id = %s AND status = 'READY'
+        """,
+        (original_asset_id,),
+    ).fetchone()
+    if relation is None or relation["compatible_asset_id"] is None:
+        return None
+    compatible_id = str(relation["compatible_asset_id"])
+    compatible = conn.execute(
+        """
+        SELECT id, kind, storage_uri, size_bytes, content_type
+        FROM assets
+        WHERE id = %s AND created_by_user_id = %s
+        """,
+        (compatible_id, actor.id),
+    ).fetchone()
+    available = (
+        compatible is not None
+        and str(compatible["kind"]) == "oral_compatible_video"
+        and str(compatible["content_type"] or "").startswith("video/")
+        and int(compatible["size_bytes"] or 0) > 0
+    )
+    if available:
+        try:
+            reference = storage_object_ref_from_uri(str(compatible["storage_uri"]))
+            compatible_storage = storage or storage_for_asset(conn, str(compatible["storage_uri"]))
+            require_storage_match(compatible_storage, reference)
+            stored = compatible_storage.head_object(reference.key)
+        except StorageBackendUnavailable as exc:
+            raise OralDomainError("��Ƶ���ݴ洢���ݲ����ã����Ժ����ԡ�") from exc
+        except ValueError:
+            available = False
+        else:
+            available = stored is not None and stored.size == int(compatible["size_bytes"])
+    if available:
+        return compatible_id
+    conn.execute(
+        """
+        UPDATE video_compat_derivatives
+        SET compatible_asset_id = NULL, status = 'FAILED', error_message = %s
+        WHERE original_asset_id = %s AND status = 'READY' AND compatible_asset_id = %s
+        """,
+        ("��Ƶ���ݰ汾���Ѿ�ʧЧ����������", original_asset_id, compatible_id),
+    )
+    return None
+
+
 def start_avatar_clone(
     conn: BusinessConnection,
     *,
@@ -392,6 +474,7 @@ def start_avatar_clone(
     consent_id: str,
     idempotency_key: str,
     vendor: HiflyClient | None = None,
+    storage: StorageAdapter | None = None,
 ) -> CloneStartResult:
     require_not_auditor(
         conn,
@@ -419,6 +502,22 @@ def start_avatar_clone(
         source_sha256=str(asset["sha256"]),
         purpose="AVATAR_CLONE",
     )
+    compatible_source_asset_id = source_asset_id
+    if source_kind == "VIDEO":
+        ready_compatible_asset_id = _ready_video_compatible_asset(
+            conn,
+            actor=actor,
+            original_asset_id=source_asset_id,
+            storage=storage,
+        )
+        compatible_source_asset_id = ready_compatible_asset_id or source_asset_id
+        if ready_compatible_asset_id is None:
+            try:
+                source_metadata = json.loads(str(asset.get("metadata_json") or "{}"))
+            except (TypeError, ValueError):
+                source_metadata = {}
+            if isinstance(source_metadata, dict) and source_metadata.get("compatibility_status"):
+                raise OralDomainError("视频兼容版本尚未就绪，请稍后重试；尚未提交数字人任务。")
     clean_title = title.strip() or "口播分身"
     request_hash = _request_hash(
         {
@@ -452,9 +551,9 @@ def start_avatar_clone(
         """
         INSERT INTO oral_avatars (
             id, identity_id, owner_user_id, title, status, source_kind,
-            source_asset_id, consent_id, idempotency_key, request_hash,
+            source_asset_id, original_source_asset_id, consent_id, idempotency_key, request_hash,
             submission_state
-        ) VALUES (%s, %s, %s, %s, 'PENDING', %s, %s, %s, %s, %s, 'LOCAL_PENDING')
+        ) VALUES (%s, %s, %s, %s, 'PENDING', %s, %s, %s, %s, %s, %s, 'LOCAL_PENDING')
         """,
         (
             avatar_id,
@@ -462,6 +561,7 @@ def start_avatar_clone(
             actor.id,
             clean_title,
             source_kind,
+            compatible_source_asset_id,
             source_asset_id,
             consent_id,
             idempotency_key,
@@ -684,7 +784,8 @@ def create_oral_task(
 
     avatar = conn.execute(
         """
-        SELECT id, status, identity_id, source_kind, source_asset_id, consent_id
+        SELECT id, status, identity_id, source_kind, source_asset_id,
+               original_source_asset_id, consent_id
         FROM oral_avatars WHERE id = %s AND owner_user_id = %s
         """,
         (avatar_id, actor.id),
@@ -693,7 +794,7 @@ def create_oral_task(
         raise OralDomainError("请选择已就绪的口播分身")
     if avatar["identity_id"] != identity_id:
         raise OralDomainError("口播分身与人物不匹配")
-    avatar_asset = _require_biometric_source_asset(
+    _require_biometric_source_asset(
         conn,
         actor=actor,
         asset_id=str(avatar["source_asset_id"]),
@@ -702,13 +803,21 @@ def create_oral_task(
     )
     if not avatar["consent_id"]:
         raise OralDomainError("口播分身缺少有效授权，请重新制作")
+    consent_asset_id = str(avatar["original_source_asset_id"] or avatar["source_asset_id"])
+    consent_asset = _require_biometric_source_asset(
+        conn,
+        actor=actor,
+        asset_id=consent_asset_id,
+        media_type=str(avatar["source_kind"]).lower(),
+        label="原始分身素材",
+    )
     _require_valid_consent(
         conn,
         actor=actor,
         consent_id=str(avatar["consent_id"]),
         identity_id=identity_id,
-        source_asset_id=str(avatar["source_asset_id"]),
-        source_sha256=str(avatar_asset["sha256"]),
+        source_asset_id=consent_asset_id,
+        source_sha256=str(consent_asset["sha256"]),
         purpose="AVATAR_CLONE",
     )
 
@@ -1429,6 +1538,329 @@ def _clean_clone_title(title: str) -> str:
     if len(clean) > MAX_CLONE_TITLE_CHARS:
         raise OralDomainError(f"名称不能超过 {MAX_CLONE_TITLE_CHARS} 个字")
     return clean
+
+
+def _repair_avatar_video_compatibility_prototype(
+    conn: BusinessConnection, *, actor: CurrentUser, avatar_id: str, storage: StorageAdapter
+) -> dict[str, Any]:
+    """Create/reuse a local preview derivative without touching vendor or billing."""
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="oral.avatar.compatibility",
+        entity_type="oral_avatar",
+        entity_id=avatar_id,
+    )
+    avatar = conn.execute(
+        "SELECT * FROM oral_avatars WHERE id = %s AND owner_user_id = %s FOR UPDATE",
+        (avatar_id, actor.id),
+    ).fetchone()
+    if avatar is None or avatar["deleted_at"] is not None:
+        raise OralResourceNotFoundError("口播分身不存在")
+    if avatar["status"] != "READY" or avatar["source_kind"] != "VIDEO":
+        raise OralDomainError("仅已就绪的视频分身可修复预览")
+    original_id = str(avatar["original_source_asset_id"] or avatar["source_asset_id"])
+    compatible_id = _ready_video_compatible_asset(
+        conn,
+        actor=actor,
+        original_asset_id=original_id,
+        storage=storage,
+    )
+    if compatible_id is not None:
+        conn.execute(
+            "UPDATE oral_avatars SET source_asset_id = %s WHERE id = %s",
+            (compatible_id, avatar_id),
+        )
+        return dict(
+            conn.execute("SELECT * FROM oral_avatars WHERE id = %s", (avatar_id,)).fetchone()
+        )
+    asset = require_asset_access(
+        conn, actor=actor, asset_id=original_id, action="oral.avatar.compatibility"
+    )
+    if not str(asset["content_type"]).startswith("video/"):
+        raise OralDomainError("原始素材不是视频")
+    try:
+        ref = storage_object_ref_from_uri(str(asset["storage_uri"]))
+        require_storage_match(storage, ref)
+        content = read_uploaded_object(
+            storage,
+            ref.key,
+            expected_size=int(asset["size_bytes"]),
+            max_bytes=ORAL_SOURCE_MAX_BYTES["video"],
+        )
+        inspected = inspect_media_bytes(content, suffix=".mp4", expected_type="video")
+        if inspected.width is None or inspected.height is None:
+            raise OralDomainError("原始视频尺寸无效")
+        normalized = normalize_generated_video(
+            content,
+            target_width=inspected.width,
+            target_height=inspected.height,
+            max_duration_seconds=None,
+        )
+        compatible_id = str(uuid4())
+        stored = storage.put_object(
+            f"materials/compatible/{actor.id}/{original_id}/{compatible_id}.mp4",
+            normalized.content,
+            content_type="video/mp4",
+        )
+    except Exception as exc:
+        conn.execute(
+            "INSERT INTO video_compat_derivatives "
+            "(original_asset_id, compatible_asset_id, status, error_message) "
+            "VALUES (%s, NULL, 'FAILED', %s) ON CONFLICT (original_asset_id) "
+            "DO UPDATE SET compatible_asset_id = NULL, status = 'FAILED', "
+            "error_message = EXCLUDED.error_message "
+            "WHERE video_compat_derivatives.status <> 'READY'",
+            (original_id, "视频兼容处理失败，请重试。"),
+        )
+        if isinstance(exc, OralDomainError):
+            raise
+        raise OralDomainError("视频兼容处理失败，请重试。") from exc
+    conn.execute(
+        "INSERT INTO assets (id, project_id, kind, storage_uri, sha256, size_bytes, "
+        "content_type, metadata_json, created_by_user_id) VALUES "
+        "(%s, NULL, 'oral_compatible_video', %s, %s, %s, 'video/mp4', %s, %s)",
+        (
+            compatible_id,
+            stored.uri,
+            hashlib.sha256(normalized.content).hexdigest(),
+            stored.size,
+            json.dumps({"compatibility_derived_from": original_id}),
+            actor.id,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO video_compat_derivatives "
+        "(original_asset_id, compatible_asset_id, status, error_message) "
+        "VALUES (%s, %s, 'READY', NULL) ON CONFLICT (original_asset_id) "
+        "DO UPDATE SET compatible_asset_id = EXCLUDED.compatible_asset_id, "
+        "status = 'READY', error_message = NULL",
+        (original_id, compatible_id),
+    )
+    conn.execute(
+        "UPDATE oral_avatars SET source_asset_id = %s WHERE id = %s", (compatible_id, avatar_id)
+    )
+    return dict(conn.execute("SELECT * FROM oral_avatars WHERE id = %s", (avatar_id,)).fetchone())
+
+
+def repair_avatar_video_compatibility(
+    conn: BusinessConnection, *, actor: CurrentUser, avatar_id: str, storage: StorageAdapter
+) -> AvatarCompatibilityRepairResult:
+    """Create or reuse a local preview derivative without vendor or billing work."""
+    require_not_auditor(
+        conn,
+        actor=actor,
+        action="oral.avatar.compatibility",
+        entity_type="oral_avatar",
+        entity_id=avatar_id,
+    )
+    avatar = conn.execute(
+        "SELECT * FROM oral_avatars WHERE id = %s AND owner_user_id = %s FOR UPDATE",
+        (avatar_id, actor.id),
+    ).fetchone()
+    if avatar is None or avatar["deleted_at"] is not None:
+        raise OralResourceNotFoundError("内部克隆不存在")
+    if avatar["status"] != "READY" or avatar["source_kind"] != "VIDEO":
+        raise OralDomainError("当前分身无需修复视频预览")
+
+    original_id = str(avatar["original_source_asset_id"] or avatar["source_asset_id"])
+    asset = require_asset_access(
+        conn, actor=actor, asset_id=original_id, action="oral.avatar.compatibility"
+    )
+    if not str(asset["content_type"]).startswith("video/"):
+        raise OralDomainError("原始素材不是视频")
+
+    # Avatar rows are distinct for old clones.  Locking their common original
+    # serializes repairs and material-side conversion, leaving one derivative.
+    conn.execute("SELECT id FROM assets WHERE id = %s FOR UPDATE", (original_id,)).fetchone()
+    compatible_id = _ready_video_compatible_asset(
+        conn,
+        actor=actor,
+        original_asset_id=original_id,
+        storage=storage,
+    )
+    if compatible_id is not None:
+        conn.execute(
+            "UPDATE oral_avatars SET source_asset_id = %s, "
+            "original_source_asset_id = COALESCE(original_source_asset_id, %s), "
+            "updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+            (compatible_id, original_id, avatar_id),
+        )
+        row = conn.execute("SELECT * FROM oral_avatars WHERE id = %s", (avatar_id,)).fetchone()
+        assert row is not None
+        return AvatarCompatibilityRepairResult(
+            avatar=dict(row),
+            original_asset_id=original_id,
+            compatible_object_key=None,
+        )
+
+    stored_key: str | None = None
+    try:
+        ref = storage_object_ref_from_uri(str(asset["storage_uri"]))
+        require_storage_match(storage, ref)
+        content = read_uploaded_object(
+            storage,
+            ref.key,
+            expected_size=int(asset["size_bytes"]),
+            max_bytes=ORAL_SOURCE_MAX_BYTES["video"],
+        )
+        inspected = inspect_media_bytes(content, suffix=".mp4", expected_type="video")
+        if inspected.width is None or inspected.height is None:
+            raise OralDomainError("原始视频尺寸无效")
+        normalized = normalize_generated_video(
+            content,
+            target_width=inspected.width,
+            target_height=inspected.height,
+            max_duration_seconds=None,
+        )
+        compatible_id = str(uuid4())
+        stored = storage.put_object(
+            f"materials/compatible/{actor.id}/{original_id}/{compatible_id}.mp4",
+            normalized.content,
+            content_type="video/mp4",
+        )
+        stored_key = stored.key
+        conn.execute(
+            "INSERT INTO assets (id, project_id, kind, storage_uri, sha256, size_bytes, "
+            "content_type, metadata_json, created_by_user_id) VALUES "
+            "(%s, NULL, 'oral_compatible_video', %s, %s, %s, 'video/mp4', %s, %s)",
+            (
+                compatible_id,
+                stored.uri,
+                hashlib.sha256(normalized.content).hexdigest(),
+                stored.size,
+                json.dumps({"compatibility_derived_from": original_id}),
+                actor.id,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO video_compat_derivatives "
+            "(original_asset_id, compatible_asset_id, status, error_message) "
+            "VALUES (%s, %s, 'READY', NULL) ON CONFLICT (original_asset_id) "
+            "DO UPDATE SET compatible_asset_id = EXCLUDED.compatible_asset_id, "
+            "status = 'READY', error_message = NULL "
+            "WHERE video_compat_derivatives.status <> 'READY'",
+            (original_id, compatible_id),
+        )
+        conn.execute(
+            "UPDATE oral_avatars SET source_asset_id = %s, "
+            "original_source_asset_id = COALESCE(original_source_asset_id, %s), "
+            "updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+            (compatible_id, original_id, avatar_id),
+        )
+    except Exception as exc:
+        # The enclosing writer may now be aborted.  The route opens one fresh
+        # transaction to check references, delete only an orphan, and record a
+        # retryable failure.  Deleting here could race a commit whose outcome is
+        # no longer observable from this connection.
+        raise OralCompatibilityRepairError(original_id, stored_key) from exc
+
+    row = conn.execute("SELECT * FROM oral_avatars WHERE id = %s", (avatar_id,)).fetchone()
+    assert row is not None
+    return AvatarCompatibilityRepairResult(
+        avatar=dict(row),
+        original_asset_id=original_id,
+        compatible_object_key=stored_key,
+    )
+
+
+def reconcile_avatar_video_compatibility_after_write_error(
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    avatar_id: str,
+    original_asset_id: str,
+    compatible_object_key: str | None,
+    storage: StorageAdapter,
+) -> dict[str, Any] | None:
+    """Resolve an ambiguous repair write in one fresh transaction.
+
+    A database driver can report an error after COMMIT reached PostgreSQL.  In
+    that case the READY relation, compatible asset, and avatar source all
+    survive; return the persisted avatar and never reclaim its object.  Only a
+    definitely non-ready state may record FAILED and attempt reference-gated
+    cleanup.
+    """
+    avatar = conn.execute(
+        "SELECT * FROM oral_avatars WHERE id = %s AND owner_user_id = %s FOR UPDATE",
+        (avatar_id, actor.id),
+    ).fetchone()
+    if avatar is None or avatar["deleted_at"] is not None:
+        return None
+    recorded_original_id = str(avatar["original_source_asset_id"] or avatar["source_asset_id"])
+    if (
+        recorded_original_id != original_asset_id
+        or avatar["source_kind"] != "VIDEO"
+        or avatar["status"] != "READY"
+    ):
+        return None
+
+    relation = conn.execute(
+        "SELECT compatible_asset_id, status FROM video_compat_derivatives "
+        "WHERE original_asset_id = %s FOR UPDATE",
+        (original_asset_id,),
+    ).fetchone()
+    if relation is not None and relation["status"] == "READY" and relation["compatible_asset_id"]:
+        compatible_asset_id = str(relation["compatible_asset_id"])
+        compatible_asset = conn.execute(
+            "SELECT id FROM assets WHERE id = %s FOR UPDATE", (compatible_asset_id,)
+        ).fetchone()
+        if compatible_asset is not None and str(avatar["source_asset_id"]) == compatible_asset_id:
+            return dict(avatar)
+        # A partial pre-existing record is not proof that this request owns the
+        # object.  Leave it untouched instead of turning a success into loss.
+        return None
+
+    if compatible_object_key is not None:
+        try:
+            content_store.delete_object_if_unreferenced(
+                conn, storage, compatible_object_key, actor_id=actor.id
+            )
+        except Exception:
+            # Cleanup is best-effort after the reference check.  The durable
+            # FAILED marker still gives the user a safe retry if storage is
+            # temporarily unavailable.
+            logger.exception("Unable to clean uncommitted oral compatibility object")
+    mark_avatar_video_compatibility_failed(
+        conn,
+        actor=actor,
+        avatar_id=avatar_id,
+        original_asset_id=original_asset_id,
+    )
+    return None
+
+
+def mark_avatar_video_compatibility_failed(
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    avatar_id: str,
+    original_asset_id: str,
+) -> None:
+    """Persist retryable failure only after the failed business write has rolled back."""
+    avatar = conn.execute(
+        "SELECT source_asset_id, original_source_asset_id, source_kind, status, deleted_at "
+        "FROM oral_avatars WHERE id = %s AND owner_user_id = %s FOR UPDATE",
+        (avatar_id, actor.id),
+    ).fetchone()
+    if avatar is None or avatar["deleted_at"] is not None:
+        return
+    recorded_original_id = str(avatar["original_source_asset_id"] or avatar["source_asset_id"])
+    if (
+        recorded_original_id != original_asset_id
+        or avatar["source_kind"] != "VIDEO"
+        or avatar["status"] != "READY"
+    ):
+        return
+    conn.execute(
+        "INSERT INTO video_compat_derivatives "
+        "(original_asset_id, compatible_asset_id, status, error_message) "
+        "VALUES (%s, NULL, 'FAILED', %s) ON CONFLICT (original_asset_id) "
+        "DO UPDATE SET compatible_asset_id = NULL, status = 'FAILED', "
+        "error_message = EXCLUDED.error_message "
+        "WHERE video_compat_derivatives.status <> 'READY'",
+        (original_asset_id, "视频兼容处理失败，请重试。"),
+    )
 
 
 def list_avatars(

@@ -97,7 +97,7 @@ REPO_ROOT = SERVER_DIR.parent
 # 月度预算）与 20260930T1100_alert_notify_dedup（方案 P2 告警邮件推送防打扰）
 # 继续追加其上；20260930T1400_registration_bonus_settings（注册赠送积分单行
 # 配置表）追加在其后，故链尾为该值。
-HEAD_REVISION = "20261002T0800_alert_delivery_rules"
+HEAD_REVISION = "20261002T1015_merge_oral_compatibility_alerts"
 
 
 @pytest.mark.pg
@@ -391,21 +391,21 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # （净 0），另新增一条 `ck_admin_adjustments_order_required`（反向调账以外必须有充值单）
 # ——故 check_constraints +1，其余计数与表名全集不变。注意 `HEAD_SCHEMA_DIGEST`
 # 仍然会变：它把 `pg_get_constraintdef` 的文本一起哈希，约束体一改就换值。
-# Unpublished admin target: recaptured in a clean PG database after appended migrations.
-# Published chain hashes and supported starting heads remain frozen.
+# 联合 head 在全新隔离 PG16 中重测：兼容派生表、原始素材外键与主线诊断告警 DDL 同时存在。
+# 已发布链哈希与支持的发行起点保持冻结，不因这次 merge revision 改写。
 HEAD_SCHEMA_COUNTS = {
-    "tables": 122,
-    "columns": 1386,
+    "tables": 123,
+    "columns": 1392,
     "identity_columns": 0,
     "sequences": 8,
     "jsonb_columns": 11,
-    "timestamptz_columns": 93,
+    "timestamptz_columns": 94,
     "triggers": 55,
     "partial_indexes": 41,
     "unique_constraints": 40,
-    "check_constraints": 360,
-    "foreign_keys": 202,
-    "primary_keys": 122,
+    "check_constraints": 361,
+    "foreign_keys": 205,
+    "primary_keys": 123,
 }
 
 # head 的表名全集。counts 只能证明「数量没漂」，证明不了「同一批表」：
@@ -525,6 +525,7 @@ HEAD_TABLE_NAMES = (
     "user_queue_cursors",
     "users",
     "versions",
+    "video_compat_derivatives",
     "viral_collection_batches",
     "viral_collection_charges",
     "viral_collection_members",
@@ -648,9 +649,9 @@ HEAD_TABLE_NAMES = (
 #  两侧原来的 digest 都不能用——本分支那条是接在 viral 之后的旧链、main 那条只到
 #  MATERIAL-UX，合并后 head 变成接在 MATERIAL-UX 之后的本分支迁移，约束文本随之变化，
 #  digest 必然要重算。由 scripts/ci/migration_manifest.py --print-schema 在 PG 上重算后粘贴。
-# Batch17: fresh isolated PG16 at 0340; one outcome column + JSON-object CHECK.
-# Measured with migration_manifest.py --print-schema; original published heads stay frozen.
-HEAD_SCHEMA_DIGEST = "8fe3222a638ea6e4fe79e103220c1aee330070c8dec25d7a0e41001b4ac1f95f"
+# 由 migration_manifest.py --print-schema 在联合 head 的全新 PG16 中测得；
+# 旧已发布链仍保持字节冻结。
+HEAD_SCHEMA_DIGEST = "68d468b915a74359ea8ad164cdbdff2e27d41c602e1e7ff2acac77798a7d32a4"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (
@@ -872,10 +873,10 @@ def _is_ancestor(script: ScriptDirectory, candidate: str, target: str) -> bool:
 
 
 def test_migration_chain_has_single_head_with_registered_merge() -> None:
-    """Only the registered post-release merge may join the two installed branches.
+    """只有登记过的 merge revision 才能汇合已安装分支。
 
-    The published base..055 chain remains strictly linear and byte-frozen in the
-    following test. Additional or changed merge parents must still fail closed.
+    已发布的 base..055 链仍在后续测试中保持线性和字节冻结；额外 merge 或修改
+    既有父节点必须失败关闭。
     """
     script = _script_directory()
     heads = script.get_heads()
@@ -888,6 +889,13 @@ def test_migration_chain_has_single_head_with_registered_merge() -> None:
         if isinstance(rev.down_revision, tuple)
     ]
     assert branch_points == [
+        (
+            "20261002T1015_merge_oral_compatibility_alerts",
+            (
+                "20261002T0800_alert_delivery_rules",
+                "20261002T1000_oral_video_compatibility",
+            ),
+        ),
         (
             "20260921T0000_merge_wallet_actor_and_billing_metadata",
             (
@@ -1442,6 +1450,39 @@ def test_supported_head_matrix_upgrade_preserves_facts_and_schema(
             _singleton_write_viral_controls(conn, actor)
         assert conn.execute("SELECT count(*) FROM runtime_settings").fetchone()[0] == 1
         assert conn.execute("SELECT count(*) FROM viral_runtime_controls").fetchone()[0] == 1
+
+
+@pytest.mark.pg
+@pytest.mark.parametrize(
+    "starting_head",
+    (
+        "20261002T0800_alert_delivery_rules",
+        "20261002T1000_oral_video_compatibility",
+    ),
+)
+def test_parallel_branch_heads_upgrade_to_the_merged_head(
+    starting_head: str, matrix_database: str
+) -> None:
+    """两个已存在分支头都必须能收敛到同一个升级终点。"""
+    dsn = matrix_database
+    _upgrade(dsn, starting_head)
+    _upgrade(dsn, HEAD_REVISION)
+
+    with psycopg.connect(dsn) as conn:
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [
+            (HEAD_REVISION,)
+        ]
+        # 两条分支的 DDL 都要保留；merge revision 只负责图收敛，不能吞掉任一侧。
+        assert conn.execute("SELECT to_regclass('video_compat_derivatives')").fetchone()[0]
+        assert conn.execute("SELECT to_regclass('alert_deliveries')").fetchone()[0]
+        assert conn.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name='oral_avatars' AND column_name='original_source_asset_id'"
+        ).fetchone()
+        assert conn.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name='alert_settings' AND column_name='notification_policies_json'"
+        ).fetchone()
 
 
 def test_audit_lineage_downgrade_refusal_is_preserved(matrix_database: str) -> None:

@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.auth import CurrentUser
 from app.character_identity import jpeg_dimensions
 from app.content_store import (
+    delete_object_if_unreferenced,
     delete_object_outside_content_namespace,
     find_content_object,
     retain_content_object,
@@ -40,10 +41,12 @@ from app.media import (
     storage_key_from_uri,
 )
 from app.media_tools import (
+    GENERATED_VIDEO_MAX_SECONDS,
     MediaToolFailed,
     MediaToolUnavailable,
     MediaValidationFailed,
     inspect_media_bytes,
+    normalize_generated_video,
     probe_duration_seconds,
     resolve_media_binary,
 )
@@ -52,6 +55,7 @@ from app.sql_pagination import PAGE_CLAUSE
 from app.storage import (
     StorageAdapter,
     StorageBackendUnavailable,
+    StoredObject,
     UploadedObjectSizeMismatch,
     read_uploaded_object,
     require_storage_match,
@@ -299,6 +303,7 @@ class PreparedMaterialUpload:
     expected_sha256: str | None
     audio_purpose: AudioPurpose | None = None
     requested_duration_seconds: float | None = None
+    already_ready: bool = False
 
 
 @dataclass(frozen=True)
@@ -315,6 +320,10 @@ class ProbedMaterialUpload:
     # 取不到为 None，不影响上传结果。
     width: int | None = None
     height: int | None = None
+    compatible_asset_id: str | None = None
+    compatible_stored: StoredObject | None = None
+    compatible_sha256: str | None = None
+    compatible_size_bytes: int | None = None
 
 
 def material_error(status: int, code: str, message: str) -> HTTPException:
@@ -1204,6 +1213,100 @@ def require_material(
     return resolved.items[0]
 
 
+def _ready_compatible_derivative(
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    storage: StorageAdapter,
+    original_asset_id: str,
+) -> dict[str, Any] | None:
+    """仅在派生资产归属和对象均有效时复用 READY 关系。"""
+    row = conn.execute(
+        """
+        SELECT compatible_asset_id
+        FROM video_compat_derivatives
+        WHERE original_asset_id = %s AND status = 'READY'
+        """,
+        (original_asset_id,),
+    ).fetchone()
+    if row is None or row["compatible_asset_id"] is None:
+        return None
+    compatible = conn.execute(
+        """
+        SELECT id, kind, storage_uri, sha256, size_bytes, content_type
+        FROM assets
+        WHERE id = %s AND created_by_user_id = %s
+        """,
+        (str(row["compatible_asset_id"]), actor.id),
+    ).fetchone()
+    if (
+        compatible is None
+        or str(compatible["kind"]) != "oral_compatible_video"
+        or not str(compatible["content_type"] or "").startswith("video/")
+        or int(compatible["size_bytes"] or 0) <= 0
+    ):
+        return None
+    try:
+        reference = storage_object_ref_from_uri(str(compatible["storage_uri"]))
+        require_storage_match(storage, reference)
+        stored = storage.head_object(reference.key)
+    except (StorageBackendUnavailable, ValueError):
+        return None
+    if stored is None or stored.size != int(compatible["size_bytes"]):
+        return None
+    return dict(compatible)
+
+
+def _rebuild_registered_video_derivative(
+    *,
+    actor: CurrentUser,
+    storage: StorageAdapter,
+    original_asset_id: str,
+    object_key: str,
+    size_bytes: int,
+) -> dict[str, Any] | None:
+    """从仍被登记的原片本地重建一个缺失的派生件。"""
+    try:
+        content = read_uploaded_object(
+            storage,
+            object_key,
+            expected_size=size_bytes,
+            max_bytes=MAX_UPLOAD_BYTES,
+        )
+        inspection = inspect_media_bytes(
+            content, suffix=".mp4", expected_type="video", min_duration_seconds=0.001
+        )
+        if inspection.width is None or inspection.height is None:
+            return None
+        normalized = normalize_generated_video(
+            content,
+            target_width=inspection.width,
+            target_height=inspection.height,
+            max_duration_seconds=GENERATED_VIDEO_MAX_SECONDS,
+        )
+        compatible_asset_id = str(uuid4())
+        stored = storage.put_object(
+            f"materials/compatible/{actor.id}/{original_asset_id}/{compatible_asset_id}.mp4",
+            normalized.content,
+            content_type="video/mp4",
+        )
+    except (
+        MediaToolFailed,
+        MediaToolUnavailable,
+        MediaValidationFailed,
+        StorageBackendUnavailable,
+        UploadedObjectSizeMismatch,
+        OSError,
+    ):
+        return None
+    return {
+        "id": compatible_asset_id,
+        "storage_uri": stored.uri,
+        "sha256": hashlib.sha256(normalized.content).hexdigest(),
+        "size_bytes": stored.size,
+    }
+
+
 def _reuse_registered_material(
     conn: BusinessConnection,
     *,
@@ -1239,12 +1342,37 @@ def _reuse_registered_material(
     if storage.head_object(existing.object_key) is None:
         return None
     source = conn.execute(
-        "SELECT id, metadata_json FROM assets WHERE content_object_id = %s "
+        "SELECT id, metadata_json FROM assets "
+        "WHERE content_object_id = %s AND created_by_user_id = %s "
         "ORDER BY CASE WHEN metadata_json::jsonb ->> 'audio_duration_verified' = 'true' "
         "THEN 0 ELSE 1 END, created_at LIMIT 1",
-        (existing.id,),
+        (existing.id, actor.id),
     ).fetchone()
     source_metadata = _metadata(source["metadata_json"]) if source is not None else {}
+    reused_compatible: dict[str, Any] | None = None
+    rebuilt_compatible: dict[str, Any] | None = None
+    if media_type == "video":
+        if source is None:
+            return None
+        reused_compatible = _ready_compatible_derivative(
+            conn,
+            actor=actor,
+            storage=storage,
+            original_asset_id=str(source["id"]),
+        )
+        if reused_compatible is None:
+            # 关系可能在对象过期或被手动删除后残留；从保留原片本地重建，
+            # 不重新传输原片，也不触发供应商或计费操作。
+            rebuilt_compatible = _rebuild_registered_video_derivative(
+                actor=actor,
+                storage=storage,
+                original_asset_id=str(source["id"]),
+                object_key=existing.object_key,
+                size_bytes=existing.size_bytes,
+            )
+            if rebuilt_compatible is None:
+                return None
+            reused_compatible = rebuilt_compatible
     if media_type == "audio":
         duration = source_metadata.get("duration_seconds")
         if (
@@ -1290,8 +1418,44 @@ def _reuse_registered_material(
         # Carry the probing work over from the upload that stored these bytes;
         # re-probing would cost a download and a media-tool invocation.
         metadata["duration_seconds"] = source_metadata["duration_seconds"]
+    if reused_compatible is not None:
+        metadata["compatible_asset_id"] = str(reused_compatible["id"])
+        metadata["compatibility_status"] = "READY"
     reused_from = None if source is None else str(source["id"])
     with conn:
+        if rebuilt_compatible is not None:
+            conn.execute(
+                """
+                INSERT INTO assets (
+                    id, project_id, kind, storage_uri, sha256, size_bytes,
+                    content_type, metadata_json, created_by_user_id
+                ) VALUES (%s, NULL, 'oral_compatible_video', %s, %s, %s,
+                          'video/mp4', %s, %s)
+                """,
+                (
+                    rebuilt_compatible["id"],
+                    rebuilt_compatible["storage_uri"],
+                    rebuilt_compatible["sha256"],
+                    rebuilt_compatible["size_bytes"],
+                    json.dumps(
+                        {"compatibility_derived_from": str(source["id"])},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    actor.id,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO video_compat_derivatives (
+                    original_asset_id, compatible_asset_id, status, error_message
+                ) VALUES (%s, %s, 'READY', NULL)
+                ON CONFLICT (original_asset_id) DO UPDATE
+                SET compatible_asset_id = EXCLUDED.compatible_asset_id,
+                    status = 'READY', error_message = NULL
+                """,
+                (str(source["id"]), rebuilt_compatible["id"]),
+            )
         conn.execute(
             """
             INSERT INTO assets (
@@ -1311,6 +1475,15 @@ def _reuse_registered_material(
                 content.id,
             ),
         )
+        if reused_compatible is not None:
+            conn.execute(
+                """
+                INSERT INTO video_compat_derivatives (
+                    original_asset_id, compatible_asset_id, status
+                ) VALUES (%s, %s, 'READY')
+                """,
+                (asset_id, str(reused_compatible["id"])),
+            )
         if request.title or request.group:
             _upsert_preference(
                 conn,
@@ -1518,6 +1691,7 @@ def prepare_material_upload(
             if isinstance(metadata.get("duration_seconds"), (int, float))
             else None
         ),
+        already_ready=metadata.get("upload_status") == "READY",
     )
 
 
@@ -1533,6 +1707,17 @@ def probe_material_upload(
         raise material_error(409, "MATERIAL_OBJECT_MISSING", "上传文件尚未到达存储。")
     if stored.size != prepared.requested_size_bytes:
         raise material_error(409, "MATERIAL_SIZE_MISMATCH", "上传文件大小不一致。")
+    if prepared.already_ready:
+        # A client can replay /complete after it lost the first response.  Once
+        # READY is committed, repeat requests must not make another derivative.
+        if not prepared.expected_sha256:
+            raise material_error(409, "MATERIAL_UPLOAD_INVALID", "上传记录不完整。")
+        return ProbedMaterialUpload(
+            prepared=prepared,
+            storage_uri=prepared.storage_uri,
+            sha256=prepared.expected_sha256,
+            size_bytes=stored.size,
+        )
     try:
         content = read_uploaded_object(
             storage,
@@ -1573,6 +1758,27 @@ def probe_material_upload(
                 503, "MATERIAL_VIDEO_PROBE_UNAVAILABLE", "视频校验服务暂不可用，请稍后重试。"
             ) from exc
         thumbnail_jpeg = extract_thumbnail_jpeg(content)
+        if inspection.width is None or inspection.height is None:
+            raise material_error(422, "MATERIAL_VIDEO_INVALID", "视频尺寸无效，无法生成兼容版本。")
+        try:
+            normalized = normalize_generated_video(
+                content, target_width=inspection.width, target_height=inspection.height
+            )
+        except MediaValidationFailed as exc:
+            raise material_error(
+                422,
+                "MATERIAL_VIDEO_COMPATIBILITY_FAILED",
+                "视频无法转换为兼容格式，请重新导出后上传。",
+            ) from exc
+        except (MediaToolFailed, MediaToolUnavailable) as exc:
+            raise material_error(
+                503,
+                "MATERIAL_VIDEO_COMPATIBILITY_UNAVAILABLE",
+                "视频兼容处理暂不可用，请稍后重试；尚未提交数字人任务。",
+            ) from exc
+        compatible_content = normalized.content
+    else:
+        compatible_content = None
     if prepared.media_type == "image":
         # MATERIAL-UX-08：图片宽高头解析，失败只损失方向信息，不影响上传。
         probed_dimensions = _probe_image_dimensions(content, suffix)
@@ -1642,6 +1848,24 @@ def probe_material_upload(
         content=content,
         content_type=prepared.content_type,
     )
+    # The source hash and its verified store must win before this second PUT.
+    # Otherwise a hash mismatch or source-store failure would leave a derivative
+    # that the route cannot identify to clean up.
+    if compatible_content is not None:
+        compatible_asset_id = str(uuid4())
+        compatible_stored = storage.put_object(
+            f"materials/compatible/{prepared.owner_user_id}/{prepared.asset_id}/"
+            f"{compatible_asset_id}.mp4",
+            compatible_content,
+            content_type="video/mp4",
+        )
+        compatible_sha256 = hashlib.sha256(compatible_content).hexdigest()
+        compatible_size_bytes = compatible_stored.size
+    else:
+        compatible_asset_id = None
+        compatible_stored = None
+        compatible_sha256 = None
+        compatible_size_bytes = None
     if probed_dimensions is not None:
         probed_width, probed_height = probed_dimensions
     return ProbedMaterialUpload(
@@ -1653,6 +1877,10 @@ def probe_material_upload(
         thumbnail_jpeg=thumbnail_jpeg,
         width=probed_width,
         height=probed_height,
+        compatible_asset_id=compatible_asset_id,
+        compatible_stored=compatible_stored,
+        compatible_sha256=compatible_sha256,
+        compatible_size_bytes=compatible_size_bytes,
     )
 
 
@@ -1708,6 +1936,21 @@ def persist_material_upload(
         "SELECT id FROM assets WHERE id=%s FOR UPDATE", (probed.prepared.asset_id,)
     ).fetchone()
     prepared = prepare_material_upload(conn, actor=actor, asset_id=probed.prepared.asset_id)
+    if prepared.already_ready:
+        # Another complete request may have won while this request was probing.
+        # Its temporary derivative has no asset row, so cleanup is only attempted
+        # through the repository's reference-aware deletion gate.
+        if probed.compatible_stored is not None and storage is not None:
+            try:
+                delete_object_if_unreferenced(
+                    conn,
+                    storage,
+                    storage_object_ref_from_uri(probed.compatible_stored.uri).key,
+                    actor_id=actor.id,
+                )
+            except StorageBackendUnavailable:
+                pass
+        return require_material(conn, actor=actor, material_id=f"asset:{prepared.asset_id}")
     if prepared.storage_uri != probed.prepared.storage_uri:
         raise material_error(409, "MATERIAL_UPLOAD_CHANGED", "上传记录已变化。")
     row = conn.execute(
@@ -1753,6 +1996,19 @@ def persist_material_upload(
     # storage but never breaks a reference, and upload_cleanup reaps it later.
     orphan_key = ref.key if ref.key != content.object_key else None
     metadata["content_deduplicated"] = deduplicated
+    if probed.compatible_asset_id is not None:
+        if (
+            probed.compatible_stored is None
+            or probed.compatible_sha256 is None
+            or probed.compatible_size_bytes is None
+        ):
+            raise material_error(
+                409,
+                "MATERIAL_VIDEO_COMPATIBILITY_INVALID",
+                "视频兼容版本记录不完整。",
+            )
+        metadata["compatible_asset_id"] = probed.compatible_asset_id
+        metadata["compatibility_status"] = "READY"
     with conn:
         conn.execute(
             """
@@ -1770,6 +2026,39 @@ def persist_material_upload(
                 prepared.asset_id,
             ),
         )
+        if probed.compatible_asset_id is not None:
+            assert probed.compatible_stored is not None
+            assert probed.compatible_sha256 is not None
+            assert probed.compatible_size_bytes is not None
+            conn.execute(
+                """
+                INSERT INTO assets (
+                    id, project_id, kind, storage_uri, sha256, size_bytes,
+                    content_type, metadata_json, created_by_user_id
+                ) VALUES (%s, NULL, 'oral_compatible_video', %s, %s, %s,
+                          'video/mp4', %s, %s)
+                """,
+                (
+                    probed.compatible_asset_id,
+                    probed.compatible_stored.uri,
+                    probed.compatible_sha256,
+                    probed.compatible_size_bytes,
+                    json.dumps(
+                        {"compatibility_derived_from": prepared.asset_id},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    actor.id,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO video_compat_derivatives (
+                    original_asset_id, compatible_asset_id, status
+                ) VALUES (%s, %s, 'READY')
+                """,
+                (prepared.asset_id, probed.compatible_asset_id),
+            )
         write_audit(
             conn,
             actor=actor,
@@ -1787,6 +2076,30 @@ def persist_material_upload(
     if orphan_key is not None and storage is not None:
         delete_object_outside_content_namespace(storage, orphan_key, actor_id=actor.id)
     return result
+
+
+def cleanup_unpersisted_compatible_upload(
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    probed: ProbedMaterialUpload,
+    storage: StorageAdapter,
+) -> None:
+    """Best-effort cleanup after the transaction that persisted ``probed`` failed.
+
+    This must be called from a *new* database transaction.  A PostgreSQL write
+    error aborts its owning transaction, so querying references on that same
+    connection would either fail or bypass the reference-aware deletion gate.
+    The original upload is deliberately retained: a retry can probe it again.
+    """
+    if probed.compatible_stored is None:
+        return
+    delete_object_if_unreferenced(
+        conn,
+        storage,
+        storage_object_ref_from_uri(probed.compatible_stored.uri).key,
+        actor_id=actor.id,
+    )
 
 
 def update_material(

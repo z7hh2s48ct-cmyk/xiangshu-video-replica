@@ -106,6 +106,7 @@ from app.storage import StorageBackendUnavailable
 from app.usage_billing import resolve_wallet_owner
 
 router = APIRouter(prefix="/api", tags=["generation"])
+GENERATION_RESULT_MAX_DURATION_SECONDS = 60
 logger = logging.getLogger(__name__)
 
 
@@ -875,7 +876,12 @@ def archive_generation_result(task_id: str, db: BusinessDbDep, storage: MediaSto
             and snapshot.get("ratio") == "9:16"
         ):
             source_digest = hashlib.sha256(content).hexdigest()
-            normalized = normalize_generated_video(content, target_width=1440, target_height=2560)
+            normalized = normalize_generated_video(
+                content,
+                target_width=1440,
+                target_height=2560,
+                max_duration_seconds=GENERATION_RESULT_MAX_DURATION_SECONDS,
+            )
             content = normalized.content
             duration_seconds = normalized.duration_seconds
             if not content or len(content) > MAX_UPLOAD_BYTES:

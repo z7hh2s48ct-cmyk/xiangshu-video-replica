@@ -2084,6 +2084,7 @@ def test_direct_generation_archive_is_owned_idempotent_and_does_not_rebill(
         "revoked",
         "normalize",
         "normalization-failed",
+        "normalization-61-seconds",
         "snapshot-changed",
         "normalized-revoked",
         "claim-stolen",
@@ -2121,6 +2122,7 @@ def test_archive_http_rechecks_before_commit_and_preserves_billing(
     normalized_outcomes = {
         "normalize",
         "normalization-failed",
+        "normalization-61-seconds",
         "snapshot-changed",
         "normalized-revoked",
         "claim-stolen",
@@ -2143,7 +2145,7 @@ def test_archive_http_rechecks_before_commit_and_preserves_billing(
     )
     pg.commit()
     downloads: list[str] = []
-    normalization_calls: list[tuple[bytes, int, int]] = []
+    normalization_calls: list[tuple[bytes, int, int, float | None]] = []
     original_content = b"\x00\x00\x00\x18ftypisom" + b"test-video"
     normalized_content = b"\x00\x00\x00\x18ftypisom" + b"normalized-video"
 
@@ -2177,9 +2179,16 @@ def test_archive_http_rechecks_before_commit_and_preserves_billing(
                 pg.commit()
             return original_content
 
-    def normalize(content: bytes, *, target_width: int, target_height: int):
-        normalization_calls.append((content, target_width, target_height))
-        if outcome == "normalization-failed":
+    def normalize(
+        content: bytes,
+        *,
+        target_width: int,
+        target_height: int,
+        max_duration_seconds: float | None,
+    ):
+        normalization_calls.append((content, target_width, target_height, max_duration_seconds))
+        if outcome in {"normalization-failed", "normalization-61-seconds"}:
+            assert max_duration_seconds == 60
             raise MediaValidationFailed("invalid decoded video")
         if outcome == "claim-stolen":
             pg.execute(
@@ -2261,7 +2270,7 @@ def test_archive_http_rechecks_before_commit_and_preserves_billing(
             asset = pg.execute("SELECT sha256,metadata_json FROM assets").fetchone()
             saved_metadata = json.loads(asset[1])
             if outcome == "normalize":
-                assert normalization_calls == [(original_content, 1440, 2560)]
+                assert normalization_calls == [(original_content, 1440, 2560, 60)]
                 assert uploaded_content == [normalized_content]
                 assert asset[0] == hashlib.sha256(normalized_content).hexdigest()
                 assert saved_metadata["video_normalization"] == {
@@ -2284,7 +2293,7 @@ def test_archive_http_rechecks_before_commit_and_preserves_billing(
                 assert asset[0] == hashlib.sha256(original_content).hexdigest()
                 assert "video_normalization" not in saved_metadata
         else:
-            if outcome in {"normalization-failed", "claim-stolen"}:
+            if outcome in {"normalization-failed", "normalization-61-seconds", "claim-stolen"}:
                 assert uploaded_content == []
             assert pg.execute("SELECT count(*) FROM assets").fetchone()[0] == 0
             assert (
@@ -2366,7 +2375,14 @@ def test_archive_retry_while_first_request_runs_deduplicates_expensive_work(
                     raise RuntimeError("overlap test release was not delivered")
             return content
 
-    def normalize(data: bytes, *, target_width: int, target_height: int):
+    def normalize(
+        data: bytes,
+        *,
+        target_width: int,
+        target_height: int,
+        max_duration_seconds: float | None,
+    ):
+        assert max_duration_seconds == 60
         with count_lock:
             calls["normalize"] += 1
         return SimpleNamespace(
@@ -3503,7 +3519,7 @@ def test_material_video_completion_persists_probed_duration(
     bus: BusinessConnection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from app import materials
-    from app.media_tools import MediaInspection
+    from app.media_tools import MediaInspection, NormalizedGeneratedVideo
 
     storage = FakeStorageAdapter(provider="fake", bucket="cw058-tests")
     admin = actor("admin_1", "admin")
@@ -3516,7 +3532,26 @@ def test_material_video_completion_persists_probed_duration(
             media_type="video", duration_seconds=12.066667, width=720, height=1372
         )
 
+    def normalize(
+        content_bytes: bytes, *, target_width: int, target_height: int
+    ) -> NormalizedGeneratedVideo:
+        assert content_bytes == content
+        assert (target_width, target_height) == (720, 1372)
+        return NormalizedGeneratedVideo(
+            content=content,
+            duration_seconds=12.066667,
+            width=720,
+            height=1372,
+            source_sample_aspect_ratio="1:1",
+            source_display_aspect_ratio="180:343",
+            sample_aspect_ratio="1:1",
+            display_aspect_ratio="180:343",
+            source_rotation_degrees=0,
+            transformed=False,
+        )
+
     monkeypatch.setattr(materials, "inspect_media_bytes", inspect, raising=False)
+    monkeypatch.setattr(materials, "normalize_generated_video", normalize)
     intent = materials.create_material_upload_intent(
         bus,
         actor=admin,

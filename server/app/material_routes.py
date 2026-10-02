@@ -28,6 +28,7 @@ from app.materials import (
     MaterialUsagesResponse,
     attach_video_thumbnail,
     bulk_update_materials,
+    cleanup_unpersisted_compatible_upload,
     create_material_upload_intent,
     hide_material,
     list_material_groups,
@@ -202,8 +203,26 @@ def complete_upload(
             status_code=503,
             detail={"code": "STORAGE_PROVIDER_UNAVAILABLE"},
         ) from exc
-    with db.write() as (conn, actor):
-        item = persist_material_upload(conn, actor=actor, probed=probed, storage=storage)
+    try:
+        with db.write() as (conn, actor):
+            item = persist_material_upload(conn, actor=actor, probed=probed, storage=storage)
+    except Exception:
+        # The failed write has exited (and therefore rolled back) before this
+        # fresh transaction checks whether its temporary compatibility object is
+        # referenced.  Never delete the original upload: it is the retry input.
+        try:
+            with db.write() as (conn, actor):
+                cleanup_unpersisted_compatible_upload(
+                    conn,
+                    actor=actor,
+                    probed=probed,
+                    storage=storage,
+                )
+        except Exception:
+            # Cleanup is intentionally best-effort; preserving the original
+            # persistence error gives the caller a retryable, truthful result.
+            pass
+        raise
     # MATERIAL-THUMBS-B：缩略图落存储与记键在写事务之外（dedup 后的最终对象键
     # 以持久化结果为准）；失败只损失缩略图，不影响上传结果。
     if probed.thumbnail_jpeg is not None:

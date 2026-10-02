@@ -27,7 +27,10 @@ IMAGE_DECODE_TIMEOUT_SECONDS = 15
 # 规范化比单纯解码多了缩放与 PNG 编码，1 亿像素上限的原图需要更宽的预算。
 IMAGE_NORMALIZE_TIMEOUT_SECONDS = 30
 GENERATED_VIDEO_MAX_BYTES = 50 * 1024 * 1024
-GENERATED_VIDEO_MAX_SECONDS = 60
+# This helper is used for customer uploads and generated results.  The byte
+# contract is still enforced by each caller; one minute is not a valid global
+# compatibility boundary (a perfectly normal source can be 61 seconds).
+GENERATED_VIDEO_MAX_SECONDS = 30 * 60
 logger = logging.getLogger(__name__)
 
 
@@ -67,6 +70,9 @@ class NormalizedGeneratedVideo:
 
 @dataclass(frozen=True)
 class _GeneratedVideoGeometry:
+    video_codec: str
+    pixel_format: str
+    color_transfer: str
     width: int
     height: int
     sar: Fraction
@@ -77,13 +83,19 @@ class _GeneratedVideoGeometry:
 
 
 def normalize_generated_video(
-    content: bytes, *, target_width: int, target_height: int
+    content: bytes,
+    *,
+    target_width: int,
+    target_height: int,
+    max_bytes: int = GENERATED_VIDEO_MAX_BYTES,
+    max_duration_seconds: float | None = GENERATED_VIDEO_MAX_SECONDS,
 ) -> NormalizedGeneratedVideo:
     """Fit existing MP4 display pixels into a square-pixel canvas without cropping.
 
-    Video is re-encoded only when geometry/rotation needs correction; audio is
-    stream-copied. A single timeout budget covers probing, processing and full
-    decoding. Media bytes, tool diagnostics and temporary paths are never logged.
+    Video is re-encoded when geometry/rotation needs correction or when it is
+    not broadly playable by the customer WebView. A single timeout budget covers
+    probing and full decoding. Media bytes, tool diagnostics and temporary paths
+    are never logged.
     The caller owns target resolution selection, archiving and billing.
     """
     if any(
@@ -91,7 +103,9 @@ def normalize_generated_video(
         for value in (target_width, target_height)
     ):
         raise MediaValidationFailed("目标视频尺寸必须为有效的偶数尺寸")
-    if not content or len(content) > GENERATED_VIDEO_MAX_BYTES or content[4:8] != b"ftyp":
+    if max_bytes <= 0 or (max_duration_seconds is not None and max_duration_seconds <= 0):
+        raise MediaValidationFailed("视频规范化资源限制无效")
+    if not content or len(content) > max_bytes or content[4:8] != b"ftyp":
         raise MediaValidationFailed("成片必须为大小合规的非空 MP4 视频")
     ffprobe = resolve_media_binary("ffprobe")
     ffmpeg = resolve_media_binary("ffmpeg")
@@ -101,20 +115,44 @@ def normalize_generated_video(
             source_path = Path(directory) / "source.mp4"
             output_path = Path(directory) / "normalized.mp4"
             source_path.write_bytes(content)
-            source = _probe_generated_geometry(ffprobe, source_path, deadline)
+            source = _probe_generated_geometry(
+                ffprobe, source_path, deadline, max_duration_seconds=max_duration_seconds
+            )
+            is_hdr = source.color_transfer in {"smpte2084", "arib-std-b67"}
+            # Callers commonly only know coded dimensions.  Rotation is display
+            # metadata, therefore that coded target must be rotated as well;
+            # otherwise a portrait phone recording is needlessly letterboxed in
+            # a landscape canvas.
+            display_target_width, display_target_height = target_width, target_height
+            if source.rotation in {90, 270} and (target_width, target_height) == (
+                source.width,
+                source.height,
+            ):
+                display_target_width, display_target_height = target_height, target_width
             transformed = (
-                source.width != target_width
-                or source.height != target_height
+                source.width != display_target_width
+                or source.height != display_target_height
                 or source.sar != 1
                 or source.rotation != 0
+                or source.video_codec != "h264"
+                or source.pixel_format != "yuv420p"
+                or is_hdr
+                or (bool(source.audio_codecs) and source.audio_codecs != ("aac",))
             )
             if transformed:
                 fitted_width, fitted_height = _fit_generated_display(
-                    source.dar, target_width, target_height
+                    source.dar, display_target_width, display_target_height
                 )
-                filters = (
+                tone_map = (
+                    "zscale=t=linear:npl=100,format=gbrpf32le,"
+                    "tonemap=tonemap=hable:desat=0,"
+                    "zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p,"
+                    if is_hdr
+                    else ""
+                )
+                filters = tone_map + (
                     f"scale={fitted_width}:{fitted_height}:flags=lanczos,setsar=1,"
-                    f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:color=black"
+                    f"pad={display_target_width}:{display_target_height}:(ow-iw)/2:(oh-ih)/2:color=black"
                 )
                 _run_generated_tool(
                     [
@@ -133,8 +171,12 @@ def normalize_generated_video(
                         str(source_path),
                         "-map",
                         "0:v:0",
+                        # The first/default audio track is the user-facing
+                        # speech track for this product.  Keeping one explicit
+                        # track avoids an ambiguous two-AAC output and makes the
+                        # browser contract deterministic.
                         "-map",
-                        "0:a?",
+                        "0:a:0?",
                         "-vf",
                         filters,
                         "-c:v",
@@ -147,32 +189,40 @@ def normalize_generated_video(
                         "18",
                         "-pix_fmt",
                         "yuv420p",
+                        "-color_primaries",
+                        "bt709",
+                        "-color_trc",
+                        "bt709",
+                        "-colorspace",
+                        "bt709",
                         "-c:a",
-                        "copy",
+                        "aac",
                         "-metadata:s:v:0",
                         "rotate=0",
                         "-movflags",
                         "+faststart",
                         "-fs",
-                        str(GENERATED_VIDEO_MAX_BYTES + 1),
+                        str(max_bytes + 1),
                         str(output_path),
                     ],
                     deadline,
                 )
-                if (
-                    not output_path.is_file()
-                    or not 0 < output_path.stat().st_size <= GENERATED_VIDEO_MAX_BYTES
-                ):
+                if not output_path.is_file() or not 0 < output_path.stat().st_size <= max_bytes:
                     raise MediaValidationFailed("规范化成片大小不合规")
-                result = _probe_generated_geometry(ffprobe, output_path, deadline)
+                result = _probe_generated_geometry(
+                    ffprobe, output_path, deadline, max_duration_seconds=max_duration_seconds
+                )
                 if (
-                    result.width != target_width
-                    or result.height != target_height
+                    result.width != display_target_width
+                    or result.height != display_target_height
                     or result.sar != 1
                     or result.rotation != 0
-                    or result.dar != Fraction(target_width, target_height)
+                    or result.dar != Fraction(display_target_width, display_target_height)
                     or abs(result.duration - source.duration) > 0.05
-                    or result.audio_codecs != source.audio_codecs
+                    or result.video_codec != "h264"
+                    or result.pixel_format != "yuv420p"
+                    or result.color_transfer in {"smpte2084", "arib-std-b67"}
+                    or (bool(source.audio_codecs) and result.audio_codecs != ("aac",))
                 ):
                     raise MediaValidationFailed("规范化成片的画幅、时长或音轨校验失败")
                 selected_path = output_path
@@ -252,7 +302,9 @@ def _run_generated_tool(command: list[str], deadline: float, *, probe: bool = Fa
     return completed.stdout if probe else b""
 
 
-def _probe_generated_geometry(ffprobe: str, path: Path, deadline: float) -> _GeneratedVideoGeometry:
+def _probe_generated_geometry(
+    ffprobe: str, path: Path, deadline: float, *, max_duration_seconds: float | None
+) -> _GeneratedVideoGeometry:
     output = _run_generated_tool(
         [
             ffprobe,
@@ -261,7 +313,7 @@ def _probe_generated_geometry(ffprobe: str, path: Path, deadline: float) -> _Gen
             "-protocol_whitelist",
             "file,pipe",
             "-show_entries",
-            "stream=codec_type,codec_name,width,height,sample_aspect_ratio:"
+            "stream=codec_type,codec_name,pix_fmt,color_transfer,width,height,sample_aspect_ratio:"
             "stream_tags=rotate:stream_side_data=rotation:format=duration,format_name",
             "-of",
             "json",
@@ -282,7 +334,11 @@ def _probe_generated_geometry(ffprobe: str, path: Path, deadline: float) -> _Gen
         if not (2 <= width <= 8192 and 2 <= height <= 8192 and width * height <= 33554432):
             raise ValueError("invalid dimensions")
         duration = float(payload["format"]["duration"])
-        if not math.isfinite(duration) or not 0 < duration <= GENERATED_VIDEO_MAX_SECONDS:
+        if (
+            not math.isfinite(duration)
+            or duration <= 0
+            or (max_duration_seconds is not None and duration > max_duration_seconds)
+        ):
             raise ValueError("invalid duration")
         sar_text = video.get("sample_aspect_ratio", "1:1")
         sar = (
@@ -304,7 +360,21 @@ def _probe_generated_geometry(ffprobe: str, path: Path, deadline: float) -> _Gen
         audio_codecs = tuple(
             str(s.get("codec_name")) for s in streams if s.get("codec_type") == "audio"
         )
-        return _GeneratedVideoGeometry(width, height, sar, dar, rotation, duration, audio_codecs)
+        pixel_format = str(video.get("pix_fmt") or "")
+        if not pixel_format:
+            raise ValueError("missing pixel format")
+        return _GeneratedVideoGeometry(
+            str(video["codec_name"]),
+            pixel_format,
+            str(video.get("color_transfer") or "unknown").lower(),
+            width,
+            height,
+            sar,
+            dar,
+            rotation,
+            duration,
+            audio_codecs,
+        )
     except (
         ValueError,
         TypeError,

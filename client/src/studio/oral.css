@@ -454,33 +454,63 @@
   overflow-wrap: anywhere;
 }
 /* 整行宽度下按钮不再需要换行；窄窗口仍允许回落，避免横向溢出。 */
-.oral-library-card-body > div {
+.oral-library-card-actions {
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  gap: 10px;
+  gap: 12px;
   flex-wrap: wrap;
 }
 /* 删除推到最右，与「使用/下载」这类正向操作拉开距离，避免误点。 */
-.oral-library-card-body > div > .studio-button:last-child {
+.oral-library-card-actions__delete {
   margin-left: auto;
-}
-.oral-library-card-body .studio-button {
-  color: #ebbb53;
-  border-color: #7b602b;
-  border-radius: 5px;
-  padding: 8px 10px;
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 8px 12px;
+  border: 1px solid #74413a;
+  border-radius: 6px;
+  background: transparent;
+  color: #e6a198;
+  font: inherit;
   font-size: 12px;
+  cursor: pointer;
+}
+.oral-library-card-actions__delete:hover:not(:disabled) {
+  border-color: #c96758;
+  background: #321c19;
+  color: #ffd0c8;
+}
+.oral-library-card-actions__delete:focus-visible {
+  outline: 2px solid #e7b552;
+  outline-offset: 2px;
+}
+.oral-library-card-actions__delete:disabled {
+  cursor: default;
+  opacity: 0.48;
+}
+.oral-library-card-actions__use {
+  min-height: 38px;
+  padding-inline: 15px;
+  box-shadow:
+    0 0 0 1px #5d461d,
+    0 6px 16px #0000002e;
+  font-weight: 600;
 }
 .oral-library-card-body .oral-ready {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 5px 6px;
-  border-radius: 4px;
+  gap: 7px;
+  min-height: 38px;
+  padding: 7px 11px;
+  border: 1px solid #385034;
+  border-radius: 6px;
   background: #202d1e;
-  color: #a7d098;
-  font-size: 11px;
+  color: #b7e6a8;
+  font-size: 12px;
+  font-weight: 600;
 }
 /* 纵向列表里它是整行一条，不再是等高网格里的一格；315px 会突兀地高过
    旁边的分身卡（卡高由 200px 缩略图 ÷ 1.1 ≈ 182px 决定）。 */
@@ -726,7 +756,7 @@
   .oral-library-preview {
     aspect-ratio: 4 / 3;
   }
-  .oral-library-card-body > div > .studio-button:last-child {
+  .oral-library-card-actions__delete {
     margin-left: 0;
   }
   .oral-create-tile {
