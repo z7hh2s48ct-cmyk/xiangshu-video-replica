@@ -5,7 +5,7 @@
       "001_core"
     ],
     "heads": [
-      "20260930T1400_registration_bonus_settings"
+      "20261002T0800_alert_delivery_rules"
     ],
     "parents": {
       "001_core": null,
@@ -150,9 +150,27 @@
       "20260929T1200_admin_team_and_alert_settings": "20260929T1000_customer_annotations",
       "20260930T1000_viral_quality_budget": "20260929T1200_admin_team_and_alert_settings",
       "20260930T1100_alert_notify_dedup": "20260930T1000_viral_quality_budget",
-      "20260930T1400_registration_bonus_settings": "20260930T1100_alert_notify_dedup"
+      "20260930T1400_registration_bonus_settings": "20260930T1100_alert_notify_dedup",
+      "20261001T1500_external_call_full_response": "20260930T1400_registration_bonus_settings",
+      "20261001T1600_external_call_metrics": "20261001T1500_external_call_full_response",
+      "20261001T1645_viral_search_events": "20261001T1600_external_call_metrics",
+      "20261001T1800_viral_homepage_schedule": "20261001T1645_viral_search_events",
+      "20261001T1840_viral_content_observations": "20261001T1800_viral_homepage_schedule",
+      "20261001T2115_viral_keyword_runs": "20261001T1840_viral_content_observations",
+      "20261001T2240_viral_collection_clock": "20261001T2115_viral_keyword_runs",
+      "20261001T2300_viral_collection_records": "20261001T2240_viral_collection_clock",
+      "20261001T2330_collection_record_recovery": "20261001T2300_viral_collection_records",
+      "20261002T0030_realtime_legacy_lease": "20261001T2330_collection_record_recovery",
+      "20261002T0050_collection_stats_version": "20261002T0030_realtime_legacy_lease",
+      "20261002T0115_generation_status_history": "20261002T0050_collection_stats_version",
+      "20261002T0220_adjustment_balance_snapshots": "20261002T0115_generation_status_history",
+      "20261002T0340_video_collection_outcomes": "20261002T0220_adjustment_balance_snapshots",
+      "20261002T0430_payment_methods": "20261002T0340_video_collection_outcomes",
+      "20261002T0600_call_diagnostics": "20261002T0430_payment_methods",
+      "20261002T0630_task_diagnostic_refs": "20261002T0600_call_diagnostics",
+      "20261002T0800_alert_delivery_rules": "20261002T0630_task_diagnostic_refs"
     },
-    "revision_count": 134
+    "revision_count": 152
   },
   "manifest_schema_version": 1,
   "naming_policy": {
@@ -702,6 +720,78 @@
     "20260930T1400_registration_bonus_settings": {
       "file": "versions/20260930T1400_registration_bonus_settings.py",
       "sha256": "6e71a1a7bd02568f051800828894b60b5741148bff4e4e103f69c526d7c7a63d"
+    },
+    "20261001T1500_external_call_full_response": {
+      "file": "versions/20261001T1500_external_call_full_response.py",
+      "sha256": "05522d0b60eb47d81a91973f909d7bda33e73ab4190fda625cb37f4104530eac"
+    },
+    "20261001T1600_external_call_metrics": {
+      "file": "versions/20261001T1600_external_call_metrics.py",
+      "sha256": "6bbba550fdb19060248deb083a255fe004d02c78c9af052a8cf0881a3d822268"
+    },
+    "20261001T1645_viral_search_events": {
+      "file": "versions/20261001T1645_viral_search_events.py",
+      "sha256": "b808080633fa76b3bfc4f4271bb92ded9163020466edba45e4442207bf456a8e"
+    },
+    "20261001T1800_viral_homepage_schedule": {
+      "file": "versions/20261001T1800_viral_homepage_schedule.py",
+      "sha256": "7da431f1ec103b0c9b5e3e654a0b432d8d819b88c95482e77f142c6fde0b1c29"
+    },
+    "20261001T1840_viral_content_observations": {
+      "file": "versions/20261001T1840_viral_content_observations.py",
+      "sha256": "b47a14f595753dc1c6391f608921a82f396cd713db293d8757c2516723b52124"
+    },
+    "20261001T2115_viral_keyword_runs": {
+      "file": "versions/20261001T2115_viral_keyword_runs.py",
+      "sha256": "7ca3c638ef151b4b24aca30303494bfd7698015dc5609a43ae59a44660767820"
+    },
+    "20261001T2240_viral_collection_clock": {
+      "file": "versions/20261001T2240_viral_collection_clock.py",
+      "sha256": "734566b17b29c47db7e3371cb0641fa7e755eab3e4a0438ee9ac51c8d5806e60"
+    },
+    "20261001T2300_viral_collection_records": {
+      "file": "versions/20261001T2300_viral_collection_records.py",
+      "sha256": "b9aed7188722f7c0b5f3aeb05e06f7511a61afa11b36b3f64037b6191754fcd4"
+    },
+    "20261001T2330_collection_record_recovery": {
+      "file": "versions/20261001T2330_collection_record_recovery.py",
+      "sha256": "0857d8e711191e48031f538586cc541f410e626b3e7f65036a5a939ce9421a6b"
+    },
+    "20261002T0030_realtime_legacy_lease": {
+      "file": "versions/20261002T0030_realtime_legacy_lease.py",
+      "sha256": "102d630fd2621755e50ba2bb62aca049501f3badb6d4a226d37131a23477f43c"
+    },
+    "20261002T0050_collection_stats_version": {
+      "file": "versions/20261002T0050_collection_stats_version.py",
+      "sha256": "be6584e14ba46f63a43233459dc32b5fd39d25c414939f5ac6c192c3ee4a5d08"
+    },
+    "20261002T0115_generation_status_history": {
+      "file": "versions/20261002T0115_generation_status_history.py",
+      "sha256": "624180f9e64e41f3d224469b31239d8342970d3ea29f1feef1da44861b4418e0"
+    },
+    "20261002T0220_adjustment_balance_snapshots": {
+      "file": "versions/20261002T0220_adjustment_balance_snapshots.py",
+      "sha256": "5049800de5775a7a261e3ff8d3fd363819ef6a7624b2c106d86a573543810016"
+    },
+    "20261002T0340_video_collection_outcomes": {
+      "file": "versions/20261002T0340_video_collection_outcomes.py",
+      "sha256": "480b2878d7df8a839e9fcd2f682506320154f1bc2f196ecd1cc013120345d9ee"
+    },
+    "20261002T0430_payment_methods": {
+      "file": "versions/20261002T0430_payment_methods.py",
+      "sha256": "55392da9879f558a1c9f2d76c3e6e73e494e12860bb9d5ef16f06efb5ff6fddf"
+    },
+    "20261002T0600_call_diagnostics": {
+      "file": "versions/20261002T0600_call_diagnostics.py",
+      "sha256": "70606351fb17dbbaa8193ce89e5370361799e700297f527fae6fecb5a4e0370b"
+    },
+    "20261002T0630_task_diagnostic_refs": {
+      "file": "versions/20261002T0630_task_diagnostic_refs.py",
+      "sha256": "1f125fe86af0cb573ea599bb22af9d91a2527e4859987028235ee6e9725eb042"
+    },
+    "20261002T0800_alert_delivery_rules": {
+      "file": "versions/20261002T0800_alert_delivery_rules.py",
+      "sha256": "177cbe04b99b48778d0e98bbc34a9b37d01565dbd5fa6ce0a94f55647c6bc4c8"
     }
   },
   "task": "MIGRATION-GUARD-20260912"

@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, StrictInt
 
 from app.auth import AuthenticatedUser, CurrentUser, Database
 from app.auth import get_database as auth_get_database
+from app.control_auth import require_control_super_admin
 from app.db_portable import BusinessConnection
 from app.h3_account_pool import paid_probe_config
 from app.permissions import require_role
@@ -90,10 +91,17 @@ def require_settings_admin(conn: Database, actor: AuthenticatedUser) -> CurrentU
 SettingsAdmin = Annotated[CurrentUser, Depends(require_settings_admin)]
 
 
+def require_technical_settings_admin(conn: Database, actor: SettingsAdmin) -> CurrentUser:
+    return require_control_super_admin(conn, actor)
+
+
+TechnicalSettingsAdmin = Annotated[CurrentUser, Depends(require_technical_settings_admin)]
+
+
 @router.get("")
 def read_settings(
     conn: Database,
-    _: SettingsAdmin,
+    _: TechnicalSettingsAdmin,
 ) -> dict[str, object]:
     repo = SettingsRepository(conn)
     return {
@@ -108,7 +116,7 @@ def update_provider_settings(
     provider: str,
     payload: ProviderSettingsRequest,
     conn: Database,
-    admin: SettingsAdmin,
+    admin: TechnicalSettingsAdmin,
 ) -> dict[str, object]:
     provider_name = require_supported_provider(provider)
     repo = SettingsRepository(conn)
@@ -156,7 +164,7 @@ def reveal_provider_secret(
     provider: str,
     field: str,
     conn: Database,
-    admin: SettingsAdmin,
+    admin: TechnicalSettingsAdmin,
 ) -> JSONResponse:
     provider_name = require_supported_provider(provider)
     if not is_secret_field(field):
@@ -204,7 +212,7 @@ def reveal_provider_secret(
 def update_runtime_settings(
     payload: RuntimeSettingsRequest,
     conn: Database,
-    admin: SettingsAdmin,
+    admin: TechnicalSettingsAdmin,
 ) -> dict[str, int | str]:
     repo = SettingsRepository(conn)
     try:
@@ -279,7 +287,7 @@ def update_billing_settings(
 def connection_test(
     provider: str,
     conn: Database,
-    _: SettingsAdmin,
+    _: TechnicalSettingsAdmin,
     tester: ProviderTester = Depends(get_provider_tester),
 ) -> ProviderTestResult:
     provider_name = require_supported_provider(provider)
@@ -295,7 +303,7 @@ def connection_test(
 def paid_test(
     provider: str,
     conn: Database,
-    _: SettingsAdmin,
+    _: TechnicalSettingsAdmin,
     tester: ProviderTester = Depends(get_provider_tester),
 ) -> ProviderTestResult:
     provider_name = require_supported_provider(provider)
@@ -308,7 +316,7 @@ def paid_test(
 @router.post("/diagnostic-test", response_model=SettingsDiagnosticReport)
 def run_settings_diagnostic(
     conn: Database,
-    admin: SettingsAdmin,
+    admin: TechnicalSettingsAdmin,
     tester: ProviderTester = Depends(get_provider_tester),
 ) -> SettingsDiagnosticReport:
     repo = SettingsRepository(conn)
@@ -435,7 +443,7 @@ def run_settings_diagnostic(
 def download_settings_diagnostic(
     report_id: str,
     conn: Database,
-    _: SettingsAdmin,
+    _: TechnicalSettingsAdmin,
 ) -> Response:
     row = conn.execute(
         """

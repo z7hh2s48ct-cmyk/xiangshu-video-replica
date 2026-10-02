@@ -48,7 +48,7 @@ _NOW = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
 # 统计只读本轮种子涉及的表；CASCADE 负责清掉引用它们的行。alert_settings
 # 的单行引用 users（接收人外键），显式列入让清理不依赖 CASCADE 推断。
 _RESET_TABLES = (
-    "audit_logs, character_generation_tasks, character_sheet_tasks, "
+    "alert_deliveries, audit_logs, character_generation_tasks, character_sheet_tasks, "
     "first_frame_tasks, source_frame_tasks, analysis_tasks, oral_tasks, "
     "oral_avatars, person_identities, character_versions, character_personas, "
     "assets, generation_tasks, generation_batches, projects, users, alert_settings"
@@ -133,6 +133,10 @@ def seeded(alerts_dsn: str) -> str:
             " id, project_id, created_by_user_id, idempotency_key, request_hash,"
             " request_snapshot_json, status"
             ") VALUES ('b-1', 'p-1', 'u-1', 'ik-b1', 'rh-b1', '{}', 'QUEUED')"
+        )
+    with psycopg.connect(alerts_dsn, autocommit=True) as raw:
+        raw.execute(
+            "UPDATE oral_avatars SET updated_at='2020-01-01T00:00:00+00:00' WHERE id='avatar-1'"
         )
     return alerts_dsn
 
@@ -728,7 +732,7 @@ def test_alerts_overview_notify_sends_digest_once_per_hour(
             ON CONFLICT (id) DO UPDATE SET recipient_user_id = 'alert-recipient'
             """
         )
-        raw.execute("DELETE FROM alert_notify_dedup")
+        raw.execute("DELETE FROM alert_deliveries")
         # 造一条 danger：PAID 订单无入账。
         raw.execute(
             "INSERT INTO users (id, username, display_name, role, is_active) "
@@ -765,7 +769,7 @@ def test_alerts_overview_notify_sends_digest_once_per_hour(
         assert sent[0]["danger_count"] == 1
     finally:
         with _psycopg.connect(seeded, autocommit=True) as raw:
-            raw.execute("DELETE FROM alert_notify_dedup")
+            raw.execute("DELETE FROM alert_deliveries")
             raw.execute("DELETE FROM recharge_orders WHERE id = 'digest-orphan'")
             raw.execute("DELETE FROM alert_settings")
             raw.execute("DELETE FROM users WHERE id IN ('alert-recipient','digest-user')")
@@ -819,7 +823,7 @@ def _seed_digest_scenario(dsn: str) -> None:
             ON CONFLICT (id) DO UPDATE SET recipient_user_id = 'alert-recipient'
             """
         )
-        raw.execute("DELETE FROM alert_notify_dedup")
+        raw.execute("DELETE FROM alert_deliveries")
         raw.execute(
             "INSERT INTO users (id, username, display_name, role, is_active) "
             "VALUES ('digest-user', 'digest-user', '摘要客户', 'customer', 1) "
@@ -843,7 +847,7 @@ def _clear_digest_scenario(dsn: str) -> None:
     import psycopg as _psycopg
 
     with _psycopg.connect(dsn, autocommit=True) as raw:
-        raw.execute("DELETE FROM alert_notify_dedup")
+        raw.execute("DELETE FROM alert_deliveries")
         raw.execute("DELETE FROM recharge_orders WHERE id = 'digest-orphan'")
         raw.execute("DELETE FROM alert_settings")
         raw.execute("DELETE FROM users WHERE id IN ('alert-recipient','digest-user')")
@@ -853,7 +857,9 @@ def _dedup_rows(dsn: str) -> int:
     import psycopg as _psycopg
 
     with _psycopg.connect(dsn, autocommit=True) as raw:
-        return int(raw.execute("SELECT count(*) FROM alert_notify_dedup").fetchone()[0])
+        return int(
+            raw.execute("SELECT count(*) FROM alert_deliveries WHERE state='SENT'").fetchone()[0]
+        )
 
 
 def test_alert_digest_dedup_is_recorded_only_after_a_confirmed_send(
@@ -885,7 +891,7 @@ def test_alert_digest_dedup_is_recorded_only_after_a_confirmed_send(
         )
         assert api.get("/api/control/alerts/overview?notify=1").status_code == 200
         assert len(working.sent) == 1
-        assert _dedup_rows(seeded) == 1
+        assert _dedup_rows(seeded) == 2
 
         # 4) 记账之后同一小时不重发。
         assert api.get("/api/control/alerts/overview?notify=1").status_code == 200
@@ -952,7 +958,7 @@ def test_concurrent_workers_send_a_single_digest_per_hour(
             for future in [pool.submit(_tick) for _ in range(workers)]:
                 future.result()
         assert len(sender.sent) == 1
-        assert _dedup_rows(seeded) == 1
+        assert _dedup_rows(seeded) == 2
     finally:
         _clear_digest_scenario(seeded)
 
@@ -979,7 +985,7 @@ def test_failed_send_releases_the_claim_so_another_worker_can_retry(
         )
         dispatch_alert_digest()
         assert len(working.sent) == 1
-        assert _dedup_rows(seeded) == 1
+        assert _dedup_rows(seeded) == 2
     finally:
         _clear_digest_scenario(seeded)
 
@@ -1026,3 +1032,226 @@ def test_worker_alert_tick_is_throttled_and_never_blocks_the_round(
     monkeypatch.setattr("app.failure_rate_alerts.dispatch_alert_digest", boom)
     monkeypatch.setattr(worker, "_last_alert_digest_at", None)
     worker.dispatch_alert_digest_throttled()  # 推送是旁路：异常不能外抛去拖住任务处理
+
+
+@pytest.mark.parametrize(
+    "key", ["unconfigured_rates", "reconciliation", "sensitive_events", "failure_rate"]
+)
+def test_each_alert_category_routes_and_deduplicates_with_fake_mail(
+    api: TestClient, seeded: str, monkeypatch: pytest.MonkeyPatch, key: str
+) -> None:
+    from app.failure_rate_alerts import AlertOverviewItem, AlertsOverview, notify_if_dangerous
+
+    _seed_digest_scenario(seeded)
+    sender = _DigestSender()
+    monkeypatch.setattr("app.email_delivery.email_sender_from_settings", lambda conn: sender)
+    overview = AlertsOverview(
+        items=[
+            AlertOverviewItem(
+                key=key,
+                severity="warn" if key != "failure_rate" else "danger",
+                headline="合成类别告警",
+                detail="仅假邮件渠道",
+                count=2,
+            )
+        ],
+        recipient_display_name="合成接收人",
+        generated_at=datetime.now(UTC).isoformat(),
+    )
+    notify_if_dangerous(overview)
+    notify_if_dangerous(overview)
+    assert len(sender.sent) == 1
+    assert "合成类别告警" in str(sender.sent[0]["items"])
+    status = api.get("/api/control/alerts/deliveries").json()
+    assert status["items"][0]["state"] == "SENT"
+    assert status["items"][0]["attempts"] == 1
+    assert "email" not in status["items"][0]
+
+
+def test_independent_routes_preserve_existing_recipient_and_validate(
+    api: TestClient, seeded: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.failure_rate_alerts import AlertOverviewItem, AlertsOverview, notify_if_dangerous
+
+    _seed_digest_scenario(seeded)
+    with psycopg.connect(seeded) as raw:
+        raw.execute(
+            "UPDATE users SET email='synthetic-other@example.invalid',"
+            "email_verified_at=clock_timestamp() WHERE id='auditor_u'"
+        )
+    policies = [{"key": "sensitive_events", "recipient_user_id": "auditor_u", "threshold_count": 3}]
+    saved = _put_settings(
+        api,
+        recipient_user_id="alert-recipient",
+        notification_policies=policies,
+        failure_rules=[
+            {
+                "record_type": "VIDEO",
+                "error_code": "H3_PROVIDER_FAILED",
+                "threshold_percent": 20,
+                "min_sample_size": 10,
+            }
+        ],
+    )
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["recipient_user_id"] == "alert-recipient"
+    with psycopg.connect(seeded) as raw:
+        audit = raw.execute(
+            "SELECT metadata_json FROM audit_logs WHERE action='alerts.settings.update' "
+            "ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()[0]
+        assert "notification_policies" in audit and "failure_rules" in audit
+    sender = _DigestSender()
+    monkeypatch.setattr("app.email_delivery.email_sender_from_settings", lambda conn: sender)
+    overview = AlertsOverview(
+        items=[
+            AlertOverviewItem(key=key, severity="warn", headline=key, detail="合成渠道", count=3)
+            for key in ["sensitive_events", "unconfigured_rates"]
+        ],
+        recipient_display_name=None,
+        generated_at=datetime.now(UTC).isoformat(),
+    )
+    notify_if_dangerous(overview)
+    assert {item["to"] for item in sender.sent} == {
+        "oncall@example.com",
+        "synthetic-other@example.invalid",
+    }
+    invalid = _put_settings(
+        api, notification_policies=[{"key": "sensitive_events", "recipient_user_id": "u-1"}]
+    )
+    assert invalid.status_code == 400
+    duplicate = _put_settings(
+        api,
+        failure_rules=[{"record_type": "VIDEO", "threshold_percent": 20, "min_sample_size": 5}] * 2,
+    )
+    assert duplicate.status_code == 422
+    out_of_range = _put_settings(
+        api, notification_policies=[{"key": "sensitive_events", "threshold_count": 0}]
+    )
+    assert out_of_range.status_code == 422
+
+
+def test_code_rate_has_type_terminal_denominator_and_independent_threshold(
+    api: TestClient, seeded: str
+) -> None:
+    for index in range(10):
+        _video_task(
+            seeded,
+            f"rate-{index}",
+            "FAILED" if index < 2 else "SUCCEEDED",
+            updated_at=datetime.now(UTC).isoformat(),
+            error_code="H3_PROVIDER_FAILED" if index < 2 else None,
+        )
+    saved = _put_settings(
+        api,
+        failure_rate_threshold_percent=90,
+        failure_rules=[
+            {
+                "record_type": "VIDEO",
+                "error_code": "H3_PROVIDER_FAILED",
+                "threshold_percent": 20,
+                "min_sample_size": 10,
+            }
+        ],
+    )
+    assert saved.status_code == 200, saved.text
+    report = api.get("/api/control/alerts/failure-rate").json()
+    group = next(g for g in report["groups"] if g["record_type"] == "VIDEO")
+    assert group["exceeded"] is False
+    code = group["top_errors"][0]
+    assert (code["count"], code["total"], code["failure_rate_percent"], code["exceeded"]) == (
+        2,
+        10,
+        20,
+        True,
+    )
+    assert report["alerting"] is True
+    saved = _put_settings(
+        api,
+        failure_rate_threshold_percent=90,
+        failure_rules=[
+            {
+                "record_type": "VIDEO",
+                "error_code": "H3_PROVIDER_FAILED",
+                "threshold_percent": 20,
+                "min_sample_size": 11,
+            }
+        ],
+    )
+    assert saved.status_code == 200
+    assert api.get("/api/control/alerts/failure-rate").json()["alerting"] is False
+
+
+def test_unconfigured_template_and_failed_mail_are_visible_and_retryable(
+    api: TestClient, seeded: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.failure_rate_alerts import dispatch_alert_digest
+
+    _seed_digest_scenario(seeded)
+    sender = _DigestSender()
+    sender.alert_digest_configured = False
+    monkeypatch.setattr("app.email_delivery.email_sender_from_settings", lambda conn: sender)
+    dispatch_alert_digest()
+    assert sender.sent == []
+    report = api.get("/api/control/alerts/deliveries").json()
+    assert all(item["state"] == "UNCONFIGURED" for item in report["items"])
+    assert all(not c["channel_configured"] for c in report["configuration"])
+    failing = _DigestSender(fail_with="synthetic-timeout")
+    monkeypatch.setattr("app.email_delivery.email_sender_from_settings", lambda conn: failing)
+    dispatch_alert_digest()
+    report = api.get("/api/control/alerts/deliveries").json()
+    assert all(item["state"] == "FAILED" for item in report["items"])
+    assert all(item["last_error"] == "EMAIL_DELIVERY_FAILED" for item in report["items"])
+    working = _DigestSender()
+    monkeypatch.setattr("app.email_delivery.email_sender_from_settings", lambda conn: working)
+    dispatch_alert_digest()
+    assert len(working.sent) == 1
+    assert all(
+        item["state"] == "SENT" and item["attempts"] == 2
+        for item in api.get("/api/control/alerts/deliveries").json()["items"]
+    )
+
+
+@pytest.mark.parametrize(
+    "usage,expected", [(79, False), (80, True), (99, True), (100, True), (0, False)]
+)
+def test_budget_eighty_percent_active_notification_monthly_dedup(
+    api: TestClient, seeded: str, monkeypatch: pytest.MonkeyPatch, usage: int, expected: bool
+) -> None:
+    from app.failure_rate_alerts import dispatch_alert_digest
+
+    _seed_digest_scenario(seeded)
+    sender = _DigestSender()
+    monkeypatch.setattr("app.email_delivery.email_sender_from_settings", lambda conn: sender)
+    # 其他类别已各自测过，此处只隔离预算的阈值和月度投递名额。
+    policies = [
+        {"key": key, "enabled": key == "collection_budget"}
+        for key in [
+            "failure_rate",
+            "unconfigured_rates",
+            "reconciliation",
+            "sensitive_events",
+            "collection_budget",
+        ]
+    ]
+    assert (
+        _put_settings(
+            api, recipient_user_id="alert-recipient", notification_policies=policies
+        ).status_code
+        == 200
+    )
+    budget = {
+        "budget_usage_percent": usage,
+        "month_unknown_cost_count": 3,
+        "month_pending_cost_count": 2,
+        "budget_period_start": "2026-10-01T00:00:00+08:00",
+    }
+    monkeypatch.setattr("app.viral_collection_budget.collection_budget", lambda conn: budget)
+    dispatch_alert_digest()
+    dispatch_alert_digest()
+    assert len(sender.sent) == int(expected)
+    if expected:
+        assert "未知3条" in str(sender.sent[0]["items"])
+        budget["budget_period_start"] = "2026-11-01T00:00:00+08:00"
+        dispatch_alert_digest()
+        assert len(sender.sent) == 2

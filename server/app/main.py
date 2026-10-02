@@ -85,6 +85,7 @@ from app.simple_character_routes import router as character_simple_router
 from app.source_frame_routes import router as source_frame_router
 from app.studio_draft_routes import router as studio_draft_router
 from app.studio_routes import router as studio_router
+from app.task_diagnostic_routes import router as task_diagnostic_router
 from app.viral_import_routes import router as viral_import_router
 from app.viral_routes import router as viral_router
 from app.viral_search_refresh_routes import router as viral_search_refresh_router
@@ -374,6 +375,7 @@ app.add_middleware(
 # outside CORS so direct OPTIONS responses also receive a request id, log and
 # bounded HTTP metric instead of being silently short-circuited.
 app.middleware("http")(request_observability_middleware)
+app.include_router(task_diagnostic_router)
 app.include_router(generation_router)
 app.include_router(studio_router)
 app.include_router(studio_draft_router)

@@ -37,7 +37,7 @@ describe("StatusBadge", () => {
     );
     expect(screen.getByText("已撤销")).toHaveClass("status-badge--danger");
     expect(screen.getByText("MYSTERY")).toHaveClass("status-badge--neutral");
-    expect(screen.getByText("已强制退出")).toBeInTheDocument();
+    expect(screen.getByText("永久禁用")).toBeInTheDocument();
     expect(screen.getByText("已支付")).toHaveClass("status-badge--good");
     expect(screen.getByText("Windows")).toBeInTheDocument();
   });

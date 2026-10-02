@@ -428,6 +428,11 @@ def _require_device_authority(
 ) -> None:
     if device.activation_code_id is not None:
         _require_active_code(conn, device.activation_code_id)
+        account = conn.execute(
+            "SELECT is_active FROM users WHERE id=%s FOR SHARE", (device.user_id,)
+        ).fetchone()
+        if account is None or not account[0]:
+            raise _http(403, "ACCOUNT_SUSPENDED", "账号已暂停，请联系管理员。")
         return
     # Password accounts may restore a live session, but a cached device credential
     # alone cannot log back in after logout/expiry and bypass the password gate.

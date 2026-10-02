@@ -48,7 +48,7 @@ function describeTariff(
 
 /** 成本以“分”存储，展示时统一换算成元；未配置显示“未配置”。 */
 function formatCostYuan(value: string | null): string {
-  return value === null ? "未配置" : formatFen(Number(value));
+  return value === null ? "成本待核对" : formatFen(Number(value));
 }
 
 /**
@@ -56,7 +56,7 @@ function formatCostYuan(value: string | null): string {
  * 未配置与缺换算各给一个中文说明，不再输出裸数字。
  */
 function costDisplay(costFen: string | null, costCredits: string): ReactNode {
-  if (costFen === null) return "待配置";
+  if (costFen === null) return "成本待核对";
   return (
     <>
       <span>{formatFen(Number(costFen))}</span>
@@ -395,7 +395,10 @@ export function BillingRatesManager({
         <tr className={editing ? "is-editing" : undefined}>
           <td>
             <strong>{service.name}</strong>
-            <code>{service.service}</code>
+            <details>
+              <summary>技术详情</summary>
+              <code>{service.service}</code>
+            </details>
           </td>
           <td>每{unit}</td>
           <td>
@@ -421,6 +424,7 @@ export function BillingRatesManager({
             )}
           </td>
           <td>不向客户收费</td>
+          <td>不适用</td>
           <td>平台承担</td>
           <td>
             {service.updated_by ? (
@@ -488,7 +492,7 @@ export function BillingRatesManager({
   return (
     <section className="admin-panel" aria-label="逐项成本与售价">
       <p>
-        爆款视频数据按后台采集的已确认接口请求次数，使用采集批次开始时的单次售价向客户扣分；搜索分页和视频号详情分别计次。未配置或未启用售价时不向客户收费，读取已采集视频不扣分。
+        爆款视频数据按后台采集的已确认接口请求次数，使用采集批次开始时的单次售价向客户扣分；搜索分页和视频号详情分别计次。未配置或未启用售价时不向客户收费。视频库列表读取不扣积分；详情与文案按对应计费项目及已有授权判断是否扣分。
       </p>
       <div className="billing-rates-toolbar">
         <span>
@@ -522,7 +526,7 @@ export function BillingRatesManager({
       )}
       {notice && <p role="status">{notice}</p>}
       {!catalog ? (
-        <p>正在读取科目…</p>
+        <p>正在读取业务价格…</p>
       ) : (
         <form
           onSubmit={save}
@@ -532,10 +536,11 @@ export function BillingRatesManager({
             <table className="admin-data-table" aria-label="API 端点成本与售价">
               <thead>
                 <tr>
-                  <th>费用科目 / API</th>
+                  <th>业务</th>
                   <th>单位</th>
                   <th>成本（元）</th>
-                  <th>售价（积分）</th>
+                  <th>售价（元主，积分辅）</th>
+                  <th>毛利率</th>
                   <th>收费设置</th>
                   <th>最后修改</th>
                   <th>操作</th>
@@ -557,7 +562,10 @@ export function BillingRatesManager({
                         <tr className={editing ? "is-editing" : undefined}>
                           <td>
                             <strong>{service.name}</strong>
-                            <code>{service.service}</code>
+                            <details>
+                              <summary>技术详情</summary>
+                              <code>{service.service}</code>
+                            </details>
                           </td>
                           <td>每{unit}</td>
                           <td>
@@ -597,10 +605,29 @@ export function BillingRatesManager({
                                 disabled={busy || readOnly}
                               />
                             ) : service.tariff.unit_credits != null ? (
-                              roundToOneDecimal(service.tariff.unit_credits)
+                              <>
+                                <strong>
+                                  {service.unit_price_fen == null
+                                    ? "换算待核对"
+                                    : `${formatFen(Number(service.unit_price_fen))}/${unit}`}
+                                </strong>
+                                <small>
+                                  {service.tariff.unit_credits} 积分/{unit}
+                                </small>
+                              </>
                             ) : (
                               "未配置"
                             )}
+                          </td>
+                          <td>
+                            {service.gross_margin_percent == null
+                              ? service.tariff.unit_cost_fen == null
+                                ? "成本待核对"
+                                : !service.tariff.enabled ||
+                                    Number(service.tariff.unit_credits) === 0
+                                  ? "不适用"
+                                  : "换算待核对"
+                              : `${Number(service.gross_margin_percent).toFixed(1)}%`}
                           </td>
                           <td>
                             {editing ? (
@@ -727,10 +754,11 @@ export function BillingRatesManager({
               >
                 <thead>
                   <tr>
-                    <th>费用科目 / API</th>
+                    <th>业务</th>
                     <th>单位</th>
                     <th>成本（元）</th>
-                    <th>售价（积分）</th>
+                    <th>售价（元主，积分辅）</th>
+                    <th>毛利率</th>
                     <th>收费设置</th>
                     <th>最后修改</th>
                     <th>操作</th>

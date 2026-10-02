@@ -40,6 +40,7 @@ from typing import Literal, cast
 from fastapi import APIRouter
 from fastapi import Response as HttpResponse
 
+from app.admin_audit_business import audit_business_fields
 from app.admin_auth_routes import AdminReader, AdminWriter
 from app.admin_dates import append_admin_date_filters, utc_timestamp_sql
 from app.api_errors import http_error as _http
@@ -67,9 +68,16 @@ AUDIT_SERVICE_UNAVAILABLE_MESSAGE = "Audit log requires the PostgreSQL runtime."
 # 键是分组 id，值是该组包含的统一事件类型（与 _UNION_SQL 产出的 event_type
 # 同一口径）；前端下拉按此分组渲染，后端按值集合过滤。
 EVENT_GROUPS: dict[str, tuple[str, ...]] = {
+    "content": ("viral_runtime.update", "viral_platform.probe"),
     # 资金：调账（开通/赠送/补偿/退款）与查单补单都落在 admin_adjustments
     # 与 payment.sync 两个事件名上，来源单类型列里有更细的语义。
-    "funds": ("ADMIN_ADJUSTMENT", "payment.sync"),
+    "funds": (
+        "ADMIN_ADJUSTMENT",
+        "payment.sync",
+        "payment.ledger_repair",
+        "customer_adjustment.create",
+        "customer_package.grant",
+    ),
     "pricing": (
         "operation_rate.update",
         "billing.tariff.update",
@@ -84,6 +92,17 @@ EVENT_GROUPS: dict[str, tuple[str, ...]] = {
         "registration_bonus.settings.update",
     ),
     "account": (
+        "customer.suspend",
+        "customer.resume",
+        "customer_annotation.update",
+        "customer.annotations.update",
+        "admin.activation_code.archived",
+        "ACTIVATION_CODE_SUSPENDED",
+        "ACTIVATION_CODE_RESUMED",
+        "ACTIVATION_CODE_REVOKED",
+        "ACTIVATION_CODE_ACTIVATED",
+        "ADMIN_DEVICE_PAIRING_ADMIN_APPROVED",
+        "ADMIN_DEVICE_REPLACE",
         "ADMIN_DEVICE_DISABLE",
         "ADMIN_DEVICE_UNBIND",
         "ADMIN_SESSION_LOGOUT",
@@ -96,6 +115,14 @@ EVENT_GROUPS: dict[str, tuple[str, ...]] = {
     "system": (
         "provider_settings.update",
         "provider_settings.paid_test",
+        "billing_settings.update",
+        "zpay_settings.update",
+        "admin_team.create",
+        "admin_team.update",
+        "admin_team.password_reset",
+        "team.member.create",
+        "team.member.update",
+        "team.member.password_reset",
         "runtime_settings.update",
         "payment.provider.update",
         "payment.wechat.update",
@@ -121,6 +148,8 @@ SENSITIVE_EVENTS: frozenset[str] = frozenset(
         "admin.activation_code.revealed_replay",
         "external_call.response_view",
         "control.export",
+        "customer_pricing.update",
+        "zpay_settings.update",
         "billing.tariff.update",
         "operation_rate.update",
         "payment.provider.update",
@@ -146,11 +175,17 @@ _UNION_SQL = """
     SELECT aa.id, 'ADMIN_ADJUSTMENT', aa.admin_user_id, u.username,
            aa.target_user_id, aa.source_document_type, aa.source_document_ref,
            aa.reason, aa.request_id, aa.created_at::timestamptz,
-           ''::text, NULL::integer, NULL::integer, NULL::jsonb, 'admin'::text
+           ''::text, NULL::integer, NULL::integer,
+           jsonb_build_object('changes', jsonb_build_object('available_credits',
+             jsonb_build_object('before', aa.balance_before,
+                                'after', aa.balance_after))), 'admin'::text
     FROM admin_adjustments aa
     JOIN users u ON u.id = aa.admin_user_id
     UNION ALL
-    SELECT de.id, 'ADMIN_DEVICE_' || de.event, de.admin_user_id, u.username,
+    SELECT de.id, CASE de.event
+           WHEN 'DEVICE_ADMIN_UNBOUND' THEN 'ADMIN_DEVICE_UNBIND'
+           WHEN 'DEVICE_CREDENTIAL_REVOKED' THEN 'ADMIN_DEVICE_DISABLE'
+           ELSE 'ADMIN_DEVICE_' || de.event END, de.admin_user_id, u.username,
            de.target_user_id, 'DEVICE', COALESCE(de.device_id, ''),
            de.reason, de.request_id, de.created_at::timestamptz,
            ''::text, NULL::integer, NULL::integer, NULL::jsonb, 'admin'::text
@@ -171,7 +206,9 @@ _UNION_SQL = """
            COALESCE(ae.actor_user_id, ''), COALESCE(u2.username, ''),
            COALESCE(code.bound_user_id, ''), 'ACTIVATION_CODE', ae.code_id,
            COALESCE(ae.reason, ''), COALESCE(ae.request_id, ''), ae.created_at::timestamptz,
-           ''::text, NULL::integer, NULL::integer, NULL::jsonb, 'admin'::text
+           ''::text, NULL::integer, NULL::integer, NULL::jsonb,
+           CASE WHEN ae.actor_user_id IS NULL THEN 'system'
+             WHEN u2.role IN ('admin','auditor') THEN 'admin' ELSE 'customer' END
     FROM activation_code_events ae
     LEFT JOIN users u2 ON u2.id = ae.actor_user_id
     LEFT JOIN activation_codes code ON code.id = ae.code_id
@@ -187,7 +224,8 @@ _UNION_SQL = """
     UNION ALL
     SELECT al.id, al.action, COALESCE(al.actor_user_id, ''),
            COALESCE(u4.username, ''),
-           CASE WHEN al.entity_type IN ('user', 'customer_unit_price')
+            CASE WHEN al.entity_type IN
+                 ('user', 'customer_unit_price', 'customer_annotation', 'team_member')
                 THEN al.entity_id
                 WHEN u4.role NOT IN ('admin', 'auditor') THEN al.actor_user_id
                 ELSE '' END,
@@ -222,16 +260,52 @@ _UNION_SQL = """
                    THEN (al.metadata_json::jsonb ->> 'new_unit_price_fen')::integer
                ELSE NULL
            END,
-           CASE
-               WHEN al.action = 'billing.tariff.update'
+            CASE
+                WHEN al.action IN ('customer_unit_price.update', 'customer_unit_price.reset')
+                    AND jsonb_typeof(al.metadata_json::jsonb -> 'price_change') = 'object'
+                    THEN jsonb_build_object('changes', jsonb_build_object(
+                        'customer_unit_price', al.metadata_json::jsonb -> 'price_change'))
+                WHEN al.action IN ('customer_unit_price.update', 'customer_unit_price.reset')
+                    AND al.metadata_json::jsonb ? 'old_unit_price_fen'
+                    AND al.metadata_json::jsonb ? 'new_unit_price_fen'
+                    AND jsonb_typeof(al.metadata_json::jsonb -> 'old_unit_price_fen')
+                        IN ('number','null')
+                    AND jsonb_typeof(al.metadata_json::jsonb -> 'new_unit_price_fen')
+                        IN ('number','null')
+                    THEN jsonb_build_object('changes', jsonb_build_object('customer_unit_price',
+                        jsonb_build_object(
+                            'before', jsonb_build_object(
+                                'mode', CASE
+                                    WHEN jsonb_typeof(
+                                        al.metadata_json::jsonb -> 'old_unit_price_fen')='null'
+                                    THEN 'DEFAULT' ELSE 'CUSTOM' END,
+                                'custom_unit_price_fen',
+                                al.metadata_json::jsonb -> 'old_unit_price_fen',
+                                'effective_unit_price_fen',
+                                al.metadata_json::jsonb -> 'old_unit_price_fen'),
+                            'after', jsonb_build_object(
+                                'mode', CASE
+                                    WHEN jsonb_typeof(
+                                        al.metadata_json::jsonb -> 'new_unit_price_fen')='null'
+                                    THEN 'DEFAULT' ELSE 'CUSTOM' END,
+                                'custom_unit_price_fen',
+                                al.metadata_json::jsonb -> 'new_unit_price_fen',
+                                'effective_unit_price_fen',
+                                al.metadata_json::jsonb -> 'new_unit_price_fen'))))
+                WHEN al.action = 'billing.tariff.update'
                    THEN jsonb_build_object(
                        'old', al.metadata_json::jsonb -> 'old',
-                       'new', al.metadata_json::jsonb -> 'new'
-                   )
-               ELSE NULL
+                        'new', al.metadata_json::jsonb -> 'new'
+                    )
+                WHEN al.action = 'viral_runtime.update'
+                    THEN jsonb_build_object('changes', al.metadata_json::jsonb -> 'changes')
+               ELSE jsonb_build_object('metadata',al.metadata_json::jsonb,
+                    'old',al.metadata_json::jsonb -> 'old',
+                    'new',al.metadata_json::jsonb -> 'new',
+                    'changes',al.metadata_json::jsonb -> 'changes')
            END,
-           CASE WHEN al.actor_user_id IS NULL OR u4.role IN ('admin', 'auditor')
-                THEN 'admin' ELSE 'customer' END
+           CASE WHEN al.actor_user_id IS NULL THEN 'system'
+                WHEN u4.role IN ('admin', 'auditor') THEN 'admin' ELSE 'customer' END
     FROM audit_logs al
     LEFT JOIN users u4 ON u4.id = al.actor_user_id
 """
@@ -299,15 +373,15 @@ def export_audit_log_csv(
         clauses.append("ev.actor_username ILIKE %s")
         params.append(f"%{actor_username}%")
     if target_username:
-        clauses.append("tu.username ILIKE %s")
-        params.append(f"%{target_username}%")
+        clauses.append("(tu.username ILIKE %s OR tu.display_name ILIKE %s)")
+        params.extend([f"%{target_username}%"] * 2)
     append_admin_date_filters(
         clauses, params, column="ev.created_at", created_from=created_from, created_to=created_to
     )
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
     try:
-        with pg_transaction() as conn:
+        with pg_transaction(isolation="REPEATABLE READ") as conn:
             decision = consume_rate_limit(
                 conn,
                 dimension=DIMENSION_CONTROL_EXPORT_ACCOUNT,
@@ -352,7 +426,8 @@ def export_audit_log_csv(
                 SELECT ev.event_type, ev.created_at, ev.actor_username,
                        COALESCE(tu.username, '') AS target_username,
                        ev.source_document_type, ev.source_document_ref,
-                       ev.reason
+                       ev.reason,ev.change_subject,ev.old_unit_price_fen,
+                       ev.new_unit_price_fen,ev.change_detail,COALESCE(tu.display_name,'')
                 FROM ({_UNION_SQL}) AS ev(event_id, event_type, actor_user_id,
                                           actor_username, target_user_id,
                                           source_document_type,
@@ -382,10 +457,37 @@ def export_audit_log_csv(
             "source_document_type",
             "source_document_ref",
             "reason",
+            "event_label",
+            "event_group_label",
+            "target_label",
+            "change_summary",
+            "sensitive",
         ]
     )
     for row in rows:
-        writer.writerow([spreadsheet_safe_cell(str(value)) for value in row])
+        fields = audit_business_fields(
+            {
+                "event_type": str(row[0]),
+                "source_document_type": str(row[4]),
+                "source_document_ref": str(row[5]),
+                "target_username": str(row[3]),
+                "change_subject": row[7],
+                "old_unit_price_fen": row[8],
+                "new_unit_price_fen": row[9],
+                "change_detail": row[10],
+                "target_company_name": row[11],
+            },
+            EVENT_GROUPS,
+        )
+        business_row = (
+            *row[:7],
+            fields["event_label"],
+            fields["event_group_label"],
+            fields["target_label"],
+            fields["change_summary"],
+            _is_sensitive(str(row[0]), str(row[4])) or fields["negative_adjustment"],
+        )
+        writer.writerow([spreadsheet_safe_cell(str(value)) for value in business_row])
     payload = buffer.getvalue().encode("utf-8")
     return HttpResponse(
         content=payload,
@@ -450,15 +552,15 @@ def list_audit_log(
         clauses.append("ev.actor_username ILIKE %s")
         params.append(f"%{actor_username}%")
     if target_username:
-        clauses.append("tu.username ILIKE %s")
-        params.append(f"%{target_username}%")
+        clauses.append("(tu.username ILIKE %s OR tu.display_name ILIKE %s)")
+        params.extend([f"%{target_username}%"] * 2)
     append_admin_date_filters(
         clauses, params, column="ev.created_at", created_from=created_from, created_to=created_to
     )
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
 
     try:
-        with pg_transaction() as conn:
+        with pg_transaction(isolation="REPEATABLE READ") as conn:
             rows = conn.execute(
                 f"""
                 SELECT ev.event_id, ev.event_type, ev.actor_user_id,
@@ -467,7 +569,7 @@ def list_audit_log(
                        ev.source_document_type, ev.source_document_ref,
                        ev.reason, ev.request_id, ev.created_at,
                        ev.change_subject, ev.old_unit_price_fen,
-                       ev.new_unit_price_fen, ev.change_detail
+                       ev.new_unit_price_fen, ev.change_detail,COALESCE(tu.display_name,'')
                 FROM ({_UNION_SQL}) AS ev(event_id, event_type, actor_user_id,
                                           actor_username, target_user_id,
                                           source_document_type,
@@ -532,9 +634,16 @@ def list_audit_log(
             "new_unit_price_fen": int(row[13]) if row[13] is not None else None,
             "change_detail": row[14] if row[14] is not None else None,
             "sensitive": _is_sensitive(str(row[1]), str(row[6])),
+            "target_company_name": str(row[15]),
         }
         for row in rows
     ]
+
+    for item in items:
+        business = audit_business_fields(item, EVENT_GROUPS)
+        item.update(business)
+        item["sensitive"] = bool(item["sensitive"] or business["negative_adjustment"])
+        item.pop("negative_adjustment", None)
 
     total = int(total_row[0]) if total_row is not None else 0
 

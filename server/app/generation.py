@@ -40,6 +40,8 @@ from app.external_calls import (
     external_call_model,
     parse_provider_error,
     recorded_urlopen,
+    redact_text,
+    summarize_provider_message,
 )
 from app.first_frames import (
     FirstFrameQualityInspector,
@@ -552,12 +554,13 @@ class UrllibMetasoHttpTransport:
                 timeout=self.timeout_seconds,
                 provider="metaso",
                 endpoint=endpoint_from_url(url),
+                expected_json=True,
             )
             return response_body
         except HTTPError as exc:
             detail = ""
             try:
-                detail = exc.read()[:1000].decode("utf-8", "replace")
+                detail = redact_text(exc.read().decode("utf-8", "replace"))[:1000]
             except OSError:
                 pass
             logger.warning("H3 provider request failed with HTTP status %s: %s", exc.code, detail)
@@ -5553,7 +5556,7 @@ def reschedule_generation_poll(
             END,
             error_message_redacted = CASE
                 WHEN current_task.timed_out
-                THEN 'Provider task exceeded the automatic polling window.'
+                THEN '生成超过自动核对时限，请人工确认任务结果后再处理。'
                 ELSE task.error_message_redacted
             END,
             next_poll_at = CASE
@@ -5806,6 +5809,7 @@ def mark_task_provider_failed(
     provider_task_id: str | None,
     provider_reason: str | None = None,
 ) -> None:
+    provider_reason = summarize_provider_message(provider_reason)
     task_id = str(lease["id"])
     batch_id = str(lease["batch_id"])
     message = (

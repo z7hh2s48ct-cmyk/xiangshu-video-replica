@@ -587,6 +587,118 @@ function wechatStatisticsPayload() {
 }
 
 describe("V1.4 内容与运营页面", () => {
+  it("首页到期先移出，重新读取失败也不会保留旧条目", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2026-10-01T12:00:00Z"));
+    try {
+      // 客户本机时钟比服务器快1小时，排期仍按服务器窗口。
+      listViralVideos
+        .mockResolvedValueOnce({
+          items: [
+            viralItem(1, {
+              title: "到期专题",
+              homepageEndsAt: "2026-10-01T11:00:02Z",
+            }),
+          ],
+          serverTime: "2026-10-01T11:00:00Z",
+          nextChangeAt: "2026-10-01T11:00:02Z",
+        })
+        .mockRejectedValue(new Error("离线"));
+      const base = studio();
+      render(
+        <StatefulViralPage
+          value={studio({ review: false, data: { ...base.data, videos: [] } })}
+        />,
+      );
+      await screen.findByText("到期专题");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(screen.getByText("到期专题")).toBeInTheDocument();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_050);
+      });
+      expect(screen.queryByText("到期专题")).toBeNull();
+      expect(listViralVideos).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("当前页面为空时也按下一上线边界重新读取", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2026-10-01T12:00:00Z"));
+    try {
+      listViralVideos
+        .mockResolvedValueOnce({
+          items: [],
+          serverTime: "2026-10-01T12:00:00Z",
+          nextChangeAt: "2026-10-01T12:00:02Z",
+        })
+        .mockResolvedValue({ items: [viralItem(2, { title: "新上线专题" })] });
+      const base = studio();
+      render(
+        <StatefulViralPage
+          value={studio({ review: false, data: { ...base.data, videos: [] } })}
+        />,
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(50);
+      });
+      expect(screen.queryByText("新上线专题")).toBeNull();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_050);
+      });
+      expect(screen.getByText("新上线专题")).toBeInTheDocument();
+      expect(listViralVideos).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("默认首页保留低赞置首与跨页同序结果，不再二次按点赞排序", async () => {
+    const base = studio();
+    const first = base.data.videos[0];
+    listViralVideos.mockReturnValue(new Promise(() => {}));
+    const value = studio({
+      review: false,
+      data: {
+        ...base.data,
+        videos: [
+          {
+            ...first,
+            id: "rank-low",
+            title: "编排首位低赞",
+            likes: 1,
+            homepageRank: 1,
+            homepageFeatured: true,
+          },
+          {
+            ...first,
+            id: "rank-high",
+            title: "编排次位高赞",
+            likes: 999,
+            homepageRank: 2,
+            homepageFeatured: true,
+          },
+          {
+            ...first,
+            id: "rank-tie",
+            title: "服务端同序后条",
+            likes: 1000,
+            homepageRank: 2,
+            homepageFeatured: true,
+          },
+        ],
+      },
+    });
+    render(<StatefulViralPage value={value} />);
+    const names = screen
+      .getAllByText(/编排首位低赞|编排次位高赞|服务端同序后条/)
+      .map((x) => x.textContent);
+    expect(names).toEqual(["编排首位低赞", "编排次位高赞", "服务端同序后条"]);
+  });
+
   beforeEach(() => {
     window.sessionStorage.clear();
     useStudio.mockReset();

@@ -10,6 +10,7 @@ from typing import Any, cast
 from fastapi import APIRouter, HTTPException
 
 from app.admin_auth_routes import AdminReader
+from app.admin_cash_evidence import CASH_ORDER_ELIGIBLE, NONCASH_ADJUSTMENT, OFFLINE_CASH_EVIDENCE
 from app.billing_catalog import SERVICES
 from app.billing_reports import UNMETERED_DELIVERED_CHARGE, date_bounds, statistics
 from app.db_pg import pg_transaction
@@ -291,12 +292,13 @@ def _recharge_metrics(conn: Any, *, lower: Any, upper: Any) -> dict[str, int]:
     新增付费 = 全历史首笔实付落在本区间的客户，所以子查询不能只看区间内行。
     """
     row = conn.execute(
-        """
+        f"""
         WITH paid AS (
             SELECT user_id, amount_fen,
                    (paid_at::timestamp AT TIME ZONE 'UTC') AS paid_utc
-            FROM recharge_orders
-            WHERE status = 'PAID' AND paid_at IS NOT NULL
+            FROM recharge_orders ro
+            WHERE status = 'PAID' AND paid_at IS NOT NULL AND amount_fen > 0
+              AND {CASH_ORDER_ELIGIBLE}
         )
         SELECT COALESCE(SUM(amount_fen), 0) AS recharge_fen,
                COUNT(DISTINCT user_id) AS paying_customers,
@@ -329,7 +331,8 @@ def _consumption_facts(conn: Any, *, lower: Any, upper: Any) -> list[dict[str, A
                COALESCE(SUM(revenue_fen), 0) AS revenue_fen,
                COALESCE(SUM(known_cost), 0) AS known_cost_fen,
                COUNT(*) FILTER (WHERE unknown_cost > 0) AS unknown_cost_count,
-               COUNT(*) FILTER (WHERE state = 'PENDING') AS pending_count
+               COUNT(*) FILTER (WHERE state = 'PENDING') AS pending_count,
+               COUNT(*) FILTER (WHERE revenue_fen IS NULL) AS unknown_revenue_count
         FROM facts
         GROUP BY service
         ORDER BY COALESCE(SUM(revenue_fen), 0) DESC,
@@ -349,6 +352,7 @@ def _consumption_facts(conn: Any, *, lower: Any, upper: Any) -> list[dict[str, A
                 "cost_fen": float(row["known_cost_fen"] or 0),
                 "unknown_cost_count": int(row["unknown_cost_count"] or 0),
                 "pending_count": int(row["pending_count"] or 0),
+                "unknown_revenue_count": int(row["unknown_revenue_count"] or 0),
             }
         )
     return result
@@ -512,11 +516,24 @@ def business_overview(start: date, end: date, _actor: AdminReader) -> dict[str, 
             business_conn, since=prev_upper
         )
         economics = statistics(business_conn, start=start, end=end, grain="day")
+        prev_economics = statistics(business_conn, start=prev_start, end=prev_end, grain="day")
         daily = [
             {
                 "day": item["period"],
                 "revenue_fen": _number_or_none(item.get("revenue_fen")),
                 "cost_fen": _number_or_none(item.get("cost_fen")),
+                "known_revenue_fen": _number_or_none(item.get("known_revenue_fen")),
+                "known_cost_fen": _number_or_none(item.get("known_cost_fen")),
+                "margin_pct": (
+                    None
+                    if item.get("profit_margin") is None
+                    else float(item["profit_margin"] * 100)
+                ),
+                "unknown_cost_count": item.get("unknown_cost_count", 0),
+                "unknown_revenue_count": item.get("unknown_revenue_count", 0),
+                "pending_count": item.get("pending_count", 0),
+                "legacy_cost_count": item.get("legacy_cost_count", 0),
+                "legacy_settlement_count": item.get("legacy_settlement_count", 0),
             }
             for item in economics["periods"]
         ]
@@ -527,10 +544,35 @@ def business_overview(start: date, end: date, _actor: AdminReader) -> dict[str, 
             "cost_fen": float(sum(Decimal(str(m["cost_fen"])) for m in modules)),
             "unknown_cost_count": sum(m["unknown_cost_count"] for m in modules),
             "pending_count": sum(m["pending_count"] for m in modules),
+            "unknown_revenue_count": sum(m["unknown_revenue_count"] for m in modules),
         }
 
     cur_totals = _consumption_totals(cur_modules)
     prev_totals = _consumption_totals(prev_modules)
+    for totals, source in ((cur_totals, economics), (prev_totals, prev_economics)):
+        totals["legacy_cost_count"] = source["totals"].get("legacy_cost_count", 0)
+        totals["legacy_settlement_count"] = source["totals"].get("legacy_settlement_count", 0)
+    for totals in (cur_totals, prev_totals):
+        complete = not any(
+            totals[k]
+            for k in (
+                "unknown_cost_count",
+                "unknown_revenue_count",
+                "pending_count",
+                "legacy_cost_count",
+                "legacy_settlement_count",
+            )
+        )
+        totals["gross_fen"] = (
+            float(Decimal(str(totals["revenue_fen"])) - Decimal(str(totals["cost_fen"])))
+            if complete
+            else None
+        )
+        totals["margin_pct"] = (
+            float(Decimal(str(totals["gross_fen"])) / Decimal(str(totals["revenue_fen"])) * 100)
+            if complete and totals["revenue_fen"] > 0
+            else None
+        )
     return {
         "start": start.isoformat(),
         "end": end.isoformat(),
@@ -567,27 +609,39 @@ def funds_summary(start: date, end: date, _actor: AdminReader) -> dict[str, Any]
         # 命名行访问统一走 BusinessConnection 包装（见 business_overview 注释）。
         business_conn = BusinessConnection.postgres(conn)
         rows = business_conn.execute(
-            """
-            SELECT provider, COUNT(*) AS orders, COALESCE(SUM(amount_fen), 0) AS amount_fen
-            FROM recharge_orders
-            WHERE status = 'PAID' AND paid_at IS NOT NULL
+            f"""
+            SELECT provider, CASE WHEN {OFFLINE_CASH_EVIDENCE} THEN 'offline'
+              ELSE payment_method END AS payment_method, COUNT(*) AS orders,
+                   COALESCE(SUM(amount_fen), 0) AS amount_fen
+            FROM recharge_orders ro
+            WHERE status = 'PAID' AND paid_at IS NOT NULL AND amount_fen > 0
+              AND {CASH_ORDER_ELIGIBLE}
               AND (paid_at::timestamp AT TIME ZONE 'UTC') >= %s
               AND (paid_at::timestamp AT TIME ZONE 'UTC') < %s
-            GROUP BY provider
+            GROUP BY provider, 2
             """,
             (lower, upper),
         ).fetchall()
         free_row = business_conn.execute(
-            """
+            f"""
             SELECT COALESCE(SUM(credits), 0)
-            FROM recharge_orders
-            WHERE status = 'PAID' AND provider = 'admin_adjustment' AND amount_fen = 0
+            FROM recharge_orders ro
+            WHERE status = 'PAID' AND provider = 'admin_adjustment'
+              AND (amount_fen = 0 OR {NONCASH_ADJUSTMENT})
               AND (paid_at::timestamp AT TIME ZONE 'UTC') >= %s
               AND (paid_at::timestamp AT TIME ZONE 'UTC') < %s
             """,
             (lower, upper),
         ).fetchone()
         assert free_row is not None
+        unverified = business_conn.execute(
+            f"""SELECT COUNT(*), COALESCE(SUM(amount_fen),0) FROM recharge_orders ro
+            WHERE provider='admin_adjustment' AND status='PAID' AND amount_fen>0
+              AND NOT ({CASH_ORDER_ELIGIBLE}) AND NOT ({NONCASH_ADJUSTMENT})
+              AND paid_at::timestamp AT TIME ZONE 'UTC'>=%s
+              AND paid_at::timestamp AT TIME ZONE 'UTC'<%s""",
+            (lower, upper),
+        ).fetchone()
         refund_row = business_conn.execute(
             """
             SELECT COALESCE(SUM(-t.available_delta), 0)
@@ -612,19 +666,35 @@ def funds_summary(start: date, end: date, _actor: AdminReader) -> dict[str, Any]
             )
         )
 
-    by_channel: list[dict[str, Any]] = [
+    physical_channels: list[dict[str, Any]] = [
         {
             "provider": str(item["provider"]),
+            "method": (
+                item["payment_method"]
+                if item["payment_method"] in {"alipay", "wxpay", "offline"}
+                else "unknown"
+            ),
             "orders": int(item["orders"]),
             "amount_fen": int(item["amount_fen"]),
         }
         for item in (cast(dict[str, Any], dict(row)) for row in rows)
     ]
-    recharge_fen = sum(item["amount_fen"] for item in by_channel)
+    # 通道承担多种支付方式；只使用支付核验后持久化的实际 payment_method，缺失即未知。
+    method_totals: dict[str, dict[str, Any]] = {}
+    provider_totals: dict[str, dict[str, Any]] = {}
+    for item in physical_channels:
+        for key, field, target in (
+            (item["method"], "method", method_totals),
+            (item["provider"], "provider", provider_totals),
+        ):
+            group = target.setdefault(key, {field: key, "orders": 0, "amount_fen": 0})
+            group["orders"] += item["orders"]
+            group["amount_fen"] += item["amount_fen"]
+    by_channel = list(provider_totals.values())
+    by_method = sorted(method_totals.values(), key=lambda item: item["method"])
+    recharge_fen = sum(item["amount_fen"] for item in by_method)
     # 线下收款 = 管理员代开的已收款套餐（金额 > 0）；金额为 0 的同渠道行是赠送。
-    offline_fen = sum(
-        item["amount_fen"] for item in by_channel if item["provider"] == "admin_adjustment"
-    )
+    offline_fen = sum(item["amount_fen"] for item in by_method if item["method"] == "offline")
     grant_credits = int(free_row[0] or 0)
     refund_credits = int(refund_row[0] or 0)
     refund_fen = _fen(refund_credits)
@@ -640,6 +710,9 @@ def funds_summary(start: date, end: date, _actor: AdminReader) -> dict[str, Any]
         # 净收入 = 充值实收 − 退款扣减；兑换比例未配置时退款只有积分数。
         "net_fen": None if refund_fen is None else recharge_fen - refund_fen,
         "by_channel": by_channel,
+        "by_method": by_method,
+        "unverified_manual_orders": int(unverified[0]) if unverified else 0,
+        "unverified_manual_fen": int(unverified[1]) if unverified else 0,
         "prepaid_credits": available_credits + reserved_credits,
         "prepaid_fen": _fen(available_credits + reserved_credits),
         "reconciliation_problems": problems,

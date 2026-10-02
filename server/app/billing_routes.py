@@ -117,8 +117,28 @@ class TariffUpdate(AdminWriteContract):
 
 def admin_catalog_response(conn: BusinessConnection) -> dict[str, Any]:
     version, pricing = read_pricing(conn)
+    services = catalog(conn, admin=True)
+    for service in services:
+        tariff = service["tariff"]
+        credits = tariff["unit_credits"]
+        unit_price = (
+            Decimal(str(credits)) * 100 / Decimal(pricing.points_per_yuan)
+            if credits is not None and pricing is not None
+            else None
+        )
+        cost = tariff["unit_cost_fen"]
+        service["unit_price_fen"] = str(unit_price) if unit_price is not None else None
+        service["gross_margin_percent"] = (
+            str((unit_price - Decimal(str(cost))) / unit_price * 100)
+            if tariff["enabled"]
+            and service["customer_charge_allowed"]
+            and unit_price is not None
+            and unit_price > 0
+            and cost is not None
+            else None
+        )
     return {
-        "services": catalog(conn, admin=True),
+        "services": services,
         "pricing": {
             "version": version,
             "points_per_yuan": pricing.points_per_yuan if pricing else None,
@@ -452,10 +472,12 @@ def source_actions(
     start: date,
     end: date,
     user_id: str | None = None,
+    username: str | None = None,
     service: str | None = None,
     module: str | None = None,
     provider: str | None = None,
     platform: bool = False,
+    attention: Literal["pending", "unknown_cost"] | None = None,
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
@@ -466,10 +488,12 @@ def source_actions(
             start=start,
             end=end,
             user_id=user_id,
+            username=username,
             service=service,
             module=module,
             provider=provider,
             platform=platform,
+            attention=attention,
             limit=limit,
             offset=offset,
         )
@@ -506,9 +530,11 @@ def export(
     start: date,
     end: date,
     user_id: str | None = None,
+    username: str | None = None,
     service: str | None = None,
     module: str | None = None,
     provider: str | None = None,
+    attention: Literal["pending", "unknown_cost"] | None = None,
 ) -> Response:
     with pg_transaction() as raw:
         rows = operation_rows(
@@ -516,9 +542,11 @@ def export(
             start=start,
             end=end,
             user_id=user_id,
+            username=username,
             service=service,
             module=module,
             provider=provider,
+            attention=attention,
             limit=5000,
         )
     buffer = io.StringIO()

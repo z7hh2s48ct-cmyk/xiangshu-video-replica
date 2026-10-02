@@ -1,19 +1,27 @@
 import { useEffect, useState } from "react";
 
 import { type FundsSummary, getFundsSummary } from "../api";
+import { SummaryReportExport } from "./SummaryReportExport";
 import { formatFen } from "./ui/vocabulary";
 
-/** 渠道值 → 中性支付方式名（与收款订单页同一套业务词）。 */
-function channelLabel(provider: string): string {
-  const labels: Record<string, string> = {
-    zpay: "支付宝",
-    wechat_native: "微信",
-    activation_code: "激活码",
-    admin_adjustment: "线下转账",
+const methodLabel = (method: string) =>
+  ({
+    alipay: "支付宝",
+    wxpay: "微信",
+    offline: "线下转账",
+    unknown: "支付方式未知",
+  })[method as "alipay"] ?? "支付方式未知";
+function monthRange(month: string) {
+  const year = Number(month.slice(0, 4)),
+    number = Number(month.slice(5, 7));
+  return {
+    start: `${month}-01`,
+    end:
+      month === shanghaiToday().slice(0, 7)
+        ? shanghaiToday()
+        : `${month}-${String(new Date(Date.UTC(year, number, 0)).getUTCDate()).padStart(2, "0")}`,
   };
-  return labels[provider] ?? provider;
 }
-
 function shanghaiToday(): string {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Shanghai",
@@ -27,9 +35,20 @@ function shanghaiToday(): string {
  *  预收余额与对账异常是时点数，两张卡单独展示；点对账异常跳异常清单。 */
 export function FundsOverview({
   onOpenReconciliation,
+  readOnly = false,
+  selectedMonth,
+  onMonthChange,
 }: {
   onOpenReconciliation: () => void;
+  readOnly?: boolean;
+  selectedMonth?: string;
+  onMonthChange?: (month: string) => void;
 }) {
+  const [localMonth, setLocalMonth] = useState(() =>
+    shanghaiToday().slice(0, 7),
+  );
+  const month = selectedMonth ?? localMonth;
+  const range = monthRange(month);
   const [todaySummary, setTodaySummary] = useState<FundsSummary>();
   const [monthSummary, setMonthSummary] = useState<FundsSummary>();
   const [error, setError] = useState("");
@@ -38,12 +57,14 @@ export function FundsOverview({
   useEffect(() => {
     let active = true;
     const today = shanghaiToday();
-    const monthStart = `${today.slice(0, 7)}-01`;
+
     setBusy(true);
     setError("");
+    setMonthSummary(undefined);
+    setTodaySummary(undefined);
     void Promise.all([
       getFundsSummary(today, today),
-      getFundsSummary(monthStart, today),
+      getFundsSummary(range.start, range.end),
     ])
       .then(([todayResult, monthResult]) => {
         if (active) {
@@ -61,7 +82,7 @@ export function FundsOverview({
     return () => {
       active = false;
     };
-  }, []);
+  }, [range.start, range.end]);
 
   const rows: { label: string; today: string; month: string; hint?: string }[] =
     [];
@@ -87,28 +108,52 @@ export function FundsOverview({
         label: "退款扣减",
         today:
           todaySummary.refund_fen === null
-            ? `${todaySummary.refund_credits} 积分`
+            ? `${todaySummary.refund_credits} 积分（金额待核对）`
             : `${formatFen(todaySummary.refund_fen)}`,
         month:
           monthSummary.refund_fen === null
-            ? `${monthSummary.refund_credits} 积分`
+            ? `${monthSummary.refund_credits} 积分（金额待核对）`
             : `${formatFen(monthSummary.refund_fen)}`,
       },
       {
         label: "净收入",
         today:
-          todaySummary.net_fen === null ? "—" : formatFen(todaySummary.net_fen),
+          todaySummary.net_fen === null
+            ? "待核对"
+            : formatFen(todaySummary.net_fen),
         month:
-          monthSummary.net_fen === null ? "—" : formatFen(monthSummary.net_fen),
+          monthSummary.net_fen === null
+            ? "待核对"
+            : formatFen(monthSummary.net_fen),
         hint: "充值实收 − 退款扣减",
       },
     );
   }
 
-  const channels = monthSummary?.by_channel ?? [];
+  const channels = monthSummary?.by_method ?? [];
 
   return (
-    <section className="admin-panel" aria-label="资金概览">
+    <section className="admin-panel funds-overview" aria-label="资金概览">
+      <label className="funds-month-filter">
+        资金报表月份{" "}
+        <input
+          type="month"
+          aria-label="资金报表月份"
+          value={month}
+          max={shanghaiToday().slice(0, 7)}
+          onChange={(event) => {
+            const next = event.target.value;
+            if (/^\d{4}-(0[1-9]|1[0-2])$/.test(next)) {
+              setLocalMonth(next);
+              onMonthChange?.(next);
+            }
+          }}
+        />
+      </label>
+      <p className="admin-hint">
+        所选月份范围 {range.start} 至 {range.end}
+        （北京时间）；今日单独对照。时点数据取当前余额与异常。
+      </p>
       {error && <p role="alert">{error}</p>}
       {busy && <p role="status">正在计算…</p>}
       {todaySummary && monthSummary && (
@@ -119,7 +164,7 @@ export function FundsOverview({
                 <tr>
                   <th>指标</th>
                   <th>今日</th>
-                  <th>本月至今</th>
+                  <th>所选月份 {month}</th>
                 </tr>
               </thead>
               <tbody>
@@ -157,9 +202,16 @@ export function FundsOverview({
               </button>
             </article>
           </div>
-          <h3>支付方式分布（本月）</h3>
+          <h3>支付方式分布（{month}）</h3>
+          {(monthSummary.unverified_manual_orders ?? 0) > 0 && (
+            <p className="admin-hint">
+              历史人工订单 {monthSummary.unverified_manual_orders} 笔，记录金额{" "}
+              {formatFen(monthSummary.unverified_manual_fen ?? 0)}{" "}
+              待核对，未计入实收或线下收款。补偿/赠送积分不产生收款。
+            </p>
+          )}
           {channels.length === 0 ? (
-            <p>本月暂无收款。</p>
+            <p>所选月份暂无已知支付方式的收款；缺失方式显示为未知。</p>
           ) : (
             <div className="admin-table-scroll">
               <table className="admin-data-table" aria-label="支付方式分布">
@@ -172,8 +224,8 @@ export function FundsOverview({
                 </thead>
                 <tbody>
                   {channels.map((channel) => (
-                    <tr key={channel.provider}>
-                      <td>{channelLabel(channel.provider)}</td>
+                    <tr key={channel.method}>
+                      <td>{methodLabel(channel.method)}</td>
                       <td>{channel.orders}</td>
                       <td>{formatFen(channel.amount_fen)}</td>
                     </tr>
@@ -183,6 +235,13 @@ export function FundsOverview({
             </div>
           )}
         </>
+      )}
+      {!readOnly && (
+        <SummaryReportExport
+          kind="funds"
+          range={range}
+          disabled={busy || !monthSummary || Boolean(error)}
+        />
       )}
     </section>
   );

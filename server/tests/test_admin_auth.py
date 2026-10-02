@@ -1438,11 +1438,14 @@ def test_customer_production_ledger_csv_exports_deny_auditors(
 @pytestmark_pg
 def test_customer_production_control_settings_writes_require_admin_write_contract(
     customer_production_control_client: TestClient,
+    clean_sessions: str,
     method: str,
     path: str,
     payload: dict[str, object],
 ) -> None:
     client = customer_production_control_client
+    with psycopg.connect(clean_sessions) as conn:
+        conn.execute("UPDATE users SET is_super_admin=1 WHERE id='admin_u'")
     exchange = password_admin_session(client, "admin_u")
     assert exchange.status_code == 201, exchange.text
     headers = {ADMIN_CSRF_HEADER: exchange.json()["csrf_token"]}
@@ -1474,6 +1477,54 @@ def test_customer_production_control_settings_writes_require_admin_write_contrac
     assert blank_reason.status_code == 400
     assert blank_reason.json()["detail"]["code"] == "REASON_REQUIRED"
 
+    valid_payload = dict(payload)
+    if path.endswith("/runtime"):
+        valid_payload["max_generation_count_per_batch"] = 7
+    if path.endswith("/billing"):
+        valid_payload["internal_base_unit_price_fen"] = 500
+    accepted = client.request(
+        method,
+        path,
+        headers={**headers, "Idempotency-Key": f"business-snapshot-{method}-{path}"},
+        json={**valid_payload, "confirm": True, "reason": "合成配置快照核对"},
+    )
+    assert accepted.status_code == 200, accepted.text
+    with psycopg.connect(clean_sessions) as conn:
+        row = conn.execute(
+            "SELECT metadata_json FROM audit_logs WHERE actor_user_id='admin_u' "
+            "AND metadata_json::jsonb ->> 'reason' = %s",
+            ("合成配置快照核对",),
+        ).fetchone()
+    assert row is not None
+    metadata = json.loads(str(row[0]))
+    changes = metadata["changes"]
+    if path.endswith("/runtime"):
+        assert changes["max_generation_count_per_batch"]["after"] == 7
+        assert changes["max_generation_count_per_batch"]["before"] is not None
+    elif path.endswith("/billing"):
+        assert changes["internal_base_unit_price_fen"]["after"] == 500
+        assert "before" in changes["internal_base_unit_price_fen"]
+    elif path.endswith("/zpay"):
+        assert changes["enabled_channels"]["after"] == ["alipay"]
+        assert "merchant-secret" not in str(metadata)
+    else:
+        assert changes["api_key_state"]["after"] in {"已配置", "已更新"}
+        assert "metaso-secret" not in str(metadata)
+    # This module shares its database; retain the later replay test's own scope.
+    from app.admin_write_contract import idempotency_key_digest
+
+    with psycopg.connect(clean_sessions) as conn:
+        conn.execute(
+            "DELETE FROM admin_write_idempotency WHERE actor_user_id='admin_u' "
+            "AND route = %s AND idempotency_key_digest = %s",
+            (f"{method} {path}", idempotency_key_digest(f"business-snapshot-{method}-{path}")),
+        )
+        conn.execute(
+            "DELETE FROM audit_logs WHERE actor_user_id='admin_u' "
+            "AND metadata_json::jsonb ->> 'reason' = %s",
+            ("合成配置快照核对",),
+        )
+
 
 @pytestmark_pg
 def test_customer_production_control_runtime_write_replays_and_conflicts_by_idempotency_key(
@@ -1481,6 +1532,8 @@ def test_customer_production_control_runtime_write_replays_and_conflicts_by_idem
     clean_sessions: str,
 ) -> None:
     client = customer_production_control_client
+    with psycopg.connect(clean_sessions) as conn:
+        conn.execute("UPDATE users SET is_super_admin=1 WHERE id='admin_u'")
     exchange = password_admin_session(client, "admin_u")
     assert exchange.status_code == 201, exchange.text
     headers = {

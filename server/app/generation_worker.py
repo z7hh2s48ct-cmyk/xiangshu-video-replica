@@ -1096,6 +1096,7 @@ def _run_pg_generation_step(
                         conn,
                         lease=lease,
                         provider_task_id=provider_task_id,
+                        provider_reason=exc.provider_reason or str(exc),
                     )
                 else:
                     reschedule_generation_poll(conn, lease=lease, delay_seconds=15)
@@ -1111,6 +1112,7 @@ def _run_pg_generation_step(
                     conn,
                     lease=lease,
                     provider_task_id=provider_task_id,
+                    provider_reason=query.failure_reason,
                 )
             return
         if query.result_url is None:
@@ -1844,11 +1846,16 @@ def run_pg_collection_once(*, worker_id: str, storage: StorageAdapter) -> int:
     3. 消费一个在队任务（关键词采集 / admin 单条归档 / 失败重试）。
     供应商成本仍由 ``meter_call`` 记平台单；客户侧按共享账单批次快照价扣分。
     """
+    from app.admin_viral_collection_records import recover_interrupted_search_records
     from app.viral_collection import enqueue_due_viral_collections
     from app.viral_collection_billing import settle_collection_charges
+    from app.viral_content_observations import observe_due_homepages
 
     with pg_transaction() as raw:
-        enqueue_due_viral_collections(BusinessConnection.postgres(raw))
+        business_conn = BusinessConnection.postgres(raw)
+        recover_interrupted_search_records(business_conn)
+        observe_due_homepages(business_conn)
+        enqueue_due_viral_collections(business_conn)
     settle_collection_charges()
     with pg_transaction() as raw:
         lease = acquire_viral_refresh_task(BusinessConnection.postgres(raw), worker_id=worker_id)

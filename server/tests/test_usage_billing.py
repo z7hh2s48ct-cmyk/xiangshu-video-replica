@@ -1,6 +1,8 @@
 """Itemized prices and settlement: real PostgreSQL, no paid provider calls."""
 
 # ruff: noqa: F811
+import csv
+import io
 import json
 from datetime import date
 from decimal import Decimal
@@ -21,6 +23,193 @@ from app.billing_catalog import SERVICES, Tariff, calculate_credits
 from app.billing_reports import date_bounds, operation_rows, statistics
 from app.db_portable import BusinessConnection
 from app.usage_billing import accept_operation, finish_operation, record_attempt
+
+
+def test_panorama_name_and_stable_id_filter_match_operations(pricing_client, route_state):
+    from app.billing_routes import router
+
+    pricing_client.app.include_router(router)
+    _, uid = account(pricing_client)
+    other = "panorama-other"
+    with psycopg.connect(route_state) as raw:
+        raw.execute("UPDATE users SET display_name='精准A公司' WHERE id=%s", (uid,))
+        raw.execute(
+            "INSERT INTO users(id,username,display_name,role) "
+            "VALUES (%s,'same-ab','精准B公司','user')",
+            (other,),
+        )
+        raw.execute(
+            "INSERT INTO wallets(user_id,available_credits,reserved_credits) VALUES (%s,100,0)",
+            (other,),
+        )
+        raw.execute("UPDATE wallets SET available_credits=100 WHERE user_id=%s", (uid,))
+        conn = BusinessConnection.postgres(raw)
+        for owner in [uid, other]:
+            accept_operation(
+                conn, user_id=owner, service="analysis", source_id="same-action", units=1
+            )
+    admin = admin_login(pricing_client, route_state)
+    for name, expected in [("精准A公司", uid), ("精准B公司", other)]:
+        params = {"start": "2000-01-01", "end": "2099-01-01", "username": name}
+        details = pricing_client.get(
+            "/api/control/billing/operations", headers=admin, params=params
+        )
+        panorama = pricing_client.get(
+            "/api/control/billing/source-actions", headers=admin, params=params
+        )
+        assert details.status_code == panorama.status_code == 200
+        assert {row["user_id"] for row in details.json()["items"]} == {expected}
+        assert {row["user_id"] for row in panorama.json()["items"]} == {expected}
+    exact = pricing_client.get(
+        "/api/control/billing/source-actions",
+        headers=admin,
+        params={"start": "2000-01-01", "end": "2099-01-01", "user_id": uid},
+    )
+    assert {row["user_id"] for row in exact.json()["items"]} == {uid}
+
+
+def test_admin_catalog_money_and_margin_require_known_cost_and_positive_price(
+    pricing_client, route_state
+):
+    from app.billing_routes import router
+
+    pricing_client.app.include_router(router)
+    with psycopg.connect(route_state) as raw:
+        raw.execute(
+            "UPDATE customer_credit_pricing SET config_json=%s WHERE id=1",
+            (json.dumps({"points_per_yuan": 100}),),
+        )
+        for service, price, cost in [
+            ("analysis", 100, 25),
+            ("rewrite", 100, None),
+            ("first_frame", 100, 0),
+            ("oral", 0, 0),
+        ]:
+            raw.execute(
+                "INSERT INTO billing_tariffs(service,enabled,unit_credits,unit_cost_fen) "
+                "VALUES (%s,true,%s,%s)",
+                (service, price, cost),
+            )
+    headers = admin_login(pricing_client, route_state)
+    response = pricing_client.get("/api/control/billing/catalog", headers=headers)
+    assert response.status_code == 200, response.text
+    services = {item["service"]: item for item in response.json()["services"]}
+    assert Decimal(services["analysis"]["unit_price_fen"]) == 100
+    assert Decimal(services["analysis"]["gross_margin_percent"]) == 75
+    assert services["rewrite"]["gross_margin_percent"] is None
+    assert Decimal(services["first_frame"]["gross_margin_percent"]) == 100
+    assert services["oral"]["gross_margin_percent"] is None
+
+
+@pytest.mark.parametrize("shared_source", [False, True])
+def test_panorama_attention_combines_scope_before_aggregation_and_export(
+    pricing_client, route_state, shared_source
+):
+    from app.billing_routes import router
+
+    pricing_client.app.include_router(router)
+    _, uid = account(pricing_client)
+    with psycopg.connect(route_state) as raw:
+        raw.execute("UPDATE users SET display_name='队列核对公司' WHERE id=%s", (uid,))
+        raw.execute("UPDATE wallets SET available_credits=100 WHERE user_id=%s", (uid,))
+        conn = BusinessConnection.postgres(raw)
+        raw.execute("INSERT INTO billing_tariffs(service,unit_cost_fen) VALUES ('analysis',2.5)")
+        ids = {}
+        for index, state in enumerate(["pending", "known", "unknown"], 1):
+            if state == "unknown":
+                raw.execute("DELETE FROM billing_tariffs WHERE service='analysis'")
+            operation = accept_operation(
+                conn,
+                user_id=uid,
+                service="analysis",
+                source_id="mixed" if shared_source else state,
+                units=1,
+                billing_round=index,
+            )
+            ids[state] = operation
+            if state != "pending":
+                record_attempt(conn, operation_id=operation, attempt_key="a", usage=1)
+                finish_operation(conn, operation_id=operation, units=1, succeeded=True)
+        second = accept_operation(
+            conn,
+            user_id=uid,
+            service="analysis",
+            source_id="second-unknown",
+            units=1,
+        )
+        record_attempt(conn, operation_id=second, attempt_key="a", usage=1)
+        finish_operation(conn, operation_id=second, units=1, succeeded=True)
+        module = raw.execute(
+            "SELECT module FROM billing_operations WHERE id=%s", (ids["pending"],)
+        ).fetchone()[0]
+    admin = admin_login(pricing_client, route_state)
+    scope = {
+        "start": "2000-01-01",
+        "end": "2099-01-01",
+        "user_id": uid,
+        "username": "队列核对公司",
+        "module": module,
+    }
+    for attention, expected in [
+        ("pending", {ids["pending"]}),
+        ("unknown_cost", {ids["unknown"], second}),
+    ]:
+        params = {**scope, "attention": attention}
+        detail = pricing_client.get("/api/control/billing/operations", headers=admin, params=params)
+        panorama = pricing_client.get(
+            "/api/control/billing/source-actions", headers=admin, params=params
+        )
+        exported = pricing_client.get("/api/control/billing/export", headers=admin, params=params)
+        assert detail.status_code == panorama.status_code == exported.status_code == 200
+        assert {row["id"] for row in detail.json()["items"]} == expected
+        assert {
+            row["id"] for row in csv.DictReader(io.StringIO(exported.text.lstrip("\ufeff")))
+        } == expected
+        actions = panorama.json()["items"]
+        assert panorama.json()["total"] == len(expected)
+        assert sum(row["operation_count"] for row in actions) == len(expected)
+        assert all(row["operation_count"] == 1 for row in actions)
+        pages = [
+            pricing_client.get(
+                "/api/control/billing/source-actions",
+                headers=admin,
+                params={**params, "limit": 1, "offset": offset},
+            ).json()
+            for offset in range(len(expected))
+        ]
+        assert all(page["total"] == len(expected) for page in pages)
+        assert [page["items"][0]["source_id"] for page in pages] == [
+            row["source_id"] for row in actions
+        ]
+        for mismatch in [
+            {"module": "no-such-module"},
+            {"user_id": "no-such-customer"},
+            {"username": "别的公司"},
+            {"start": "2098-01-01"},
+        ]:
+            rejected_scope = {**params, **mismatch}
+            assert (
+                pricing_client.get(
+                    "/api/control/billing/source-actions", headers=admin, params=rejected_scope
+                ).json()["items"]
+                == []
+            )
+            assert (
+                pricing_client.get(
+                    "/api/control/billing/operations", headers=admin, params=rejected_scope
+                ).json()["items"]
+                == []
+            )
+            exported_empty = pricing_client.get(
+                "/api/control/billing/export", headers=admin, params=rejected_scope
+            )
+            assert list(csv.DictReader(io.StringIO(exported_empty.text.lstrip("\ufeff")))) == []
+    invalid = pricing_client.get(
+        "/api/control/billing/source-actions",
+        headers=admin,
+        params={**scope, "attention": "everything"},
+    )
+    assert invalid.status_code == 422
 
 
 def test_customer_and_admin_ledgers_share_causal_order_and_pagination(pricing_client, route_state):
@@ -356,15 +545,19 @@ def test_activation_suspension_is_serialized_with_collection_charge(
         )
         raw.execute(
             "INSERT INTO "
-            "activation_code_batches(id,name,face_value_fen,unit_price_fen_snapshot,credits_snapshot,quantity,activation_expires_at,status,created_by_user_id)"
+            "activation_code_batches(id,name,face_value_fen,unit_price_fen_sna"
+            "pshot,credits_snapshot,quantity,activation_expires_at,status,crea"
+            "ted_by_user_id)"
             " VALUES('collection-code-batch','test',1000,10,100,1,'2099-01-01','OPEN',%s)",
             (user,),
         )
         raw.execute(
             "INSERT INTO "
-            "activation_codes(id,batch_id,code_digest,digest_key_version,masked_code,status,issued_at,bound_user_id,activated_at)"
+            "activation_codes(id,batch_id,code_digest,digest_key_version,maske"
+            "d_code,status,issued_at,bound_user_id,activated_at)"
             " "
-            "VALUES('collection-code','collection-code-batch','collection-digest',1,'TEST-****','ACTIVE','2026-01-01',%s,'2026-01-01')",
+            "VALUES('collection-code','collection-code-batch','collection-dige"
+            "st',1,'TEST-****','ACTIVE','2026-01-01',%s,'2026-01-01')",
             (user,),
         )
         raw.execute(

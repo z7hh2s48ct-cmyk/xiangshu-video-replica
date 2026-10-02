@@ -203,22 +203,22 @@ class TemplateEmailSender:
             data={"username": username, "time": occurred_at},
         )
 
+    @property
+    def alert_digest_configured(self) -> bool:
+        return self._notice_template_id is not None
+
     def send_alert_digest(
         self, *, to: str, total: int, danger_count: int, items: str, generated_at: str
     ) -> None:
-        """告警摘要邮件：复用通知模板（username/time 变量位），模板未配则跳过。
-
-        摘要正文受模板变量结构限制，只放计数与生成时刻；明细引导回管理端
-        告警页——邮件不做告警的唯一出口（页面红黄条始终在）。
-        """
+        """复用现有通知模板；缺模板显式失败，摘要最多400字符，明细在管理端。"""
         if self._notice_template_id is None:
-            return
+            raise EmailDeliveryError("Alert notification template is not configured")
         self._send_template(
             to=to,
             subject=f"管理端告警：{danger_count} 条紧急 / 共 {total} 条",
             template_id=self._notice_template_id,
             data={
-                "username": "告警接收人",
+                "username": "；".join(items.splitlines())[:400],
                 "time": generated_at,
             },
         )

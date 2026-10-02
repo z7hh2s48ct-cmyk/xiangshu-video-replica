@@ -22,7 +22,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from app.db_portable import BusinessConnection
-from app.external_calls import endpoint_from_url, recorded_urlopen
+from app.external_calls import endpoint_from_url, recorded_urlopen, redact_text
 from app.settings import SettingsRepository, SettingsUnavailableError
 
 HIFLY_BASE_URL = "https://hfw-api.hifly.cc"
@@ -181,12 +181,13 @@ class UrllibHiflyHttpTransport(HiflyHttpTransport):
                 provider="hifly",
                 endpoint=endpoint_from_url(url),
                 opener=urlopen,
+                expected_json=method.upper() != "PUT",
             )
             return response_body
         except HTTPError as exc:
             detail = ""
             try:
-                detail = exc.read()[:1000].decode("utf-8", "replace")
+                detail = redact_text(exc.read().decode("utf-8", "replace"))[:1000]
             except OSError:
                 pass
             if exc.code == 429:

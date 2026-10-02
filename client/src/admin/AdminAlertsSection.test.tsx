@@ -45,6 +45,8 @@ function settingsPayload(overrides: Record<string, unknown> = {}) {
 function installFetch(payload: unknown, status = 200) {
   const fetchMock = vi.fn((url: string, init?: RequestInit) => {
     const method = init?.method ?? "GET";
+    if (url.endsWith("/api/control/alerts/deliveries"))
+      return jsonResponse({ items: [], configuration: [] });
     if (url.endsWith("/api/control/alerts/failure-rate") && method === "GET") {
       return jsonResponse(payload, status);
     }
@@ -105,7 +107,7 @@ describe("AdminAlertsSection", () => {
     render(<AdminAlertsSection />);
 
     expect(await screen.findByText("超阈值")).toBeInTheDocument();
-    expect(screen.getByText(/请技术负责人尽快处理/)).toBeInTheDocument();
+    expect(screen.getByText(/请技术负责人处理标记项/)).toBeInTheDocument();
     expect(screen.getByText("视频生成")).toBeInTheDocument();
     expect(
       screen.getByText(/失败分类：服务商故障 · 处理人：运营重试/),
@@ -175,7 +177,9 @@ describe("AdminAlertsSection", () => {
     expect(screen.getByText("样本不足")).toBeInTheDocument();
     expect(screen.getByText("正常")).toBeInTheDocument();
     expect(screen.getByText(/未记录错误码/)).toBeInTheDocument();
-    expect(screen.getByText(/没有类型越过 30% 失败率阈值/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/没有类型或错误码达到各自告警阈值/),
+    ).toBeInTheDocument();
   });
 
   it("states that nothing ended in the window when there are no terminal tasks", async () => {
@@ -271,7 +275,7 @@ describe("AdminAlertsSection", () => {
     render(<AdminAlertsSection />);
 
     expect(
-      await screen.findByText(/没有类型越过 30% 失败率阈值/),
+      await screen.findByText(/没有类型或错误码达到各自告警阈值/),
     ).toBeInTheDocument();
     fireEvent.change(await screen.findByLabelText("失败率阈值（%）"), {
       target: { value: "45" },
@@ -283,7 +287,7 @@ describe("AdminAlertsSection", () => {
     fireEvent.click(screen.getByRole("button", { name: "确认保存" }));
 
     expect(
-      await screen.findByText(/没有类型越过 45% 失败率阈值/),
+      await screen.findByText(/没有类型或错误码达到各自告警阈值/),
     ).toBeInTheDocument();
     expect(reads).toBe(2);
   });

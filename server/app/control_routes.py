@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
+from app.admin_audit_business import audit_changes, provider_audit_changes
 from app.admin_dates import append_admin_date_filters
 from app.admin_write_contract import (
     AdminWriteContract,
@@ -29,16 +30,21 @@ from app.admin_write_contract import (
 )
 from app.auth import Database, Role
 from app.billing_catalog import SERVICES
-from app.control_auth import ControlUser, ControlWriter
+from app.control_auth import ControlSuperUser, ControlUser, ControlWriter
 from app.csv_export import spreadsheet_safe_cell
 from app.db_portable import BusinessConnection
 from app.external_calls import summarize_provider_message
-from app.failure_runbook import failure_advice, failure_explanation
+from app.failure_runbook import failed_record_explanation
 from app.h3_account_pool import paid_probe_config
 from app.material_thumbs import THUMBNAIL_URL_EXPIRES_IN
 from app.media_routes import storage_for_asset
 from app.ops_metrics import get_or_create_request_id
 from app.permissions import write_audit
+from app.provider_failure_runbook import (
+    PROVIDER_FAILURE_MAPPINGS,
+    provider_failure_explanation,
+    provider_failure_mapping,
+)
 from app.security_rate_limit import (
     DIMENSION_CONTROL_EXPORT_ACCOUNT,
     consume_rate_limit,
@@ -56,7 +62,7 @@ from app.settings import (
     require_supported_provider,
 )
 from app.sql_pagination import PAGE_CLAUSE
-from app.storage import StorageBackendUnavailable
+from app.storage import StorageBackendUnavailable, storage_object_ref_from_uri
 from app.zpay import deployment_config_from_environment
 
 router = APIRouter(prefix="/api/control", tags=["control"])
@@ -183,6 +189,10 @@ class ControlWalletTransaction(BaseModel):
     source_id: str | None = None
     service: str | None = None
     service_name: str | None = None
+    order_no: str | None = None
+    project_name: str | None = None
+    oral_title: str | None = None
+    business_label: str | None = None
 
 
 class ControlWalletTransactionPage(BaseModel):
@@ -198,6 +208,10 @@ class ControlGenerationRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     record_id: str
+    short_ref: str | None = None
+    root_task_id: str | None = None
+    retry_path: str | None = None
+    handling_advice: str | None = None
     record_type: GenerationRecordType
     operation: str
     user_id: str
@@ -218,6 +232,8 @@ class ControlGenerationRecord(BaseModel):
     error_message: str | None
     created_at: str
     completed_at: str | None
+    # 只有状态转换历史能证明失败发生时刻；旧记录不以更新时间冒充实测。
+    failed_at: str | None = None
     # 视频拆解专用：P0-2 落库的失败诊断。只有 analysis_tasks 有这些列，其他类型
     # 保持 None——「失败阶段/可否重试/上游原话」过去只活在日志里，管理端看不见。
     failure_phase: str | None = None
@@ -523,6 +539,7 @@ def _update_control_provider_settings_business(
     reason: str,
     request_id: str,
 ) -> dict[str, object]:
+    conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"audit:provider:{provider_name}",))
     try:
         repo = SettingsRepository(conn)
         current = repo.load_provider_config(provider_name)
@@ -542,6 +559,7 @@ def _update_control_provider_settings_business(
         entity_id=provider_name,
         metadata={
             "provider": provider_name,
+            "changes": provider_audit_changes(current, merged),
             "reason": reason.strip(),
             "request_id": request_id,
         },
@@ -570,6 +588,8 @@ def _update_control_runtime_settings_business(
     payload: RuntimeSettingsUpdate,
     request_id: str,
 ) -> dict[str, object]:
+    conn.execute("SELECT id FROM runtime_settings WHERE id=1 FOR UPDATE")
+    before = SettingsRepository(conn).read_runtime_settings()
     try:
         saved = SettingsRepository(conn).save_runtime_settings(
             max_generation_count_per_batch=payload.max_generation_count_per_batch,
@@ -587,6 +607,7 @@ def _update_control_runtime_settings_business(
         entity_id="1",
         metadata={
             "setting": "runtime_limits",
+            "changes": audit_changes(before, saved),
             "reason": payload.reason.strip(),
             "request_id": request_id,
         },
@@ -626,6 +647,10 @@ def _update_control_zpay_settings_business(
         entity_id="zpay",
         metadata={
             "enabled_channels": payload.enabled_channels,
+            "changes": audit_changes(
+                {"enabled_channels": str(current.get("enabled_channels", "")).split(",")},
+                {"enabled_channels": payload.enabled_channels},
+            ),
             "reason": payload.reason.strip(),
             "request_id": request_id,
         },
@@ -640,6 +665,8 @@ def _update_control_billing_settings_business(
     payload: BillingSettingsUpdate,
     request_id: str,
 ) -> dict[str, object]:
+    conn.execute("SELECT id FROM runtime_settings WHERE id=1 FOR UPDATE")
+    before = SettingsRepository(conn).read_billing_settings()
     try:
         result = SettingsRepository(conn).save_billing_settings(
             internal_base_unit_price_fen=payload.internal_base_unit_price_fen,
@@ -658,6 +685,7 @@ def _update_control_billing_settings_business(
         entity_id="1",
         metadata={
             "scope": "INTERNAL",
+            "changes": audit_changes(before, result),
             "reason": payload.reason.strip(),
             "request_id": request_id,
         },
@@ -722,6 +750,7 @@ def list_recharge_orders(
     status: OrderStatus | None = None,
     user_id: str | None = None,
     username: str | None = None,
+    order_no: str | None = None,
     channel: str | None = None,
     created_from: str | None = None,
     created_to: str | None = None,
@@ -737,6 +766,9 @@ def list_recharge_orders(
         created_from=created_from,
         created_to=created_to,
     )
+    if order_no:
+        where += (" AND " if where else " WHERE ") + "orders.merchant_order_no=%s"
+        params = (*params, order_no)
     total = int(
         conn.execute(
             f"SELECT COUNT(*) FROM recharge_orders AS orders "
@@ -836,9 +868,15 @@ def list_wallet_transactions(
                  WHERE prev.user_id = tx.user_id
                    AND (prev.ledger_sequence IS NULL
                         OR prev.ledger_sequence <= tx.ledger_sequence))
-            END AS reserved_balance_after
+            END AS reserved_balance_after,
+            ro.merchant_order_no AS order_no,project.name AS project_name,oral.title AS oral_title
         FROM wallet_transactions AS tx
         JOIN users ON users.id = tx.user_id
+        LEFT JOIN recharge_orders ro ON ro.id=tx.recharge_order_id
+        LEFT JOIN generation_tasks task ON task.id=tx.task_id
+        LEFT JOIN generation_batches batch ON batch.id=task.batch_id
+        LEFT JOIN projects project ON project.id=batch.project_id
+        LEFT JOIN oral_tasks oral ON oral.id=tx.oral_task_id
         {where}
         ORDER BY (tx.ledger_sequence IS NULL), tx.ledger_sequence DESC,
                  tx.created_at DESC, tx.id DESC
@@ -851,6 +889,17 @@ def list_wallet_transactions(
             ControlWalletTransaction(
                 **dict(row),
                 service_name=SERVICES[row["service"]].name if row["service"] in SERVICES else None,
+                business_label=(
+                    f"充值订单 · {row['order_no']}"
+                    if row["order_no"]
+                    else f"视频生成 · {row['project_name'] or '历史项目未记录'}"
+                    if row["task_id"]
+                    else f"口播生成 · {row['oral_title'] or '历史标题未记录'}"
+                    if row["oral_task_id"]
+                    else SERVICES[row["service"]].name
+                    if row["service"] in SERVICES
+                    else "历史关联未记录"
+                ),
             )
             for row in rows
         ],
@@ -860,15 +909,79 @@ def list_wallet_transactions(
     )
 
 
+@router.get("/generation-records/{record_type}/{record_id}/history")
+def read_generation_record_history(
+    record_type: GenerationRecordType,
+    record_id: str,
+    conn: Database,
+    _actor: ControlUser,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    tables = {
+        "VIDEO": "generation_tasks",
+        "ORAL_VIDEO": "oral_tasks",
+        "ORAL_AVATAR": "oral_avatars",
+        "ORAL_VOICE": "oral_voices",
+        "FIRST_FRAME_IMAGE": "first_frame_tasks",
+        "CHARACTER_SHEET_IMAGE": "character_sheet_tasks",
+        "CHARACTER_VIEW_IMAGE": "character_generation_tasks",
+        "ANALYSIS": "analysis_tasks",
+        "SOURCE_FRAME_PROCESS": "source_frame_tasks",
+        "SOURCE_FRAME_AI_SCORE": "source_frame_tasks",
+    }
+    table = tables[record_type]
+    exists = conn.execute(f"SELECT 1 FROM {table} WHERE id=%s", (record_id,)).fetchone()  # noqa: S608
+    if exists is None:
+        raise HTTPException(status_code=404, detail="任务不存在。")
+    family = "SOURCE_FRAME" if record_type.startswith("SOURCE_FRAME_") else record_type
+    started = conn.execute("SELECT started_at FROM generation_record_history_coverage").fetchone()[
+        0
+    ]
+    rows = conn.execute(
+        "SELECT id,old_status,new_status,occurred_at FROM generation_record_status_events "
+        "WHERE record_type=%s AND record_id=%s ORDER BY occurred_at DESC,id DESC "
+        "LIMIT %s OFFSET %s",
+        (family, record_id, limit, offset),
+    ).fetchall()
+    total = conn.execute(
+        "SELECT count(*) FROM generation_record_status_events "
+        "WHERE record_type=%s AND record_id=%s",
+        (family, record_id),
+    ).fetchone()[0]
+    return {
+        "items": [
+            {"id": r[0], "before": r[1], "after": r[2], "at": r[3].isoformat()} for r in rows
+        ],
+        "total": int(total),
+        "limit": limit,
+        "offset": offset,
+        "measurementStartedAt": started.isoformat(),
+        "historyRule": "仅记录启用后实际发生的状态转换；启用前的失败和重试过程无法还原。",
+    }
+
+
 @router.get("/generation-records", response_model=ControlGenerationRecordPage)
 def list_generation_records(
     conn: Database,
     _actor: ControlUser,
     username: str | None = None,
+    user_id: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
     status: str | None = None,
     status_group: Literal["queued", "running", "succeeded", "failed", "attention"] | None = None,
     record_type: GenerationRecordType | None = None,
     failure_phase: str | None = None,
+    diagnostics: bool = False,
+    failure_category: Literal[
+        "CUSTOMER_ASSET",
+        "CONTENT_REVIEW",
+        "PROVIDER_BUSY",
+        "PROVIDER_FAULT",
+        "CONFIG",
+        "DEFECT",
+        "UNCLASSIFIED",
+    ]
+    | None = None,
     created_from: str | None = None,
     created_to: str | None = None,
     task_ref: Annotated[str | None, Query(max_length=200)] = None,
@@ -881,6 +994,8 @@ def list_generation_records(
     （方案 P1），与显式 ``status`` 合并；``project_name`` 按项目名筛视频与
     拆解记录。"""
     records: list[ControlGenerationRecord] = []
+    if diagnostics:
+        status = "FAILED,ARCHIVE_FAILED,SUBMISSION_UNCERTAIN,UNKNOWN"
     status = _merge_status(status, status_group)
     ref_filter = _task_ref_filter(conn, task_ref)
     scan_limit = offset + limit
@@ -888,6 +1003,7 @@ def list_generation_records(
         postgres=conn.is_postgres,
         record_types=("VIDEO",),
         username=username,
+        user_id=user_id,
         status=status,
         record_type=record_type,
         created_from=created_from,
@@ -899,6 +1015,7 @@ def list_generation_records(
         postgres=conn.is_postgres,
         record_types=("ORAL_VIDEO",),
         username=username,
+        user_id=user_id,
         status=status,
         record_type=record_type,
         created_from=created_from,
@@ -906,10 +1023,37 @@ def list_generation_records(
         task_ref=ref_filter,
         project_name=project_name,
     )
+    avatar_where, avatar_params = _generation_record_filters(
+        postgres=conn.is_postgres,
+        record_types=("ORAL_AVATAR",),
+        username=username,
+        user_id=user_id,
+        status=status,
+        record_type=record_type,
+        created_from=created_from,
+        created_to=created_to,
+        task_ref=ref_filter,
+        project_name=project_name,
+    )
+    avatar_where = avatar_where.replace("task.status", "task.admin_status")
+    voice_where, voice_params = _generation_record_filters(
+        postgres=conn.is_postgres,
+        record_types=("ORAL_VOICE",),
+        username=username,
+        user_id=user_id,
+        status=status,
+        record_type=record_type,
+        created_from=created_from,
+        created_to=created_to,
+        task_ref=ref_filter,
+        project_name=project_name,
+    )
+    voice_where = voice_where.replace("task.status", "task.admin_status")
     first_where, first_params = _generation_record_filters(
         postgres=conn.is_postgres,
         record_types=("FIRST_FRAME_IMAGE",),
         username=username,
+        user_id=user_id,
         status=status,
         record_type=record_type,
         created_from=created_from,
@@ -921,6 +1065,7 @@ def list_generation_records(
         postgres=conn.is_postgres,
         record_types=("CHARACTER_SHEET_IMAGE",),
         username=username,
+        user_id=user_id,
         status=status,
         record_type=record_type,
         created_from=created_from,
@@ -932,6 +1077,7 @@ def list_generation_records(
         postgres=conn.is_postgres,
         record_types=("CHARACTER_VIEW_IMAGE",),
         username=username,
+        user_id=user_id,
         status=status,
         record_type=record_type,
         created_from=created_from,
@@ -943,6 +1089,7 @@ def list_generation_records(
         postgres=conn.is_postgres,
         record_types=("SOURCE_FRAME_PROCESS", "SOURCE_FRAME_AI_SCORE"),
         username=username,
+        user_id=user_id,
         status=status,
         record_type=record_type,
         created_from=created_from,
@@ -953,6 +1100,7 @@ def list_generation_records(
     analysis_where, analysis_params = _analysis_record_filters(
         postgres=conn.is_postgres,
         username=username,
+        user_id=user_id,
         status=status,
         record_type=record_type,
         failure_phase=failure_phase,
@@ -998,6 +1146,10 @@ def list_generation_records(
                  LEFT JOIN versions ON versions.id = task.result_version_id {source_where})
               + (SELECT COUNT(*) FROM oral_tasks task
                  JOIN users ON users.id = task.owner_user_id {oral_where})
+              + (SELECT COUNT(*) FROM {_clone_record_source("oral_avatars")} task
+                 JOIN users ON users.id=task.owner_user_id {avatar_where})
+              + (SELECT COUNT(*) FROM {_clone_record_source("oral_voices")} task
+                 JOIN users ON users.id=task.owner_user_id {voice_where})
               + (SELECT COUNT(*) FROM analysis_tasks task
                  JOIN users ON users.id = task.created_by_user_id {analysis_where})
                 AS total
@@ -1009,17 +1161,22 @@ def list_generation_records(
                 *view_params,
                 *source_params,
                 *oral_params,
+                *avatar_params,
+                *voice_params,
                 *analysis_params,
             ),
         ).fetchone()["total"]
     )
 
+    if diagnostics or failure_category:
+        scan_limit = total
     video_rows = conn.execute(
         f"""
         SELECT
             task.id, task.generation_mode AS operation, task.status,
             task.provider, task.model, task.actual_cost, task.estimated_cost,
             task.result_asset_id AS result_reference, task.provider_task_id,
+            task.provider_result_url, task.archive_status,
             task.error_code,
             task.error_message_redacted AS error_message,
             task.created_at, task.completed_at,
@@ -1071,7 +1228,13 @@ def list_generation_records(
                 result_reference=(
                     None if row["result_reference"] is None else str(row["result_reference"])
                 ),
-                has_preview=row["result_reference"] is not None,
+                has_preview=row["result_reference"] is not None
+                or (
+                    str(row["status"]) == "SUCCEEDED"
+                    and row["archive_status"] in {"DIRECT", "ARCHIVING", "ARCHIVE_FAILED"}
+                    and row["provider"] == "metaso"
+                    and bool(str(row["provider_result_url"] or "").strip())
+                ),
                 provider_reference=_optional_text(row["provider_task_id"]),
                 error_code=None if row["error_code"] is None else str(row["error_code"]),
                 error_message=_optional_text(row["error_message"]),
@@ -1361,6 +1524,65 @@ def list_generation_records(
             )
         )
 
+    for kind, table, where, params in (
+        ("ORAL_AVATAR", "oral_avatars", avatar_where, avatar_params),
+        ("ORAL_VOICE", "oral_voices", voice_where, voice_params),
+    ):
+        clone_rows = conn.execute(
+            f"""SELECT task.*,users.username,users.display_name,
+                (SELECT sum(o.charged_credits) FROM billing_operations o
+                 WHERE o.source_id=task.id AND o.user_id=task.owner_user_id) AS charged_credits
+                FROM {_clone_record_source(table)} task
+                JOIN users ON users.id=task.owner_user_id {where}
+                ORDER BY task.created_at DESC,task.id DESC LIMIT %s""",  # noqa: S608
+            (*params, scan_limit),
+        ).fetchall()
+        for row in clone_rows:
+            state = str(row["admin_status"])
+            records.append(
+                ControlGenerationRecord(
+                    record_id=str(row["id"]),
+                    record_type=cast(GenerationRecordType, kind),
+                    operation="AVATAR_CLONE" if kind == "ORAL_AVATAR" else "VOICE_CLONE",
+                    user_id=str(row["owner_user_id"]),
+                    username=str(row["username"]),
+                    display_name=str(row["display_name"]),
+                    project_id=None,
+                    project_name=None,
+                    status=state,
+                    provider="hifly",
+                    model=None,
+                    provider_cost=None,
+                    provider_cost_status="UNAVAILABLE",
+                    record_data_status="VALID",
+                    charged_credits=int(row["charged_credits"] or 0),
+                    result_reference=None,
+                    has_preview=False,
+                    provider_reference=_optional_text(row["vendor_task_id"]),
+                    error_code=(
+                        "ORAL_SUBMISSION_UNCERTAIN"
+                        if state == "SUBMISSION_UNCERTAIN"
+                        else f"{kind}_FAILED"
+                        if state == "FAILED"
+                        else None
+                    ),
+                    error_message=(
+                        "克隆制作失败，请核对素材与服务商结果。"
+                        if state == "FAILED"
+                        else "提交结果待核对，避免重复提交。"
+                        if state == "SUBMISSION_UNCERTAIN"
+                        else None
+                    ),
+                    provider_message=summarize_provider_message(
+                        _optional_text(row["error_message"])
+                    ),
+                    created_at=str(row["created_at"]),
+                    completed_at=str(row["updated_at"])
+                    if state in {"SUCCEEDED", "FAILED"}
+                    else None,
+                )
+            )
+
     analysis_rows = conn.execute(
         f"""
         SELECT task.*, users.username, users.display_name,
@@ -1427,9 +1649,39 @@ def list_generation_records(
             )
         )
 
-    records.sort(key=lambda item: (item.created_at, item.record_id), reverse=True)
+    if diagnostics or failure_category:
+        for start in range(0, len(records), 100):
+            _attach_failure_explanations(conn, records[start : start + 100])
+        if failure_category:
+            records = [
+                item
+                for item in records
+                if (
+                    item.failure_category in {None, "UNCLASSIFIED"}
+                    if failure_category == "UNCLASSIFIED"
+                    else item.failure_category == failure_category
+                )
+            ]
+        total = len(records)
+        records.sort(
+            key=lambda item: (
+                item.failed_at or item.completed_at or item.created_at,
+                item.record_id,
+            ),
+            reverse=True,
+        )
+    else:
+        records.sort(key=lambda item: (item.created_at, item.record_id), reverse=True)
     page = records[offset : offset + limit]
     _attach_failure_explanations(conn, page)
+    if _actor.role == "auditor":
+        for record in page:
+            record.provider_cost = None
+            record.provider_cost_status = "UNAVAILABLE"
+            record.error_message = None
+            record.provider_message = None
+            record.upstream_reason = None
+            record.has_preview = False
     return ControlGenerationRecordPage(
         items=page,
         total=total,
@@ -1444,6 +1696,7 @@ class ExternalCallSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     call_id: str
+    task_id: str | None = None
     created_at: str
     provider: str
     model: str | None
@@ -1463,15 +1716,87 @@ class ExternalCallSummary(BaseModel):
     request_summary: Any = None
     response_body_bytes: int | None
     has_response_body: bool
+    request_id: str | None = None
+    exception_type: str | None = None
+    failure_category: str | None = None
+    failure_owner: str | None = None
+    advice: str | None = None
+    mapping_revision: str | None = None
+    mapping_evidence: str | None = None
+    poll_count: int = 1
+    last_seen_at: str | None = None
 
 
 class ExternalCallList(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     items: list[ExternalCallSummary]
-    # 匹配该记录的全部调用条数；items 最多 _CALL_LIST_LIMIT 条，
-    # total 大于 items 长度时说明清单被截断（方案 #27）。
+    # 全量计数与分页独立，最终失败不能因长轮询挤到第 201 条而无法访问。
     total: int
+
+
+class PendingProviderCode(BaseModel):
+    provider: str
+    error_code: str | None
+    count: int
+    last_seen_at: str
+
+
+@router.get("/provider-errors/pending", response_model=list[PendingProviderCode])
+def list_pending_provider_errors(
+    conn: Database, actor: ControlUser, response: Response
+) -> list[PendingProviderCode]:
+    response.headers["Cache-Control"] = "no-store"
+    clauses = ["outcome='PROVIDER_ERROR'"]
+    params: list[Any] = []
+    for provider, code in PROVIDER_FAILURE_MAPPINGS:
+        clauses.append("NOT (lower(provider)=%s AND lower(COALESCE(provider_error_code,''))=%s)")
+        params.extend((provider, code))
+    rows = conn.execute(
+        "SELECT provider, provider_error_code, count(*) AS total, max(created_at) AS last_seen_at "
+        "FROM external_call_logs WHERE "
+        + " AND ".join(clauses)
+        + " GROUP BY provider, provider_error_code "
+        "ORDER BY total DESC, provider, provider_error_code LIMIT 200",
+        params,
+    ).fetchall()
+    # Deliberately metadata only, including for administrators: no echoed prompt or signed URL.
+    return [
+        PendingProviderCode(
+            provider=str(row[0]),
+            error_code=_optional_text(row[1]),
+            count=int(row[2]),
+            last_seen_at=str(row[3]),
+        )
+        for row in rows
+    ]
+
+
+class GlobalExternalCall(BaseModel):
+    call: ExternalCallSummary
+    task_type: str | None
+    task_id: str | None
+    request_id: str | None
+
+
+class ExternalCallProviderMetric(BaseModel):
+    provider: str
+    total: int
+    failed: int
+    failure_rate_pct: float | None
+    avg_latency_ms: float | None
+    latency_samples: int
+
+
+class GlobalExternalCallPage(BaseModel):
+    items: list[GlobalExternalCall]
+    total: int
+    limit: int
+    offset: int
+    providers: list[str]
+    endpoints: list[str]
+    metrics: list[ExternalCallProviderMetric]
+    metrics_since: str
 
 
 class ExternalCallResponse(BaseModel):
@@ -1481,7 +1806,7 @@ class ExternalCallResponse(BaseModel):
     response_headers: dict[str, str] | None
     response_body: str | None
     response_body_bytes: int | None
-    truncated: bool
+    truncated: bool | None
 
 
 class GenerationRecordThumbnail(BaseModel):
@@ -1580,6 +1905,8 @@ def read_generation_record_thumbnail(
 
     查看客户媒体要留痕：签出成功时写一条审计（与资产下载签发的既有口径一致）。
     """
+    if actor.role == "auditor":
+        raise HTTPException(403, detail={"code": "GENERATION_RECORD_MEDIA_FORBIDDEN"})
     expires_in_seconds = int(THUMBNAIL_URL_EXPIRES_IN.total_seconds())
     empty = GenerationRecordThumbnail(
         record_type=record_type,
@@ -1623,6 +1950,8 @@ def list_generation_record_calls(
     actor: ControlUser,
     record_type: ExternalCallRecordType,
     record_id: str,
+    limit: Annotated[int, Query(ge=1, le=200)] = _CALL_LIST_LIMIT,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> ExternalCallList:
     """某条生成记录（或充值订单）的全部第三方接口调用，按时间顺序（方案 P0-9）。"""
     if not conn.is_postgres:
@@ -1637,50 +1966,186 @@ def list_generation_record_calls(
         if record_type in {"SOURCE_FRAME_PROCESS", "SOURCE_FRAME_AI_SCORE"}
         else record_type
     )
+    history = _expand_task_history(conn, {record_id})
     rows = conn.execute(
         """
-        SELECT id, created_at, provider, model, endpoint_name, method, url_redacted, attempt,
+        SELECT id, task_id, created_at, provider, model, endpoint_name,
+               method, url_redacted, attempt,
                http_status, latency_ms, outcome, provider_task_id, provider_request_id,
                provider_error_code, provider_message, error_message_redacted,
-               request_summary_json, response_body_bytes,
-               response_body IS NOT NULL AS has_response_body,
+                request_summary_json, response_body_bytes, poll_count, last_seen_at,
+                request_id, exception_type,
+                response_body IS NOT NULL OR response_storage_uri IS NOT NULL AS has_response_body,
                count(*) OVER () AS total_count
         FROM external_call_logs
-        WHERE task_type = %s AND task_id = %s
+        WHERE task_type = %s AND task_id = ANY(%s)
         ORDER BY created_at, id
-        LIMIT %s
+        LIMIT %s OFFSET %s
         """,
-        (call_type, record_id, _CALL_LIST_LIMIT),
+        (call_type, list(history.ids), limit, offset),
     ).fetchall()
     show_summary = actor.role != "auditor"
+    total = (
+        int(rows[0]["total_count"])
+        if rows
+        else int(
+            conn.execute(
+                "SELECT count(*) AS total FROM external_call_logs "
+                "WHERE task_type = %s AND task_id = ANY(%s)",
+                (call_type, list(history.ids)),
+            ).fetchone()["total"]
+        )
+    )
     return ExternalCallList(
-        total=int(rows[0]["total_count"]) if rows else 0,
+        total=total,
+        items=[_external_call_summary(row, show_summary=show_summary) for row in rows],
+    )
+
+
+def _external_call_summary(row: Any, *, show_summary: bool = True) -> ExternalCallSummary:
+    provider = _optional_text(row["provider"])
+    provider_code = _optional_text(row["provider_error_code"])
+    mapping = provider_failure_mapping(provider, provider_code)
+    explanation = (
+        provider_failure_explanation(provider, provider_code)
+        if row["outcome"] == "PROVIDER_ERROR"
+        else None
+    )
+    return ExternalCallSummary(
+        call_id=str(row["id"]),
+        task_id=_optional_text(row["task_id"]),
+        created_at=str(row["created_at"]),
+        provider=str(row["provider"]),
+        model=_optional_text(row["model"]),
+        endpoint=str(row["endpoint_name"]),
+        method=_optional_text(row["method"]),
+        url=_optional_text(row["url_redacted"])
+        if show_summary
+        else str(row["url_redacted"]).partition("?")[0]
+        if row["url_redacted"]
+        else None,
+        attempt=None if row["attempt"] is None else int(row["attempt"]),
+        http_status=None if row["http_status"] is None else int(row["http_status"]),
+        latency_ms=None if row["latency_ms"] is None else int(row["latency_ms"]),
+        outcome=_optional_text(row["outcome"]),
+        provider_task_id=_optional_text(row["provider_task_id"]),
+        provider_request_id=_optional_text(row["provider_request_id"]),
+        provider_error_code=_optional_text(row["provider_error_code"]),
+        provider_message=_optional_text(row["provider_message"]) if show_summary else None,
+        error_message=_optional_text(row["error_message_redacted"]) if show_summary else None,
+        request_summary=_json_value(row["request_summary_json"]) if show_summary else None,
+        response_body_bytes=(
+            None if row["response_body_bytes"] is None else int(row["response_body_bytes"])
+        ),
+        has_response_body=bool(row["has_response_body"]),
+        request_id=_optional_text(row["request_id"]),
+        exception_type=_optional_text(row["exception_type"]),
+        failure_category=explanation.category if explanation else None,
+        failure_owner=explanation.owner if explanation else None,
+        advice=explanation.advice if explanation else None,
+        mapping_revision=mapping.revision if mapping else None,
+        mapping_evidence=mapping.evidence if mapping else None,
+        poll_count=int(row["poll_count"]),
+        last_seen_at=_optional_text(row["last_seen_at"]),
+    )
+
+
+@router.get("/external-calls", response_model=GlobalExternalCallPage)
+def list_global_external_calls(
+    conn: Database,
+    _actor: ControlSuperUser,
+    response: Response,
+    provider: Annotated[str | None, Query(max_length=100)] = None,
+    endpoint: Annotated[str | None, Query(max_length=200)] = None,
+    outcome: Literal["SUCCEEDED", "PROVIDER_ERROR", "TIMEOUT", "NETWORK_ERROR", "PARSE_ERROR"]
+    | None = None,
+    task_ref: Annotated[str | None, Query(max_length=200)] = None,
+    created_from: str | None = None,
+    created_to: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> GlobalExternalCallPage:
+    response.headers["Cache-Control"] = "no-store"
+    clauses = ["TRUE"]
+    params: list[Any] = []
+    for column, value in (
+        ("provider", provider),
+        ("endpoint_name", endpoint),
+        ("outcome", outcome),
+    ):
+        if value:
+            clauses.append(f"{column} = %s")
+            params.append(value)
+    if task_ref and task_ref.strip():
+        resolved = _task_ref_filter(conn, task_ref)
+        if resolved is not None:
+            clauses.append("task_id = ANY(%s)")
+            params.append(list(resolved.ids))
+    append_admin_date_filters(
+        clauses, params, column="created_at", created_from=created_from, created_to=created_to
+    )
+    where = " AND ".join(clauses)
+    rows = conn.execute(
+        "SELECT *, endpoint_name AS endpoint, "
+        "response_body IS NOT NULL OR response_storage_uri IS NOT NULL AS has_response_body "
+        f"FROM external_call_logs WHERE {where} ORDER BY created_at::timestamptz DESC, id DESC "
+        "LIMIT %s OFFSET %s",
+        (*params, limit, offset),
+    ).fetchall()
+    total = int(
+        conn.execute(
+            f"SELECT count(*) AS total FROM external_call_logs WHERE {where}", params
+        ).fetchone()["total"]
+    )
+    # 观察表不含客户正文；合并轮询仍逐次计数，未知耗时不当成零。
+    since = conn.execute("SELECT (now() - interval '24 hours') AS since").fetchone()["since"]
+    metric_rows = conn.execute(
+        "SELECT provider, count(*) AS total, "
+        "count(*) FILTER (WHERE outcome != 'SUCCEEDED') AS failed, "
+        "avg(latency_ms) AS avg_latency_ms, count(latency_ms) AS latency_samples "
+        "FROM external_call_observations WHERE created_at >= %s "
+        "GROUP BY provider ORDER BY provider",
+        (since,),
+    ).fetchall()
+    return GlobalExternalCallPage(
         items=[
-            ExternalCallSummary(
-                call_id=str(row["id"]),
-                created_at=str(row["created_at"]),
-                provider=str(row["provider"]),
-                model=_optional_text(row["model"]),
-                endpoint=str(row["endpoint_name"]),
-                method=_optional_text(row["method"]),
-                url=_optional_text(row["url_redacted"]),
-                attempt=None if row["attempt"] is None else int(row["attempt"]),
-                http_status=None if row["http_status"] is None else int(row["http_status"]),
-                latency_ms=None if row["latency_ms"] is None else int(row["latency_ms"]),
-                outcome=_optional_text(row["outcome"]),
-                provider_task_id=_optional_text(row["provider_task_id"]),
-                provider_request_id=_optional_text(row["provider_request_id"]),
-                provider_error_code=_optional_text(row["provider_error_code"]),
-                provider_message=_optional_text(row["provider_message"]),
-                error_message=_optional_text(row["error_message_redacted"]),
-                request_summary=_json_value(row["request_summary_json"]) if show_summary else None,
-                response_body_bytes=(
-                    None if row["response_body_bytes"] is None else int(row["response_body_bytes"])
-                ),
-                has_response_body=bool(row["has_response_body"]),
+            GlobalExternalCall(
+                call=_external_call_summary(row),
+                task_type=_optional_text(row["task_type"]),
+                task_id=_optional_text(row["task_id"]),
+                request_id=_optional_text(row["request_id"]),
             )
             for row in rows
         ],
+        total=total,
+        limit=limit,
+        offset=offset,
+        providers=[
+            str(r["provider"])
+            for r in conn.execute(
+                "SELECT DISTINCT provider FROM external_call_logs ORDER BY provider"
+            ).fetchall()
+        ],
+        endpoints=[
+            str(r["endpoint_name"])
+            for r in conn.execute(
+                "SELECT DISTINCT endpoint_name FROM external_call_logs ORDER BY endpoint_name"
+            ).fetchall()
+        ],
+        metrics=[
+            ExternalCallProviderMetric(
+                provider=str(r["provider"]),
+                total=int(r["total"]),
+                failed=int(r["failed"]),
+                failure_rate_pct=100 * int(r["failed"]) / int(r["total"]) if r["total"] else None,
+                avg_latency_ms=float(r["avg_latency_ms"])
+                if r["avg_latency_ms"] is not None
+                else None,
+                latency_samples=int(r["latency_samples"]),
+            )
+            for r in metric_rows
+        ],
+        metrics_since=str(since),
     )
 
 
@@ -1711,7 +2176,7 @@ def read_external_call_response(
     row = conn.execute(
         """
         SELECT id, task_type, task_id, response_headers_json, response_body,
-               response_body_bytes
+               response_body_bytes, response_storage_uri, response_truncated
         FROM external_call_logs WHERE id = %s
         """,
         (call_id,),
@@ -1722,6 +2187,20 @@ def read_external_call_response(
             detail={"code": "EXTERNAL_CALL_NOT_FOUND", "message": "没有找到这次接口调用。"},
         )
     body = _optional_text(row["response_body"])
+    uri = _optional_text(row["response_storage_uri"])
+    if uri:
+        try:
+            storage = storage_for_asset(conn, uri)
+            body = storage.get_object(storage_object_ref_from_uri(uri).key).decode("utf-8")
+        except (StorageBackendUnavailable, OSError, ValueError) as exc:
+            # 无法读全文时明确失败，不能把数据库内摘要当成全文返回。
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "EXTERNAL_CALL_RESPONSE_UNAVAILABLE",
+                    "message": "响应全文暂不可读取，请稍后重试。",
+                },
+            ) from exc
     body_bytes = None if row["response_body_bytes"] is None else int(row["response_body_bytes"])
     write_audit(
         conn,
@@ -1740,9 +2219,7 @@ def read_external_call_response(
         response_headers=headers if isinstance(headers, dict) else None,
         response_body=body,
         response_body_bytes=body_bytes,
-        truncated=body is not None
-        and body_bytes is not None
-        and len(body.encode("utf-8")) < body_bytes,
+        truncated=None if row["response_truncated"] is None else bool(row["response_truncated"]),
     )
 
 
@@ -1761,6 +2238,7 @@ def summarize_generation_records(
     conn: Database,
     _actor: ControlUser,
     username: str | None = None,
+    user_id: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
     status: str | None = None,
     status_group: Literal["queued", "running", "succeeded", "failed", "attention"] | None = None,
     record_type: GenerationRecordType | None = None,
@@ -1785,6 +2263,7 @@ def summarize_generation_records(
         postgres=conn.is_postgres,
         record_types=("VIDEO",),
         username=username,
+        user_id=user_id,
         status=status,
         record_type=record_type,
         created_from=created_from,
@@ -1796,6 +2275,7 @@ def summarize_generation_records(
         postgres=conn.is_postgres,
         record_types=("ORAL_VIDEO",),
         username=username,
+        user_id=user_id,
         status=status,
         record_type=record_type,
         created_from=created_from,
@@ -1803,10 +2283,37 @@ def summarize_generation_records(
         task_ref=ref_filter,
         project_name=project_name,
     )
+    avatar_where, avatar_params = _generation_record_filters(
+        postgres=conn.is_postgres,
+        record_types=("ORAL_AVATAR",),
+        username=username,
+        user_id=user_id,
+        status=status,
+        record_type=record_type,
+        created_from=created_from,
+        created_to=created_to,
+        task_ref=ref_filter,
+        project_name=project_name,
+    )
+    avatar_where = avatar_where.replace("task.status", "task.admin_status")
+    voice_where, voice_params = _generation_record_filters(
+        postgres=conn.is_postgres,
+        record_types=("ORAL_VOICE",),
+        username=username,
+        user_id=user_id,
+        status=status,
+        record_type=record_type,
+        created_from=created_from,
+        created_to=created_to,
+        task_ref=ref_filter,
+        project_name=project_name,
+    )
+    voice_where = voice_where.replace("task.status", "task.admin_status")
     first_where, first_params = _generation_record_filters(
         postgres=conn.is_postgres,
         record_types=("FIRST_FRAME_IMAGE",),
         username=username,
+        user_id=user_id,
         status=status,
         record_type=record_type,
         created_from=created_from,
@@ -1818,6 +2325,7 @@ def summarize_generation_records(
         postgres=conn.is_postgres,
         record_types=("CHARACTER_SHEET_IMAGE",),
         username=username,
+        user_id=user_id,
         status=status,
         record_type=record_type,
         created_from=created_from,
@@ -1829,6 +2337,7 @@ def summarize_generation_records(
         postgres=conn.is_postgres,
         record_types=("CHARACTER_VIEW_IMAGE",),
         username=username,
+        user_id=user_id,
         status=status,
         record_type=record_type,
         created_from=created_from,
@@ -1840,6 +2349,7 @@ def summarize_generation_records(
         postgres=conn.is_postgres,
         record_types=("SOURCE_FRAME_PROCESS", "SOURCE_FRAME_AI_SCORE"),
         username=username,
+        user_id=user_id,
         status=status,
         record_type=record_type,
         created_from=created_from,
@@ -1850,6 +2360,7 @@ def summarize_generation_records(
     analysis_where, analysis_params = _analysis_record_filters(
         postgres=conn.is_postgres,
         username=username,
+        user_id=user_id,
         status=status,
         record_type=record_type,
         failure_phase=failure_phase,
@@ -1887,6 +2398,14 @@ def summarize_generation_records(
             FROM oral_tasks AS task
             JOIN users ON users.id = task.owner_user_id
             {oral_where}
+            UNION ALL
+            SELECT 'ORAL_AVATAR',task.admin_status,NULL AS duration
+            FROM {_clone_record_source("oral_avatars")} AS task
+            JOIN users ON users.id=task.owner_user_id {avatar_where}
+            UNION ALL
+            SELECT 'ORAL_VOICE',task.admin_status,NULL AS duration
+            FROM {_clone_record_source("oral_voices")} AS task
+            JOIN users ON users.id=task.owner_user_id {voice_where}
             UNION ALL
             SELECT 'FIRST_FRAME_IMAGE', task.status,
                    CASE WHEN task.status = 'SUCCEEDED'
@@ -1946,6 +2465,8 @@ def summarize_generation_records(
         (
             *video_params,
             *oral_params,
+            *avatar_params,
+            *voice_params,
             *first_params,
             *sheet_params,
             *view_params,
@@ -1976,20 +2497,25 @@ def summarize_generation_records(
         if avg is not None and str(row["status"]) == "SUCCEEDED":
             duration_weighted += float(avg) * int(row["total"])
             duration_samples += int(row["total"])
+    reasons = _generation_failure_reasons(
+        conn,
+        username=username,
+        user_id=user_id,
+        status=status,
+        record_type=record_type,
+        failure_phase=failure_phase,
+        created_from=created_from,
+        created_to=created_to,
+        task_ref=ref_filter,
+        project_name=project_name,
+    )
+    if _actor.role == "auditor":
+        for reason in reasons:
+            reason.reason = None
     return ControlGenerationRecordSummary(
         total=total_count,
         counts=counts,
-        failure_reasons=_generation_failure_reasons(
-            conn,
-            username=username,
-            status=status,
-            record_type=record_type,
-            failure_phase=failure_phase,
-            created_from=created_from,
-            created_to=created_to,
-            task_ref=ref_filter,
-            project_name=project_name,
-        ),
+        failure_reasons=reasons,
         succeeded_count=succeeded,
         failed_count=failed,
         success_rate_pct=(None if total_count == 0 else round(succeeded / total_count * 100, 1)),
@@ -2079,6 +2605,13 @@ def get_analysis_diagnostics(
         )
         for row in rows
     ]
+    if _actor.role == "auditor":
+        for item in items:
+            item.error_message = None
+            item.upstream_reason = None
+            for attempt in item.attempts:
+                attempt.error_message = None
+                attempt.upstream_reason = None
     return AnalysisDiagnosticsResponse(items=items, total=len(items))
 
 
@@ -2185,7 +2718,7 @@ def read_reconciliation_items(
                 WHERE wt.recharge_order_id = o.id AND wt.type = 'CHARGE')
         """
         select = (
-            "SELECT o.id AS order_id, o.user_id, u.username, "
+            "SELECT o.id AS order_id, o.merchant_order_no AS order_no, o.user_id, u.username, "
             "COALESCE(NULLIF(u.display_name, ''), u.username) AS display_name, "
             "o.provider, o.amount_fen, o.credits, o.paid_at, o.created_at "
         )
@@ -2220,7 +2753,7 @@ def read_reconciliation_items(
 
 
 @router.get("/settings", response_model=ControlSettingsSnapshot)
-def read_control_settings(conn: Database, _actor: ControlUser) -> ControlSettingsSnapshot:
+def read_control_settings(conn: Database, _actor: ControlSuperUser) -> ControlSettingsSnapshot:
     repo = SettingsRepository(conn)
     return ControlSettingsSnapshot(
         billing=BillingSettingsSnapshot(**repo.read_billing_settings()),
@@ -2242,7 +2775,7 @@ def update_control_provider_settings(
     provider: str,
     payload: ControlProviderSettingsUpdate,
     conn: Database,
-    actor: ControlUser,
+    actor: ControlSuperUser,
     request: Request,
     response: Response,
 ) -> MaskedProviderSettings:
@@ -2279,7 +2812,7 @@ def update_control_provider_settings(
 def test_control_provider_connection(
     provider: str,
     conn: Database,
-    _actor: ControlUser,
+    _actor: ControlSuperUser,
     tester: ProviderTester = Depends(get_provider_tester),
 ) -> ProviderTestResult:
     provider_name = require_supported_provider(provider)
@@ -2296,7 +2829,7 @@ def paid_test_control_provider(
     provider: str,
     payload: ControlProviderPaidTestRequest,
     conn: Database,
-    actor: ControlUser,
+    actor: ControlSuperUser,
     request: Request,
     response: Response,
     tester: ProviderTester = Depends(get_provider_tester),
@@ -2350,7 +2883,7 @@ def paid_test_control_provider(
 def update_control_runtime_settings(
     payload: RuntimeSettingsUpdate,
     conn: Database,
-    actor: ControlUser,
+    actor: ControlSuperUser,
     request: Request,
     response: Response,
 ) -> RuntimeSettingsSnapshot:
@@ -2576,14 +3109,34 @@ def export_wallet_transactions_csv(
             COALESCE(tx.oral_task_id, '') AS oral_task_id,
             COALESCE(CAST(tx.billing_round AS TEXT), '') AS billing_round,
             tx.created_at,
+            COALESCE(ro.merchant_order_no,'') AS order_no,
+            CASE WHEN ro.merchant_order_no IS NOT NULL THEN '充值订单 · ' || ro.merchant_order_no
+                 WHEN tx.task_id IS NOT NULL THEN
+                      '视频生成 · ' || COALESCE(project.name,'历史项目未记录')
+                 WHEN tx.oral_task_id IS NOT NULL THEN
+                      '口播生成 · ' || COALESCE(oral.title,'历史标题未记录')
+                 WHEN tx.type='REFUND' THEN '退款扣减'
+                 WHEN tx.type='CONVERSION' THEN '旧积分转换'
+                 ELSE COALESCE(%s::jsonb ->> op.service,'历史关联未记录') END AS business_label,
+            COALESCE(op.source_id,'') AS source_id,
             COUNT(*) OVER () AS export_total
         FROM wallet_transactions AS tx
         JOIN users ON users.id = tx.user_id
+        LEFT JOIN recharge_orders ro ON ro.id=tx.recharge_order_id
+        LEFT JOIN generation_tasks task ON task.id=tx.task_id
+        LEFT JOIN generation_batches batch ON batch.id=task.batch_id
+        LEFT JOIN projects project ON project.id=batch.project_id
+        LEFT JOIN oral_tasks oral ON oral.id=tx.oral_task_id
+        LEFT JOIN billing_operations op ON op.id=tx.billing_operation_id AND op.user_id=tx.user_id
         {where}
         ORDER BY tx.created_at DESC, tx.id DESC
         LIMIT %s
         """,  # noqa: S608
-        (*params, limit),
+        (
+            json.dumps({key: value.name for key, value in SERVICES.items()}, ensure_ascii=False),
+            *params,
+            limit,
+        ),
     ).fetchall()
     return _csv_response(
         filename="wallet-transactions.csv",
@@ -2599,6 +3152,9 @@ def export_wallet_transactions_csv(
             "oral_task_id",
             "billing_round",
             "created_at",
+            "order_no",
+            "business_label",
+            "source_id",
         ),
         rows=rows,
         total=int(rows[0]["export_total"]) if rows else 0,
@@ -2739,6 +3295,34 @@ def _task_ref_filter(conn: BusinessConnection, task_ref: str | None) -> TaskRefF
         return None
     ids: set[str] = {ref}
     if conn.is_postgres:
+        known = conn.execute(
+            "SELECT task_id FROM task_diagnostic_refs WHERE short_ref=upper(%s) OR task_id=%s "
+            "OR request_id=%s OR enqueue_request_id=%s",
+            (ref, ref, ref, ref),
+        ).fetchall()
+        if known:
+            return _expand_task_history(conn, {str(row[0]) for row in known})
+        provider, separator, vendor_ref = ref.partition(":")
+        if separator:
+            rows = conn.execute(
+                "SELECT task_id FROM external_call_logs WHERE provider=%s "
+                "AND (provider_task_id=%s OR provider_request_id=%s) AND task_id IS NOT NULL",
+                (provider, vendor_ref, vendor_ref),
+            ).fetchall()
+            return _expand_task_history(conn, {str(row[0]) for row in rows} or {ref})
+        providers = conn.execute(
+            "SELECT DISTINCT provider FROM external_call_logs WHERE task_id IS NOT NULL "
+            "AND (provider_task_id=%s OR provider_request_id=%s)",
+            (ref, ref),
+        ).fetchall()
+        if len(providers) > 1:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "TASK_REFERENCE_AMBIGUOUS",
+                    "message": "该凭证对应多个服务商，请使用“服务商:凭证”查询。",
+                },
+            )
         rows = conn.execute(
             """
             SELECT task_id AS id FROM external_call_logs
@@ -2747,13 +3331,44 @@ def _task_ref_filter(conn: BusinessConnection, task_ref: str | None) -> TaskRefF
             UNION SELECT id FROM generation_tasks WHERE provider_task_id = %s
             UNION SELECT id FROM character_generation_tasks WHERE provider_task_id = %s
             UNION SELECT id FROM oral_tasks WHERE vendor_task_id = %s
+            UNION SELECT id FROM oral_avatars WHERE vendor_task_id = %s
+            UNION SELECT id FROM oral_voices WHERE vendor_task_id = %s
             """,
-            (ref, ref, ref, ref, ref, ref),
+            (ref, ref, ref, ref, ref, ref, ref, ref),
         ).fetchall()
         ids.update(str(row["id"]) for row in rows)
-    # 任务编号是小写 UUID；客户端给客户看的短编号是前 8 位大写。
+        if len(ids) > 1:
+            return _expand_task_history(conn, ids)
+        # Old UUID prefixes remain usable only when they resolve to one record.
+        if _SHORT_REF_PATTERN.fullmatch(ref):
+            legacy = conn.execute(
+                "SELECT task_id FROM task_diagnostic_refs WHERE task_id ILIKE %s",
+                (f"{ref}%",),
+            ).fetchall()
+            if len(legacy) > 1:
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "TASK_REFERENCE_AMBIGUOUS",
+                        "message": "旧短号不唯一，请使用完整任务编号。",
+                    },
+                )
+            if legacy:
+                return _expand_task_history(conn, {str(legacy[0][0])})
+        return TaskRefFilter(ids=(ref,), prefix=None)
     prefix = f"{ref.lower()}%" if _SHORT_REF_PATTERN.fullmatch(ref) else None
     return TaskRefFilter(ids=tuple(sorted(ids)), prefix=prefix)
+
+
+def _expand_task_history(conn: BusinessConnection, ids: set[str]) -> TaskRefFilter:
+    rows = conn.execute(
+        "SELECT history.task_id FROM task_diagnostic_refs history "
+        "JOIN task_diagnostic_refs matched "
+        "ON history.task_type=matched.task_type AND history.root_task_id=matched.root_task_id "
+        "WHERE matched.task_id=ANY(%s)",
+        (list(ids),),
+    ).fetchall()
+    return TaskRefFilter(ids=tuple(sorted(ids | {str(row[0]) for row in rows})), prefix=None)
 
 
 _EXPLAINED_STATUSES = frozenset(
@@ -2768,6 +3383,58 @@ _EXPLAINED_STATUSES = frozenset(
 )
 
 
+def _attach_retry_guidance(
+    conn: BusinessConnection, records: list[ControlGenerationRecord]
+) -> None:
+    """只展示既有重试函数可接受的路径；该判断不替代写端的再次校验。"""
+    from app.generation import MAX_ARCHIVE_RETRIES, SAFE_PRE_PROVIDER_FAILURE_CODES
+
+    videos = [r.record_id for r in records if r.record_type == "VIDEO"]
+    states = {}
+    if videos:
+        rows = conn.execute(
+            "SELECT id,status,archive_status,provider_task_id,provider_result_url,"
+            "submitted_at,error_code,archive_retry_count,superseded_by_task_id "
+            "FROM generation_tasks WHERE id=ANY(%s)",
+            (videos,),
+        ).fetchall()
+        states = {str(row[0]): row for row in rows}
+    for record in records:
+        row = states.get(record.record_id) if record.record_type == "VIDEO" else None
+        if row is not None and row[8] is None:
+            if (
+                row[1] == "SUCCEEDED"
+                and row[2] == "ARCHIVE_FAILED"
+                and row[4]
+                and int(row[7]) < MAX_ARCHIVE_RETRIES
+            ):
+                record.retry_path = "ARCHIVE_ONLY"
+                record.handling_advice = (
+                    "成片已生成且已按原规则计费，可恢复归档；此操作不重新生成或扣费。"
+                )
+            elif (
+                row[1] == "FAILED"
+                and not row[3]
+                and not row[4]
+                and row[5] is None
+                and row[6] in SAFE_PRE_PROVIDER_FAILURE_CODES
+            ):
+                record.retry_path = "PRE_PROVIDER"
+                record.handling_advice = (
+                    "尚未触达服务商，可按原重试规则重新入队；确认框会说明原有积分预扣。"
+                )
+        if record.retry_path is None and record.status in _EXPLAINED_STATUSES:
+            record.handling_advice = (
+                "请先核对任务、结果和本轮积分；如需重新生成，回到对应生成页面确认费用后操作。"
+            )
+            if record.status in {"SUBMISSION_UNCERTAIN", "UNKNOWN"}:
+                record.handling_advice = "提交结果尚待核对，请先查询或对账，不要重复生成。"
+            elif row is not None and row[8] is not None:
+                record.handling_advice = (
+                    "此历史任务已被替换，请沿任务历史查看当前记录，不可再次原地重试。"
+                )
+
+
 def _attach_failure_explanations(
     conn: BusinessConnection, records: list[ControlGenerationRecord]
 ) -> None:
@@ -2777,42 +3444,85 @@ def _attach_failure_explanations(
     分类取 failure_runbook 的静态映射；原话命中审核关键词时升级为「内容审核」。
     """
     if conn.is_postgres:
-        wanted = [
-            record
-            for record in records
-            if record.status in _EXPLAINED_STATUSES and record.provider_message is None
+        _attach_retry_guidance(conn, records)
+        refs = conn.execute(
+            "SELECT task_type,task_id,short_ref,root_task_id FROM task_diagnostic_refs "
+            "WHERE task_id=ANY(%s)",
+            ([record.record_id for record in records],),
+        ).fetchall()
+        references = {(str(row[0]), str(row[1])): row for row in refs}
+        for record in records:
+            family = (
+                "SOURCE_FRAME"
+                if record.record_type.startswith("SOURCE_FRAME_")
+                else record.record_type
+            )
+            ref = references.get((family, record.record_id))
+            if ref:
+                record.short_ref = str(ref[2])
+                record.root_task_id = str(ref[3])
+        failed_ids = [
+            record.record_id for record in records if record.status in _EXPLAINED_STATUSES
         ]
+        if failed_ids:
+            events = conn.execute(
+                "SELECT DISTINCT ON(record_type,record_id) record_type,record_id,occurred_at "
+                "FROM generation_record_status_events WHERE record_id=ANY(%s) "
+                "AND new_status IN ('FAILED','ARCHIVE_FAILED','SUBMISSION_UNCERTAIN','UNKNOWN') "
+                "ORDER BY record_type,record_id,occurred_at DESC,id DESC",
+                (failed_ids,),
+            ).fetchall()
+            measured = {(row[0], row[1]): row[2].isoformat() for row in events}
+            for record in records:
+                family = (
+                    "SOURCE_FRAME"
+                    if record.record_type.startswith("SOURCE_FRAME_")
+                    else record.record_type
+                )
+                record.failed_at = measured.get((family, record.record_id))
+        wanted = [record for record in records if record.status in _EXPLAINED_STATUSES]
         if wanted:
             ids = [record.record_id for record in wanted]
             rows = conn.execute(
                 f"""
-                SELECT DISTINCT ON (task_id) task_id, provider_error_code, provider_message,
+                SELECT DISTINCT ON (task_type,task_id) task_type, task_id, provider,
+                       provider_error_code, provider_message,
                        error_message_redacted
                 FROM external_call_logs
                 WHERE task_id IN ({", ".join(["%s"] * len(ids))})
                   AND outcome IS NOT NULL AND outcome <> 'SUCCEEDED'
-                ORDER BY task_id, created_at DESC
+                ORDER BY task_type, task_id, created_at DESC, id DESC
                 """,  # noqa: S608
                 tuple(ids),
             ).fetchall()
-            latest = {str(row["task_id"]): row for row in rows}
+            latest = {(str(row["task_type"]), str(row["task_id"])): row for row in rows}
             for record in wanted:
-                row = latest.get(record.record_id)
+                family = (
+                    "SOURCE_FRAME"
+                    if record.record_type.startswith("SOURCE_FRAME_")
+                    else record.record_type
+                )
+                row = latest.get((family, record.record_id))
                 if row is None:
                     continue
+                record.provider = _optional_text(row["provider"])
                 record.provider_error_code = _optional_text(row["provider_error_code"])
-                record.provider_message = _optional_text(row["provider_message"]) or _optional_text(
-                    row["error_message_redacted"]
+                record.provider_message = (
+                    record.provider_message
+                    or _optional_text(row["provider_message"])
+                    or _optional_text(row["error_message_redacted"])
                 )
     # 建议/分类/处理人统一在这里落地：原话先取到，审核升级才能生效。
     for record in records:
-        if not record.error_code:
+        if record.status not in _EXPLAINED_STATUSES:
             continue
-        explanation = failure_explanation(
-            record.error_code, provider_message=record.provider_message
+        explanation = (
+            provider_failure_explanation(record.provider, record.provider_error_code)
+            if record.provider_error_code
+            else failed_record_explanation(
+                record.error_code, provider_message=record.provider_message
+            )
         )
-        if explanation is None:
-            continue
         if record.advice is None:
             record.advice = explanation.advice
         record.failure_category = explanation.category
@@ -2840,23 +3550,31 @@ def _attach_credit_refunds(
     placeholders = ", ".join(["%s"] * len(ids))
     rows = conn.execute(
         f"""
-        SELECT released.ref FROM (
-            SELECT wt.task_id AS ref FROM wallet_transactions wt
-            WHERE wt.type = 'RELEASE' AND wt.task_id IN ({placeholders})
-            UNION
-            SELECT wt.oral_task_id AS ref FROM wallet_transactions wt
-            WHERE wt.type = 'RELEASE' AND wt.oral_task_id IN ({placeholders})
-            UNION
-            SELECT op.source_id AS ref FROM wallet_transactions wt
-            JOIN billing_operations op ON op.id = wt.billing_operation_id
-            WHERE wt.type = 'RELEASE' AND op.source_id IN ({placeholders})
-        ) AS released
+        WITH ledger AS (
+            SELECT COALESCE(wt.task_id, wt.oral_task_id, op.source_id) AS ref,
+                   COALESCE(wt.billing_round, op.billing_round, 1) AS round,
+                   wt.type, wt.available_delta, wt.reserved_delta
+            FROM wallet_transactions wt
+            LEFT JOIN billing_operations op ON op.id = wt.billing_operation_id
+            WHERE wt.task_id IN ({placeholders}) OR wt.oral_task_id IN ({placeholders})
+               OR op.source_id IN ({placeholders})
+        ), latest AS (
+            SELECT ref, MAX(round) AS round FROM ledger GROUP BY ref
+        )
+        SELECT ledger.ref,
+               COALESCE(SUM(available_delta) FILTER (WHERE type='RELEASE'), 0) > 0
+               AND SUM(reserved_delta)=0
+               AND COALESCE(SUM(available_delta) FILTER (WHERE type='RELEASE'), 0)
+                   >= COALESCE(SUM(-available_delta) FILTER (WHERE type='RESERVE'), 0)
+               AS refunded
+        FROM ledger JOIN latest USING (ref, round)
+        GROUP BY ledger.ref
         """,  # noqa: S608
         tuple(ids) * 3,
     ).fetchall()
-    refunded = {str(row["ref"]) for row in rows}
+    refunded = {str(row["ref"]): bool(row["refunded"]) for row in rows}
     for record in wanted:
-        record.credits_refunded = record.record_id in refunded
+        record.credits_refunded = refunded.get(record.record_id)
 
 
 # 5 组运营口径（方案 P1 生成记录改造）：与前端 GENERATION_STATUS_FILTERS 同集。
@@ -2893,6 +3611,17 @@ def _status_values(status: str | None) -> list[str]:
     return [value for value in (part.strip() for part in status.split(",")) if value]
 
 
+def _clone_record_source(table: str) -> str:
+    if table not in {"oral_avatars", "oral_voices"}:
+        raise ValueError("Unsupported clone resource table")
+    # READY is the successful clone outcome; uncertain submissions must stay visible
+    # in diagnostics even though their resource status remains PENDING/RUNNING.
+    return f"""(SELECT clone.*,CASE
+        WHEN submission_state='SUBMISSION_UNKNOWN' THEN 'SUBMISSION_UNCERTAIN'
+        WHEN status='READY' THEN 'SUCCEEDED' ELSE status END AS admin_status
+        FROM {table} clone)"""
+
+
 def _generation_record_filters(
     *,
     postgres: bool = False,
@@ -2904,6 +3633,7 @@ def _generation_record_filters(
     created_to: str | None,
     task_ref: TaskRefFilter | None = None,
     project_name: str | None = None,
+    user_id: str | None = None,
 ) -> tuple[str, tuple[str, ...]]:
     clauses: list[str] = []
     params: list[str] = []
@@ -2916,9 +3646,13 @@ def _generation_record_filters(
             ref_clauses.append("task.id LIKE %s")
             params.append(task_ref.prefix)
         clauses.append(f"({' OR '.join(ref_clauses)})")
+    if user_id:
+        clauses.append("users.id = %s")
+        params.append(user_id)
     if username:
-        clauses.append("users.username LIKE %s")
-        params.append(f"%{username}%")
+        clauses.append("(users.username LIKE %s OR users.display_name LIKE %s)")
+        literal = username.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        params.extend((f"%{literal}%", f"%{literal}%"))
     if project_name and project_name.strip():
         # 项目名筛选（方案 P1）：只有视频任务挂在项目下（batch → projects）；
         # 其余类型（口播/图片/拆解）没有项目维度，筛项目时如实不出现在结果里。
@@ -2927,6 +3661,19 @@ def _generation_record_filters(
                 "EXISTS (SELECT 1 FROM generation_batches gb "
                 "JOIN projects p ON p.id = gb.project_id "
                 "WHERE gb.id = task.batch_id AND p.name LIKE %s)"
+            )
+            params.append(f"%{project_name.strip()}%")
+        elif any(
+            kind in record_types
+            for kind in (
+                "FIRST_FRAME_IMAGE",
+                "CHARACTER_SHEET_IMAGE",
+                "SOURCE_FRAME_PROCESS",
+                "SOURCE_FRAME_AI_SCORE",
+            )
+        ):
+            clauses.append(
+                "EXISTS (SELECT 1 FROM projects p WHERE p.id=task.project_id AND p.name LIKE %s)"
             )
             params.append(f"%{project_name.strip()}%")
         else:
@@ -2957,6 +3704,7 @@ def _analysis_record_filters(
     created_to: str | None,
     task_ref: TaskRefFilter | None = None,
     project_name: str | None = None,
+    user_id: str | None = None,
 ) -> tuple[str, tuple[str, ...]]:
     """拆解分支的过滤器。
 
@@ -2967,6 +3715,7 @@ def _analysis_record_filters(
         postgres=postgres,
         record_types=("ANALYSIS",),
         username=username,
+        user_id=user_id,
         status=status,
         record_type=record_type,
         created_from=created_from,
@@ -3002,6 +3751,7 @@ def _generation_failure_reasons(
     created_to: str | None,
     task_ref: TaskRefFilter | None = None,
     project_name: str | None = None,
+    user_id: str | None = None,
 ) -> list[AnalysisFailureReason]:
     """按「为什么失败」聚合失败行：类型 × 错误码 × 失败阶段（方案 P1-3）。
 
@@ -3010,12 +3760,12 @@ def _generation_failure_reasons(
 
     原因（``reason``）是「错误码 + 服务商原话」里的原话：拆解取 P0-2 落库的
     上游诊断（``->>`` 只有 PG 的 jsonb 支持；SQLite 开发库没有该列，自然也
-    没有原因），其余类型取该组样本任务在调用日志里的最新失败原话。
+    没有原因），其余类型先取每条任务最新失败原话，再聚合同因。
 
     当前视图里根本没有失败行（状态过滤不是 FAILED）时返回空——不给一份与
     列表无关的失败清单。
     """
-    if status and "FAILED" not in _status_values(status):
+    if status and not (_EXPLAINED_STATUSES & set(_status_values(status))):
         return []
 
     def group_where(types: tuple[GenerationRecordType, ...]) -> tuple[str, tuple[str, ...]]:
@@ -3023,7 +3773,10 @@ def _generation_failure_reasons(
             postgres=conn.is_postgres,
             record_types=types,
             username=username,
-            status="FAILED",
+            user_id=user_id,
+            status=",".join(sorted(_EXPLAINED_STATUSES & set(_status_values(status))))
+            if status
+            else ",".join(sorted(_EXPLAINED_STATUSES)),
             record_type=record_type,
             created_from=created_from,
             created_to=created_to,
@@ -3033,6 +3786,10 @@ def _generation_failure_reasons(
 
     video_where, video_params = group_where(("VIDEO",))
     oral_where, oral_params = group_where(("ORAL_VIDEO",))
+    avatar_where, avatar_params = group_where(("ORAL_AVATAR",))
+    voice_where, voice_params = group_where(("ORAL_VOICE",))
+    avatar_where = avatar_where.replace("task.status", "task.admin_status")
+    voice_where = voice_where.replace("task.status", "task.admin_status")
     first_where, first_params = group_where(("FIRST_FRAME_IMAGE",))
     sheet_where, sheet_params = group_where(("CHARACTER_SHEET_IMAGE",))
     view_where, view_params = group_where(("CHARACTER_VIEW_IMAGE",))
@@ -3040,12 +3797,16 @@ def _generation_failure_reasons(
     analysis_where, analysis_params = _analysis_record_filters(
         postgres=conn.is_postgres,
         username=username,
-        status="FAILED",
+        user_id=user_id,
+        status=",".join(sorted(_EXPLAINED_STATUSES & set(_status_values(status))))
+        if status
+        else ",".join(sorted(_EXPLAINED_STATUSES)),
         record_type=record_type,
         failure_phase=failure_phase,
         created_from=created_from,
         created_to=created_to,
         task_ref=task_ref,
+        project_name=project_name,
     )
     # 拆解行有专属的失败阶段/可否重试/上游原因列，其余表没有：用 CAST 置空，
     # PG 与 SQLite 都认这一写法（``::`` 只有 PG 支持）。
@@ -3059,11 +3820,29 @@ def _generation_failure_reasons(
               AND quality_audit.entity_id = task.id
         )
     """
+    # 每条任务先解析最新失败调用，再按实际原因分组；不能用一个样本代表整组。
+    failure_call_join = (
+        """
+        LEFT JOIN LATERAL (
+            SELECT provider, provider_error_code, provider_message, error_message_redacted
+            FROM external_call_logs calls
+            WHERE calls.task_id = failure_rows.sample_id
+              AND calls.task_type = CASE WHEN failure_rows.record_type LIKE 'SOURCE_FRAME_%%'
+                                        THEN 'SOURCE_FRAME' ELSE failure_rows.record_type END
+              AND calls.outcome IS NOT NULL AND calls.outcome <> 'SUCCEEDED'
+            ORDER BY calls.created_at DESC, calls.id DESC LIMIT 1
+        ) latest ON TRUE
+    """
+        if conn.is_postgres
+        else """
+        LEFT JOIN (SELECT CAST(NULL AS text) AS provider, CAST(NULL AS text) AS provider_error_code,
+                          CAST(NULL AS text) AS provider_message,
+                          CAST(NULL AS text) AS error_message_redacted) latest ON FALSE
+    """
+    )
     rows = conn.execute(
         f"""
-        SELECT record_type, error_code, failure_phase, reason, retryable,
-               COUNT(*) AS total, MIN(sample_id) AS sample_id
-        FROM (
+        WITH failure_rows AS (
             SELECT 'VIDEO' AS record_type, task.error_code AS error_code,
                    CAST(NULL AS text) AS failure_phase, CAST(NULL AS text) AS reason,
                    CAST(NULL AS boolean) AS retryable, task.id AS sample_id
@@ -3086,6 +3865,16 @@ def _generation_failure_reasons(
             FROM oral_tasks AS task
             JOIN users ON users.id = task.owner_user_id
             {oral_where}
+            UNION ALL
+            SELECT 'ORAL_AVATAR','ORAL_AVATAR_FAILED',CAST(NULL AS text),task.error_message,
+                   CAST(NULL AS boolean),task.id
+            FROM {_clone_record_source("oral_avatars")} AS task
+            JOIN users ON users.id=task.owner_user_id {avatar_where}
+            UNION ALL
+            SELECT 'ORAL_VOICE','ORAL_VOICE_FAILED',CAST(NULL AS text),task.error_message,
+                   CAST(NULL AS boolean),task.id
+            FROM {_clone_record_source("oral_voices")} AS task
+            JOIN users ON users.id=task.owner_user_id {voice_where}
             UNION ALL
             SELECT 'FIRST_FRAME_IMAGE', task.error_code,
                    CAST(NULL AS text), CAST(NULL AS text),
@@ -3124,14 +3913,27 @@ def _generation_failure_reasons(
             FROM analysis_tasks AS task
             JOIN users ON users.id = task.created_by_user_id
             {analysis_where}
-        ) AS failure_rows
-        GROUP BY record_type, error_code, failure_phase, reason, retryable
-        ORDER BY total DESC, record_type ASC, error_code ASC
+        ), resolved AS (
+            SELECT failure_rows.*,
+                   COALESCE(NULLIF(failure_rows.reason, ''), NULLIF(latest.provider_message, ''),
+                            NULLIF(latest.error_message_redacted, '')) AS actual_reason,
+                   latest.provider, latest.provider_error_code
+            FROM failure_rows
+            {failure_call_join}
+        )
+        SELECT record_type, error_code, failure_phase, actual_reason AS reason, retryable,
+               provider, provider_error_code, COUNT(*) AS total
+        FROM resolved
+        GROUP BY record_type, error_code, failure_phase, actual_reason, retryable,
+                 provider, provider_error_code
+        ORDER BY total DESC, record_type ASC, error_code ASC, actual_reason ASC
         LIMIT %s
         """,  # noqa: S608
         (
             *video_params,
             *oral_params,
+            *avatar_params,
+            *voice_params,
             *first_params,
             *sheet_params,
             *view_params,
@@ -3140,40 +3942,17 @@ def _generation_failure_reasons(
             FAILURE_REASON_GROUP_LIMIT,
         ),
     ).fetchall()
-    # 没有任务行原因的组，用样本任务在调用日志里的最近一次失败原话补上，
-    # 让「同因聚合」保留服务商原话这个关键判据。
-    pending: list[tuple[Any, str | None, str | None, str | None]] = []
-    sample_ids: list[str] = []
+    items: list[AnalysisFailureReason] = []
     for row in rows:
         error_code = _optional_text(row["error_code"])
         reason = _optional_text(row["reason"])
-        sample_id = _optional_text(row["sample_id"])
-        pending.append((row, error_code, reason, sample_id))
-        if reason is None and sample_id:
-            sample_ids.append(sample_id)
-    sample_messages: dict[str, str] = {}
-    if conn.is_postgres and sample_ids:
-        call_rows = conn.execute(
-            f"""
-            SELECT DISTINCT ON (task_id) task_id, provider_message, error_message_redacted
-            FROM external_call_logs
-            WHERE task_id IN ({", ".join(["%s"] * len(sample_ids))})
-              AND outcome IS NOT NULL AND outcome <> 'SUCCEEDED'
-            ORDER BY task_id, created_at DESC
-            """,  # noqa: S608
-            tuple(sample_ids),
-        ).fetchall()
-        for call_row in call_rows:
-            message = _optional_text(call_row["provider_message"]) or _optional_text(
-                call_row["error_message_redacted"]
-            )
-            if message:
-                sample_messages[str(call_row["task_id"])] = message
-    items: list[AnalysisFailureReason] = []
-    for row, error_code, reason, sample_id in pending:
-        if reason is None and sample_id:
-            reason = sample_messages.get(sample_id)
-        explanation = failure_explanation(error_code, provider_message=reason)
+        provider = _optional_text(row["provider"])
+        provider_code = _optional_text(row["provider_error_code"])
+        explanation = (
+            provider_failure_explanation(provider, provider_code)
+            if provider_code
+            else failed_record_explanation(error_code, provider_message=reason)
+        )
         items.append(
             AnalysisFailureReason(
                 record_type=cast(GenerationRecordType, str(row["record_type"])),
@@ -3399,7 +4178,9 @@ def _analysis_diagnostic_record(
                 request_id=_optional_text(attempt["request_id"]),
                 created_at=str(attempt["created_at"]),
                 completed_at=_optional_text(attempt["completed_at"]),
-                advice=failure_advice(attempt_code),
+                advice=failed_record_explanation(
+                    attempt_code, provider_message=attempt_reason
+                ).advice,
             )
         )
     record_code = _optional_text(row["error_code"])
@@ -3423,7 +4204,9 @@ def _analysis_diagnostic_record(
         upstream_reason=diagnostic_reason,
         created_at=str(row["created_at"]),
         completed_at=_optional_text(row["completed_at"]),
-        advice=failure_advice(record_code),
+        advice=failed_record_explanation(record_code, provider_message=diagnostic_reason).advice
+        if row_status in _EXPLAINED_STATUSES
+        else None,
         attempts=attempt_items,
     )
 

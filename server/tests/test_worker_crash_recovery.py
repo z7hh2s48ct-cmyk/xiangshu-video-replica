@@ -977,6 +977,54 @@ def test_pg_worker_once_loop_claims_processes_and_drains(fair_state: str) -> Non
     assert _cursor_count(fair_state, "u2") == 0
 
 
+@pytest.mark.parametrize("raised", [False, True])
+def test_pg_worker_keeps_redacted_failed_query_reason(fair_state: str, raised: bool) -> None:
+    class FailedProvider(_StepwiseMetasoProvider):
+        def query_image_to_video(self, provider_task_id: str) -> H3QueryResult:
+            if raised:
+                from app.generation import H3ProviderFailed
+
+                raise H3ProviderFailed(
+                    "generic terminal wrapper",
+                    terminal=True,
+                    provider_reason="虚构上游拒绝 token=FICTIONAL-VIDEO-CRED",
+                )
+            return H3QueryResult(
+                status="FAILED", failure_reason="虚构上游拒绝 token=FICTIONAL-VIDEO-CRED"
+            )
+
+    _seed(fair_state, user_ids=["u1"], tasks_per_user=1, wallet_credits=1000)
+    storage = FakeStorageAdapter(provider="cos", bucket="bucket")
+    provider = FailedProvider()
+    assert (
+        run_pg_worker_once(
+            worker_id="failure-reason-test",
+            storage=storage,
+            generation_provider=provider,
+            max_tasks=1,
+        )
+        == 1
+    )
+    with psycopg.connect(fair_state, autocommit=True) as raw:
+        raw.execute("UPDATE generation_tasks SET next_poll_at = now() WHERE id = 'task-u1-0'")
+    assert (
+        run_pg_worker_once(
+            worker_id="failure-reason-test",
+            storage=storage,
+            generation_provider=provider,
+            max_tasks=1,
+        )
+        == 1
+    )
+    with psycopg.connect(fair_state) as raw:
+        status, reason = raw.execute(
+            "SELECT status, error_message_redacted FROM generation_tasks WHERE id = 'task-u1-0'"
+        ).fetchone()
+        assert status == "FAILED"
+        assert "虚构上游拒绝" in reason
+        assert "FICTIONAL-VIDEO-CRED" not in reason
+
+
 class _StepwiseMetasoProvider(MetasoH3Provider):
     def __init__(self) -> None:
         super().__init__(api_key="test-key")

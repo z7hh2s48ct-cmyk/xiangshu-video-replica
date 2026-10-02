@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import date
 from typing import Any
 from uuid import uuid4
@@ -20,6 +21,21 @@ from app.usage_billing import accept_operation, complete_attempt, finish_operati
 # Source HTTP calls use bounded timeouts. This ceiling also fences a late response
 # after process loss; expiry never proves whether the supplier charged the request.
 COLLECTION_REQUEST_DEADLINE_SECONDS = 600
+
+
+@dataclass(frozen=True)
+class FrozenCollectionBilling:
+    """确认时的成员和单价只捕获一次，避免后续读扩大收费范围。"""
+
+    user_ids: tuple[str, ...]
+    pricing_json: str
+
+
+def freeze_collection_billing(conn: BusinessConnection) -> FrozenCollectionBilling:
+    return FrozenCollectionBilling(
+        tuple(eligible_collection_users(conn)),
+        json.dumps(retail_snapshot(conn, "viral_data", 1)),
+    )
 
 
 def reconcile_collection_requests(conn: BusinessConnection) -> int:
@@ -119,18 +135,28 @@ def settle_collection_charges(*, limit: int = 100) -> int:
 
 
 def create_collection_batch(
-    conn: BusinessConnection, *, platform: str, config: dict[str, Any], user_ids: Iterable[str]
+    conn: BusinessConnection,
+    *,
+    platform: str,
+    config: dict[str, Any],
+    user_ids: Iterable[str],
+    pricing_json: str | None = None,
+    stats_complete: bool = True,
 ) -> str:
     """Freeze recipients and one-request retail price before any source call."""
     batch_id = str(uuid4())
     conn.execute(
-        "INSERT INTO viral_collection_batches(id,platform,config_json,pricing_snapshot_json) "
-        "VALUES (%s,%s,%s,%s)",
+        "INSERT INTO viral_collection_batches"
+        "(id,platform,config_json,pricing_snapshot_json,run_status,stats_version) "
+        "VALUES (%s,%s,%s,%s,'PENDING',%s)",
         (
             batch_id,
             platform,
             json.dumps(config, ensure_ascii=False),
-            json.dumps(retail_snapshot(conn, "viral_data", 1)),
+            pricing_json
+            if pricing_json is not None
+            else json.dumps(retail_snapshot(conn, "viral_data", 1)),
+            1 if stats_complete else None,
         ),
     )
     for user_id in dict.fromkeys(user_ids):

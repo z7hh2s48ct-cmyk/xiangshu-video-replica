@@ -12,6 +12,12 @@ import { GenerationRecordsPage } from "./GenerationRecordsPage";
 
 vi.mock("../api.admin", () => ({
   getAdminGenerationRecords: vi.fn(),
+  getGenerationRecordHistory: vi.fn().mockResolvedValue({
+    items: [],
+    total: 0,
+    measurementStartedAt: "2026-10-02T00:00:00Z",
+    historyRule: "迁移前历史未知",
+  }),
   getAdminGenerationRecordSummary: vi.fn(),
   getAdminGenerationRecordCalls: vi.fn(),
   getAdminGenerationRecordThumbnail: vi.fn(),
@@ -68,6 +74,8 @@ function videoFailureRecord(
     project_id: "project-1",
     project_name: "演示项目",
     status: "FAILED",
+    retry_path: "PRE_PROVIDER",
+    handling_advice: "尚未触达服务商，按原规则重新入队。",
     provider: null,
     model: null,
     provider_cost: null,
@@ -234,6 +242,110 @@ describe("GenerationRecordsPage", () => {
     });
   });
 
+  it("uses five business groups, keeps technical details folded and hides auditor cost and thumbnails", async () => {
+    const statuses = [
+      "CREATED",
+      "QUEUED",
+      "PENDING",
+      "SUBMITTING",
+      "SUBMITTED",
+      "RUNNING",
+      "RETRYING",
+      "ARCHIVING",
+      "SUCCEEDED",
+      "FAILED",
+      "CANCELED",
+      "CANCELLED",
+      "ARCHIVE_FAILED",
+      "UNKNOWN",
+      "SUBMISSION_UNCERTAIN",
+    ];
+    vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
+      items: statuses.map((status, index) =>
+        videoFailureRecord({
+          record_id: `matrix-${index}`,
+          status,
+          provider: "raw-vendor",
+          error_message: "raw English failure",
+          provider_message: "private vendor quote",
+          failure_category: "UNCLASSIFIED",
+          failure_owner: "ENGINEERING",
+          advice: "请交技术核对任务和本轮积分状态。",
+          credits_refunded: false,
+          has_preview: true,
+        }),
+      ),
+      total: statuses.length,
+      limit: 50,
+      offset: 0,
+    });
+    render(<GenerationRecordsPage readOnly />);
+    const table = await screen.findByRole("table", {
+      name: "用户生成记录列表",
+    });
+    const rows = within(table).getAllByRole("row").slice(1);
+    expect(
+      rows.map((row) => row.querySelectorAll("td")[5].textContent),
+    ).toEqual([
+      "排队中",
+      "排队中",
+      "排队中",
+      "生成中",
+      "生成中",
+      "生成中",
+      "生成中",
+      "生成中",
+      "成功",
+      "失败",
+      "失败",
+      "失败",
+      "失败",
+      "需人工核对",
+      "需人工核对",
+    ]);
+    expect(
+      within(table).queryByRole("columnheader", { name: /成本/ }),
+    ).toBeNull();
+    expect(adminApi.getAdminGenerationRecordThumbnail).not.toHaveBeenCalled();
+    expect(adminApi.getAdminGenerationRecordCalls).not.toHaveBeenCalled();
+    for (const detail of table.querySelectorAll("details"))
+      expect(detail.open).toBe(false);
+    fireEvent.click(within(rows[9]).getByText("查看详情"));
+    expect(within(rows[9]).getByText("本轮积分退回")).toBeInTheDocument();
+    expect(within(rows[9]).getByText("未退回")).toBeInTheDocument();
+    expect(within(rows[9]).queryByText("raw English failure")).toBeNull();
+    expect(within(rows[9]).queryByText("private vendor quote")).toBeNull();
+  });
+
+  it("sends company and project filters to both list and summary within the stable customer scope", async () => {
+    render(<GenerationRecordsPage initialUserId="company-a-stable-id" />);
+    await screen.findAllByText("查看详情");
+    fireEvent.change(screen.getByLabelText("生成账号"), {
+      target: { value: "公司甲" },
+    });
+    fireEvent.change(screen.getByLabelText("生成项目"), {
+      target: { value: "同名前缀项目" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
+    await waitFor(() =>
+      expect(adminApi.getAdminGenerationRecords).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          userId: "company-a-stable-id",
+          username: "公司甲",
+          projectName: "同名前缀项目",
+          offset: 0,
+        }),
+      ),
+    );
+    expect(adminApi.getAdminGenerationRecordSummary).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        userId: "company-a-stable-id",
+        username: "公司甲",
+        projectName: "同名前缀项目",
+      }),
+    );
+  });
+
   it("shows image generation and AI scoring with honest cost status", async () => {
     render(<GenerationRecordsPage />);
 
@@ -255,9 +367,8 @@ describe("GenerationRecordsPage", () => {
     expect(within(table).getAllByText("无产物")).toHaveLength(3);
   });
 
-  it("shows the calls panel total with a truncation note (P0-9 #27)", async () => {
-    // 调用日志固定最多 200 条（服务端 _CALL_LIST_LIMIT），面板必须把真实
-    // 总条数与截断说明摆出来，而不是静默只给前 200 条。
+  it("shows the calls panel total with pagination (P0-9 #27)", async () => {
+    // 总条数大于当前页时仍可继续翻页访问后续调用。
     vi.mocked(adminApi.getAdminGenerationRecordCalls).mockResolvedValue({
       items: [
         {
@@ -280,6 +391,7 @@ describe("GenerationRecordsPage", () => {
           request_summary: null,
           response_body_bytes: 128,
           has_response_body: true,
+          poll_count: 1,
         },
       ],
       total: 201,
@@ -287,13 +399,16 @@ describe("GenerationRecordsPage", () => {
     render(<GenerationRecordsPage />);
 
     fireEvent.click((await screen.findAllByText("查看详情"))[0]);
+    expect(adminApi.getAdminGenerationRecordCalls).not.toHaveBeenCalled();
+    fireEvent.click(screen.getAllByText("技术详情")[0]);
     expect(
-      await screen.findByText("共 201 次调用，仅列出最早的 1 次。"),
+      await screen.findByText("共 201 次调用，当前第 1–1 次。"),
     ).toBeInTheDocument();
     expect(screen.getByText("v1/video_generation")).toBeInTheDocument();
     expect(adminApi.getAdminGenerationRecordCalls).toHaveBeenCalledWith(
       "VIDEO",
       "video-1",
+      { limit: 50, offset: 0 },
     );
   });
 
@@ -453,21 +568,11 @@ describe("GenerationRecordsPage", () => {
         failurePhase: "http",
       }),
     );
-    // 聚合块把「哪个任务、哪一步失败、谁来处理、上游怎么说」摆在列表之前。
-    expect(screen.getByText("视频拆解 失败 1")).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        "视频拆解 · 上游拒绝（HTTP） · ANALYSIS_PROVIDER_FAILED · 不可重试 · 1 条",
-      ),
-    ).toBeInTheDocument();
-    // retryable 缺失的历史行省掉重试判定，只说事实。
-    expect(
-      screen.getByText("视频拆解 · 未知阶段 · 未记录错误码 · 2 条"),
-    ).toBeInTheDocument();
-    expect(screen.getByText(`上游说明：${upstreamReason}`)).toBeInTheDocument();
-    // P2-2：聚合行直接把错误码译成下一步动作；没有映射的旧行不多说一句。
-    expect(screen.getByText(`修复建议：${fixAdvice}`)).toBeInTheDocument();
-    expect(screen.getAllByText(/修复建议：/)).toHaveLength(1);
+    expect(screen.getByText("失败 1")).toBeInTheDocument();
+    expect(screen.getByText("未归类 · 3 次")).toBeInTheDocument();
+    const aggregate = screen.getByRole("region", { name: "记录聚合" });
+    expect(aggregate).not.toHaveTextContent("ANALYSIS_PROVIDER_FAILED");
+    expect(aggregate).not.toHaveTextContent(upstreamReason);
 
     fireEvent.click(screen.getByText("查看详情"));
     expect(screen.getByText("400")).toBeInTheDocument();
@@ -516,10 +621,7 @@ describe("GenerationRecordsPage", () => {
 
     render(<GenerationRecordsPage initialStatus="FAILED" />);
 
-    // 聚合行把「谁办 + 归哪类」放在最前，再才是环节与错误码这类排查细节。
-    expect(
-      await screen.findByText(/运营重试 · 服务商故障 · 上游拒绝（HTTP）/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("服务商故障 · 1 次")).toBeInTheDocument();
 
     fireEvent.click(screen.getByText("查看详情"));
     expect(screen.getByText("原因分类")).toBeInTheDocument();
@@ -990,7 +1092,7 @@ describe("GenerationRecordsPage", () => {
     ).toBeInTheDocument();
   });
 
-  it("copies a customer-facing note with category, advice and credit status", async () => {
+  it("copies neutral customer note without operational advice or unconfirmed refunds", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
@@ -1013,16 +1115,49 @@ describe("GenerationRecordsPage", () => {
     const note = writeText.mock.calls[0][0] as string;
     expect(note).toContain("任务编号：video-failed-1");
     expect(note).toContain("业务类型：视频生成");
-    expect(note).toContain("失败分类：配置问题");
-    expect(note).toContain(
-      "处理建议：到管理端检查生成服务设置并测试连接后重试。",
-    );
-    expect(note).toContain(
-      "积分处理：本次消耗的积分将按流程退回或补偿，请留意后续通知。",
-    );
+    expect(note).not.toContain("失败分类");
+    expect(note).not.toContain("到管理端检查生成服务设置");
+    expect(note).toContain("本轮积分尚未退回");
+    expect(note).not.toContain("将按流程退回或补偿");
     expect(
       await screen.findByText(/已复制任务 video-failed-1 的客户说明/),
     ).toBeInTheDocument();
+  });
+
+  it("offers existing archive recovery for a succeeded paid task and neutral customer copy", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
+      items: [
+        videoSuccessRecord({
+          retry_path: "ARCHIVE_ONLY",
+          handling_advice: "恢复归档不重新扣费",
+          credits_refunded: false,
+        }),
+      ],
+      total: 1,
+      limit: 50,
+      offset: 0,
+    });
+    render(<GenerationRecordsPage />);
+    fireEvent.click(await screen.findByText("查看详情"));
+    fireEvent.click(
+      screen.getByRole("button", { name: "复制客户说明 video-done-1" }),
+    );
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    expect(writeText.mock.calls[0][0]).toContain("成片已生成，保存尚未完成");
+    expect(writeText.mock.calls[0][0]).toContain("本轮积分尚未退回");
+    expect(
+      screen.queryByRole("button", { name: "补偿积分 video-done-1" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "重试任务 video-done-1" }),
+    );
+    expect(await screen.findByText(/不重新生成或扣费/)).toBeInTheDocument();
+    expect(adminApi.retryGenerationRecord).not.toHaveBeenCalled();
   });
 
   it("opens the audited video preview (P2-2)", async () => {
@@ -1128,4 +1263,32 @@ describe("GenerationRecordsPage", () => {
     expect(screen.queryByRole("button", { name: /查看成片/ })).toBeNull();
     expect(adminApi.getGenerationRecordContent).not.toHaveBeenCalled();
   });
+});
+
+it("客户详情的稳定ID在列表、聚合、筛选及失败诊断中持续保留", async () => {
+  vi.mocked(adminApi.getAdminGenerationRecords).mockResolvedValue({
+    items: [],
+    total: 0,
+    limit: 50,
+    offset: 0,
+  });
+  vi.mocked(adminApi.getAdminGenerationRecordSummary).mockResolvedValue({
+    counts: [],
+    failure_reasons: [],
+  } as unknown as adminApi.AdminGenerationRecordSummaryCards);
+  render(<GenerationRecordsPage initialUserId="stable-wallet-a" />);
+  await waitFor(() =>
+    expect(adminApi.getAdminGenerationRecords).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: "stable-wallet-a" }),
+    ),
+  );
+  expect(adminApi.getAdminGenerationRecordSummary).toHaveBeenCalledWith(
+    expect.objectContaining({ userId: "stable-wallet-a" }),
+  );
+  fireEvent.click(screen.getByRole("tab", { name: "失败诊断" }));
+  await waitFor(() =>
+    expect(adminApi.getAdminGenerationRecords).toHaveBeenCalledWith(
+      expect.objectContaining({ diagnostics: true, userId: "stable-wallet-a" }),
+    ),
+  );
 });

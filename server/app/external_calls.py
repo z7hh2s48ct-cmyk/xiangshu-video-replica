@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 Outcome = Literal["SUCCEEDED", "PROVIDER_ERROR", "TIMEOUT", "NETWORK_ERROR", "PARSE_ERROR"]
 
-# 失败调用保留全文（上限 64 KB）；成功调用只留开头，用来和失败的响应对比。
+# 失败正文超过 64 KB 外存全文；成功正文只保留 4 KB 摘要。
 FAILED_BODY_LIMIT = 64 * 1024
 SUCCEEDED_BODY_LIMIT = 4 * 1024
 PROVIDER_MESSAGE_LIMIT = 500
@@ -55,6 +55,7 @@ REDACTED = "[已脱敏]"
 _SECRET_KEYS = frozenset(
     {
         "sign",
+        "sig",
         "signature",
         "token",
         "access_token",
@@ -81,6 +82,16 @@ _SECRET_KEYS = frozenset(
         "q-sign-time",
         "q-header-list",
         "q-url-param-list",
+        "client_secret",
+        "access_key",
+        "access_key_id",
+        "secret_id",
+        "cookie",
+        "set-cookie",
+        "credential",
+        "credentials",
+        "session_token",
+        "private_key",
     }
 )
 # 只留排查用得上的响应头；其余（含 set-cookie）一律不记。
@@ -98,11 +109,28 @@ _KEPT_RESPONSE_HEADERS = frozenset(
     }
 )
 _URL_PATTERN = re.compile(r"https?://[^\s\"'<>]+")
-_BEARER_PATTERN = re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}")
-_SECRET_FIELD_PATTERN = re.compile(
-    r"(?i)([\"']?(?:api[_-]?key|secret(?:_access)?_key|access_token|password|token)"
-    r"[\"']?\s*[:=]\s*[\"']?)([^\"'\s,&}]{6,})"
+_NORMALIZED_SECRET_KEYS = frozenset(re.sub(r"[^a-z0-9]", "", key) for key in _SECRET_KEYS)
+_BEARER_PATTERN = re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+")
+_COOKIE_HEADER_PATTERN = re.compile(
+    r"(?im)(?P<prefix>(?<![\w-])(?:cookie|set-cookie)\s*:\s*)[^\r\n]*"
 )
+# 只匹配敏感键，包装字段不能遮住内部凭据；字段拼写允许大小写及分隔符差异。
+_SECRET_KEY_PATTERN = "|".join(
+    "[_-]*".join(re.escape(char) for char in key)
+    for key in sorted(_NORMALIZED_SECRET_KEYS, key=len, reverse=True)
+)
+_SECRET_FIELD_PATTERN = re.compile(
+    rf"(?i)(?P<prefix>(?<![\w-])(?:\\*[\"'])?(?:{_SECRET_KEY_PATTERN})"
+    r"(?:\\*[\"'])?\s*[:=]\s*)"
+    r"(?P<value>(?P<escape>\\+)(?P<quote>[\"'])"
+    r"(?:(?!(?P=escape)(?P=quote)).)*(?P=escape)(?P=quote)|"
+    r"\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,&}\]]+)"
+)
+
+
+def _is_secret_key(key: str) -> bool:
+    # 各接口的字段命名不统一；大小写、下划线和连字符不能改变凭据的敏感等级。
+    return re.sub(r"[^a-z0-9]", "", key.lower()) in _NORMALIZED_SECRET_KEYS
 
 
 @dataclass(frozen=True)
@@ -123,11 +151,57 @@ def external_call_context(
     task_type: str, task_id: str, *, attempt: int | None = None
 ) -> Iterator[None]:
     """标注接下来的第三方调用属于哪条任务；离开时恢复外层上下文。"""
+    from app.ops_metrics import (
+        bind_request_context,
+        current_request_context,
+        set_current_trace_fields,
+    )
+
+    request = current_request_context()
+    request_id = request.request_id if request is not None and request.method != "WORKER" else None
+    if request_id is None:
+        request_id = _task_request_id(task_type, task_id)
     token = _CONTEXT.set(CallContext(task_type=task_type, task_id=task_id, attempt=attempt))
     try:
-        yield
+        with bind_request_context(
+            request_id=request_id,
+            method=request.method if request is not None else "WORKER",
+            route=request.route if request is not None else f"task/{task_type}",
+            request=request.request if request is not None else None,
+        ):
+            set_current_trace_fields(task_id=task_id)
+            trace = {
+                "request_id": request_id,
+                "task_type": task_type,
+                "task_id": task_id,
+                "attempt": attempt,
+            }
+            logger.info(json.dumps({"event": "task_call_context_started", **trace}, sort_keys=True))
+            try:
+                yield
+            finally:
+                logger.info(
+                    json.dumps({"event": "task_call_context_finished", **trace}, sort_keys=True)
+                )
     finally:
         _CONTEXT.reset(token)
+
+
+def _task_request_id(task_type: str, task_id: str) -> str:
+    from app.db_pg import get_pg_pool
+
+    try:
+        with get_pg_pool().connection(timeout=LOG_CONNECTION_TIMEOUT_SECONDS) as conn:
+            row = conn.execute(
+                "SELECT request_id FROM task_diagnostic_refs WHERE task_type=%s AND task_id=%s",
+                (task_type, task_id),
+            ).fetchone()
+            if row:
+                return str(row[0])
+    except Exception as exc:  # noqa: BLE001 — diagnostic enrichment cannot stop a task
+        logger.debug("task correlation lookup unavailable: %s", type(exc).__name__)
+    # A task that predates correlation capture still gets one stable key across all attempts.
+    return f"task_{task_type}_{task_id}"
 
 
 @contextmanager
@@ -148,14 +222,15 @@ def redact_url(url: str) -> str:
     """去掉地址里的签名、令牌与账号口令，保留路径和普通参数便于定位。"""
     try:
         parts = urlsplit(url)
+        host = parts.hostname or ""
+        netloc = f"[{host}]" if ":" in host else host
+        if parts.port:
+            netloc = f"{netloc}:{parts.port}"
     except ValueError:
         return _URL_PATTERN.sub(REDACTED, url)
-    netloc = parts.hostname or ""
-    if parts.port:
-        netloc = f"{netloc}:{parts.port}"
     query = urlencode(
         [
-            (key, REDACTED if key.lower() in _SECRET_KEYS else value)
+            (key, REDACTED if _is_secret_key(key) else value)
             for key, value in parse_qsl(parts.query, keep_blank_values=True)
         ],
         safe="[]",
@@ -164,30 +239,63 @@ def redact_url(url: str) -> str:
 
 
 def redact_text(text: str) -> str:
+    # JSON 先递归处理，避免空格、转义、嵌套字段绕过普通文本的匹配；不截断响应原文。
+    try:
+        payload = json.loads(text)
+    except (ValueError, TypeError):
+        return _redact_plain_text(text)
+    if isinstance(payload, dict | list):
+        return json.dumps(_redact_response_value(payload), ensure_ascii=False)
+    return _redact_plain_text(text)
+
+
+def _redact_response_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): REDACTED if _is_secret_key(str(key)) else _redact_response_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_response_value(item) for item in value]
+    return _redact_plain_text(value) if isinstance(value, str) else value
+
+
+def _redact_plain_text(text: str) -> str:
+    # Cookie 每个分号段都可能是会话凭据，按完整头行遮蔽，不能只删第一项。
+    text = _COOKIE_HEADER_PATTERN.sub(lambda match: f"{match['prefix']}{REDACTED}", text)
     text = _URL_PATTERN.sub(lambda match: redact_url(match.group(0)), text)
     text = _BEARER_PATTERN.sub(lambda match: f"{match.group(1)} {REDACTED}", text)
-    return _SECRET_FIELD_PATTERN.sub(lambda match: f"{match.group(1)}{REDACTED}", text)
+    return _SECRET_FIELD_PATTERN.sub(lambda match: f"{match['prefix']}{REDACTED}", text)
 
 
 SUMMARY_STRING_LIMIT = 2000
 
 
-def redact_value(value: Any) -> Any:
+def redact_value(value: Any, *, field_name: str = "") -> Any:
     """递归脱敏请求摘要：密钥类字段整体替换，字符串里的签名链接逐个替换。
 
-    超长字符串（多为内联的 base64 图片或音频）只记长度：摘要是给人看的业务参数，
-    不是请求体备份。
+    提示词与文案保留脱敏全文；内联媒体只记录引用和长度。
     """
     if isinstance(value, Mapping):
         return {
-            str(key): REDACTED if str(key).lower() in _SECRET_KEYS else redact_value(item)
+            str(key): REDACTED
+            if _is_secret_key(str(key))
+            else redact_value(item, field_name=str(key))
             for key, item in value.items()
         }
     if isinstance(value, list | tuple):
-        return [redact_value(item) for item in value]
+        return [redact_value(item, field_name=field_name) for item in value]
     if isinstance(value, str):
-        if len(value) > SUMMARY_STRING_LIMIT:
-            return f"[已省略 {len(value)} 个字符]"
+        if value.startswith("data:") and ";base64," in value[:200]:
+            return {"media_reference": value.split(",", 1)[0], "characters": len(value)}
+        if field_name.casefold() in {"b64_json", "base64", "image_base64", "audio_base64"}:
+            return {"media_reference": "inline_base64", "characters": len(value)}
+        if (
+            field_name.casefold() in {"image", "images", "audio", "video"}
+            and len(value) > SUMMARY_STRING_LIMIT
+            and re.fullmatch(r"[A-Za-z0-9+/=\s]+", value)
+        ):
+            return {"media_reference": "inline_base64", "characters": len(value)}
         return redact_text(value)
     return value
 
@@ -216,7 +324,7 @@ def _decode(body: bytes | str | None) -> str | None:
 
 
 def parse_provider_error(
-    body: bytes | str | None, *, allow_plain_text: bool = True
+    body: bytes | str | None, *, allow_plain_text: bool = True, provider: str = ""
 ) -> tuple[str | None, str | None]:
     """从常见的响应结构里取服务商错误码与原话；取不到时返回 (None, None)。
 
@@ -234,7 +342,7 @@ def parse_provider_error(
         if not allow_plain_text:
             return None, None
         return None, _clean_message(text)
-    return _error_from_payload(payload)
+    return _error_from_payload(payload, provider=provider)
 
 
 _SUCCESS_CODES = frozenset({"0", "200", "success", "ok", "succeeded"})
@@ -249,7 +357,7 @@ _EXPLICIT_FAILURE_KEYS = (
 )
 
 
-def _error_from_payload(payload: Any) -> tuple[str | None, str | None]:
+def _error_from_payload(payload: Any, *, provider: str = "") -> tuple[str | None, str | None]:
     if not isinstance(payload, Mapping):
         return None, None
     error = payload.get("error")
@@ -270,14 +378,15 @@ def _error_from_payload(payload: Any) -> tuple[str | None, str | None]:
         return _clean_code(None if code_ok else code), _clean_message(explicit)
     if not code_ok:
         return _clean_code(code), _clean_message(generic)
-    if str(payload.get("status", "")).lower() in _FAILED_STATUSES:
+    status = str(payload.get("status", "")).lower()
+    if status in _FAILED_STATUSES or (provider == "hifly" and status == "4"):
         return None, _clean_message(generic) or "服务商返回任务失败，未附原因"
     if isinstance(detail, Mapping):
-        return _error_from_payload(detail)
+        return _error_from_payload(detail, provider=provider)
     for nested_key in ("data", "result", "output"):
         nested = payload.get(nested_key)
         if isinstance(nested, Mapping):
-            nested_code, nested_message = _error_from_payload(nested)
+            nested_code, nested_message = _error_from_payload(nested, provider=provider)
             if nested_code or nested_message:
                 return nested_code, nested_message
     return None, None
@@ -286,7 +395,7 @@ def _error_from_payload(payload: Any) -> tuple[str | None, str | None]:
 def _clean_code(code: Any) -> str | None:
     if code is None or code == "":
         return None
-    return str(code)[:120]
+    return redact_text(str(code))[:120]
 
 
 def _clean_message(message: Any) -> str | None:
@@ -342,14 +451,18 @@ class PreparedCall:
     response_headers: dict[str, str] | None
     response_body: str | None
     response_body_bytes: int | None
+    response_truncated: bool
+    poll_state: str | None
     provider_error_code: str | None
     provider_message: str | None
     provider_task_id: str | None
     provider_request_id: str | None
     error_code: str | None
     error_message: str | None
+    exception_type: str | None
     model: str | None
     context: CallContext | None
+    request_id: str
 
 
 def prepare_external_call(
@@ -368,10 +481,12 @@ def prepare_external_call(
     provider_task_id: str | None = None,
     error_code: str | None = None,
     error_message: str | None = None,
+    exception_type: str | None = None,
     model: str | None = None,
 ) -> PreparedCall:
     raw_bytes: int | None = None
     body_text: str | None = None
+    truncated = False
     if response_body is not None:
         raw_bytes = (
             len(response_body)
@@ -379,13 +494,13 @@ def prepare_external_call(
             else len(response_body.encode("utf-8"))
         )
         if not binary_response:
-            limit = SUCCEEDED_BODY_LIMIT if outcome == "SUCCEEDED" else FAILED_BODY_LIMIT
             body_text = redact_text(_decode(response_body) or "")
-            if len(body_text) > limit:
-                body_text = body_text[:limit]
+            if outcome == "SUCCEEDED":
+                truncated = len(body_text.encode("utf-8")) > SUCCEEDED_BODY_LIMIT
+                body_text = _utf8_excerpt(body_text, SUCCEEDED_BODY_LIMIT)
     code, message = (None, None)
     if outcome != "SUCCEEDED" and not binary_response:
-        code, message = parse_provider_error(response_body)
+        code, message = parse_provider_error(response_body, provider=provider)
     return PreparedCall(
         provider=provider,
         endpoint=endpoint,
@@ -398,14 +513,20 @@ def prepare_external_call(
         response_headers=_kept_headers(response_headers),
         response_body=body_text,
         response_body_bytes=raw_bytes,
+        response_truncated=truncated,
+        poll_state=_pending_poll_state(response_body, provider=provider)
+        if method.upper() == "GET" and outcome == "SUCCEEDED"
+        else None,
         provider_error_code=code,
         provider_message=message,
         provider_task_id=provider_task_id,
         provider_request_id=_provider_request_id(response_headers),
         error_code=error_code,
         error_message=_clean_message(error_message) if error_message else None,
+        exception_type=exception_type,
         model=model or _MODEL.get(),
         context=current_call_context(),
+        request_id=_request_id(),
     )
 
 
@@ -423,11 +544,94 @@ def record_external_call(**kwargs: Any) -> None:
 
 
 def _insert(call: PreparedCall) -> None:
+    call_id = str(uuid4())
+    try:
+        _insert_with_id(call, call_id)
+    finally:
+        if (
+            call.response_body is not None
+            and call.outcome != "SUCCEEDED"
+            and len(call.response_body.encode("utf-8")) > FAILED_BODY_LIMIT
+        ):
+            try:
+                from app.db_pg import get_pg_pool
+
+                with get_pg_pool().connection(timeout=LOG_CONNECTION_TIMEOUT_SECONDS) as conn:
+                    _resolve_pending_response_object(conn, call_id)
+            except Exception as exc:  # noqa: BLE001 — 登记仍保留，数据库恢复后可重试
+                logger.warning("external response cleanup deferred: %s", type(exc).__name__)
+
+
+def _insert_with_id(call: PreparedCall, call_id: str) -> None:
     from app.db_pg import get_pg_pool
+    from app.db_portable import BusinessConnection
+    from app.media_routes import get_media_storage
 
     context = call.context
+    body = call.response_body
+    storage_uri = None
     pool = get_pg_pool()
     with pool.connection(timeout=LOG_CONNECTION_TIMEOUT_SECONDS) as conn, conn.transaction():
+        # 指标逐次记录，不能让合并后的长轮询低估调用数和失败率分母。
+        conn.execute(
+            "INSERT INTO external_call_observations (id, provider, outcome, latency_ms) "
+            "VALUES (%s, %s, %s, %s)",
+            (call_id, call.provider, call.outcome, call.latency_ms),
+        )
+        if context is not None and call.poll_state is not None:
+            # 同任务同接口的轮询串行比较最近状态；只压缩连续等待，不合并失败或提交请求。
+            lock_key = f"external-poll:{context.task_type}:{context.task_id}:{call.endpoint}"
+            conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (lock_key,))
+            previous = conn.execute(
+                "SELECT id, poll_state, url_redacted, http_status, attempt FROM external_call_logs "
+                "WHERE task_type = %s AND task_id = %s AND provider = %s AND endpoint_name = %s "
+                "AND method = 'GET' ORDER BY created_at::timestamptz DESC, id DESC LIMIT 1",
+                (context.task_type, context.task_id, call.provider, call.endpoint),
+            ).fetchone()
+            if previous is not None and tuple(previous[1:]) == (
+                call.poll_state,
+                call.url_redacted,
+                call.http_status,
+                context.attempt,
+            ):
+                conn.execute(
+                    "UPDATE external_call_logs SET poll_count = poll_count + 1, "
+                    "last_seen_at = clock_timestamp() WHERE id = %s",
+                    (previous[0],),
+                )
+                return
+        if (
+            body is not None
+            and call.outcome != "SUCCEEDED"
+            and len(body.encode()) > FAILED_BODY_LIMIT
+        ):
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"external-response:{call_id}",),
+            )
+            try:
+                with conn.transaction():
+                    storage = get_media_storage(BusinessConnection.postgres(conn))
+                    key = f"diagnostics/external-calls/{call_id}.txt"
+                    expected_uri = f"{storage.cache_namespace.rstrip('/')}/{key}"
+                    # 独立提交登记后才允许写对象；主日志事务回滚不能抹掉回收线索。
+                    with pool.connection(timeout=LOG_CONNECTION_TIMEOUT_SECONDS) as pending_conn:
+                        with pending_conn.transaction():
+                            pending_conn.execute(
+                                "INSERT INTO external_call_response_pending (call_id, storage_uri) "
+                                "VALUES (%s, %s)",
+                                (call_id, expected_uri),
+                            )
+                    stored = storage.put_object(
+                        key,
+                        body.encode("utf-8"),
+                        content_type="text/plain; charset=utf-8",
+                    )
+                storage_uri = stored.uri
+                body = _utf8_excerpt(body, FAILED_BODY_LIMIT)
+            except Exception as exc:  # noqa: BLE001 — 外存暂不可用也不能丢失失败证据
+                logger.warning("external response storage unavailable: %s", type(exc).__name__)
+                # PostgreSQL 保留脱敏全文作兜底；恢复外存前不会悄悄丢掉尾部。
         conn.execute(
             """
             INSERT INTO external_call_logs (
@@ -436,14 +640,15 @@ def _insert(call: PreparedCall) -> None:
                 response_headers_json, response_body, response_body_bytes,
                 provider_error_code, provider_message, provider_task_id,
                 provider_request_id, error_code, error_message_redacted,
-                task_type, task_id, attempt, request_id
+                task_type, task_id, attempt, request_id, response_storage_uri, response_truncated,
+                poll_state, exception_type
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s::jsonb, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             """,
             (
-                str(uuid4()),
+                call_id,
                 call.provider,
                 call.model,
                 call.endpoint,
@@ -458,7 +663,7 @@ def _insert(call: PreparedCall) -> None:
                 None
                 if call.response_headers is None
                 else json.dumps(call.response_headers, ensure_ascii=False),
-                call.response_body,
+                body,
                 call.response_body_bytes,
                 call.provider_error_code,
                 call.provider_message,
@@ -469,9 +674,110 @@ def _insert(call: PreparedCall) -> None:
                 None if context is None else context.task_type,
                 None if context is None else context.task_id,
                 None if context is None else context.attempt,
-                _request_id(),
+                call.request_id,
+                storage_uri,
+                call.response_truncated,
+                call.poll_state,
+                call.exception_type,
             ),
         )
+        if storage_uri is not None:
+            conn.execute(
+                "DELETE FROM external_call_response_pending WHERE call_id = %s", (call_id,)
+            )
+
+
+def _resolve_pending_response_object(conn: psycopg.Connection, call_id: str) -> bool:
+    from app.content_store import delete_object_outside_content_namespace
+    from app.db_portable import BusinessConnection
+    from app.media_routes import storage_for_asset
+    from app.storage import storage_object_ref_from_uri
+
+    # 只回收已退出写入事务的对象；超时或进程暂停不能让清理与提交同时进行。
+    lock = conn.execute(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0))",
+        (f"external-response:{call_id}",),
+    ).fetchone()
+    if lock is None or not lock[0]:
+        return False
+    pending = conn.execute(
+        "SELECT storage_uri FROM external_call_response_pending WHERE call_id = %s",
+        (call_id,),
+    ).fetchone()
+    if pending is None:
+        return False
+    uri = str(pending[0])
+    referenced = conn.execute(
+        "SELECT 1 FROM external_call_logs WHERE response_storage_uri = %s",
+        (uri,),
+    ).fetchone()
+    if referenced is None:
+        storage = storage_for_asset(BusinessConnection.postgres(conn), uri)
+        if not delete_object_outside_content_namespace(
+            storage, storage_object_ref_from_uri(uri).key
+        ):
+            return False
+    conn.execute("DELETE FROM external_call_response_pending WHERE call_id = %s", (call_id,))
+    return True
+
+
+def resolve_pending_response_objects(
+    conn: psycopg.Connection,
+    *,
+    now: datetime,
+    batch_size: int = PURGE_BATCH_SIZE,
+) -> int:
+    """人工维护入口：只处理一小时前的登记，不干扰仍在写入的请求。未接入生产定时器。"""
+    rows = conn.execute(
+        "SELECT call_id FROM external_call_response_pending WHERE created_at < %s "
+        "AND (cleanup_retry_at IS NULL OR cleanup_retry_at <= %s) "
+        "ORDER BY created_at, call_id LIMIT %s",
+        (now - timedelta(hours=1), now, batch_size),
+    ).fetchall()
+    resolved = 0
+    for row in rows:
+        try:
+            with conn.transaction():
+                done = _resolve_pending_response_object(conn, str(row[0]))
+                resolved += int(done)
+                if not done:
+                    conn.execute(
+                        "UPDATE external_call_response_pending SET cleanup_retry_at = %s "
+                        "WHERE call_id = %s",
+                        (now + timedelta(hours=1), row[0]),
+                    )
+        except Exception as exc:  # noqa: BLE001 — 对象服务暂不可用时保留登记等待重试
+            logger.warning("external response cleanup deferred: %s", type(exc).__name__)
+            conn.execute(
+                "UPDATE external_call_response_pending SET cleanup_retry_at = %s "
+                "WHERE call_id = %s",
+                (now + timedelta(hours=1), row[0]),
+            )
+    return resolved
+
+
+def _utf8_excerpt(text: str, byte_limit: int) -> str:
+    # 从完整字符边界截取，避免中文摘要超出字节上限或尾部变成乱码。
+    return text.encode("utf-8")[:byte_limit].decode("utf-8", errors="ignore")
+
+
+def _pending_poll_state(body: bytes | str | None, *, provider: str = "") -> str | None:
+    try:
+        value = json.loads(_decode(body) or "")
+    except ValueError:
+        return None
+    if not isinstance(value, Mapping):
+        return None
+    for scope in (value, value.get("data"), value.get("result")):
+        if not isinstance(scope, Mapping):
+            continue
+        state = str(scope.get("status") or scope.get("state") or "").lower()
+        # 数字状态只按已有数字人协议解释，不能把其他接口的 status=1 猜成等待。
+        if provider == "hifly" and state in {"1", "2"}:
+            return "queued" if state == "1" else "running"
+        if state in {"pending", "queued", "running", "processing", "submitted", "waiting"}:
+            return state
+    return None
 
 
 # 超期判定：``created_at`` 是文本列（001 迁移），PG 默认值写成带时区的时间文本，
@@ -493,12 +799,20 @@ def _retention_cutoffs(now: datetime) -> tuple[datetime, datetime]:
     )
 
 
-def count_expired_calls(conn: psycopg.Connection, *, now: datetime) -> int:
+def count_expired_calls(
+    conn: psycopg.Connection, *, now: datetime, ready_only: bool = False
+) -> int:
     """超过保留期的调用日志行数（``--dry-run`` 用，不改任何数据）。"""
     succeeded_cutoff, failed_cutoff = _retention_cutoffs(now)
+    retry_predicate = (
+        " AND (cleanup_retry_at IS NULL OR cleanup_retry_at <= %s)" if ready_only else ""
+    )
+    params = (
+        (succeeded_cutoff, failed_cutoff, now) if ready_only else (succeeded_cutoff, failed_cutoff)
+    )
     row = conn.execute(
-        f"SELECT count(*) FROM external_call_logs WHERE {_EXPIRED_PREDICATE}",
-        (succeeded_cutoff, failed_cutoff),
+        f"SELECT count(*) FROM external_call_logs WHERE ({_EXPIRED_PREDICATE}){retry_predicate}",
+        params,
     ).fetchone()
     return int(row[0]) if row is not None else 0
 
@@ -512,18 +826,42 @@ def purge_expired_call_batch(
     持有一个长事务。幂等——重复执行只会找不到可删的行。
     """
     succeeded_cutoff, failed_cutoff = _retention_cutoffs(now)
-    deleted = conn.execute(
+    from app.content_store import delete_object_outside_content_namespace
+    from app.db_portable import BusinessConnection
+    from app.media_routes import storage_for_asset
+    from app.storage import storage_object_ref_from_uri
+
+    candidates = conn.execute(
         f"""
-        DELETE FROM external_call_logs
-        WHERE id IN (
-            SELECT id FROM external_call_logs
-            WHERE {_EXPIRED_PREDICATE}
-            LIMIT %s
-        )
+        SELECT id, response_storage_uri FROM external_call_logs
+        WHERE ({_EXPIRED_PREDICATE}) AND (cleanup_retry_at IS NULL OR cleanup_retry_at <= %s)
+        ORDER BY created_at, id LIMIT %s
         """,
-        (succeeded_cutoff, failed_cutoff, batch_size),
-    ).rowcount
-    return int(deleted)
+        (succeeded_cutoff, failed_cutoff, now, batch_size),
+    ).fetchall()
+    removed: list[str] = []
+    for row in candidates:
+        call_id, uri = row[0], row[1]
+        if uri:
+            try:
+                storage = storage_for_asset(BusinessConnection.postgres(conn), str(uri))
+                if not delete_object_outside_content_namespace(
+                    storage, storage_object_ref_from_uri(str(uri)).key
+                ):
+                    raise ValueError("storage deletion gate retained the response object")
+            except Exception as exc:  # noqa: BLE001 — 引用保留至下次重试，避免遗留失联对象
+                logger.warning("external response cleanup deferred: %s", type(exc).__name__)
+                conn.execute(
+                    "UPDATE external_call_logs SET cleanup_retry_at = %s WHERE id = %s",
+                    (now + timedelta(hours=1), call_id),
+                )
+                continue
+        removed.append(str(call_id))
+    if not removed:
+        return 0
+    return int(
+        conn.execute("DELETE FROM external_call_logs WHERE id = ANY(%s)", (removed,)).rowcount
+    )
 
 
 def _request_id() -> str:
@@ -573,9 +911,9 @@ def _is_binary_content(headers: Mapping[str, str]) -> bool:
     return content_type.startswith(_BINARY_CONTENT_PREFIXES)
 
 
-def _is_business_failure(body: bytes | str | None) -> bool:
+def _is_business_failure(body: bytes | str | None, *, provider: str = "") -> bool:
     """HTTP 200 但业务失败：视频任务的失败原因就在这类响应里。"""
-    code, message = parse_provider_error(body, allow_plain_text=False)
+    code, message = parse_provider_error(body, allow_plain_text=False, provider=provider)
     return bool(code or message)
 
 
@@ -588,6 +926,7 @@ def recorded_urlopen(
     opener: Any = None,
     read_limit: int | None = None,
     model: str | None = None,
+    expected_json: bool = False,
 ) -> tuple[bytes, dict[str, str], int]:
     """``urlopen`` 的记录版：返回 (响应体, 响应头, 状态码)，异常与原来一致。
 
@@ -621,8 +960,8 @@ def recorded_urlopen(
             status = int(getattr(response, "status", 200) or 200)
     except HTTPError as exc:
         try:
-            # 错误响应只需要看原因，最多读 1 MB，避免异常大的错误页占满内存。
-            error_body = exc.read(1024 * 1024)
+            # 失败正文需要全文留存，脱敏后按大小转存，不能在传输入口先丢掉尾部。
+            error_body = exc.read()
         except (OSError, ValueError, AttributeError):
             error_body = b""
         record_external_call(
@@ -640,6 +979,7 @@ def recorded_urlopen(
             outcome="TIMEOUT",
             latency_ms=timer.elapsed_ms(),
             error_message=f"等待 {timeout:g} 秒未收到响应",
+            exception_type=type(exc).__name__,
         )
         raise exc
     except URLError as exc:
@@ -649,6 +989,7 @@ def recorded_urlopen(
             outcome="TIMEOUT" if timed_out else "NETWORK_ERROR",
             latency_ms=timer.elapsed_ms(),
             error_message=type(exc.reason).__name__ if exc.reason else type(exc).__name__,
+            exception_type=type(exc.reason).__name__ if exc.reason else type(exc).__name__,
         )
         raise
     except OSError as exc:
@@ -657,19 +998,27 @@ def recorded_urlopen(
             outcome="NETWORK_ERROR",
             latency_ms=timer.elapsed_ms(),
             error_message=type(exc).__name__,
+            exception_type=type(exc).__name__,
         )
         raise
     binary_response = _is_binary_content(headers)
-    failed = not binary_response and _is_business_failure(body)
+    failed = not binary_response and _is_business_failure(body, provider=provider)
+    parse_error = False
+    if expected_json and not binary_response:
+        try:
+            json.loads(body)
+        except (ValueError, UnicodeError):
+            parse_error = True
     record_external_call(
         **common,
-        outcome="PROVIDER_ERROR" if failed else "SUCCEEDED",
+        outcome="PARSE_ERROR" if parse_error else "PROVIDER_ERROR" if failed else "SUCCEEDED",
         http_status=status,
         response_headers=headers,
         response_body=body,
         binary_response=binary_response,
         latency_ms=timer.elapsed_ms(),
         provider_task_id=None if binary_response else provider_task_id_from(body),
+        error_message="服务响应不是有效 JSON" if parse_error else None,
     )
     return body, headers, status
 

@@ -98,7 +98,13 @@ def _ops_app(*, ready: bool = True) -> FastAPI:
 
 def _last_log_payload(caplog: pytest.LogCaptureFixture) -> dict[str, object]:
     assert caplog.records, "expected at least one structured request log"
-    return json.loads(caplog.records[-1].getMessage())
+    return json.loads(
+        next(
+            record.getMessage()
+            for record in reversed(caplog.records)
+            if record.name == "app.ops_metrics"
+        )
+    )
 
 
 def test_request_middleware_mints_request_id_and_redacts_secrets(

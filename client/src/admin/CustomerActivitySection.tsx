@@ -1,14 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { type AuditLogItem, listAuditLog } from "../api.admin";
+import { auditEventLabel } from "./auditVocabulary";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
 import { formatDateTime } from "./ui/vocabulary";
 
-// 方案 P0-3：客户详情「操作记录」——查看这位客户自己在工作台的日常动作
-// （建项目、读素材等）。这些行一直写在 audit_logs 里，但审计页默认
-// scope=admin 看不到；服务端 docstring 承诺的入口（scope=customer +
-// target_user_id）就在这里补上。管理员对该客户的处置仍在审计页查看。
+// 同一稳定客户编号归集日常行为与管理员处置，沿用服务端合并审计的分页口径。
 const ACTIVITY_PAGE_SIZE = 20;
 
 export function CustomerActivitySection({ userId }: { userId: string }) {
@@ -26,7 +24,7 @@ export function CustomerActivitySection({ userId }: { userId: string }) {
       setLoading(true);
       setError("");
       const response = await listAuditLog({
-        scope: "customer",
+        scope: "all",
         targetUserId: userId,
         limit: ACTIVITY_PAGE_SIZE,
         offset,
@@ -62,8 +60,7 @@ export function CustomerActivitySection({ userId }: { userId: string }) {
         <small>{loading ? "加载中…" : `共 ${total} 条`}</small>
       </header>
       <p className="admin-hint">
-        该客户在工作台的日常动作（建项目、读素材等）。管理员对该客户的处置请到
-        「审计事件」页查看。
+        合并该客户的工作台行为与管理员处置，包含暂停、恢复、调账、退款扣减、设备和定价变更；仅显示已经记录的事实。
       </p>
 
       {error ? <PageBanner tone="error">{error}</PageBanner> : null}
@@ -79,40 +76,37 @@ export function CustomerActivitySection({ userId }: { userId: string }) {
               <tr>
                 <th scope="col">时间</th>
                 <th scope="col">动作</th>
-                <th scope="col">来源单据</th>
+                <th scope="col">操作人</th>
+                <th scope="col">操作对象</th>
                 <th scope="col">原因</th>
-                <th scope="col">问题编号</th>
+                <th scope="col">变更</th>
+                <th scope="col">详情</th>
               </tr>
             </thead>
             <tbody>
               {items.map((item) => (
                 <tr key={item.event_id}>
                   <td>{formatDateTime(item.created_at)}</td>
+                  <td>{auditEventLabel(item)}</td>
+                  <td>{item.actor_username || "系统"}</td>
                   <td>
-                    {/* 客户动作没有逐项中文词典（族回退会把它们全说成“系统
-                        操作”），这里直接给原始动作名 + 悬浮完整值。 */}
-                    <span title={item.event_type}>{item.event_type}</span>
-                  </td>
-                  <td>
-                    {item.source_document_ref ? (
-                      <span
-                        title={`${item.source_document_type} / ${item.source_document_ref}`}
-                      >
-                        {item.source_document_ref}
-                      </span>
-                    ) : (
-                      "—"
-                    )}
+                    {item.target_label ||
+                      item.target_company_name ||
+                      item.target_username ||
+                      "该客户"}
                   </td>
                   <td>{item.reason || "—"}</td>
+                  <td>{item.change_summary ?? activityChange(item)}</td>
                   <td>
-                    {item.request_id ? (
-                      <span title={item.request_id}>
-                        {compactRef(item.request_id)}
-                      </span>
-                    ) : (
-                      "—"
-                    )}
+                    <details>
+                      <summary>技术详情</summary>
+                      <p>事件：{item.event_type}</p>
+                      <p>
+                        来源单据：{item.source_document_type} /{" "}
+                        {item.source_document_ref || "—"}
+                      </p>
+                      <p>请求编号：{item.request_id || "—"}</p>
+                    </details>
                   </td>
                 </tr>
               ))}
@@ -132,8 +126,43 @@ export function CustomerActivitySection({ userId }: { userId: string }) {
   );
 }
 
-function compactRef(value: string): string {
-  return value.length <= 24
-    ? value
-    : `${value.slice(0, 12)}…${value.slice(-6)}`;
+type PriceState = {
+  mode: "DEFAULT" | "CUSTOM";
+  effective_unit_price_fen: number | null;
+};
+
+function priceState(value: unknown): PriceState | null {
+  if (!value || typeof value !== "object") return null;
+  const state = value as Record<string, unknown>;
+  if (state.mode !== "DEFAULT" && state.mode !== "CUSTOM") return null;
+  if (
+    state.effective_unit_price_fen !== null &&
+    (typeof state.effective_unit_price_fen !== "number" ||
+      !Number.isFinite(state.effective_unit_price_fen))
+  )
+    return null;
+  return state as PriceState;
+}
+
+function priceLabel(state: PriceState): string {
+  const amount =
+    state.effective_unit_price_fen == null
+      ? "历史金额未记录"
+      : `¥${(state.effective_unit_price_fen / 100).toFixed(2)}`;
+  return state.mode === "DEFAULT"
+    ? `未配置自定义价（继承默认，${amount}）`
+    : `自定义价 ${amount}`;
+}
+
+function activityChange(item: AuditLogItem): string {
+  const credits = item.change_detail?.changes?.available_credits;
+  if (typeof credits?.before === "number" && typeof credits.after === "number")
+    return `${credits.before} → ${credits.after} 积分`;
+  const prices = item.change_detail?.changes?.customer_unit_price;
+  const before = priceState(prices?.before);
+  const after = priceState(prices?.after);
+  if (before && after) return `${priceLabel(before)} → ${priceLabel(after)}`;
+  if (item.old_unit_price_fen != null && item.new_unit_price_fen != null)
+    return `${item.old_unit_price_fen / 100} → ${item.new_unit_price_fen / 100} 元`;
+  return "未记录前后值";
 }

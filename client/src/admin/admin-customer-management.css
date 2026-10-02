@@ -1,0 +1,167 @@
+.admin-shell--control .admin-nav-groups {
+  overflow-y: auto;
+  overflow-x: hidden;
+  flex: 1 1 0;
+  min-height: 0;
+}
+.admin-shell--control .admin-sidebar__footer {
+  flex-shrink: 0;
+  background: #10100f;
+}
+.admin-shell--control .admin-workspace .customer-identity-link {
+  display: grid;
+  gap: 4px;
+  text-align: left;
+  padding: 0;
+  min-height: 0;
+  border: 0;
+  background: transparent;
+  color: #e9cd91;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.customer-identity-link small {
+  color: #b5b2a8;
+  font-weight: normal;
+}
+.admin-shell--control .customer-attention-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 16px 0 8px;
+}
+.admin-shell--control .customer-attention-cards button {
+  display: grid;
+  gap: 8px;
+  text-align: left;
+  padding: 16px;
+  background: #201e18;
+  color: #e6ca8a;
+  border: 1px solid #67522a;
+}
+.customer-attention-cards button strong {
+  font-size: 22px;
+}
+.customer-attention-cards button[aria-pressed="true"] {
+  outline: 2px solid #d7ad50;
+}
+.admin-shell--control .admin-workspace .customers-table {
+  min-width: 0;
+  width: 100%;
+  table-layout: fixed;
+  font-size: 12px;
+}
+
+.admin-shell--control
+  .admin-workspace
+  .customers-table
+  .customer-identity-link {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.admin-shell--control
+  .admin-workspace
+  .customers-table
+  .customer-identity-link
+  strong {
+  display: block;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.admin-shell--control .customers-table :is(th, td) {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  padding: 12px 8px;
+}
+.customers-table :is(th, td):first-child {
+  width: 23%;
+}
+.customers-table td small {
+  display: block;
+  margin-top: 5px;
+  color: #b5b2a8;
+}
+.admin-shell--control .admin-workspace .customers-table th button {
+  padding: 0;
+  min-height: 0;
+  background: transparent;
+  border: 0;
+  color: #e4c883;
+  text-align: left;
+  white-space: normal;
+}
+.customer-low-balance {
+  color: #f0c46b;
+}
+.customer-failure-badge {
+  display: inline-block;
+  padding: 3px 6px;
+  border-radius: 5px;
+  background: #512c28;
+  color: #ffc0b3;
+  margin-top: 5px;
+}
+.admin-shell--control .customer-detail-title h1 {
+  overflow-wrap: anywhere;
+  font-size: 24px;
+}
+.admin-shell--control .customer-detail-kpis {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.customer-detail-kpis article {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.customer-detail-kpis article strong {
+  font-size: 21px;
+}
+.customer-consumption-chart {
+  width: 100%;
+  max-height: 155px;
+  display: block;
+}
+.customer-overview {
+  padding: 20px;
+  border: 1px solid #38362e;
+  border-radius: 12px;
+  margin: 16px 0;
+}
+.customer-overview h2 {
+  font-size: 17px;
+}
+.customer-timeline {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.customer-timeline li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid #36332a;
+}
+.customer-timeline time {
+  color: #b5b2a8;
+}
+.customer-technical-details {
+  margin: 16px 0;
+  padding: 16px;
+  border: 1px solid #38362e;
+}
+@media (max-width: 1200px) {
+  .admin-shell--control .customer-detail-kpis {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .admin-shell--control .admin-workspace .customers-table {
+    font-size: 11px;
+  }
+  .admin-shell--control .customers-table :is(th, td) {
+    padding: 10px 5px;
+  }
+}

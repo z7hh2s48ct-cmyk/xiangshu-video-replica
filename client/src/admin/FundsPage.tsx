@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { ReconciliationAnomaly } from "../api";
 
 import { AccountsPage } from "./AccountsPage";
 import { AdjustmentsPage } from "./AdjustmentsPage";
@@ -30,10 +31,34 @@ export type FundsTab =
 export function FundsPage({
   readOnly = false,
   initialTab = "overview",
+  userId = "",
+  orderNo = "",
+  initialMonth,
+  onMonthChange,
+  initialAnomaly = "paid_without_charge",
+  onCustomer,
 }: {
   readOnly?: boolean;
   initialTab?: FundsTab;
+  userId?: string;
+  orderNo?: string;
+  initialMonth?: string;
+  onMonthChange?: (month: string) => void;
+  initialAnomaly?: ReconciliationAnomaly;
+  onCustomer?: (id: string) => void;
 }) {
+  const [month, setMonth] = useState(
+    () =>
+      initialMonth ??
+      new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Shanghai",
+        year: "numeric",
+        month: "2-digit",
+      })
+        .format(new Date())
+        .slice(0, 7),
+  );
+  const [anomaly, setAnomaly] = useState<ReconciliationAnomaly>(initialAnomaly);
   const [tab, setTab] = useState<FundsTab>(initialTab);
   return (
     <div>
@@ -44,12 +69,41 @@ export function FundsPage({
         onChange={(next) => setTab(next as FundsTab)}
       />
       {tab === "overview" && (
-        <FundsOverview onOpenReconciliation={() => setTab("reconciliation")} />
+        <FundsOverview
+          readOnly={readOnly}
+          selectedMonth={month}
+          onMonthChange={(next) => {
+            setMonth(next);
+            onMonthChange?.(next);
+          }}
+          onOpenReconciliation={() => setTab("reconciliation")}
+        />
       )}
-      {tab === "orders" && <OrdersPage readOnly={readOnly} />}
-      {tab === "transactions" && <AccountsPage readOnly={readOnly} />}
-      {tab === "adjustments" && <AdjustmentsPage readOnly={readOnly} />}
-      {tab === "reconciliation" && <ReconciliationPage />}
+      {tab === "orders" && (
+        <OrdersPage
+          onCustomer={onCustomer}
+          readOnly={readOnly}
+          userId={userId}
+          orderNo={orderNo}
+          onOpenReconciliation={(next) => {
+            setAnomaly(next);
+            setTab("reconciliation");
+          }}
+        />
+      )}
+      {tab === "transactions" && (
+        <AccountsPage readOnly={readOnly} userId={userId} />
+      )}
+      {tab === "adjustments" && (
+        <AdjustmentsPage readOnly={readOnly} onCustomer={onCustomer} />
+      )}
+      {tab === "reconciliation" && (
+        <ReconciliationPage
+          key={anomaly}
+          readOnly={readOnly}
+          initialAnomaly={anomaly}
+        />
+      )}
     </div>
   );
 }

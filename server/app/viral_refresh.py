@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -11,6 +12,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.db_portable import BusinessConnection
+from app.viral_collection_failures import FAILURES, classify_collection_failure
 
 logger = logging.getLogger(__name__)
 VIRAL_REFRESH_LEASE_MINUTES = 10
@@ -143,6 +145,14 @@ def acquire_viral_refresh_task(
         """,
         (worker_id, locked_until, now, now),
     ).fetchone()
+    if row is not None:
+        conn.execute(
+            "UPDATE viral_collection_batches SET run_status='RUNNING',"
+            "started_at=COALESCE(started_at,clock_timestamp()),completed_at=NULL,failure_reason=NULL,"
+            "failure_code=NULL "
+            "WHERE id=%s",
+            (str(json.loads(row["collection_config_json"]).get("billing_batch_id") or ""),),
+        )
     conn.commit()
     if row is None:
         return None
@@ -185,6 +195,12 @@ def complete_viral_refresh_task(conn: BusinessConnection, *, lease: ViralRefresh
     )
     if updated.rowcount != 1:
         raise _lease_lost()
+    conn.execute(
+        "UPDATE viral_collection_batches SET run_status='SUCCEEDED',completed_at=clock_timestamp(),"
+        "failed_video_count=0,failure_reason=NULL WHERE id=(SELECT collection_config_json::jsonb"
+        "->>'billing_batch_id' FROM viral_refresh_tasks WHERE id=%s)",
+        (lease.id,),
+    )
     conn.commit()
 
 
@@ -192,6 +208,7 @@ def fail_viral_refresh_task(
     conn: BusinessConnection, *, lease: ViralRefreshLease, cause: Exception
 ) -> None:
     logger.warning("viral refresh task %s failed: %s", lease.id, type(cause).__name__)
+    code = classify_collection_failure(cause)
     now = _time_text(datetime.now(UTC))
     updated = conn.execute(
         """
@@ -206,4 +223,11 @@ def fail_viral_refresh_task(
     )
     if updated.rowcount != 1:
         raise _lease_lost()
+    conn.execute(
+        "UPDATE viral_collection_batches SET run_status='FAILED',completed_at=clock_timestamp(),"
+        "failure_reason=%s,failure_code=%s "
+        "WHERE id=(SELECT collection_config_json::jsonb->>'billing_batch_id' "
+        "FROM viral_refresh_tasks WHERE id=%s)",
+        (FAILURES[code][0], code, lease.id),
+    )
     conn.commit()

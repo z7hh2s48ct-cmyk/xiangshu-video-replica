@@ -1,3 +1,4 @@
+import "./admin/admin-customer-management.css";
 import {
   type FormEvent,
   useCallback,
@@ -8,14 +9,17 @@ import {
 import { AnalyticsPage } from "./admin/AnalyticsPage";
 import { AuditCenterPage } from "./admin/AuditCenterPage";
 import { CustomersManagementPage } from "./admin/CustomersManagementPage";
+import { ExternalCallsPage } from "./admin/ExternalCallsPage";
 import { FundsPage } from "./admin/FundsPage";
 import { GenerationRecordsPage } from "./admin/GenerationRecordsPage";
 import { OverviewPage } from "./admin/OverviewPage";
 import { SessionsPage } from "./admin/SessionsPage";
 import { SystemSettingsPage } from "./admin/SystemSettingsPage";
 import { shanghaiDate } from "./admin/ui/vocabulary";
+import { ViralCollectionPage } from "./admin/ViralCollectionPage";
 import { ViralDiscoveriesPage } from "./admin/ViralDiscoveriesPage";
-import { ViralRuntimeSection } from "./admin/ViralRuntimeSection";
+import { ViralHomepagePage } from "./admin/ViralHomepagePage";
+import { ViralOverviewPage } from "./admin/ViralOverviewPage";
 import { ViralVideosPage } from "./admin/ViralVideosPage";
 import "./admin/admin-login.css";
 import { PageBanner } from "./admin/ui/PageBanner";
@@ -65,10 +69,16 @@ const loginErrorOverrides = {
 export type AdminTab =
   | "overview"
   | "analytics"
+  | "costReview"
   | "funds"
   | "customersMgmt"
   | "sessions"
   | "generationRecords"
+  | "generationFailures"
+  | "externalCalls"
+  | "viralOverview"
+  | "viralHomepage"
+  | "viralCollection"
   | "viralVideos"
   | "viralDiscoveries"
   | "auditCenter"
@@ -80,68 +90,132 @@ const tabGroups: Array<{
   tabs: Array<{ id: AdminTab; label: string; helper: string }>;
 }> = [
   {
-    id: "overview",
-    label: "运营概览",
+    id: "workbench",
+    label: "工作台",
+    tabs: [{ id: "overview", label: "总览", helper: "核心指标与运营待办" }],
+  },
+  {
+    id: "business",
+    label: "经营",
     tabs: [
-      { id: "overview", label: "总览仪表盘", helper: "核心指标与经营总览" },
-      { id: "analytics", label: "经营分析", helper: "利润、成本与趋势" },
-      { id: "funds", label: "资金中心", helper: "收款、流水、调账与对账" },
+      { id: "analytics", label: "经营看板", helper: "收入、成本与经营趋势" },
+      {
+        id: "costReview",
+        label: "成本核对",
+        helper: "待结算、成本待核对与业务全景",
+      },
     ],
   },
   {
-    id: "operations",
-    label: "客户运营",
+    id: "funds",
+    label: "资金中心",
+    tabs: [
+      { id: "funds", label: "资金中心", helper: "收款、积分、人工调整与对账" },
+    ],
+  },
+  {
+    id: "customers",
+    label: "客户",
     tabs: [
       {
         id: "customersMgmt",
-        label: "客户管理",
-        helper: "客户账户与积分管理",
+        label: "客户列表",
+        helper: "客户账户、权益与操作记录",
       },
       {
         id: "sessions",
         label: "登录与设备",
-        helper: "在线客户、登录设备与下线管理",
-      },
-      {
-        id: "generationRecords",
-        label: "生成记录",
-        helper: "视频、图片与 AI 评分费用追溯",
-      },
-      {
-        id: "viralVideos",
-        label: "爆款视频库",
-        helper: "采集数据、实时搜索、首页展示与删除管理",
-      },
-      {
-        id: "viralDiscoveries",
-        label: "用户搜索发现",
-        helper: "客户搜索记录下钻与上首页",
+        helper: "在线客户、设备历史与异常关注",
       },
     ],
   },
   {
-    id: "governance",
-    label: "系统治理",
+    id: "generation",
+    label: "生成",
     tabs: [
-      { id: "auditCenter", label: "审计中心", helper: "审计日志与调账记录" },
+      {
+        id: "generationRecords",
+        label: "生成记录",
+        helper: "生成任务、交付与费用追溯",
+      },
+      {
+        id: "generationFailures",
+        label: "失败诊断",
+        helper: "失败原因、处理建议与责任人",
+      },
+      {
+        id: "externalCalls",
+        label: "接口调用日志",
+        helper: "调用检索与服务健康",
+      },
+    ],
+  },
+  {
+    id: "content",
+    label: "内容",
+    tabs: [
+      {
+        id: "viralOverview",
+        label: "内容概览",
+        helper: "库存、效果与运营待办",
+      },
+      { id: "viralVideos", label: "视频库", helper: "挑选内容与批量上首页" },
+      {
+        id: "viralHomepage",
+        label: "首页编排",
+        helper: "调整顺序与定时上下线",
+      },
+      {
+        id: "viralDiscoveries",
+        label: "客户需求洞察",
+        helper: "搜索需求与内容补货",
+      },
+      {
+        id: "viralCollection",
+        label: "采集设置",
+        helper: "计划、关键词、质量与预算",
+      },
+    ],
+  },
+  {
+    id: "audit",
+    label: "审计",
+    tabs: [
+      {
+        id: "auditCenter",
+        label: "管理操作日志",
+        helper: "管理员操作、高敏事件与变更摘要",
+      },
+    ],
+  },
+  {
+    id: "settings",
+    label: "设置",
+    tabs: [
       {
         id: "systemSettings",
         label: "系统设置",
-        helper: "支付、费率与服务配置",
+        helper: "价格、收款、团队、通知与技术配置",
       },
     ],
   },
 ];
 const tabPageTitles: Record<AdminTab, string> = {
-  overview: "总览仪表盘",
-  analytics: "经营分析",
+  overview: "总览",
+  analytics: "经营看板",
+  costReview: "成本核对",
   funds: "资金中心",
-  customersMgmt: "客户管理",
+  customersMgmt: "客户列表",
   sessions: "登录与设备",
-  generationRecords: "用户生成记录",
-  viralVideos: "爆款视频库",
-  viralDiscoveries: "用户搜索发现",
-  auditCenter: "审计中心",
+  generationRecords: "生成记录",
+  generationFailures: "失败诊断",
+  externalCalls: "接口调用日志",
+  viralOverview: "内容概览",
+  viralHomepage: "首页编排",
+  viralCollection: "采集设置",
+  viralVideos: "视频库",
+  viralDiscoveries: "客户需求洞察",
+  auditCenter: "管理操作日志",
   systemSettings: "系统设置",
 };
 
@@ -149,10 +223,16 @@ const compactNavigationBreakpoint = 1024;
 const navigationIcons: Record<AdminTab, string> = {
   overview: gaugeIcon,
   analytics: chartIcon,
+  costReview: chartIcon,
   funds: walletIcon,
   customersMgmt: usersIcon,
   sessions: shieldIcon,
   generationRecords: clapperboardIcon,
+  generationFailures: clapperboardIcon,
+  externalCalls: clapperboardIcon,
+  viralOverview: chartIcon,
+  viralHomepage: clapperboardIcon,
+  viralCollection: settingsIcon,
   viralVideos: clapperboardIcon,
   viralDiscoveries: clapperboardIcon,
   auditCenter: shieldIcon,
@@ -171,6 +251,9 @@ const adminIntents = new Set([
   "failedGenerationRecords",
   "analysisFailures",
   "rates",
+  "recon",
+  "order",
+  "ledger",
 ]);
 
 export function adminRouteFromHash(hash: string): {
@@ -180,19 +263,18 @@ export function adminRouteFromHash(hash: string): {
   const [path, query = ""] = hash.replace(/^#/, "").split("?", 2);
   const requested = path.replace(/^admin\//, "") as AdminTab;
   return {
-    tab: adminTabs.has(requested) ? requested : "overview",
+    tab:
+      requested === "analytics" &&
+      new URLSearchParams(query).get("analyticsTab") === "cost"
+        ? "costReview"
+        : adminTabs.has(requested)
+          ? requested
+          : "overview",
     intent: (() => {
       const intent = new URLSearchParams(query).get("intent") ?? "";
       return adminIntents.has(intent) ? intent : "";
     })(),
   };
-}
-
-function adminHash(tab: AdminTab, intent = "") {
-  const params = new URLSearchParams();
-  if (intent) params.set("intent", intent);
-  const query = params.toString();
-  return `#admin/${tab}${query ? `?${query}` : ""}`;
 }
 
 export function AdminApp() {
@@ -212,6 +294,13 @@ export function AdminApp() {
   const initialRoute = adminRouteFromHash(window.location.hash);
   const [activeTab, setActiveTab] = useState<AdminTab>(initialRoute.tab);
   const [navigationIntent, setNavigationIntent] = useState(initialRoute.intent);
+  const [businessTarget, setBusinessTarget] = useState(
+    () => new URLSearchParams(window.location.hash.split("?")[1] ?? ""),
+  );
+  const [viralDemandSearch, setViralDemandSearch] = useState<{
+    keyword: string;
+    platform: "douyin" | "wechat_channels";
+  } | null>(null);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [isCompactNavigation, setIsCompactNavigation] = useState(() =>
@@ -225,21 +314,79 @@ export function AdminApp() {
       : true,
   );
 
-  const navigateAdmin = useCallback((tab: AdminTab, intent = "") => {
-    setActiveTab(tab);
-    setNavigationIntent(intent);
-    window.history.pushState(null, "", adminHash(tab, intent));
-  }, []);
+  const navigateAdmin = useCallback(
+    (tab: AdminTab, intent = "", target: Record<string, string> = {}) => {
+      setActiveTab(tab);
+      setNavigationIntent(intent);
+      const params = new URLSearchParams(target);
+      if (intent) params.set("intent", intent);
+      setBusinessTarget(params);
+      window.history.pushState(
+        null,
+        "",
+        `#admin/${tab}${params.size ? `?${params}` : ""}`,
+      );
+    },
+    [],
+  );
+
+  function persistBusinessScope(scope: Record<string, string>) {
+    const current = window.location.hash.split("?");
+    const params = new URLSearchParams(current[1]);
+    for (const [key, value] of Object.entries(scope)) params.set(key, value);
+    window.history.replaceState(null, "", `${current[0]}?${params}`);
+  }
+
+  function persistAnalyticsScope(scope: Record<string, string>) {
+    persistBusinessScope(scope);
+    if (scope.analyticsTab) {
+      const tab = scope.analyticsTab === "cost" ? "costReview" : "analytics";
+      const params = new URLSearchParams(
+        window.location.hash.split("?")[1] ?? "",
+      );
+      setActiveTab(tab);
+      setBusinessTarget(params);
+      window.history.replaceState(null, "", `#admin/${tab}?${params}`);
+    }
+  }
 
   useEffect(() => {
     const current = adminRouteFromHash(window.location.hash);
-    const normalized = adminHash(current.tab, current.intent);
+    const allowed = new URLSearchParams(
+      window.location.hash.split("?")[1] ?? "",
+    );
+    for (const key of [...allowed.keys()])
+      if (
+        ![
+          "intent",
+          "userId",
+          "orderNo",
+          "taskId",
+          "videoId",
+          "platform",
+          "batchId",
+          "listQuery",
+          "start",
+          "end",
+          "analyticsTab",
+          "billingQuery",
+          "month",
+          "anomaly",
+        ].includes(key)
+      )
+        allowed.delete(key);
+    if (current.intent) allowed.set("intent", current.intent);
+    else allowed.delete("intent");
+    const normalized = `#admin/${current.tab}${allowed.size ? `?${allowed}` : ""}`;
     if (window.location.hash !== normalized)
       window.history.replaceState(null, "", normalized);
     const restore = () => {
       const route = adminRouteFromHash(window.location.hash);
       setActiveTab(route.tab);
       setNavigationIntent(route.intent);
+      setBusinessTarget(
+        new URLSearchParams(window.location.hash.split("?")[1] ?? ""),
+      );
     };
     window.addEventListener("hashchange", restore);
     window.addEventListener("popstate", restore);
@@ -708,39 +855,60 @@ export function AdminApp() {
                 <section className="admin-nav-group" key={group.id}>
                   <h3>{group.label}</h3>
                   <div className="admin-nav-group__items">
-                    {group.tabs.map((tab) => (
-                      <button
-                        aria-current={activeTab === tab.id ? "page" : undefined}
-                        aria-label={tab.label}
-                        className={
-                          activeTab === tab.id
-                            ? "admin-tab is-active"
-                            : "admin-tab"
-                        }
-                        key={tab.id}
-                        type="button"
-                        onClick={() => {
-                          navigateAdmin(tab.id);
-                          // C3：切标签清掉上一页残留的全局提示。
-                          setError("");
-                          setNotice("");
-                          if (isCompactNavigation) {
-                            setIsNavigationOpen(false);
+                    {group.tabs
+                      .filter(
+                        (tab) =>
+                          tab.id !== "externalCalls" ||
+                          (actor.role === "admin" && actor.is_super_admin),
+                      )
+                      .map((tab) => (
+                        <button
+                          aria-current={
+                            activeTab === tab.id ? "page" : undefined
                           }
-                        }}
-                      >
-                        <img
-                          alt=""
-                          aria-hidden="true"
-                          className="admin-navigation-icon"
-                          src={navigationIcons[tab.id]}
-                        />
-                        <span className="admin-navigation-copy">
-                          <span>{tab.label}</span>
-                          <small>{tab.helper}</small>
-                        </span>
-                      </button>
-                    ))}
+                          aria-label={tab.label}
+                          className={
+                            activeTab === tab.id
+                              ? "admin-tab is-active"
+                              : "admin-tab"
+                          }
+                          key={tab.id}
+                          type="button"
+                          onClick={() => {
+                            const inBusiness =
+                              ["analytics", "costReview"].includes(activeTab) &&
+                              ["analytics", "costReview"].includes(tab.id);
+                            const scope = inBusiness
+                              ? Object.fromEntries(
+                                  new URLSearchParams(
+                                    window.location.hash.split("?")[1] ?? "",
+                                  ),
+                                )
+                              : {};
+                            if (inBusiness)
+                              scope.analyticsTab =
+                                tab.id === "costReview" ? "cost" : "dashboard";
+                            navigateAdmin(tab.id, "", scope);
+                            // C3：切标签清掉上一页残留的全局提示。
+                            setError("");
+                            setNotice("");
+                            if (isCompactNavigation) {
+                              setIsNavigationOpen(false);
+                            }
+                          }}
+                        >
+                          <img
+                            alt=""
+                            aria-hidden="true"
+                            className="admin-navigation-icon"
+                            src={navigationIcons[tab.id]}
+                          />
+                          <span className="admin-navigation-copy">
+                            <span>{tab.label}</span>
+                            <small>{tab.helper}</small>
+                          </span>
+                        </button>
+                      ))}
                   </div>
                 </section>
               ))}
@@ -758,6 +926,13 @@ export function AdminApp() {
         </aside>
 
         <div className="admin-workspace">
+          {activeTab === "externalCalls" ? (
+            actor.role === "admin" && actor.is_super_admin ? (
+              <ExternalCallsPage />
+            ) : (
+              <PageBanner tone="error">此功能仅超级管理员可用。</PageBanner>
+            )
+          ) : null}
           {error ? <PageBanner tone="error">{error}</PageBanner> : null}
           {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
 
@@ -771,7 +946,7 @@ export function AdminApp() {
             <>
               <TabBar
                 ariaLabel="运营概览快捷导航"
-                items={tabGroups[0].tabs}
+                items={[...tabGroups[0].tabs, ...tabGroups[1].tabs]}
                 active={activeTab}
                 onChange={(tab) => navigateAdmin(tab as AdminTab)}
               />
@@ -791,6 +966,7 @@ export function AdminApp() {
                     failedGenerationRecords: "generationRecords",
                     analysisFailures: "generationRecords",
                     rates: "systemSettings",
+                    recon: "funds",
                   };
                   navigateAdmin(
                     routes[destination] ?? (destination as AdminTab),
@@ -800,11 +976,20 @@ export function AdminApp() {
               />
             </>
           ) : null}
-          {activeTab === "analytics" ? (
+          {activeTab === "analytics" || activeTab === "costReview" ? (
             <AnalyticsPage
-              key={`analytics:${navigationIntent}`}
+              key={`${activeTab}:${navigationIntent}`}
               readOnly={readOnly}
+              onCustomer={(userId) =>
+                navigateAdmin("customersMgmt", "customer", { userId })
+              }
+              initialStart={businessTarget.get("start") ?? undefined}
+              initialEnd={businessTarget.get("end") ?? undefined}
+              initialCostQuery={businessTarget.get("billingQuery") ?? ""}
+              onScopeChange={persistAnalyticsScope}
               initialTab={
+                activeTab === "costReview" ||
+                businessTarget.get("analyticsTab") === "cost" ||
                 navigationIntent === "costDetails" ||
                 navigationIntent === "pendingOperations" ||
                 navigationIntent === "unknownCost" ||
@@ -827,8 +1012,27 @@ export function AdminApp() {
             // 总览「对账不一致」待办带 recon 意图进来时直达对账异常页签
             // （方案 P0-5：待办点击后落到的清单与待办数一致）。
             <FundsPage
+              onCustomer={(userId) =>
+                navigateAdmin("customersMgmt", "customer", { userId })
+              }
+              key={`funds:${businessTarget}:${navigationIntent}`}
+              initialMonth={businessTarget.get("month") ?? undefined}
+              onMonthChange={(month) => persistBusinessScope({ month })}
+              initialAnomaly={
+                (businessTarget.get(
+                  "anomaly",
+                ) as import("./api").ReconciliationAnomaly) || undefined
+              }
+              userId={businessTarget.get("userId") ?? ""}
+              orderNo={businessTarget.get("orderNo") ?? ""}
               initialTab={
-                navigationIntent === "recon" ? "reconciliation" : "overview"
+                navigationIntent === "recon"
+                  ? "reconciliation"
+                  : navigationIntent === "order"
+                    ? "orders"
+                    : navigationIntent === "ledger"
+                      ? "transactions"
+                      : "overview"
               }
               readOnly={readOnly}
             />
@@ -838,9 +1042,30 @@ export function AdminApp() {
                intent 透传下去，客户管理页才能定位到对应表单，否则点完只是
                换了个页签、没有下文。 */
             <CustomersManagementPage
+              key={`customers:${navigationIntent}:${businessTarget}`}
+              initialCustomerId={businessTarget.get("userId") ?? ""}
               initialIntent={navigationIntent}
               operatorId={actor.user_id}
               readOnly={readOnly}
+              initialListQuery={businessTarget.get("listQuery") ?? ""}
+              onScopeChange={persistBusinessScope}
+              onCustomer={(userId) =>
+                navigateAdmin("customersMgmt", "customer", {
+                  userId,
+                  listQuery:
+                    new URLSearchParams(
+                      window.location.hash.split("?")[1] ?? "",
+                    ).get("listQuery") ?? "",
+                })
+              }
+              onReturnToList={() =>
+                navigateAdmin("customersMgmt", "", {
+                  listQuery:
+                    new URLSearchParams(
+                      window.location.hash.split("?")[1] ?? "",
+                    ).get("listQuery") ?? "",
+                })
+              }
             />
           ) : null}
           {/* 任务书 C：恢复在线会话挂载。多设备并存下按设备强制下线是管理刚需，
@@ -848,10 +1073,14 @@ export function AdminApp() {
           {activeTab === "sessions" ? (
             <SessionsPage readOnly={readOnly} />
           ) : null}
-          {activeTab === "generationRecords" ? (
+          {activeTab === "generationRecords" ||
+          activeTab === "generationFailures" ? (
             <GenerationRecordsPage
-              key={`generationRecords:${navigationIntent}`}
+              key={`${activeTab}:${navigationIntent}:${businessTarget}`}
+              initialTaskRef={businessTarget.get("taskId") ?? ""}
+              initialUserId={businessTarget.get("userId") ?? ""}
               initialStatus={
+                activeTab === "generationFailures" ||
                 navigationIntent === "failedGenerationRecords" ||
                 navigationIntent === "analysisFailures"
                   ? "FAILED"
@@ -866,15 +1095,49 @@ export function AdminApp() {
           {activeTab === "auditCenter" ? (
             <AuditCenterPage readOnly={readOnly} />
           ) : null}
+          {activeTab === "viralOverview" ? <ViralOverviewPage /> : null}
+          {activeTab === "viralHomepage" ? (
+            <ViralHomepagePage readOnly={readOnly} />
+          ) : null}
+          {activeTab === "viralCollection" ? (
+            <ViralCollectionPage
+              key={`collection:${businessTarget}`}
+              readOnly={readOnly}
+              initialBatchId={businessTarget.get("batchId") ?? ""}
+            />
+          ) : null}
           {activeTab === "viralVideos" ? (
-            <>
-              <ViralVideosPage readOnly={readOnly} />
-              {/* 采集设置迁入内容组（方案 P1 内容模块：采集设置不再藏在系统设置）。 */}
-              <ViralRuntimeSection readOnly={readOnly} />
-            </>
+            <ViralVideosPage
+              key={`videos:${businessTarget}`}
+              onCustomer={(userId) =>
+                navigateAdmin("customersMgmt", "customer", { userId })
+              }
+              initialVideo={
+                businessTarget.get("videoId")
+                  ? {
+                      video_id: businessTarget.get("videoId") ?? "",
+                      platform:
+                        businessTarget.get("platform") === "wechat_channels"
+                          ? "wechat_channels"
+                          : "douyin",
+                    }
+                  : null
+              }
+              readOnly={readOnly}
+              initialSearch={viralDemandSearch}
+            />
           ) : null}
           {activeTab === "viralDiscoveries" ? (
-            <ViralDiscoveriesPage readOnly={readOnly} />
+            <ViralDiscoveriesPage
+              readOnly={readOnly}
+              onCustomer={(userId) => {
+                navigateAdmin("customersMgmt", "demandCustomer", { userId });
+              }}
+              onSearch={(keyword, platform) => {
+                setViralDemandSearch({ keyword, platform });
+                navigateAdmin("viralVideos");
+              }}
+            />
           ) : null}
           {activeTab === "systemSettings" ? (
             <SystemSettingsPage

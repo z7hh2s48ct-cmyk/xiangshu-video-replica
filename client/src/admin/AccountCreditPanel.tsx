@@ -69,7 +69,7 @@ export function AccountCreditPanel({
   return (
     <section className="customer-detail-section" aria-label="账号积分查账">
       <details className="customer-account-tools">
-        <summary>充值核验与接口用量</summary>
+        <summary>技术详情</summary>
         {error && (
           <PageBanner tone="error">
             {error}

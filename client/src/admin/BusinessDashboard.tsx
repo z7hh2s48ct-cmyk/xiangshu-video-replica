@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { adminRead } from "../api.admin";
 import { formatFen } from "./ui/vocabulary";
 
@@ -10,6 +10,11 @@ type OverviewMetrics = {
   cost_fen: number;
   unknown_cost_count: number;
   pending_count: number;
+  unknown_revenue_count?: number;
+  legacy_cost_count?: number;
+  legacy_settlement_count?: number;
+  gross_fen?: number | null;
+  margin_pct?: number | null;
   prepaid_credits: number;
   prepaid_fen: number | null;
 };
@@ -21,7 +26,19 @@ type BusinessOverview = {
   prev_end: string;
   metrics: OverviewMetrics;
   prev: OverviewMetrics;
-  daily: { day: string; revenue_fen: number | null; cost_fen: number | null }[];
+  daily: {
+    day: string;
+    revenue_fen: number | null;
+    cost_fen: number | null;
+    known_revenue_fen?: number | null;
+    known_cost_fen?: number | null;
+    margin_pct?: number | null;
+    unknown_cost_count?: number;
+    unknown_revenue_count?: number;
+    legacy_cost_count?: number;
+    legacy_settlement_count?: number;
+    pending_count?: number;
+  }[];
   modules: {
     service: string;
     label: string;
@@ -29,6 +46,9 @@ type BusinessOverview = {
     cost_fen: number;
     unknown_cost_count: number;
     pending_count: number;
+    unknown_revenue_count?: number;
+    legacy_cost_count?: number;
+    legacy_settlement_count?: number;
   }[];
   top_customers: {
     user_id: string;
@@ -104,21 +124,36 @@ function delta(cur: number, prev: number): string {
  *  缺证据的请求只进「待核对」条数，绝不冒充零成本或零收入。 */
 export function BusinessDashboard({
   readOnly = false,
+  range: controlledRange,
+  onRangeChange,
+  onCustomer,
 }: {
   readOnly?: boolean;
+  range?: { start: string; end: string };
+  onRangeChange?: (range: { start: string; end: string }) => void;
+  onCustomer?: (userId: string) => void;
 }) {
-  const [preset, setPreset] = useState<Preset>("month");
+  const [preset, setPreset] = useState<Preset>(
+    controlledRange &&
+      (controlledRange.start !== `${shanghaiToday().slice(0, 7)}-01` ||
+        controlledRange.end !== shanghaiToday())
+      ? "custom"
+      : "month",
+  );
   const [custom, setCustom] = useState(() => ({
-    start: `${shanghaiToday().slice(0, 7)}-01`,
-    end: shanghaiToday(),
+    start: controlledRange?.start ?? `${shanghaiToday().slice(0, 7)}-01`,
+    end: controlledRange?.end ?? shanghaiToday(),
   }));
-  const range = presetRange(preset, custom);
+  const range = controlledRange ?? presetRange(preset, custom);
   const [overview, setOverview] = useState<BusinessOverview>();
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState("");
 
+  const requestSequence = useRef(0);
   const load = useCallback(async () => {
+    const sequence = ++requestSequence.current;
+    setOverview(undefined);
     setBusy(true);
     setError("");
     try {
@@ -127,17 +162,21 @@ export function BusinessDashboard({
         `/api/control/business/overview?${query}`,
         "读取经营看板失败",
       );
-      setOverview(result);
+      if (sequence === requestSequence.current) setOverview(result);
     } catch (cause) {
+      if (sequence !== requestSequence.current) return;
       setOverview(undefined);
       setError(cause instanceof Error ? cause.message : "读取经营看板失败");
     } finally {
-      setBusy(false);
+      if (sequence === requestSequence.current) setBusy(false);
     }
   }, [range.start, range.end]);
 
   useEffect(() => {
     void load();
+    return () => {
+      requestSequence.current += 1;
+    };
   }, [load]);
 
   const metrics = overview?.metrics;
@@ -148,7 +187,13 @@ export function BusinessDashboard({
       : undefined;
   const grossPrev = prev ? prev.revenue_fen - prev.cost_fen : undefined;
   const attentionCount =
-    metrics && prev ? metrics.unknown_cost_count + metrics.pending_count : 0;
+    metrics && prev
+      ? metrics.unknown_cost_count +
+        metrics.pending_count +
+        (metrics.unknown_revenue_count ?? 0) +
+        (metrics.legacy_cost_count ?? 0) +
+        (metrics.legacy_settlement_count ?? 0)
+      : 0;
   const avgOrder =
     metrics && metrics.paying_customers > 0
       ? metrics.recharge_fen / metrics.paying_customers
@@ -164,6 +209,7 @@ export function BusinessDashboard({
     sub?: string;
     delta?: string;
     warn?: boolean;
+    basis?: string;
   }[] = [];
   if (metrics && prev) {
     cards.push(
@@ -189,14 +235,23 @@ export function BusinessDashboard({
       },
       {
         label: "毛利 / 毛利率",
-        value: formatFen(gross?.fen ?? 0),
+        value: attentionCount > 0 ? "待核对" : formatFen(gross?.fen ?? 0),
         sub:
           attentionCount > 0
-            ? `含 ${attentionCount} 项待核对`
+            ? `毛利率：待核对 · 含 ${attentionCount} 项待核对`
             : metrics.revenue_fen > 0
               ? `毛利率 ${Math.round(((gross?.fen ?? 0) / metrics.revenue_fen) * 100)}%`
-              : undefined,
-        delta: delta(gross?.fen ?? 0, grossPrev ?? 0),
+              : "毛利率：无收入，无法计算",
+        delta:
+          attentionCount > 0 ||
+          prev.unknown_cost_count +
+            prev.pending_count +
+            (prev.unknown_revenue_count ?? 0) +
+            (prev.legacy_cost_count ?? 0) +
+            (prev.legacy_settlement_count ?? 0) >
+            0
+            ? undefined
+            : delta(gross?.fen ?? 0, grossPrev ?? 0),
         warn: attentionCount > 0,
       },
       {
@@ -231,10 +286,40 @@ export function BusinessDashboard({
     );
   }
 
+  const bases = [
+    "区间内已支付且金额大于零的充值，含线下实收；赠送、补偿、注册奖励不计。",
+    "所消费积分对应的实付金额；赠送积分不产生收入。这里只合计已知收入。",
+    "实际调用或已核对凭据的已知成本；重试分别计入，未知金额不当作零。",
+    "确认收入减成本；毛利率为毛利除以确认收入。收入、成本或结算证据缺失时待核对，收入为零时不计算。",
+    "区间内至少一次金额大于零的实付充值，按稳定客户编号去重。",
+    "客户全历史首笔金额大于零的实付充值发生在当前区间；先赠送后实付仍以实付日期计。",
+    "区间充值实收除以区间付费客户数；没有付费客户时不计算。",
+    "当前全部客户可用积分加冻结积分，是当前时点余额；金额依当前配置兑换比例，不是历史月末余额。",
+  ];
+  cards.forEach((card, index) => {
+    card.basis = bases[index];
+  });
   const daily = overview?.daily ?? [];
+  const trendRef = useRef<SVGSVGElement>(null);
+  const [trendWidth, setTrendWidth] = useState(600);
+  useEffect(() => {
+    if (daily.length === 0) return;
+    const element = trendRef.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) =>
+      setTrendWidth(Math.max(300, entries[0].contentRect.width)),
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [daily.length]);
   const maxDaily = Math.max(
     1,
-    ...daily.map((day) => Math.max(day.revenue_fen ?? 0, day.cost_fen ?? 0)),
+    ...daily.map((day) =>
+      Math.max(
+        day.known_revenue_fen ?? day.revenue_fen ?? 0,
+        day.known_cost_fen ?? day.cost_fen ?? 0,
+      ),
+    ),
   );
 
   async function copyCustomerId(userId: string) {
@@ -260,7 +345,11 @@ export function BusinessDashboard({
           时间
           <select
             value={preset}
-            onChange={(event) => setPreset(event.target.value as Preset)}
+            onChange={(event) => {
+              const next = event.target.value as Preset;
+              setPreset(next);
+              onRangeChange?.(presetRange(next, custom));
+            }}
           >
             <option value="today">今日</option>
             <option value="week">本周</option>
@@ -275,10 +364,12 @@ export function BusinessDashboard({
               开始日期
               <input
                 type="date"
-                value={custom.start}
-                onChange={(event) =>
-                  setCustom({ ...custom, start: event.target.value })
-                }
+                value={range.start}
+                onChange={(event) => {
+                  const next = { ...range, start: event.target.value };
+                  setCustom(next);
+                  onRangeChange?.(next);
+                }}
                 required
               />
             </label>
@@ -286,11 +377,13 @@ export function BusinessDashboard({
               结束日期
               <input
                 type="date"
-                value={custom.end}
-                min={custom.start}
-                onChange={(event) =>
-                  setCustom({ ...custom, end: event.target.value })
-                }
+                value={range.end}
+                min={range.start}
+                onChange={(event) => {
+                  const next = { ...range, end: event.target.value };
+                  setCustom(next);
+                  onRangeChange?.(next);
+                }}
                 required
               />
             </label>
@@ -309,67 +402,147 @@ export function BusinessDashboard({
             {overview?.prev_start} 至 {overview?.prev_end}。时区：北京时间。
           </p>
           <section
-            className="economics-kpis economics-kpis--four"
+            className="economics-kpis economics-kpis--four business-kpis"
             aria-label="经营指标卡"
           >
-            {cards.map((card) => (
+            {cards.map((card, index) => (
               <article
                 key={card.label}
                 className={card.warn ? "business-card--warn" : undefined}
               >
-                <span>{card.label}</span>
+                <span>
+                  {card.label}{" "}
+                  <button
+                    type="button"
+                    className="metric-help"
+                    aria-label={`${card.label}口径`}
+                    aria-describedby={`business-basis-${index}`}
+                  >
+                    ⓘ
+                    <span role="tooltip" id={`business-basis-${index}`}>
+                      {card.basis}
+                    </span>
+                  </button>
+                </span>
                 <strong>{card.value}</strong>
-                {card.sub && <small>{card.sub}</small>}
+                {card.sub &&
+                  ["成本", "毛利 / 毛利率", "预收积分余额"].includes(
+                    card.label,
+                  ) && <small>{card.sub}</small>}
                 {card.delta && <small>环比 {card.delta}</small>}
               </article>
             ))}
           </section>
-          <h3>收入与成本按日趋势</h3>
-          {daily.length === 0 ? (
-            <p>这个区间没有消耗记录。</p>
-          ) : (
-            <svg
-              className="business-trend"
-              viewBox={`0 0 ${daily.length * 24} 160`}
-              role="img"
-              aria-label="收入与成本按日趋势图，柱为收入与成本"
-              preserveAspectRatio="none"
-            >
-              {daily.map((day, index) => {
-                const revenue = day.revenue_fen ?? 0;
-                const cost = day.cost_fen ?? 0;
-                const x = index * 24;
-                return (
-                  <g key={day.day}>
-                    <title>{`${day.day}：确认收入 ${formatFen(revenue)}，成本 ${day.cost_fen === null ? "待核对" : formatFen(cost)}`}</title>
-                    <rect
-                      x={x + 2}
-                      y={140 - (revenue / maxDaily) * 120}
-                      width={8}
-                      height={(revenue / maxDaily) * 120}
-                      className="business-trend__revenue"
-                    />
-                    <rect
-                      x={x + 12}
-                      y={140 - (cost / maxDaily) * 120}
-                      width={8}
-                      height={(cost / maxDaily) * 120}
-                      className="business-trend__cost"
-                    />
-                    <text x={x + 2} y={158} fontSize={7}>
-                      {index === 0 || index === daily.length - 1
-                        ? day.day.slice(5)
-                        : ""}
-                    </text>
-                  </g>
-                );
-              })}
-            </svg>
-          )}
-          <p className="admin-hint">
-            柱：确认收入 / 成本。成本或收入证据未齐的日期，金额按已知部分显示，
-            待核对条数见上方指标卡。
-          </p>
+          <section className="business-trend-panel" aria-label="经营趋势">
+            <h3>收入、成本与毛利率按日趋势</h3>
+            {daily.length === 0 ? (
+              <p>这个区间没有消耗记录。</p>
+            ) : (
+              <svg
+                className="business-trend"
+                ref={trendRef}
+                viewBox={`0 0 ${trendWidth} 130`}
+                role="img"
+                aria-label="收入与成本按日趋势图，柱为收入与成本，折线为毛利率"
+                preserveAspectRatio="none"
+              >
+                {(() => {
+                  const width = trendWidth;
+                  const step = (width - 60) / daily.length;
+                  const rates = daily.map((day) => {
+                    if (
+                      (day.unknown_cost_count ?? 0) +
+                        (day.unknown_revenue_count ?? 0) +
+                        (day.legacy_cost_count ?? 0) +
+                        (day.legacy_settlement_count ?? 0) +
+                        (day.pending_count ?? 0) >
+                        0 ||
+                      day.revenue_fen == null ||
+                      day.cost_fen == null ||
+                      day.revenue_fen <= 0
+                    )
+                      return null;
+                    return (
+                      day.margin_pct ??
+                      ((day.revenue_fen - day.cost_fen) / day.revenue_fen) * 100
+                    );
+                  });
+                  const minRate = Math.min(
+                    0,
+                    ...rates.filter((v): v is number => v != null),
+                  );
+                  const maxRate = Math.max(
+                    100,
+                    ...rates.filter((v): v is number => v != null),
+                  );
+                  const y = (rate: number) =>
+                    100 - ((rate - minRate) / (maxRate - minRate)) * 85;
+                  let path = "";
+                  rates.forEach((rate, i) => {
+                    if (rate !== null)
+                      path += `${i === 0 || rates[i - 1] === null ? "M" : "L"}${30 + (i + 0.5) * step},${y(rate)} `;
+                  });
+                  return (
+                    <>
+                      <text x={0} y={12} fontSize={10}>
+                        {formatFen(maxDaily)}
+                      </text>
+                      <text x={width - 28} y={12} fontSize={10}>
+                        {Math.round(maxRate)}%
+                      </text>
+                      <text x={width - 28} y={105} fontSize={10}>
+                        {Math.round(minRate)}%
+                      </text>
+                      {daily.map((day, i) => {
+                        const revenue =
+                          day.known_revenue_fen ?? day.revenue_fen ?? 0;
+                        const cost = day.known_cost_fen ?? day.cost_fen ?? 0;
+                        const x = 30 + i * step;
+                        const detail = `${day.day}：已知确认收入 ${formatFen(revenue)}，已知成本 ${formatFen(cost)}，毛利率 ${rates[i] === null ? "待核对或无收入" : `${Math.round(rates[i] ?? 0)}%`}`;
+                        return (
+                          <g key={day.day} tabIndex={0} aria-label={detail}>
+                            <title>{detail}</title>
+                            <rect
+                              x={x + step * 0.12}
+                              y={100 - (revenue / maxDaily) * 85}
+                              width={step * 0.28}
+                              height={(revenue / maxDaily) * 85}
+                              className="business-trend__revenue"
+                            />
+                            <rect
+                              x={x + step * 0.43}
+                              y={100 - (cost / maxDaily) * 85}
+                              width={step * 0.28}
+                              height={(cost / maxDaily) * 85}
+                              className="business-trend__cost"
+                            />
+                            {rates[i] != null && (
+                              <circle
+                                cx={x + step * 0.5}
+                                cy={y(rates[i] ?? 0)}
+                                r={2.5}
+                                className="business-trend__margin"
+                              />
+                            )}
+                            <text x={x} y={123} fontSize={10}>
+                              {i === 0 || i === daily.length - 1
+                                ? day.day.slice(5)
+                                : ""}
+                            </text>
+                          </g>
+                        );
+                      })}
+                      <path d={path} className="business-trend__margin-line" />
+                    </>
+                  );
+                })()}
+              </svg>
+            )}
+            <p className="admin-hint">
+              金柱：已知确认收入 · 灰柱：已知成本 ·
+              绿线：毛利率（右轴）。证据缺失或收入为零时折线断开；未知金额不当作零。
+            </p>
+          </section>
           <h3>业务构成</h3>
           <div className="admin-table-scroll">
             <table
@@ -395,7 +568,16 @@ export function BusinessDashboard({
                         <>（含 {module.unknown_cost_count} 项待核对）</>
                       )}
                     </td>
-                    <td>{formatFen(module.revenue_fen - module.cost_fen)}</td>
+                    <td>
+                      {module.unknown_cost_count +
+                        module.pending_count +
+                        (module.unknown_revenue_count ?? 0) +
+                        (overview.metrics.legacy_cost_count ?? 0) +
+                        (overview.metrics.legacy_settlement_count ?? 0) >
+                      0
+                        ? "待核对"
+                        : formatFen(module.revenue_fen - module.cost_fen)}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -412,10 +594,25 @@ export function BusinessDashboard({
                 </tr>
               </thead>
               <tbody>
+                {(overview?.top_customers.length ?? 0) === 0 && (
+                  <tr>
+                    <td colSpan={3}>这个区间没有客户消耗记录。</td>
+                  </tr>
+                )}
                 {overview?.top_customers.map((customer) => (
                   <tr key={customer.user_id}>
                     <td>
-                      {customer.display_name || customer.username}
+                      <button
+                        type="button"
+                        className="table-link-button"
+                        onClick={() => {
+                          if (onCustomer) onCustomer(customer.user_id);
+                          else
+                            window.location.hash = `admin/customersMgmt?userId=${encodeURIComponent(customer.user_id)}`;
+                        }}
+                      >
+                        {customer.display_name || customer.username}
+                      </button>
                       <small>（{customer.username}）</small>
                     </td>
                     <td>{formatFen(customer.revenue_fen)}</td>

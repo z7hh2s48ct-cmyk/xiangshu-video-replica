@@ -3597,7 +3597,13 @@ describe("startVideoAnalysis", () => {
     };
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue({ ok: true, json: async () => failed }),
+      vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, json: async () => failed })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ short_ref: "12AB34CD" }),
+        }),
     );
 
     const failure = await waitForAnalysisTask("analysis-task-ref").catch(
@@ -3605,7 +3611,7 @@ describe("startVideoAnalysis", () => {
     );
 
     expect(failure).toMatchObject({
-      message: "视频拆解失败，请稍后重新拆解。",
+      message: "视频拆解失败，请稍后重新拆解。 错误编号：12AB34CD",
       code: "ANALYSIS_PROVIDER_FAILED",
       taskId: "analysis-task-ref",
       requestId: "req-support-42",

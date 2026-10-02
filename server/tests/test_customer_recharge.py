@@ -624,11 +624,12 @@ def test_customer_session_recharge_after_session_expired_401(
     # Pull the lease into the past (what admin suspend/logout propagation does).
     # created_at + 1s keeps the lease_after_created check happy while landing
     # barely after creation; sleeping past that instant makes it lapsed for the
-    # fenced re-verification (clock_timestamp() vs lease_until).
+    # fenced re-verification (clock_timestamp() vs lease_until). Keep the
+    # stored offset when the raw fixture and application pool use different zones.
     with psycopg.connect(clean_state, autocommit=True) as conn:
         conn.execute(
             "UPDATE customer_session_state "
-            "SET lease_until = created_at::timestamp + interval '1 second'"
+            "SET lease_until = created_at::timestamptz + interval '1 second'"
         )
     time.sleep(1.2)
 

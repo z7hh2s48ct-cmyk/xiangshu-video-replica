@@ -48,73 +48,142 @@ const controls = {
 };
 
 describe("ViralRuntimeSection", () => {
-  it("保存每周采集关键词及数量上限", async () => {
+  it("手动采集先读取调用量和部分费用预估，确认真实原因后才入队", async () => {
+    setAdminCsrfToken("csrf-estimate");
+    const fetchMock = vi.fn((url: string, init?: RequestInit) =>
+      response(
+        url.includes("/estimate")
+          ? {
+              enabledKeywords: 2,
+              searchCallsMin: 2,
+              searchCallsMax: 4,
+              searchCostMinFen: 5,
+              searchCostMaxFen: 10,
+              videoLimit: 12,
+              snapshot: "a".repeat(64),
+              customerCount: 2,
+              customerCreditsPerConfirmedCall: 3,
+              customerCreditsMaxEach: 108,
+              physicalDataCallsMin: 2,
+              physicalDataCallsMax: 36,
+              totalCostFen: null,
+              note: "搜索部分预估，素材重试费用另计",
+            }
+          : init?.method === "POST"
+            ? { queued: true }
+            : controls,
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ViralRuntimeSection />);
+    fireEvent.click(await screen.findByRole("button", { name: "立即采集" }));
+    expect(await screen.findByText(/预计搜索调用 2～4 次/)).toBeInTheDocument();
+    expect(screen.getByText(/¥0.05～¥0.10/)).toBeInTheDocument();
+    expect(screen.getByText(/此操作会影响客户积分/)).toBeInTheDocument();
+    expect(screen.getByText(/当前符合收费条件客户2 位/)).toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.filter(([, init]) => init?.method === "POST"),
+    ).toHaveLength(0);
+    fireEvent.change(screen.getByLabelText("操作原因"), {
+      target: { value: "知晓预估后手动补货" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认执行" }));
+    await screen.findByText("采集已入队，可查看平台进度。");
+    const call = fetchMock.mock.calls.find(
+      ([, init]) => init?.method === "POST",
+    );
+    expect(call?.[0]).toContain("/api/control/viral/collect");
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual({
+      confirm: true,
+      reason: "知晓预估后手动补货",
+      expected_estimate_snapshot: "a".repeat(64),
+    });
+  });
+
+  it("预算80%和100%提醒区分，未知费用不显示为总计零", async () => {
+    const fetchMock = vi.fn(() =>
+      response({
+        ...controls,
+        budget_status: "warning",
+        month_spend_fen: 8000.5,
+        month_unknown_cost_count: 2,
+        month_pending_cost_count: 1,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ViralRuntimeSection readOnly />);
+    expect(await screen.findByText(/已知成本已达预算80%/)).toBeInTheDocument();
+    expect(screen.getByText(/当前总费用未知/)).toBeInTheDocument();
+    expect(screen.getByText(/¥80.0050/)).toBeInTheDocument();
+  });
+
+  it("保存采集计划且不覆盖独立关键词配置", async () => {
     const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
       response(controls),
     );
     vi.stubGlobal("fetch", fetchMock);
     setAdminCsrfToken("csrf-viral");
     render(<ViralRuntimeSection />);
-    fireEvent.click(await screen.findByRole("button", { name: "添加关键词" }));
-    fireEvent.change(screen.getByLabelText("分类 1"), {
-      target: { value: "庭院案例" },
-    });
-    fireEvent.change(screen.getByLabelText("关键词 1"), {
-      target: { value: "农村庭院" },
-    });
-    fireEvent.change(screen.getByLabelText("每个关键词最多采集"), {
+    fireEvent.change(await screen.findByLabelText("默认每词条数"), {
       target: { value: "12" },
     });
-    fireEvent.change(screen.getByLabelText("刷新周期"), {
+    fireEvent.change(screen.getByLabelText("采集频率"), {
       target: { value: "1" },
     });
+    fireEvent.change(screen.getByLabelText("执行时间（上海时间）"), {
+      target: { value: "09:15" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "保存采集设置" }));
+    expect(
+      screen.getByRole("region", { name: "采集设置变更摘要" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/月度预算：不限 → 不限/)).toBeInTheDocument();
+    expect(screen.getByText(/最低点赞：不限 → 不限/)).toBeInTheDocument();
     // P0-8：原因由操作人填写，空原因不能提交。
-    fireEvent.click(screen.getByRole("button", { name: "确认更新" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认执行" }));
     expect(await screen.findByText("请填写操作原因")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("操作原因"), {
       target: { value: "新增庭院类关键词备货" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "确认更新" }));
-    await screen.findByText("定时采集设置已更新。");
+    fireEvent.click(screen.getByRole("button", { name: "确认执行" }));
+    await screen.findByText("采集设置已保存。");
     const patch = fetchMock.mock.calls.find(
       ([, init]) => init?.method === "PATCH",
     );
     expect(JSON.parse(String(patch?.[1]?.body))).toMatchObject({
-      keywords: [
-        { platform: "douyin", category: "庭院案例", keyword: "农村庭院" },
-      ],
       per_keyword_limit: 12,
       collection_interval_days: 1,
+      collection_time: "09:15",
       reason: "新增庭院类关键词备货",
       confirm: true,
     });
+    expect(JSON.parse(String(patch?.[1]?.body))).not.toHaveProperty("keywords");
+    expect(JSON.parse(String(patch?.[1]?.body))).not.toHaveProperty(
+      "expected_keywords",
+    );
   });
   afterEach(() => {
     vi.unstubAllGlobals();
     setAdminCsrfToken("");
   });
 
-  it("展示平台缓存、导入队列与运行开关", async () => {
+  it("展示平台业务状态与链接导入说明，并移除视频ID表单", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(() => response(controls)),
     );
     render(<ViralRuntimeSection />);
 
-    expect(await screen.findByText(/导入任务：排队 2/)).toBeInTheDocument();
-    expect(screen.getByText(/数据源：已配置/)).toHaveTextContent(
-      /刷新任务：\s*排队 1 \/ 执行 1 \/ 失败 0/,
-    );
-    expect(screen.getByText(/2026-09-07 10:00:00/)).toHaveTextContent(
-      "抖音：已缓存 24条",
-    );
-    expect(screen.getByText(/最后采集 暂无/)).toHaveTextContent(
-      "视频号：已缓存 18条",
-    );
+    expect(await screen.findByText("客户链接导入")).toBeInTheDocument();
+    expect(
+      screen.getByText("客户粘贴视频链接并导入创作的功能。"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("最近采集成功")).toBeInTheDocument();
+    expect(screen.getByText("采集中")).toBeInTheDocument();
+    expect(screen.queryByLabelText("视频 ID")).not.toBeInTheDocument();
   });
 
-  it("采集进行中轮询只刷新运行状态，不覆盖未保存的关键词草稿", async () => {
+  it("采集进行中轮询只刷新运行状态，不覆盖未保存的质量草稿", async () => {
     const serverControls = {
       ...controls,
       keywords: [
@@ -129,10 +198,10 @@ describe("ViralRuntimeSection", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<ViralRuntimeSection />);
 
-    fireEvent.change(await screen.findByLabelText("关键词 1"), {
-      target: { value: "我的未保存草稿" },
+    fireEvent.change(await screen.findByLabelText("最低点赞数"), {
+      target: { value: "500" },
     });
-    fireEvent.change(await screen.findByLabelText("每个关键词最多采集"), {
+    fireEvent.change(await screen.findByLabelText("默认每词条数"), {
       target: { value: "21" },
     });
 
@@ -140,8 +209,8 @@ describe("ViralRuntimeSection", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2), {
       timeout: 4500,
     });
-    expect(screen.getByLabelText("关键词 1")).toHaveValue("我的未保存草稿");
-    expect(screen.getByLabelText("每个关键词最多采集")).toHaveValue(21);
+    expect(screen.getByLabelText("最低点赞数")).toHaveValue(500);
+    expect(screen.getByLabelText("默认每词条数")).toHaveValue(21);
   });
 
   it("旧轮询结果不能回滚刚保存的采集开关", async () => {
@@ -168,16 +237,16 @@ describe("ViralRuntimeSection", () => {
     fireEvent.change(screen.getByLabelText("操作原因"), {
       target: { value: "国庆期间暂停采集" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "确认更新" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认执行" }));
     expect(
-      await screen.findByRole("button", { name: "恢复采集" }),
+      await screen.findByRole("button", { name: "开启采集" }),
     ).toBeInTheDocument();
 
     await act(async () => {
       resolvePolling?.(await response(controls));
     });
     expect(
-      screen.getByRole("button", { name: "恢复采集" }),
+      screen.getByRole("button", { name: "开启采集" }),
     ).toBeInTheDocument();
   });
 
@@ -196,11 +265,9 @@ describe("ViralRuntimeSection", () => {
     fireEvent.change(screen.getByLabelText("操作原因"), {
       target: { value: "国庆期间暂停采集" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "确认更新" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认执行" }));
 
-    expect(
-      await screen.findByText("爆款视频运行开关已更新。"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("采集设置已保存。")).toBeInTheDocument();
     const patch = fetchMock.mock.calls.find(
       ([, init]) => init?.method === "PATCH",
     );
@@ -213,3 +280,87 @@ describe("ViralRuntimeSection", () => {
     });
   });
 });
+
+it("预算按元编辑、按分提交，清空质量和预算明确传 null", async () => {
+  setAdminCsrfToken("csrf-viral");
+  const fetchMock = vi.fn((_url: string, init?: RequestInit) =>
+    response({
+      ...controls,
+      monthly_budget_fen: 10000,
+      quality_min_likes: 500,
+      quality_duration_min_ms: 1000,
+      quality_duration_max_ms: 60000,
+      ...(init?.method === "PATCH" ? JSON.parse(String(init.body)) : {}),
+    }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  render(<ViralRuntimeSection />);
+  expect(await screen.findByLabelText("月度采集预算（元）")).toHaveValue(100);
+  expect(screen.getByLabelText("最短时长（秒）")).toHaveValue(1);
+  expect(screen.getByLabelText("最长时长（秒）")).toHaveValue(60);
+  fireEvent.change(screen.getByLabelText("月度采集预算（元）"), {
+    target: { value: "100.75" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "保存采集设置" }));
+  fireEvent.change(screen.getByLabelText("操作原因"), {
+    target: { value: "调整月度预算" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "确认执行" }));
+  await screen.findByText("采集设置已保存。");
+  const patches = () =>
+    fetchMock.mock.calls.filter(([, init]) => init?.method === "PATCH");
+  expect(JSON.parse(String(patches()[0][1]?.body)).monthly_budget_fen).toBe(
+    10075,
+  );
+  for (const name of [
+    "月度采集预算（元）",
+    "最低点赞数",
+    "最短时长（秒）",
+    "最长时长（秒）",
+  ]) {
+    fireEvent.change(screen.getByLabelText(name), { target: { value: "" } });
+  }
+  fireEvent.click(screen.getByRole("button", { name: "保存采集设置" }));
+  fireEvent.change(screen.getByLabelText("操作原因"), {
+    target: { value: "恢复不限制规则" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "确认执行" }));
+  await waitFor(() => expect(patches()).toHaveLength(2));
+  expect(JSON.parse(String(patches()[1][1]?.body))).toMatchObject({
+    monthly_budget_fen: null,
+    quality_min_likes: null,
+    quality_duration_min_ms: null,
+    quality_duration_max_ms: null,
+  });
+  vi.unstubAllGlobals();
+  setAdminCsrfToken("");
+});
+
+it.each(["100.755", "0", "-1"])(
+  "非法预算 %s 不提交，也不解除旧限额",
+  async (input) => {
+    setAdminCsrfToken("csrf-viral");
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
+      response({ ...controls, monthly_budget_fen: 10000 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ViralRuntimeSection />);
+    expect(await screen.findByLabelText("月度采集预算（元）")).toHaveValue(100);
+    fireEvent.change(screen.getByLabelText("月度采集预算（元）"), {
+      target: { value: input },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存采集设置" }));
+    fireEvent.change(screen.getByLabelText("操作原因"), {
+      target: { value: "虚构输入校验" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认执行" }));
+    await screen.findAllByText(
+      "月度预算请输入大于零、最多两位小数的金额；清空才会解除限额。",
+    );
+    expect(
+      fetchMock.mock.calls.filter(([, init]) => init?.method === "PATCH"),
+    ).toHaveLength(0);
+    vi.unstubAllGlobals();
+    setAdminCsrfToken("");
+  },
+);

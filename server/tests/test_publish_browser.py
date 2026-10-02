@@ -887,3 +887,31 @@ def test_run_publish_round_probes_due_browser_account_and_marks_invalid(
     row = pg.execute("SELECT status, error_message FROM publish_browser_accounts").fetchone()
     assert row[0] == "invalid"
     assert row[1] == "登录态已失效"
+
+
+@pytest.mark.parametrize("session_zone", ["UTC", "Asia/Shanghai", "America/New_York"])
+def test_browser_probe_deadlines_are_instants_across_database_session_zones(
+    client: TestClient, pg: psycopg.Connection, lane_env: str, session_zone: str
+) -> None:
+    _seed_connected_browser_account(client)
+    due = datetime(2026, 10, 8, 12, 0, 0, 123456, tzinfo=UTC)
+    pg.execute("UPDATE publish_browser_accounts SET next_probe_at=%s", (due,))
+    with pg_transaction() as raw:
+        raw.execute("SELECT set_config('TimeZone',%s,true)", (session_zone,))
+        conn = BusinessConnection.postgres(raw)
+        assert (
+            claim_browser_probe_work(conn, worker_id="before", now=due - timedelta(microseconds=1))
+            is None
+        )
+        lease = claim_browser_probe_work(conn, worker_id="due", now=due, lease_seconds=30)
+        assert lease is not None
+        row = raw.execute("SELECT probe_lease_expires_at FROM publish_browser_accounts").fetchone()
+        assert row[0] == due + timedelta(seconds=30)
+        assert (
+            claim_browser_probe_work(conn, worker_id="other", now=due + timedelta(seconds=29))
+            is None
+        )
+        finalize_browser_probe(conn, lease=lease, ok=True, now=due + timedelta(seconds=5))
+    row = pg.execute("SELECT status,next_probe_at FROM publish_browser_accounts").fetchone()
+    assert row[0] == "connected"
+    assert row[1] == due + timedelta(seconds=5, hours=24)

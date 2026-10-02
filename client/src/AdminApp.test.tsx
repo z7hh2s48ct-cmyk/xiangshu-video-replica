@@ -172,9 +172,11 @@ const settings = {
 function installFetch(options?: {
   session?: "valid" | "missing";
   failedTasks?: number;
+  reconciliationProblems?: number;
   generationTotal?: number;
   /** 以只读的 auditor 角色登录；默认是超级管理员。 */
   role?: "admin" | "auditor";
+  isSuperAdmin?: boolean;
 }) {
   const sessionState = options?.session ?? "missing";
   const activeSession =
@@ -183,7 +185,13 @@ function installFetch(options?: {
           ...adminSession,
           actor: { ...adminActor, role: "auditor", is_super_admin: false },
         }
-      : adminSession;
+      : {
+          ...adminSession,
+          actor: {
+            ...adminActor,
+            is_super_admin: options?.isSuperAdmin ?? true,
+          },
+        };
   const fetchMock = vi.fn((url: string, requestInit?: RequestInit) => {
     if (
       url.endsWith("/api/control/admin/session") &&
@@ -237,7 +245,7 @@ function installFetch(options?: {
         todos: {
           pending_pairings: 0,
           failed_tasks_7d: options?.failedTasks ?? 0,
-          reconciliation_problems: 0,
+          reconciliation_problems: options?.reconciliationProblems ?? 0,
           expiring_codes_7d: 0,
         },
         device_slots: { bound: 0, total: 0 },
@@ -289,6 +297,9 @@ function installFetch(options?: {
         limit: 50,
         offset: 0,
       });
+    }
+    if (url.includes("/api/control/billing-reconciliation/items?")) {
+      return jsonResponse({ items: [], total: 0, limit: 20, offset: 0 });
     }
     if (url.endsWith("/api/control/billing-reconciliation")) {
       return jsonResponse(reconciliation);
@@ -396,7 +407,7 @@ describe("AdminApp", () => {
     render(<AdminApp />);
     expect(await screen.findByLabelText("新管理员密码")).toBeVisible();
     expect(
-      screen.queryByRole("heading", { name: "总览仪表盘" }),
+      screen.queryByRole("heading", { name: "总览" }),
     ).not.toBeInTheDocument();
     expect(fetchMock.mock.calls).toHaveLength(1);
   });
@@ -423,6 +434,31 @@ describe("AdminApp", () => {
       expect(adminRouteFromHash(`#admin/${tab}`).tab).toBe(tab);
     }
     expect(adminRouteFromHash("#admin/unknown").tab).toBe("overview");
+  });
+
+  it.each(["admin", "auditor"] as const)(
+    "%s 从总览对账待办进入异常页",
+    async (role) => {
+      installFetch({ session: "valid", role, reconciliationProblems: 3 });
+      render(<AdminApp />);
+      const todos = await screen.findByRole("region", { name: "待办事项" });
+      fireEvent.click(
+        within(todos).getByRole("button", {
+          name: role === "auditor" ? "去查看" : "去处理",
+        }),
+      );
+      expect(
+        await screen.findByRole("tablist", { name: "对账异常类型" }),
+      ).toBeInTheDocument();
+      expect(window.location.hash).toBe("#admin/funds?intent=recon");
+    },
+  );
+
+  it("刷新资金对账地址保留异常清单意图", () => {
+    expect(adminRouteFromHash("#admin/funds?intent=recon")).toEqual({
+      tab: "funds",
+      intent: "recon",
+    });
   });
 
   it("恢复拆解失败意图时同时带上类型与状态筛选", async () => {
@@ -457,7 +493,7 @@ describe("AdminApp", () => {
     render(<AdminApp />);
 
     expect(
-      await screen.findByRole("heading", { level: 1, name: "客户管理" }),
+      await screen.findByRole("heading", { level: 1, name: "客户列表" }),
     ).toBeInTheDocument();
     expect(
       await screen.findByText(/赠送积分在客户详情内完成/),
@@ -483,8 +519,9 @@ describe("AdminApp", () => {
     ).toBeInTheDocument();
 
     // 从侧栏点回「客户管理」= 不带 intent，引导必须跟着 intent 一起消失。
-    fireEvent.click(screen.getByRole("button", { name: "客户管理" }));
-    expect(window.location.hash).toBe("#admin/customersMgmt");
+    fireEvent.click(screen.getByRole("button", { name: "客户列表" }));
+    expect(window.location.hash).toMatch(/^#admin\/customersMgmt(?:\?|$)/);
+    expect(window.location.hash).not.toContain("intent=");
     await waitFor(() =>
       expect(screen.queryByText(/赠送积分在客户详情内完成/)).toBeNull(),
     );
@@ -506,7 +543,7 @@ describe("AdminApp", () => {
     render(<AdminApp />);
 
     expect(
-      await screen.findByRole("heading", { level: 1, name: "用户生成记录" }),
+      await screen.findByRole("heading", { level: 1, name: "生成记录" }),
     ).toBeInTheDocument();
     // 5 组口径：FAILED 意图归一到「失败」组。
     expect(screen.getByLabelText("生成状态")).toHaveValue(
@@ -818,12 +855,12 @@ describe("AdminApp", () => {
 
     render(<AdminApp />);
     await signInWithPassword();
-    fireEvent.click(screen.getByRole("button", { name: "客户管理" }));
+    fireEvent.click(screen.getByRole("button", { name: "客户列表" }));
     expect(
       screen.queryByRole("tab", { name: "激活码" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.getByRole("heading", { level: 1, name: "客户管理" }),
+      screen.getByRole("heading", { level: 1, name: "客户列表" }),
     ).toBeInTheDocument();
   });
 
@@ -834,7 +871,7 @@ describe("AdminApp", () => {
     fireEvent.click(await screen.findByRole("button", { name: "生成记录" }));
 
     expect(
-      await screen.findByRole("heading", { level: 1, name: "用户生成记录" }),
+      await screen.findByRole("heading", { level: 1, name: "生成记录" }),
     ).toBeInTheDocument();
     // P2-1：类型下拉从词典生成后，「人物置换首帧 / 成本待核对」同时出现
     // 在下拉选项与表格单元格，断言限定到表格内。
@@ -918,32 +955,47 @@ describe("AdminApp", () => {
     await screen.findByRole("navigation", { name: "管理端导航" });
     const groupTabs = screen.getByRole("tablist", { name: "运营概览快捷导航" });
     expect(groupTabs).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "总览仪表盘" })).toHaveAttribute(
+    expect(screen.getByRole("tab", { name: "总览" })).toHaveAttribute(
       "aria-selected",
       "true",
     );
-    fireEvent.click(screen.getByRole("tab", { name: "经营分析" }));
+    fireEvent.click(screen.getByRole("tab", { name: "经营看板" }));
     expect(screen.getByRole("tab", { name: "成本核对" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "经营分析" })).toHaveAttribute(
+    expect(screen.getByRole("button", { name: "经营看板" })).toHaveAttribute(
       "aria-current",
       "page",
     );
   });
 
-  it("renders the merged seven-item navigation with per-page tabs", async () => {
+  it("renders the original eight navigation groups with scoped pages", async () => {
     installFetch({ session: "valid" });
 
     render(<AdminApp />);
     await screen.findByRole("navigation", { name: "管理端导航" });
 
-    for (const name of [
-      "总览仪表盘",
-      "经营分析",
+    expect(
+      within(screen.getByRole("navigation", { name: "管理端导航" }))
+        .getAllByRole("heading", { level: 3 })
+        .map((heading) => heading.textContent),
+    ).toEqual([
+      "工作台",
+      "经营",
       "资金中心",
-      "客户管理",
+      "客户",
+      "生成",
+      "内容",
+      "审计",
+      "设置",
+    ]);
+
+    for (const name of [
+      "总览",
+      "经营看板",
+      "资金中心",
+      "客户列表",
       "登录与设备",
       "生成记录",
-      "审计中心",
+      "管理操作日志",
       "系统设置",
     ]) {
       expect(screen.getByRole("button", { name })).toBeInTheDocument();
@@ -953,11 +1005,11 @@ describe("AdminApp", () => {
     expect(screen.getByRole("tab", { name: "收款订单" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "积分流水" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "经营分析" }));
+    fireEvent.click(screen.getByRole("button", { name: "经营看板" }));
     expect(screen.getByRole("tab", { name: "经营看板" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "成本核对" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "客户管理" }));
+    fireEvent.click(screen.getByRole("button", { name: "客户列表" }));
     expect(
       screen.queryByRole("tab", { name: "在线会话" }),
     ).not.toBeInTheDocument();
@@ -969,7 +1021,7 @@ describe("AdminApp", () => {
       screen.queryByRole("tab", { name: "设备与会话" }),
     ).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "审计中心" }));
+    fireEvent.click(screen.getByRole("button", { name: "管理操作日志" }));
     // 调账记录已迁入资金中心·人工调整（方案 P1），审计中心只剩审计日志单页。
     expect(
       screen.getByRole("region", { name: "审计事件" }),
@@ -995,10 +1047,8 @@ describe("AdminApp", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "登录与设备" }));
 
-    expect(await screen.findByLabelText("客户编号")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "查看客户" }),
-    ).toBeInTheDocument();
+    expect(await screen.findByLabelText("公司名或用户名")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "搜索" })).toBeInTheDocument();
   });
 
   it("returns to the login gate and clears admin session state when a control 401 emits the shared expiry event", async () => {
@@ -1311,6 +1361,22 @@ describe("AdminApp", () => {
     ).toBeInTheDocument();
   });
 
+  it.each(["admin", "auditor"] as const)(
+    "%s 无全局日志导航，直接地址也不发敏感读取",
+    async (role) => {
+      window.history.replaceState(null, "", "#admin/externalCalls");
+      installFetch({ session: "valid", role, isSuperAdmin: false });
+      render(<AdminApp />);
+      await screen.findByText("此功能仅超级管理员可用。");
+      expect(screen.queryByRole("button", { name: "接口调用日志" })).toBeNull();
+      expect(
+        vi
+          .mocked(fetch)
+          .mock.calls.some(([url]) => String(url).includes("/external-calls")),
+      ).toBe(false);
+    },
+  );
+
   it("groups admin navigation and lets compact layouts collapse and reopen it", async () => {
     Object.defineProperty(window, "innerWidth", {
       configurable: true,
@@ -1323,29 +1389,97 @@ describe("AdminApp", () => {
     expect(
       await screen.findByRole("button", { name: "展开导航" }),
     ).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByRole("button", { name: "客户管理" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "客户列表" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "展开导航" }));
 
-    expect(screen.getAllByText("运营概览").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("客户运营").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("系统治理").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("工作台").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("客户").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("设置").length).toBeGreaterThan(0);
     expect(
-      screen.getByRole("button", { name: "客户管理" }),
+      screen.getByRole("button", { name: "客户列表" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "关闭导航" })).toHaveAttribute(
       "aria-expanded",
       "true",
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "客户管理" }));
+    fireEvent.click(screen.getByRole("button", { name: "客户列表" }));
 
     expect(
-      await screen.findByRole("heading", { name: "客户管理" }),
+      await screen.findByRole("heading", { name: "客户列表" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "展开导航" })).toHaveAttribute(
       "aria-expanded",
       "false",
     );
+  });
+  it("switches independent cost and failure navigation to their real filtered pages", async () => {
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 1440,
+    });
+    installFetch({ session: "valid" });
+    render(<AdminApp />);
+    await screen.findByRole("navigation", { name: "管理端导航" });
+    fireEvent.click(screen.getByRole("button", { name: "经营看板" }));
+    fireEvent.click(screen.getByRole("button", { name: "成本核对" }));
+    expect(screen.getByRole("tab", { name: "成本核对" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(window.location.hash).toContain("#admin/costReview");
+    fireEvent.click(screen.getByRole("button", { name: "生成记录" }));
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(fetch)
+          .mock.calls.some(([url]) =>
+            String(url).includes("/generation-records?"),
+          ),
+      ).toBe(true),
+    );
+    vi.mocked(fetch).mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "失败诊断" }));
+    await waitFor(() =>
+      expect(
+        vi.mocked(fetch).mock.calls.some(([url]) => {
+          const parsed = new URL(String(url));
+          return (
+            parsed.pathname.endsWith("/generation-records") &&
+            parsed.searchParams.get("status") ===
+              "FAILED,CANCELED,CANCELLED,ARCHIVE_FAILED"
+          );
+        }),
+      ).toBe(true),
+    );
+    expect(window.location.hash).toContain("#admin/generationFailures");
+  });
+
+  it("restores the old cost address without losing its filters", async () => {
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 1440,
+    });
+    window.history.replaceState(
+      null,
+      "",
+      "#admin/analytics?analyticsTab=cost&start=2026-09-01&end=2026-09-02&billingQuery=user_id%3Dsame-a%26attention%3Dpending",
+    );
+    installFetch({ session: "valid" });
+    render(<AdminApp />);
+    await screen.findByRole("navigation", { name: "管理端导航" });
+    expect(screen.getByRole("button", { name: "成本核对" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(screen.getByRole("tab", { name: "成本核对" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(window.location.hash).toContain("#admin/costReview");
+    const params = new URLSearchParams(window.location.hash.split("?")[1]);
+    expect(params.get("billingQuery")).toBe("user_id=same-a&attention=pending");
+    expect(params.get("start")).toBe("2026-09-01");
   });
 });

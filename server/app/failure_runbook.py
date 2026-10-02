@@ -28,6 +28,10 @@ from typing import Literal
 # 文案规则：一句「这是什么、下一步做什么」，写给客服/运维/客户三方中
 # 最先看到它的人；不出现内部文件名、类名与密钥形态信息。
 FAILURE_RUNBOOK: dict[str, str] = {
+    "PROVIDER_POLL_TIMEOUT": (
+        "生成超过自动核对时限，结果仍需人工确认。先核对任务是否已完成或扣费，"
+        "再决定恢复查询或补偿，避免重复生成。"
+    ),
     # ---- 视频拆解（analysis_tasks.error_code）----
     "ANALYSIS_WORKER_FAILED": (
         "拆解进程发生未分类错误。重试一次；仍失败携任务编号报障，运维按编号查 worker 日志堆栈。"
@@ -231,12 +235,14 @@ FailureCategory = Literal[
     "CONFIG",
     "DEFECT",
     "NOT_A_FAILURE",
+    "UNCLASSIFIED",
 ]
 # 处理人：客服告知客户 / 运营重试 / 技术处理。与原因的对应不是一对一——
 # 例如「配置问题」通常要技术去改，而「客户素材」由客服引导客户。
 FailureOwner = Literal["SUPPORT", "OPS", "ENGINEERING"]
 
 FAILURE_CLASSIFICATION: dict[str, tuple[FailureCategory, FailureOwner]] = {
+    "PROVIDER_POLL_TIMEOUT": ("PROVIDER_FAULT", "OPS"),
     "ANALYSIS_WORKER_FAILED": ("DEFECT", "ENGINEERING"),
     "ANALYSIS_WORKER_INTERRUPTED": ("DEFECT", "ENGINEERING"),
     "ANALYSIS_PROVIDER_FAILED": ("PROVIDER_FAULT", "OPS"),
@@ -397,6 +403,17 @@ def failure_explanation(
     if code in _CONTENT_REVIEW_SCAN_CODES and _content_review_message(provider_message):
         category, owner = "CONTENT_REVIEW", "SUPPORT"
     return FailureExplanation(category=category, owner=owner, advice=advice)
+
+
+def failed_record_explanation(
+    error_code: str | None, *, provider_message: str | None = None
+) -> FailureExplanation:
+    """Only call for a failed/uncertain record; unknown codes stay visibly unclassified."""
+    return failure_explanation(error_code, provider_message=provider_message) or FailureExplanation(
+        category="UNCLASSIFIED",
+        owner="ENGINEERING",
+        advice="原因尚未归类。请交技术核对任务和调用记录，并确认本轮积分状态；核对前不要重复提交或重复补偿。",
+    )
 
 
 def failure_advice(error_code: str | None) -> str | None:

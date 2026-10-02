@@ -438,6 +438,7 @@ interface AdminListPage<T> {
 export async function listAdminRechargeOrders(
   options: {
     status?: string;
+    orderNo?: string;
     userId?: string;
     username?: string;
     channel?: string;
@@ -451,6 +452,7 @@ export async function listAdminRechargeOrders(
     limit: String(options.limit ?? 50),
     offset: String(options.offset ?? 0),
   });
+  if (options.orderNo) params.set("order_no", options.orderNo);
   if (options.status) params.set("status", options.status);
   if (options.userId) params.set("user_id", options.userId);
   if (options.username) params.set("username", options.username);
@@ -458,7 +460,7 @@ export async function listAdminRechargeOrders(
   if (options.createdFrom) params.set("created_from", options.createdFrom);
   if (options.createdTo) params.set("created_to", options.createdTo);
   return adminRead(
-    options.userId
+    options.userId && !options.orderNo
       ? `/api/control/customers/${encodeURIComponent(options.userId)}/recharge-orders?${params}`
       : `/api/control/recharge-orders?${params}`,
     "读取充值订单失败",
@@ -1004,6 +1006,8 @@ export interface CustomerListItem {
   activation_code_id?: string;
   activation_code: string;
   status: string;
+  account_active?: boolean;
+  activation_status?: string | null;
   available_credits?: number;
   reserved_credits?: number;
   device_slots_used?: number;
@@ -1024,6 +1028,12 @@ export interface CustomerListItem {
   last_active_at?: string;
   month_consumed_credits?: number;
   current_benefit?: string;
+  generation_total_30d?: number;
+  generation_succeeded_30d?: number;
+  generation_failed_30d?: number;
+  generation_failed_7d?: number;
+  success_rate_30d?: number | null;
+  low_balance?: boolean | null;
 }
 
 export interface CustomerListResponse {
@@ -1031,9 +1041,16 @@ export interface CustomerListResponse {
   total: number;
   limit: number;
   offset: number;
+  attention_counts?: {
+    low_balance: number | null;
+    recent_failure: number;
+    inactive: number;
+  };
+  low_balance_threshold?: number | null;
 }
 
 export interface CustomerListOptions {
+  userId?: string;
   limit?: number;
   offset?: number;
   /** 关键字而非严格用户名：服务端同时匹配 username 与 display_name（公司名称）。 */
@@ -1045,6 +1062,9 @@ export interface CustomerListOptions {
   balanceMax?: number;
   /** 排序（方案 P1）：激活时间（默认）/ 累计充值 / 本月消耗 / 最近活跃。 */
   sort?: "activated" | "recharge" | "month_consumed" | "last_active";
+  direction?: "asc" | "desc";
+  attention?: "low_balance" | "recent_failure" | "inactive" | "";
+  lowBalanceThreshold?: number;
 }
 
 /**
@@ -1063,6 +1083,7 @@ export async function listCustomers(
   if (options.offset !== undefined)
     params.set("offset", String(options.offset));
   if (options.username_filter) params.set("username", options.username_filter);
+  if (options.userId) params.set("user_id", options.userId);
   if (options.status) params.set("status", options.status);
   if (options.createdFrom) params.set("created_from", options.createdFrom);
   if (options.createdTo) params.set("created_to", options.createdTo);
@@ -1072,6 +1093,10 @@ export async function listCustomers(
     params.set("balance_max", String(options.balanceMax));
   if (options.sort && options.sort !== "activated")
     params.set("sort", options.sort);
+  if (options.direction) params.set("direction", options.direction);
+  if (options.attention) params.set("attention", options.attention);
+  if (options.lowBalanceThreshold !== undefined)
+    params.set("low_balance_threshold", String(options.lowBalanceThreshold));
 
   const response = await requestControl(
     `/api/control/customers?${params.toString()}`,
@@ -1301,6 +1326,11 @@ export interface DeviceListItem {
   activation_code?: string;
   last_heartbeat_at?: string | null;
   online?: boolean;
+  company_name?: string;
+  session_id?: string | null;
+  session_epoch?: number | null;
+  first_bound_at?: string | null;
+  last_active_at?: string | null;
 }
 
 export interface DeviceSummary {
@@ -1308,6 +1338,9 @@ export interface DeviceSummary {
   online: number;
   revoked_today: number;
   unbound: number;
+  online_customers?: number;
+  at_slot_limit?: number;
+  frequent_swaps_24h?: number;
 }
 
 export interface DeviceListResponse {
@@ -1324,6 +1357,8 @@ export interface DeviceListOptions {
   userId?: string;
   limit?: number;
   offset?: number;
+  keyword?: string;
+  attention?: "online" | "offline" | "at_slot_limit" | "frequent_swaps_24h";
 }
 
 /**
@@ -1338,6 +1373,8 @@ export async function listDevices(
   if (options.status) params.set("status", options.status);
   if (options.platform) params.set("platform", options.platform);
   if (options.userId) params.set("user_id", options.userId);
+  if (options.keyword) params.set("keyword", options.keyword);
+  if (options.attention) params.set("attention", options.attention);
   if (options.limit !== undefined) params.set("limit", String(options.limit));
   if (options.offset !== undefined)
     params.set("offset", String(options.offset));
@@ -1364,24 +1401,28 @@ export interface DeviceOperationResult {
 export async function unbindDevice(
   deviceId: string,
   reason: string,
+  idempotencyKey?: string,
 ): Promise<DeviceOperationResult> {
   return adminWrite<DeviceOperationResult>(
     `/api/control/devices/${encodeURIComponent(deviceId)}/unbind`,
     {},
     reason,
-    "设备下线失败",
+    "解绑设备失败",
+    idempotencyKey,
   );
 }
 
 export async function revokeDeviceCredential(
   deviceId: string,
   reason: string,
+  idempotencyKey?: string,
 ): Promise<DeviceOperationResult> {
   return adminWrite<DeviceOperationResult>(
     `/api/control/devices/${encodeURIComponent(deviceId)}/revoke-credential`,
     {},
     reason,
-    "撤销设备凭据失败",
+    "永久禁用设备失败",
+    idempotencyKey,
   );
 }
 
@@ -1407,6 +1448,7 @@ export interface AdjustmentListItem {
   admin_username?: string;
   target_user_id?: string;
   target_username?: string;
+  target_display_name?: string;
   balance_before?: number | null;
   balance_after?: number | null;
 }
@@ -1627,13 +1669,20 @@ export interface AuditLogItem {
   change_subject?: string | null;
   old_unit_price_fen?: number | null;
   new_unit_price_fen?: number | null;
-  /** 仅 billing.tariff.update：服务端派生的费率变更前后快照（白名单字段）。 */
+  /** 服务端派生的费率快照或采集设置变更（不含密钥）。 */
   change_detail?: {
     old?: AuditTariffSnapshot | null;
     new?: AuditTariffSnapshot | null;
+    changes?: Record<string, { before: unknown; after: unknown }> | null;
   } | null;
   /** 方案 P1：高敏事件（退款扣减、密钥明文、数据导出等），列表整行标红。 */
   sensitive?: boolean;
+  event_label?: string;
+  event_group?: string;
+  event_group_label?: string;
+  target_label?: string;
+  target_company_name?: string;
+  change_summary?: string;
 }
 
 export interface AuditLogResponse {
@@ -1669,6 +1718,27 @@ export interface AuditLogOptions {
  * 会淹没管理员操作；客户详情的「操作记录」用 scope=customer + targetUserId
  * 查看某位客户自己的动作。
  */
+export async function getGenerationRecordHistory(
+  recordType: string,
+  recordId: string,
+  offset = 0,
+): Promise<{
+  items: { id: string; before: string | null; after: string; at: string }[];
+  total: number;
+  limit: number;
+  offset: number;
+  measurementStartedAt: string;
+  historyRule: string;
+}> {
+  const response = await requestControl(
+    `/api/control/generation-records/${encodeURIComponent(recordType)}/${encodeURIComponent(recordId)}/history?limit=20&offset=${offset}`,
+    { method: "GET" },
+  );
+  if (!response.ok)
+    throw await parseActivationError(response, "读取状态历史失败");
+  return response.json();
+}
+
 export async function listAuditLog(
   options: AuditLogOptions = {},
 ): Promise<AuditLogResponse> {
@@ -1735,7 +1805,12 @@ export async function downloadAuditLogCsv(
 // ---------------------------------------------------------------------------
 
 export type AdminGenerationRecord =
-  components["schemas"]["ControlGenerationRecord"];
+  components["schemas"]["ControlGenerationRecord"] & {
+    short_ref?: string | null;
+    root_task_id?: string | null;
+    retry_path?: "ARCHIVE_ONLY" | "PRE_PROVIDER" | null;
+    handling_advice?: string | null;
+  };
 export type AdminGenerationRecordPage =
   components["schemas"]["ControlGenerationRecordPage"];
 export type AdminGenerationRecordSummary =
@@ -1754,9 +1829,13 @@ export async function getAdminGenerationRecords(
     limit?: number;
     offset?: number;
     username?: string;
+    projectName?: string;
+    userId?: string;
     status?: string;
     recordType?: string;
     failurePhase?: string;
+    diagnostics?: boolean;
+    failureCategory?: string;
     taskRef?: string;
     createdFrom?: string;
     createdTo?: string;
@@ -1766,9 +1845,14 @@ export async function getAdminGenerationRecords(
     limit: String(options.limit ?? 50),
     offset: String(options.offset ?? 0),
   });
+  if (options.userId) params.set("user_id", options.userId);
   if (options.username) params.set("username", options.username);
+  if (options.projectName) params.set("project_name", options.projectName);
   if (options.status) params.set("status", options.status);
   if (options.recordType) params.set("record_type", options.recordType);
+  if (options.diagnostics) params.set("diagnostics", "true");
+  if (options.failureCategory)
+    params.set("failure_category", options.failureCategory);
   if (options.failurePhase) params.set("failure_phase", options.failurePhase);
   // P0-9 检索：服务端 task_ref 口径按任务编号匹配。
   if (options.taskRef) params.set("task_ref", options.taskRef);
@@ -1787,6 +1871,8 @@ export async function getAdminGenerationRecords(
 export async function getAdminGenerationRecordSummary(
   options: {
     username?: string;
+    projectName?: string;
+    userId?: string;
     status?: string;
     recordType?: string;
     failurePhase?: string;
@@ -1796,7 +1882,9 @@ export async function getAdminGenerationRecordSummary(
   } = {},
 ): Promise<AdminGenerationRecordSummaryCards> {
   const params = new URLSearchParams();
+  if (options.userId) params.set("user_id", options.userId);
   if (options.username) params.set("username", options.username);
+  if (options.projectName) params.set("project_name", options.projectName);
   if (options.status) params.set("status", options.status);
   if (options.recordType) params.set("record_type", options.recordType);
   if (options.failurePhase) params.set("failure_phase", options.failurePhase);
@@ -1844,15 +1932,32 @@ export async function getAlertsOverview(): Promise<AdminAlertsOverview> {
 // 失败率告警（方案 P1-5）—— GET /api/control/alerts/failure-rate
 // ---------------------------------------------------------------------------
 
-export type AdminFailureRateError = components["schemas"]["FailureRateError"];
-export type AdminFailureRateGroup = components["schemas"]["FailureRateGroup"];
+export type AdminFailureRateError =
+  components["schemas"]["FailureRateError"] & {
+    total?: number;
+    failure_rate_percent?: number;
+    threshold_percent?: number;
+    min_sample_size?: number;
+    exceeded?: boolean;
+  };
+export type AdminFailureRateGroup = Omit<
+  components["schemas"]["FailureRateGroup"],
+  "top_errors"
+> & {
+  threshold_percent?: number;
+  min_sample_size?: number;
+  top_errors: AdminFailureRateError[];
+};
 // 生成类型落后于服务端：报告已带上告警接收人（P2-4），这里按服务端契约补齐，
 // 等下一次整体重生成 OpenAPI 类型后可删掉交叉部分。
-export type AdminFailureRateReport =
-  components["schemas"]["FailureRateReport"] & {
-    recipient_user_id?: string | null;
-    recipient_display_name?: string | null;
-  };
+export type AdminFailureRateReport = Omit<
+  components["schemas"]["FailureRateReport"],
+  "groups"
+> & {
+  groups: AdminFailureRateGroup[];
+  recipient_user_id?: string | null;
+  recipient_display_name?: string | null;
+};
 
 /**
  * 近 1 小时失败率报告（「通知与告警」页）。只读端点（AdminReader），
@@ -1873,12 +1978,33 @@ export async function getFailureRateAlerts(): Promise<AdminFailureRateReport> {
  * 告警设置快照：接收人（可空）+ 失败率口径。手写而非取自生成类型——
  * 与客户标注同理，避免为一个端点重生成整份 OpenAPI 类型。
  */
+export interface AlertNotificationPolicy {
+  key:
+    | "failure_rate"
+    | "unconfigured_rates"
+    | "reconciliation"
+    | "sensitive_events"
+    | "collection_budget";
+  enabled: boolean;
+  threshold_count: number;
+  window_minutes: number;
+  channel: "email" | null;
+  recipient_user_id: string | null;
+}
+export interface AlertFailureRule {
+  record_type: string;
+  error_code: string | null;
+  threshold_percent: number;
+  min_sample_size: number;
+}
 export interface AlertSettings {
   recipient_user_id: string | null;
   recipient_display_name: string | null;
   failure_rate_window_minutes: number;
   failure_rate_threshold_percent: number;
   failure_rate_min_sample: number;
+  notification_policies?: AlertNotificationPolicy[];
+  failure_rules?: AlertFailureRule[];
   updated_by_user_id: string | null;
   updated_at: string | null;
 }
@@ -1889,6 +2015,8 @@ export type AlertSettingsFields = Pick<
   | "failure_rate_window_minutes"
   | "failure_rate_threshold_percent"
   | "failure_rate_min_sample"
+  | "notification_policies"
+  | "failure_rules"
 >;
 
 export interface AlertRecipientCandidate {
@@ -2075,10 +2203,56 @@ export function resetTeamMemberPassword(
   );
 }
 
-export type AdminExternalCall = components["schemas"]["ExternalCallSummary"];
+export type AdminExternalCall = components["schemas"]["ExternalCallSummary"] & {
+  task_id?: string | null;
+  request_id?: string | null;
+  exception_type?: string | null;
+  failure_category?: string | null;
+  advice?: string | null;
+  mapping_revision?: string | null;
+  mapping_evidence?: string | null;
+};
 export type AdminExternalCallList = components["schemas"]["ExternalCallList"];
 export type AdminExternalCallResponse =
   components["schemas"]["ExternalCallResponse"];
+
+export type GlobalExternalCallPage = Omit<
+  components["schemas"]["GlobalExternalCallPage"],
+  "items"
+> & {
+  items: Array<{
+    call: AdminExternalCall;
+    task_type: string | null;
+    task_id: string | null;
+    request_id: string | null;
+  }>;
+};
+export type GlobalExternalCallFilters = {
+  provider?: string;
+  endpoint?: string;
+  outcome?: string;
+  task_ref?: string;
+  created_from?: string;
+  created_to?: string;
+  offset?: number;
+  limit?: number;
+};
+
+export async function listGlobalExternalCalls(
+  filters: GlobalExternalCallFilters,
+): Promise<GlobalExternalCallPage> {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (value !== undefined && value !== "") query.set(key, String(value));
+  }
+  const response = await requestControl(
+    `/api/control/external-calls?${query}`,
+    {},
+  );
+  if (!response.ok)
+    throw await parseActivationError(response, "读取接口调用日志失败");
+  return response.json();
+}
 
 /**
  * P0-9：某条生成记录的全部第三方接口调用，按时间顺序。
@@ -2090,9 +2264,13 @@ export type AdminExternalCallResponse =
 export async function getAdminGenerationRecordCalls(
   recordType: string,
   recordId: string,
+  page?: { limit: number; offset: number },
 ): Promise<AdminExternalCallList> {
+  const query = page
+    ? `?limit=${encodeURIComponent(page.limit)}&offset=${encodeURIComponent(page.offset)}`
+    : "";
   const response = await requestControl(
-    `/api/control/generation-records/${encodeURIComponent(recordType)}/${encodeURIComponent(recordId)}/calls`,
+    `/api/control/generation-records/${encodeURIComponent(recordType)}/${encodeURIComponent(recordId)}/calls${query}`,
     { method: "GET" },
   );
   if (!response.ok) {
@@ -2478,10 +2656,14 @@ export type ViralRuntimeControls = {
     platform: "douyin" | "wechat_channels";
     category: string;
     keyword: string;
+    enabled?: boolean;
+    limit?: number | null;
   }>;
   per_keyword_limit?: number;
   next_collection_at?: string | null;
   collection_interval_days?: number;
+  collection_time?: string | null;
+  last_collection_at?: string | null;
   /** 采集质量规则与月度预算（方案 P1 采集设置）。 */
   quality_min_likes?: number | null;
   quality_duration_min_ms?: number | null;
@@ -2489,6 +2671,14 @@ export type ViralRuntimeControls = {
   quality_exclude_words?: string[];
   monthly_budget_fen?: number | null;
   month_spend_fen?: number;
+  month_unknown_cost_count?: number;
+  month_pending_cost_count?: number;
+  month_total_cost_fen?: number | null;
+  budget_status?: "unlimited" | "normal" | "warning" | "exhausted";
+  budget_usage_percent?: number | null;
+  budget_period_start?: string | null;
+  budget_period_end?: string | null;
+  budget_scope?: string;
   platforms: Array<{
     platform: "douyin" | "wechat_channels";
     cached_videos: number;
@@ -2521,12 +2711,13 @@ export async function updateViralRuntimeControls(
     | "keywords"
     | "per_keyword_limit"
     | "collection_interval_days"
+    | "collection_time"
     | "quality_min_likes"
     | "quality_duration_min_ms"
     | "quality_duration_max_ms"
     | "quality_exclude_words"
     | "monthly_budget_fen"
-  >,
+  > & { expected_keywords?: ViralRuntimeControls["keywords"] },
   reason: string,
   idempotencyKey?: string,
 ): Promise<ViralRuntimeControls> {
@@ -2537,6 +2728,50 @@ export async function updateViralRuntimeControls(
     "更新爆款视频运行开关失败",
     idempotencyKey,
     "PATCH",
+  );
+}
+
+export type ViralCollectionEstimate = {
+  enabledKeywords: number;
+  searchCallsMin: number;
+  searchCallsMax: number;
+  searchCostMinFen: number | null;
+  searchCostMaxFen: number | null;
+  videoLimit: number;
+  detailCallsMin?: number;
+  detailCallsMax?: number;
+  physicalDataCallsMin?: number;
+  physicalDataCallsMax?: number | null;
+  normalRetryPhysicalCallsMax?: number;
+  dataCostMinFen?: number | null;
+  dataCostMaxFen?: number | null;
+  normalRetryDataCostMaxFen?: number | null;
+  mediaDownloadsMin?: number;
+  mediaDownloadsMax?: number;
+  coverDownloadsMin?: number;
+  coverDownloadsMax?: number;
+  storageCostFen?: null;
+  transferCostFen?: null;
+  cacheHits?: null;
+  customerCount?: number;
+  customerCreditsPerConfirmedCall?: number;
+  customerCreditsMaxEach?: number | null;
+  normalRetryCustomerCreditsMaxEach?: number;
+  snapshot?: string;
+  budget?: Pick<
+    ViralRuntimeControls,
+    | "month_spend_fen"
+    | "month_unknown_cost_count"
+    | "month_pending_cost_count"
+    | "budget_status"
+  >;
+  totalCostFen: null;
+  note: string;
+};
+export function estimateViralCollection(): Promise<ViralCollectionEstimate> {
+  return adminRead(
+    "/api/control/viral/collection/estimate",
+    "读取采集预估失败",
   );
 }
 
@@ -2560,10 +2795,13 @@ export async function updateViralVideoAvailability(
 export async function collectViralNow(
   reason: string,
   idempotencyKey?: string,
+  expectedEstimateSnapshot?: string,
 ): Promise<{ queued: boolean }> {
   return adminWrite(
     "/api/control/viral/collect",
-    {},
+    expectedEstimateSnapshot
+      ? { expected_estimate_snapshot: expectedEstimateSnapshot }
+      : {},
     reason,
     "立即采集失败",
     idempotencyKey,
@@ -2605,6 +2843,16 @@ export type CollectedViralVideo = {
   published_display?: string | null;
   like_display?: string | null;
   created_at: string;
+  homepage_live?: boolean;
+  homepage_pending?: boolean;
+  content_state?:
+    | "pending_prepare"
+    | "prepare_failed"
+    | "ready"
+    | "featured"
+    | "removed"
+    | "blocked";
+  customer_visible?: boolean;
   homepage_featured: boolean;
   collection_published: boolean;
   /** 置顶序：非空表示已置顶（越小越靠前）；置顶才写入，取消置顶归 NULL。 */
@@ -2644,10 +2892,93 @@ export function addViralKeyword(
   );
 }
 
+export type ViralKeyword = {
+  platform: "douyin" | "wechat_channels";
+  category: string;
+  keyword: string;
+  enabled: boolean;
+  limit: number | null;
+};
+export type ViralKeywordPerformance = ViralKeyword & {
+  collected: number;
+  featured: number;
+  uses: number;
+  details: number;
+  copies: number;
+  effect: "high" | "medium" | "low" | "unknown";
+  lastRun: {
+    status: "RUNNING" | "SUCCEEDED" | "FAILED";
+    started_at: string;
+    finished_at: string | null;
+  } | null;
+};
+export type ViralKeywordPage = {
+  items: ViralKeywordPerformance[];
+  categories: string[];
+  from: string;
+  to: string;
+  measurementStartedAt: string;
+  coverageComplete: boolean;
+  rule: string;
+  effectRule: string;
+};
+export async function listViralKeywords(): Promise<ViralKeywordPage> {
+  const response = await requestControl("/api/control/viral/keywords", {});
+  if (!response.ok)
+    throw await parseActivationError(response, "读取关键词经营数据失败");
+  return response.json();
+}
+export function editViralKeyword(
+  expected: ViralKeyword,
+  replacement: ViralKeyword,
+  reason: string,
+  key: string,
+) {
+  return adminWrite(
+    "/api/control/viral/keywords",
+    { expected, replacement },
+    reason,
+    "保存关键词失败",
+    key,
+    "PATCH",
+  );
+}
+export function addViralKeywords(
+  keywords: ViralKeyword[],
+  reason: string,
+  key: string,
+): Promise<{ added: number; duplicates: number; total: number }> {
+  return adminWrite(
+    "/api/control/viral/keywords/batch",
+    { keywords },
+    reason,
+    "新增关键词失败",
+    key,
+  );
+}
+export function deleteViralKeyword(
+  keyword: ViralKeyword,
+  reason: string,
+  key: string,
+) {
+  return adminWrite(
+    "/api/control/viral/keywords/delete",
+    { platform: keyword.platform, keyword: keyword.keyword },
+    reason,
+    "删除关键词失败",
+    key,
+  );
+}
+
 export async function listCollectedViralVideos(options: {
   platform?: string;
   status?: CollectedViralStatus;
   category?: string;
+  contentState?: CollectedViralVideo["content_state"];
+  sourceKeyword?: string;
+  publishedFrom?: string;
+  publishedTo?: string;
+  customerVisible?: boolean;
   hasUsage?: boolean;
   sort?: "created" | "likes" | "published" | "usage";
   query?: string;
@@ -2660,6 +2991,12 @@ export async function listCollectedViralVideos(options: {
   if (options.platform) query.set("platform", options.platform);
   if (options.status) query.set("status", options.status);
   if (options.category) query.set("category", options.category);
+  if (options.contentState) query.set("content_state", options.contentState);
+  if (options.sourceKeyword) query.set("source_keyword", options.sourceKeyword);
+  if (options.publishedFrom) query.set("published_from", options.publishedFrom);
+  if (options.publishedTo) query.set("published_to", options.publishedTo);
+  if (options.customerVisible !== undefined)
+    query.set("customer_visible", String(options.customerVisible));
   if (options.hasUsage !== undefined && options.hasUsage !== null)
     query.set("has_usage", String(options.hasUsage));
   if (options.sort && options.sort !== "created")
@@ -2682,10 +3019,11 @@ export function archiveCollectedViralVideo(
   video: CollectedViralVideo,
   reason: string,
   idempotencyKey: string,
+  expectedCostSnapshot?: string,
 ) {
   return adminWrite(
     `/api/control/viral/videos/${encodeURIComponent(video.platform)}/${encodeURIComponent(video.video_id)}/archive`,
-    {},
+    { expected_cost_snapshot: expectedCostSnapshot },
     reason,
     "提交转存失败",
     idempotencyKey,
@@ -2698,10 +3036,15 @@ export function curateViralVideo(
   action: "feature" | "unfeature" | "delete" | "pin" | "unpin" | "prepare",
   reason: string,
   idempotencyKey: string,
+  expectedCostSnapshot?: string,
 ) {
-  return adminWrite(
+  return adminWrite<{
+    homepage_featured: boolean;
+    queued_for_preparation?: boolean;
+    homepage_rank?: number | null;
+  }>(
     `/api/control/viral/videos/${encodeURIComponent(video.platform)}/${encodeURIComponent(video.video_id)}/curation`,
-    { action },
+    { action, expected_cost_snapshot: expectedCostSnapshot },
     reason,
     "更新爆款视频失败",
     idempotencyKey,
@@ -2710,13 +3053,15 @@ export function curateViralVideo(
 }
 
 export type ViralBatchCurationResult = {
-  action: "feature" | "unfeature" | "delete";
+  action: "feature" | "unfeature" | "delete" | "prepare";
   count: number;
+  queued_count?: number;
   items: {
     platform: string;
     video_id: string;
     homepage_featured: boolean;
     deleted: boolean;
+    queued_for_preparation?: boolean;
   }[];
 };
 
@@ -2726,14 +3071,16 @@ export type ViralBatchCurationResult = {
  */
 export function curateViralVideosBatch(
   items: Pick<CollectedViralVideo, "platform" | "video_id">[],
-  action: "feature" | "unfeature" | "delete" | "prepare",
+  action: "feature" | "unfeature" | "delete" | "prepare" | "hide" | "block",
   reason: string,
   idempotencyKey: string,
+  expectedCostSnapshot?: string,
 ): Promise<ViralBatchCurationResult> {
   return adminWrite<ViralBatchCurationResult>(
     "/api/control/viral/videos/curation:batch",
     {
       action,
+      expected_cost_snapshot: expectedCostSnapshot,
       items: items.map((item) => ({
         platform: item.platform,
         video_id: item.video_id,
@@ -2772,9 +3119,152 @@ export async function viralLibraryOverview(): Promise<ViralLibraryOverview> {
   return response.json();
 }
 
+export type ViralHomepageVideo = CollectedViralVideo & {
+  homepage_live: boolean;
+  homepage_starts_at: string | null;
+  homepage_ends_at: string | null;
+  homepage_featured_at: string | null;
+  opens_after_homepage?: number | null;
+};
+
+export type ViralContentOverview = {
+  from: string;
+  to: string;
+  measurementStartedAt: string;
+  cohortRule: string;
+  historyNote: string;
+  funnel: Array<{ name: string; count: number; conversion: number | null }>;
+  directCopyWithoutDetail: number;
+  finance: {
+    knownRevenueFen: number;
+    unknownRevenueCount: number;
+    revenueFen: number | null;
+    knownCostFen: number;
+    unknownCostCount: number;
+    costFen: number | null;
+    grossFen: number | null;
+    grossRate: number | null;
+    countingRule: string;
+  };
+  topVideos: Array<{
+    platform: string;
+    video_id: string;
+    title: string | null;
+    requests: number;
+  }>;
+  bestKeywords: Array<{
+    keyword: string;
+    platform: string;
+    collected: number;
+    used: number;
+  }>;
+  worstKeywords: Array<{
+    keyword: string;
+    platform: string;
+    collected: number;
+    used: number;
+  }>;
+  keywordRule: string;
+};
+export async function getViralContentOverview(
+  from?: string,
+  to?: string,
+): Promise<ViralContentOverview> {
+  const query = new URLSearchParams();
+  if (from) query.set("from", from);
+  if (to) query.set("to", to);
+  const response = await requestControl(
+    `/api/control/viral/content-overview?${query}`,
+    {},
+  );
+  if (!response.ok)
+    throw await parseActivationError(response, "读取内容经营数据失败");
+  return response.json();
+}
+export type ViralHomepage = {
+  platform: "douyin" | "wechat_channels";
+  revision?: string;
+  items: ViralHomepageVideo[];
+  preparing?: ViralHomepageVideo[];
+  measurement_started_at?: string;
+  preview: ViralHomepageVideo[];
+  preview_limit: number;
+  capacity: number | null;
+  counting_rule: string;
+};
+export async function getViralHomepage(
+  platform: ViralHomepage["platform"],
+): Promise<ViralHomepage> {
+  const response = await requestControl(
+    `/api/control/viral/homepage?platform=${platform}`,
+    {},
+  );
+  if (!response.ok)
+    throw await parseActivationError(response, "读取首页编排失败");
+  const result = (await response.json()) as ViralHomepage;
+  return {
+    ...result,
+    items: result.items.map(withManagedCover) as ViralHomepageVideo[],
+    preparing: result.preparing?.map(withManagedCover) as ViralHomepageVideo[],
+    preview: result.preview.map(withManagedCover) as ViralHomepageVideo[],
+  };
+}
+export function moveViralHomepage(
+  platform: ViralHomepage["platform"],
+  video_id: string,
+  position: number,
+  expected_revision: string,
+  key: string,
+) {
+  return adminWrite(
+    "/api/control/viral/homepage/move",
+    { platform, video_id, position, expected_revision },
+    "调整首页顺序",
+    "保存首页顺序失败",
+    key,
+  );
+}
+
+export function reorderViralHomepage(
+  platform: ViralHomepage["platform"],
+  video_ids: string[],
+  expected_video_ids: string[],
+  key: string,
+) {
+  return adminWrite(
+    "/api/control/viral/homepage/order",
+    { platform, video_ids, expected_video_ids },
+    "调整首页顺序",
+    "保存首页顺序失败",
+    key,
+    "PUT",
+  );
+}
+export function scheduleViralHomepage(
+  video: ViralHomepageVideo,
+  starts_at: string | null,
+  ends_at: string | null,
+  key: string,
+) {
+  return adminWrite(
+    `/api/control/viral/homepage/${video.platform}/${encodeURIComponent(video.video_id)}/schedule`,
+    {
+      starts_at,
+      ends_at,
+      expected_starts_at: video.homepage_starts_at,
+      expected_ends_at: video.homepage_ends_at,
+    },
+    "设置首页排期",
+    "保存首页排期失败",
+    key,
+    "PATCH",
+  );
+}
+
 export function refreshCollectedVideoStatistics(
   video: Pick<CollectedViralVideo, "video_id">,
   key: string,
+  expectedCostSnapshot?: string,
 ) {
   return adminWrite<
     Pick<
@@ -2788,7 +3278,7 @@ export function refreshCollectedVideoStatistics(
     > & { statistics_status: "complete" | "partial" | "failure" }
   >(
     `/api/control/viral/videos/wechat_channels/${encodeURIComponent(video.video_id)}/statistics`,
-    {},
+    { expected_cost_snapshot: expectedCostSnapshot },
     "管理端补齐视频号互动数据",
     "获取互动数据失败",
     key,
@@ -2807,6 +3297,74 @@ export async function previewCollectedViralVideo(
   if (!response.ok)
     throw await parseActivationError(response, "读取视频预览失败");
   return response.json();
+}
+
+export type ViralVideoBusinessDetails = {
+  video: CollectedViralVideo;
+  media: Record<
+    "audio" | "video",
+    {
+      status: string;
+      ready: boolean;
+      errorCode: string | null;
+      updatedAt: string | null;
+    }
+  >;
+  copy: { text: string; updatedAt: string } | null;
+  sourceDescription: string | null;
+  originalUrl: string | null;
+  sourceKeywords: string[];
+  relatedVideos: CollectedViralVideo[];
+  business: {
+    window: string;
+    countingRule: string;
+    detailAccounts: number;
+    copyAccounts: number;
+    favoriteAccounts: number;
+    chargedCredits: number;
+    revenueFen: number | null;
+    knownRevenueFen: number;
+    unknownRevenueOperations: number;
+    collectionCostFen: number | null;
+    attributedDataCalls?: number;
+    knownDataCostFen?: number;
+    unknownDataCostCalls?: number;
+    pendingDataCostCalls?: number;
+    costNote: string;
+    customerTotal: number;
+    offset: number;
+    limit: number;
+    customers: Array<{
+      walletOwnerId: string;
+      name: string;
+      detailAuthorized: boolean;
+      copyAuthorized: boolean;
+      chargedCredits: number;
+      revenueFen: number | null;
+      knownRevenueFen: number;
+      unknownRevenueOperations: number;
+      lastUsedAt: string;
+      actors: Array<{ id: string; name: string }>;
+    }>;
+  };
+};
+
+export async function getViralVideoBusinessDetails(
+  video: Pick<CollectedViralVideo, "platform" | "video_id">,
+  offset = 0,
+): Promise<ViralVideoBusinessDetails> {
+  const response = await requestControl(
+    `/api/control/viral/videos/${encodeURIComponent(video.platform)}/${encodeURIComponent(video.video_id)}/details?offset=${offset}&limit=20`,
+    {},
+  );
+  if (!response.ok)
+    throw await parseActivationError(response, "读取视频经营详情失败");
+  const result: ViralVideoBusinessDetails = await response.json();
+  return {
+    ...result,
+    video: withManagedCover(result.video),
+    relatedVideos: result.relatedVideos.map(withManagedCover),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -2838,10 +3396,11 @@ export async function adminSearchViralVideos(
   },
   reason: string,
   idempotencyKey: string,
+  expectedCostSnapshot?: string,
 ): Promise<AdminViralSearchResult> {
   const result = await adminWrite<AdminViralSearchResult>(
     "/api/control/viral/search",
-    payload,
+    { ...payload, expected_cost_snapshot: expectedCostSnapshot },
     reason,
     "搜索爆款视频失败",
     idempotencyKey,
@@ -2863,10 +3422,51 @@ export type ViralDiscoverySummary = {
   discoveries: number;
   users: number;
   videos: number;
+  searches?: number | null;
+  zero_results?: number;
+  inventory?: number;
+  configured?: boolean;
+  collectionEnabled?: boolean | null;
+  trend?: { date: string; searches: number | null; partial: boolean }[];
 };
+
+export type ViralRecycleVideo = CollectedViralVideo & {
+  deleted_at: string;
+  restore_before: string;
+  restorable: boolean;
+};
+
+export function listViralRecycleBin(offset = 0) {
+  return adminRead<{ items: ViralRecycleVideo[]; total: number; rule: string }>(
+    `/api/control/viral/recycle?offset=${offset}&limit=25`,
+    "读取回收站失败",
+  );
+}
+
+export function restoreViralVideo(
+  video: ViralRecycleVideo,
+  reason: string,
+  key: string,
+) {
+  return adminWrite(
+    `/api/control/viral/videos/${encodeURIComponent(video.platform)}/${encodeURIComponent(video.video_id)}/restore`,
+    { confirm: true },
+    reason,
+    "恢复视频失败",
+    key,
+  );
+}
 
 export type ViralDiscoveryAggregate = {
   date: string;
+  from?: string;
+  to?: string;
+  measurementStartedAt?: string | null;
+  countingRule?: string;
+  categories?: string[];
+  inventoryRule?: string;
+  priorityRule?: string;
+  hitRecords?: number;
   total: number;
   users: number;
   videos: number;
@@ -2904,12 +3504,19 @@ export type ViralDiscoveryDetail = {
 
 export async function listViralDiscoveryDetails(options: {
   date: string;
+  from?: string;
+  to?: string;
   keyword?: string;
   platform?: string;
   offset?: number;
   limit?: number;
 }): Promise<{ date: string; total: number; items: ViralDiscoveryDetail[] }> {
   const query = new URLSearchParams({ date: options.date });
+  if (options.from && options.to) {
+    query.delete("date");
+    query.set("from", options.from);
+    query.set("to", options.to);
+  }
   if (options.keyword) query.set("keyword", options.keyword);
   if (options.platform) query.set("platform", options.platform);
   query.set("offset", String(options.offset ?? 0));
@@ -2920,7 +3527,45 @@ export async function listViralDiscoveryDetails(options: {
   );
   if (!response.ok)
     throw await parseActivationError(response, "读取搜索发现明细失败");
-  return response.json();
+  const result = (await response.json()) as {
+    date: string;
+    total: number;
+    items: ViralDiscoveryDetail[];
+  };
+  return {
+    ...result,
+    items: result.items.map((item) => ({
+      ...item,
+      video: item.video ? withManagedCover(item.video) : null,
+    })),
+  };
+}
+
+export type ViralDemandCustomer = {
+  user_id: string;
+  customer_user_id: string | null;
+  username: string | null;
+  display_name: string | null;
+  searches: number | null;
+  zero_results: number | null;
+  videos: number;
+  last_searched_at: string;
+};
+export function listViralDemandCustomers(options: {
+  from: string;
+  to: string;
+  keyword: string;
+  platform: string;
+  offset: number;
+}): Promise<{
+  items: ViralDemandCustomer[];
+  total: number;
+  countingRule: string;
+}> {
+  return adminRead(
+    `/api/control/viral/discoveries/customers?${new URLSearchParams({ ...options, offset: String(options.offset), limit: "20" })}`,
+    "读取搜索客户失败",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -3217,4 +3862,72 @@ export async function exportBillingReportCsv(
   anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
   return { filename, bytes: blob.size };
+}
+
+export async function exportSummaryReportCsv(
+  input: BillingReportExportInput & { kind: "business" | "funds" },
+  idempotencyKey?: string,
+): Promise<BillingReportExport> {
+  const csrf = requireCsrfToken();
+  const response = await requestControl(
+    "/api/control/reports/summary/export",
+    {
+      method: "POST",
+      headers: {
+        [CSRF_HEADER]: csrf,
+        [IDEMPOTENCY_KEY_HEADER]: idempotencyKey ?? newIdempotencyKey(),
+      },
+      body: JSON.stringify({
+        kind: input.kind,
+        start_date: input.start_date,
+        end_date: input.end_date,
+      }),
+    },
+    REPORT_EXPORT_TIMEOUT_MS,
+  );
+  if (!response.ok) {
+    throw await parseActivationError(response, "导出计费报表失败");
+  }
+  const blob = await response.blob();
+  const filename = exportFilename(response, "汇总报表.csv");
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return { filename, bytes: blob.size };
+}
+
+export type ViralOperationEstimateRequest = {
+  action: "search" | "prepare" | "statistics" | "feature" | "archive";
+  platform?: "douyin" | "wechat_channels";
+  items?: Pick<CollectedViralVideo, "platform" | "video_id">[];
+};
+export type ViralOperationEstimate = {
+  snapshot: string;
+  unitCostFen: number | null;
+  logicalCallsMax: number;
+  normalRetryCallsMax: number;
+  dataCostMaxFen: number | null;
+  reusedVideos: number;
+  mediaDownloadsMax: number;
+  totalCostFen: null;
+  note: string;
+};
+export function estimateViralOperation(payload: ViralOperationEstimateRequest) {
+  return readViralOperationEstimate(payload);
+}
+async function readViralOperationEstimate(
+  payload: ViralOperationEstimateRequest,
+): Promise<ViralOperationEstimate> {
+  const response = await requestControl(
+    "/api/control/viral/operations/estimate",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!response.ok) throw await parseActivationError(response, "费用预估失败");
+  return response.json();
 }

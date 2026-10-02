@@ -26,8 +26,10 @@ const PAGE_SIZE = 20;
  */
 export function AccountsPage({
   readOnly = false,
+  userId = "",
 }: {
   readOnly?: boolean;
+  userId?: string;
 } = {}) {
   const [transactions, setTransactions] = useState<AdminWalletTransaction[]>(
     [],
@@ -53,6 +55,7 @@ export function AccountsPage({
       const transactionPage = await listAdminWalletTransactions({
         limit: PAGE_SIZE,
         offset: transactionOffset,
+        userId: userId || undefined,
         username: username || undefined,
         type: typeFilter || undefined,
         createdFrom: createdFrom || undefined,
@@ -69,7 +72,7 @@ export function AccountsPage({
     } finally {
       setLoading(false);
     }
-  }, [createdFrom, createdTo, transactionOffset, typeFilter, username]);
+  }, [createdFrom, createdTo, transactionOffset, typeFilter, username, userId]);
 
   const loadRef = useRef<(() => void) | null>(null);
   loadRef.current = () => void loadAccounts();
@@ -85,6 +88,7 @@ export function AccountsPage({
     setNotice("");
     try {
       const summary = await downloadControlWalletTransactionsCsv({
+        userId: userId || undefined,
         username: username || undefined,
         type: typeFilter || undefined,
         createdFrom: createdFrom || undefined,
@@ -237,15 +241,44 @@ export function AccountsPage({
                 )}
               </td>
               <td>
-                {tx.service_name && <div>{tx.service_name}</div>}
-                <code>
-                  {tx.recharge_order_id ??
-                    tx.task_id ??
-                    tx.oral_task_id ??
-                    tx.source_id ??
-                    tx.billing_operation_id ??
-                    "—"}
-                </code>
+                <strong>
+                  {tx.business_label ?? tx.service_name ?? "历史业务名称未记录"}
+                </strong>
+                <div>
+                  <a
+                    href={`#admin/customersMgmt?userId=${encodeURIComponent(tx.user_id)}`}
+                  >
+                    查看客户
+                  </a>
+                  {tx.order_no ? (
+                    <a
+                      href={`#admin/funds?intent=order&orderNo=${encodeURIComponent(tx.order_no)}&userId=${encodeURIComponent(tx.user_id)}`}
+                    >
+                      查看订单
+                    </a>
+                  ) : null}
+                  {tx.task_id || tx.oral_task_id || tx.source_id ? (
+                    <a
+                      href={`#admin/generationRecords?taskId=${encodeURIComponent(tx.task_id ?? tx.oral_task_id ?? tx.source_id ?? "")}&userId=${encodeURIComponent(tx.user_id)}`}
+                    >
+                      查看关联任务
+                    </a>
+                  ) : null}
+                </div>
+                <details>
+                  <summary>查看关联编号</summary>
+                  <code>
+                    {tx.recharge_order_id ??
+                      tx.task_id ??
+                      tx.oral_task_id ??
+                      tx.source_id ??
+                      tx.billing_operation_id ??
+                      "—"}
+                  </code>
+                  {tx.billing_round != null ? (
+                    <div>计费轮次 {tx.billing_round}</div>
+                  ) : null}
+                </details>
               </td>
             </tr>
           ))}
@@ -254,6 +287,10 @@ export function AccountsPage({
       {!loading && transactions.length === 0 && !error ? (
         <PageBanner tone="notice">暂无账务流水。</PageBanner>
       ) : null}
+      <p className="admin-hint">
+        生成冻结是在任务提交时保留预计积分；生成扣费是任务结束后确认的消耗；未使用的生成冻结积分会退回可用余额。
+        退款扣减是人工退款对应的积分减少。关联编号保留用于追溯，不代表额外扣费。
+      </p>
       <Pagination
         disabled={loading}
         limit={PAGE_SIZE}

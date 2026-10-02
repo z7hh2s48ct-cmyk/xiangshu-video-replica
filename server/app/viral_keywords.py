@@ -24,6 +24,8 @@ class ViralKeywordConfig(BaseModel):
     platform: Literal["douyin", "wechat_channels"]
     category: str = Field(min_length=1, max_length=32)
     keyword: str = Field(min_length=1, max_length=80)
+    enabled: bool = True
+    limit: int | None = Field(default=None, ge=1, le=50)
 
 
 def configured_viral_keywords(conn: BusinessConnection) -> list[ViralKeywordConfig]:
@@ -32,7 +34,10 @@ def configured_viral_keywords(conn: BusinessConnection) -> list[ViralKeywordConf
 
 
 def configured_viral_categories(conn: BusinessConnection) -> list[str]:
-    return list(dict.fromkeys(item.category for item in configured_viral_keywords(conn)))
+    return (
+        list(dict.fromkeys(item.category for item in configured_viral_keywords(conn)))
+        or viral_categories()
+    )
 
 
 VIRAL_CATEGORIES: dict[str, dict[str, str]] = {

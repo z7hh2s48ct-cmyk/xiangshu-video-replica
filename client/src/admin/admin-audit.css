@@ -75,11 +75,12 @@
 
 /* 方案 P1：行详情抽屉——完整字段在此展开，主表保持简洁。 */
 .audit-detail-drawer {
-  border: 1px solid var(--border, #d4d4d8);
+  border: 1px solid var(--admin-line-strong, #454545);
   border-radius: 8px;
   margin-top: 12px;
   padding: 12px 16px;
-  background: var(--surface, #fafafa);
+  background: var(--admin-panel-strong, #242424);
+  color: var(--admin-copy, #f5efe4);
 }
 
 .audit-detail-drawer dl {
@@ -90,7 +91,7 @@
 }
 
 .audit-detail-drawer dt {
-  color: var(--muted, #71717a);
+  color: var(--admin-copy-soft, #c9c4ba);
 }
 
 .audit-detail-drawer dd {

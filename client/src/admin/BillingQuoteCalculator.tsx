@@ -20,7 +20,7 @@ const UNIT_LABELS: Record<string, string> = {
 
 /**
  * 价格试算器（方案 P1「价格与套餐」）：输入客户（可选）、业务、数量，
- * 输出原价、命中的折扣、取整后实扣积分、折合金额、我方成本与毛利。
+ * 输出原价、命中的折扣、取整后生成扣费积分、折合金额、我方成本与毛利。
  * 计算调用后端同一套计价函数（/billing/quote 复用结算快照），前端不复刻
  * 公式——验收口径是「试算与实际扣费一致」。
  */
@@ -111,7 +111,7 @@ export function BillingQuoteCalculator({
     <section className="admin-panel" aria-label="价格试算">
       <h3>价格试算</h3>
       <p className="admin-hint">
-        输入客户（可选）、业务与数量，按当前生效的价格与折扣试算实扣积分、
+        输入客户（可选）、业务与数量，按当前生效的价格与折扣试算生成扣费积分、
         折合金额、我方成本与毛利；计算与实际扣费同一套计价逻辑。
       </p>
       {error ? <PageBanner tone="error">{error}</PageBanner> : null}
@@ -216,7 +216,7 @@ export function BillingQuoteCalculator({
                 <td>{discountLabel}</td>
               </tr>
               <tr>
-                <th scope="row">实扣积分</th>
+                <th scope="row">生成扣费积分</th>
                 <td>{result.credits} 积分</td>
               </tr>
               <tr>

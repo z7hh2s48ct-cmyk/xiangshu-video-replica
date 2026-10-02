@@ -27,7 +27,10 @@ const sessionItem = {
   device_name: "办公室电脑",
   platform: "windows",
   slot_no: 1,
-  device_status: "ACTIVE",
+  status: "BOUND",
+  display_name: "办公室电脑",
+  bound_at: "2026-08-30T08:00:00+00:00",
+  online: true,
 };
 
 function sessionList() {
@@ -54,15 +57,15 @@ describe("SessionsPage", () => {
     render(<SessionsPage />);
 
     expect(await screen.findByText("customer_one")).toBeInTheDocument();
-    expect(screen.queryByText(/办公室电脑/)).not.toBeInTheDocument();
-    expect(screen.getByText("Windows")).toBeInTheDocument();
+    expect(screen.getByText("办公室电脑")).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "Windows" })).toBeInTheDocument();
     // P2-1：租约 / 心跳 / Epoch 与每秒进度条从主视图移除。
     expect(screen.queryByText(/租约/)).toBeNull();
     expect(screen.queryByText(/心跳/)).toBeNull();
     expect(screen.queryByText(/Epoch/)).toBeNull();
     expect(screen.queryByRole("progressbar")).toBeNull();
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain(
-      "/api/control/customer-sessions/live?limit=50&offset=0",
+      "/api/control/devices?limit=50&offset=0",
     );
   });
 
@@ -73,8 +76,18 @@ describe("SessionsPage", () => {
     const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
       jsonResponse({
         items: [
-          { ...sessionItem, session_id: "sess-ios", platform: "ios" },
-          { ...sessionItem, session_id: "sess-android", platform: "android" },
+          {
+            ...sessionItem,
+            device_id: "device-ios",
+            session_id: "sess-ios",
+            platform: "ios",
+          },
+          {
+            ...sessionItem,
+            device_id: "device-android",
+            session_id: "sess-android",
+            platform: "android",
+          },
         ],
         total: 2,
         limit: 50,
@@ -84,8 +97,10 @@ describe("SessionsPage", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<SessionsPage />);
 
-    expect(await screen.findByText("iOS")).toBeInTheDocument();
-    expect(screen.getByText("Android")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("cell", { name: "iOS" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "Android" })).toBeInTheDocument();
     // 兜底路径不再被走到：裸平台码不该出现在界面上。
     expect(screen.queryByText("ios")).toBeNull();
     expect(screen.queryByText("android")).toBeNull();
@@ -100,7 +115,7 @@ describe("SessionsPage", () => {
 
     await screen.findByText("customer_one");
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain(
-      `/api/control/customers/${CUSTOMER_ID}/sessions?limit=50`,
+      `/api/control/devices?user_id=${CUSTOMER_ID}`,
     );
     expect(screen.queryByLabelText("客户编号")).not.toBeInTheDocument();
   });
@@ -114,16 +129,8 @@ describe("SessionsPage", () => {
     render(<SessionsPage onCustomerChange={onCustomerChange} />);
 
     await screen.findByText("customer_one");
-    fireEvent.change(screen.getByLabelText("客户编号"), {
-      target: { value: "customer-b" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "查看客户" }));
-    expect(onCustomerChange).toHaveBeenCalledWith("customer-b");
-
     fireEvent.click(screen.getByRole("button", { name: "选择客户" }));
     expect(onCustomerChange).toHaveBeenCalledWith(CUSTOMER_ID);
-    fireEvent.click(screen.getByRole("button", { name: "全部在线" }));
-    expect(onCustomerChange).toHaveBeenCalledWith(undefined);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -141,15 +148,17 @@ describe("SessionsPage", () => {
     render(<SessionsPage />);
 
     await screen.findByText("customer_one");
-    expect(screen.getByLabelText("客户编号")).toHaveValue("");
+    expect(screen.queryByLabelText("客户编号")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "选择客户" }));
 
     await waitFor(() =>
       expect(String(fetchMock.mock.calls.at(-1)?.[0])).toContain(
-        `/api/control/customers/${CUSTOMER_ID}/sessions?limit=50`,
+        `/api/control/devices?user_id=${CUSTOMER_ID}`,
       ),
     );
-    expect(screen.getByLabelText("客户编号")).toHaveValue(CUSTOMER_ID);
+    expect(
+      screen.getByRole("button", { name: "查看全部设备" }),
+    ).toBeInTheDocument();
   });
 
   it("ignores a stale customer response after switching context", async () => {
@@ -218,9 +227,7 @@ describe("SessionsPage", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const { rerender } = render(<SessionsPage userId="customer-a" />);
-    fireEvent.click(
-      await screen.findByRole("button", { name: "下线 customer_a" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "下线" }));
     fireEvent.change(screen.getByLabelText("操作原因"), {
       target: { value: "客户反馈异常登录" },
     });
@@ -257,13 +264,15 @@ describe("SessionsPage", () => {
 
     render(<SessionsPage />);
     await screen.findByText("customer_one");
-    fireEvent.click(screen.getByRole("button", { name: "下线 customer_one" }));
+    fireEvent.click(screen.getByRole("button", { name: "下线" }));
     fireEvent.change(screen.getByLabelText("操作原因"), {
       target: { value: "客服确认账号异常" },
     });
     fireEvent.click(screen.getByRole("button", { name: "确认下线" }));
 
-    expect(await screen.findByText(/已下线 customer_one/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/办公室电脑：下线已完成/),
+    ).toBeInTheDocument();
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
     const revokeCall = fetchMock.mock.calls.find(([url]) =>
       String(url).includes("/revoke"),
@@ -295,7 +304,7 @@ describe("SessionsPage", () => {
 
     render(<SessionsPage />);
     await screen.findByText("customer_one");
-    fireEvent.click(screen.getByRole("button", { name: "下线 customer_one" }));
+    fireEvent.click(screen.getByRole("button", { name: "下线" }));
     fireEvent.change(screen.getByLabelText("操作原因"), {
       target: { value: "网络失败后重试" },
     });
@@ -304,7 +313,9 @@ describe("SessionsPage", () => {
       "Failed to fetch",
     );
     fireEvent.click(screen.getByRole("button", { name: "确认下线" }));
-    expect(await screen.findByText(/已下线 customer_one/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/办公室电脑：下线已完成/),
+    ).toBeInTheDocument();
 
     const keys = fetchMock.mock.calls
       .filter(([url]) => String(url).includes("/revoke"))
@@ -341,5 +352,70 @@ describe("SessionsPage", () => {
     expect(
       screen.queryByRole("button", { name: /后台调账/ }),
     ).not.toBeInTheDocument();
+  });
+
+  it("keeps company, system and attention through historical pagination and refresh", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      const params = new URL(String(url), "http://localhost").searchParams;
+      const offset = Number(params.get("offset") ?? 0);
+      return jsonResponse({
+        items: [
+          {
+            ...sessionItem,
+            company_name: "设备公司",
+            display_name: offset ? "历史电脑" : "办公室电脑",
+            status: offset ? "UNBOUND" : "BOUND",
+            online: !offset,
+          },
+        ],
+        total: 55,
+        limit: 50,
+        offset,
+        summary: {
+          bound: 2,
+          online: 1,
+          unbound: 53,
+          revoked_today: 0,
+          online_customers: 1,
+          at_slot_limit: 1,
+          frequent_swaps_24h: 1,
+        },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<SessionsPage />);
+    await screen.findByText("customer_one");
+    fireEvent.change(screen.getByLabelText("公司名或用户名"), {
+      target: { value: "设备公司" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    await screen.findByText("customer_one");
+    fireEvent.change(screen.getByLabelText("系统"), {
+      target: { value: "windows" },
+    });
+    await screen.findByText("customer_one");
+    fireEvent.click(screen.getByRole("button", { name: /当前在线客户/ }));
+    await screen.findByText("customer_one");
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    expect(await screen.findByText("历史电脑")).toBeInTheDocument();
+    expect(
+      screen.getByRole("cell", { name: "离线已解绑" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "解绑设备 device-1" }),
+    ).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    await screen.findByText("历史电脑");
+    const last = new URL(
+      String(fetchMock.mock.calls.at(-1)?.[0]),
+      "http://localhost",
+    );
+    expect(Object.fromEntries(last.searchParams)).toMatchObject({
+      keyword: "设备公司",
+      platform: "windows",
+      attention: "online",
+      offset: "50",
+    });
+    expect(screen.getByText("第 2 / 2 页（共 55 台）")).toBeInTheDocument();
   });
 });

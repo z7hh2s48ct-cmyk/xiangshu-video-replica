@@ -9,6 +9,30 @@ import pytest
 from app.hifly import HiflyClient, HiflyError, HiflyHttpTransport
 
 
+@pytest.mark.parametrize("kind", ["avatar_poll", "voice_poll", "task_poll"])
+def test_failed_poll_preserves_redacted_provider_message(kind: str) -> None:
+    from app.oral_worker import OralWorkLease, perform_oral_work
+    from app.storage import FakeStorageAdapter
+
+    vendor, _ = client(
+        {"code": 0, "status": 4, "message": "虚构原始失败 token=FICTIONAL-ORAL-CRED"}
+    )
+    lease = OralWorkLease(
+        kind=kind,
+        record_id="test-record",
+        worker_id="test-worker",
+        lease_token="local-test-lease",
+        attempt_count=1,
+        row={"vendor_task_id": "test-vendor-task"},
+    )
+    result = perform_oral_work(
+        lease, vendor=vendor, storage=FakeStorageAdapter(provider="fake", bucket="test")
+    )
+    assert result.outcome == "failed"
+    assert "虚构原始失败" in (result.message or "")
+    assert "FICTIONAL-ORAL-CRED" not in (result.message or "")
+
+
 class WireTransport(HiflyHttpTransport):
     def __init__(self, response: dict[str, Any]) -> None:
         self.response = response

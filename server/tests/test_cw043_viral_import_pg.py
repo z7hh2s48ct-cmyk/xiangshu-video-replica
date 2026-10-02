@@ -104,6 +104,9 @@ def test_cached_local_media_moves_to_cos_without_provider_call_or_losing_source(
     from app.storage import FakeStorageAdapter, LocalStorageAdapter
     from app.viral_media_preparation import ViralMediaLeaseLost, ViralMediaPreparation
 
+    # Each failure mode owns its row; a failed preceding case must not turn the
+    # next setup into the real FAILED preparation cooldown.
+    _exec(pg_state, "DELETE FROM viral_media_preparations WHERE video_id='legacy-migrate'")
     monkeypatch.setenv("VIDEO_REPLICA_STORAGE_ROOT", str(tmp_path))
     monkeypatch.setenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", "0")
     old = LocalStorageAdapter(root=tmp_path, bucket="local-private")
@@ -412,6 +415,7 @@ def test_copy_import_prefers_audio_and_falls_back_to_archived_video(pg_state, mo
     from app import viral_media
     from app.storage import FakeStorageAdapter
     from app.viral_import import ViralImportWork, perform_viral_import_task
+    from app.viral_media_preparation import ViralMediaBusy
 
     _exec(pg_state, "DELETE FROM viral_media_preparations")
     storage = FakeStorageAdapter(provider="cos", bucket="shared")
@@ -440,6 +444,9 @@ def test_copy_import_prefers_audio_and_falls_back_to_archived_video(pg_state, mo
             prefer="audio",
         )
 
+    # 没有任何归档时保留真正的未就绪错误，不能为了回落静默抓取源站。
+    with pytest.raises(ViralMediaBusy):
+        perform_viral_import_task(work())
     # 场景一：此前只归档过视频（复刻解析/采集/旧流程）→ 首选音频报未就绪后回落。
     viral_media.ViralMediaPipeline(client=None, storage=storage, shared=True).fetch(
         video, prefer="video"
@@ -453,6 +460,42 @@ def test_copy_import_prefers_audio_and_falls_back_to_archived_video(pg_state, mo
     )
     outcome = perform_viral_import_task(work())
     assert outcome.media_kind == "audio"
+
+
+def test_shared_audio_and_video_prepare_independently(pg_state):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from app.storage import FakeStorageAdapter
+    from app.viral_media_preparation import ViralMediaPreparation
+
+    _exec(pg_state, "DELETE FROM viral_media_preparations")
+    storage = FakeStorageAdapter(provider="cos", bucket="independent-kinds")
+    barrier = Barrier(2)
+    calls = []
+
+    def fetch(kind):
+        def prepare(key, check):
+            calls.append(kind)
+            barrier.wait(timeout=10)
+            check()
+            return storage.put_object(key, kind.encode(), content_type=f"{kind}/mp4")
+
+        return ViralMediaPreparation(storage=storage).fetch(
+            platform="douyin", video_id="one-video-two-kinds", kind=kind, prepare=prepare
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        audio, video = list(pool.map(fetch, ["audio", "video"]))
+    assert sorted(calls) == ["audio", "video"]
+    assert audio[0].uri != video[0].uri
+    assert not audio[1] and not video[1]
+    for kind, result in [("audio", audio), ("video", video)]:
+        hit = ViralMediaPreparation(storage=storage).cached(
+            platform="douyin", video_id="one-video-two-kinds", kind=kind
+        )
+        assert hit == result[0]
+        assert storage.get_object(hit.key) == kind.encode()
 
 
 def test_changed_storage_namespace_and_missing_object_prepare_again(pg_state):

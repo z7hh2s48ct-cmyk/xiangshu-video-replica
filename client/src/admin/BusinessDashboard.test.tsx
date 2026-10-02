@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, test, vi } from "vitest";
 import { adminRead } from "../api.admin";
 import { BusinessDashboard } from "./BusinessDashboard";
@@ -86,7 +86,9 @@ describe("BusinessDashboard", () => {
     // 成本卡与毛利卡都标注待核对；毛利口径 = 确认收入 − 成本。
     expect(within(cards).getAllByText(/含 3 项待核对/).length).toBe(1);
     expect(within(cards).getAllByText("含 2 项待核对").length).toBe(1);
-    expect(within(cards).getByText("¥600.00")).toBeInTheDocument(); // 毛利
+    expect(within(cards).queryByText("¥600.00")).toBeNull();
+    expect(within(cards).getByText("待核对")).toBeInTheDocument();
+    expect(within(cards).getByText(/毛利率：待核对/)).toBeInTheDocument();
     expect(within(cards).getByText("355 积分")).toBeInTheDocument();
     // 预收折合金额依赖积分兑换比例
     expect(within(cards).getByText(/折合 ¥3.55/)).toBeInTheDocument();
@@ -116,4 +118,33 @@ describe("BusinessDashboard", () => {
       await screen.findByText("这个区间没有经营数据。"),
     ).toBeInTheDocument();
   });
+});
+
+test("gross margin line has gaps for unknown and zero income, supports negative margin and precise customer IDs", async () => {
+  const customer = vi.fn();
+  mockOverview({
+    ...overview,
+    metrics: { ...overview.metrics, unknown_cost_count: 0, pending_count: 0 },
+    daily: [
+      { day: "2026-09-01", revenue_fen: 100, cost_fen: 200 },
+      { day: "2026-09-02", revenue_fen: 100, cost_fen: null },
+      { day: "2026-09-03", revenue_fen: 0, cost_fen: 20 },
+      { day: "2026-09-04", revenue_fen: 100, cost_fen: 20 },
+    ],
+    top_customers: [{ ...overview.top_customers[0], user_id: "a/opaque" }],
+  });
+  render(<BusinessDashboard readOnly onCustomer={customer} />);
+  const chart = await screen.findByRole("img", {
+    name: /收入与成本按日趋势图/,
+  });
+  const path = chart.querySelector("path")?.getAttribute("d") ?? "";
+  expect(path.match(/M/g)).toHaveLength(2);
+  expect(path).not.toContain("L");
+  expect(chart.querySelectorAll("circle")).toHaveLength(2);
+  expect(chart).toHaveTextContent("毛利率 -100%");
+  fireEvent.click(screen.getByRole("button", { name: "客户一公司" }));
+  expect(customer).toHaveBeenCalledWith("a/opaque");
+  const help = screen.getByRole("button", { name: "毛利 / 毛利率口径" });
+  expect(help).toHaveAttribute("aria-describedby");
+  expect(screen.getAllByRole("tooltip").length).toBe(8);
 });
