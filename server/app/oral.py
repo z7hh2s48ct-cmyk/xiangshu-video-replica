@@ -438,11 +438,12 @@ def _ready_video_compatible_asset(
         and str(compatible["content_type"] or "").startswith("video/")
         and int(compatible["size_bytes"] or 0) > 0
     )
-    if available and storage is not None:
+    if available:
         try:
             reference = storage_object_ref_from_uri(str(compatible["storage_uri"]))
-            require_storage_match(storage, reference)
-            stored = storage.head_object(reference.key)
+            compatible_storage = storage or storage_for_asset(conn, str(compatible["storage_uri"]))
+            require_storage_match(compatible_storage, reference)
+            stored = compatible_storage.head_object(reference.key)
         except StorageBackendUnavailable as exc:
             raise OralDomainError("��Ƶ���ݴ洢���ݲ����ã����Ժ����ԡ�") from exc
         except ValueError:
