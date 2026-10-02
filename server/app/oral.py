@@ -36,6 +36,7 @@ from app.permissions import require_asset_access, require_not_auditor, write_aud
 from app.sql_pagination import PAGE_CLAUSE, page_bounds
 from app.storage import (
     StorageAdapter,
+    StorageBackendUnavailable,
     read_uploaded_object,
     require_storage_match,
     storage_object_ref_from_uri,
@@ -404,6 +405,63 @@ class CloneStartResult:
     replayed: bool
 
 
+def _ready_video_compatible_asset(
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    original_asset_id: str,
+    storage: StorageAdapter | None,
+) -> str | None:
+    """返回可用派生件，并将失效 READY 关系标为可重试。"""
+    relation = conn.execute(
+        """
+        SELECT compatible_asset_id
+        FROM video_compat_derivatives
+        WHERE original_asset_id = %s AND status = 'READY'
+        """,
+        (original_asset_id,),
+    ).fetchone()
+    if relation is None or relation["compatible_asset_id"] is None:
+        return None
+    compatible_id = str(relation["compatible_asset_id"])
+    compatible = conn.execute(
+        """
+        SELECT id, kind, storage_uri, size_bytes, content_type
+        FROM assets
+        WHERE id = %s AND created_by_user_id = %s
+        """,
+        (compatible_id, actor.id),
+    ).fetchone()
+    available = (
+        compatible is not None
+        and str(compatible["kind"]) == "oral_compatible_video"
+        and str(compatible["content_type"] or "").startswith("video/")
+        and int(compatible["size_bytes"] or 0) > 0
+    )
+    if available and storage is not None:
+        try:
+            reference = storage_object_ref_from_uri(str(compatible["storage_uri"]))
+            require_storage_match(storage, reference)
+            stored = storage.head_object(reference.key)
+        except StorageBackendUnavailable as exc:
+            raise OralDomainError("��Ƶ���ݴ洢���ݲ����ã����Ժ����ԡ�") from exc
+        except ValueError:
+            available = False
+        else:
+            available = stored is not None and stored.size == int(compatible["size_bytes"])
+    if available:
+        return compatible_id
+    conn.execute(
+        """
+        UPDATE video_compat_derivatives
+        SET compatible_asset_id = NULL, status = 'FAILED', error_message = %s
+        WHERE original_asset_id = %s AND status = 'READY' AND compatible_asset_id = %s
+        """,
+        ("��Ƶ���ݰ汾���Ѿ�ʧЧ����������", original_asset_id, compatible_id),
+    )
+    return None
+
+
 def start_avatar_clone(
     conn: BusinessConnection,
     *,
@@ -415,6 +473,7 @@ def start_avatar_clone(
     consent_id: str,
     idempotency_key: str,
     vendor: HiflyClient | None = None,
+    storage: StorageAdapter | None = None,
 ) -> CloneStartResult:
     require_not_auditor(
         conn,
@@ -444,17 +503,14 @@ def start_avatar_clone(
     )
     compatible_source_asset_id = source_asset_id
     if source_kind == "VIDEO":
-        compatible = conn.execute(
-            """
-            SELECT compatible_asset_id, status
-            FROM video_compat_derivatives
-            WHERE original_asset_id = %s
-            """,
-            (source_asset_id,),
-        ).fetchone()
-        if compatible is not None and str(compatible["status"]) == "READY":
-            compatible_source_asset_id = str(compatible["compatible_asset_id"])
-        else:
+        ready_compatible_asset_id = _ready_video_compatible_asset(
+            conn,
+            actor=actor,
+            original_asset_id=source_asset_id,
+            storage=storage,
+        )
+        compatible_source_asset_id = ready_compatible_asset_id or source_asset_id
+        if ready_compatible_asset_id is None:
             try:
                 source_metadata = json.loads(str(asset.get("metadata_json") or "{}"))
             except (TypeError, ValueError):
@@ -1503,15 +1559,16 @@ def _repair_avatar_video_compatibility_prototype(
     if avatar["status"] != "READY" or avatar["source_kind"] != "VIDEO":
         raise OralDomainError("仅已就绪的视频分身可修复预览")
     original_id = str(avatar["original_source_asset_id"] or avatar["source_asset_id"])
-    existing = conn.execute(
-        "SELECT compatible_asset_id FROM video_compat_derivatives "
-        "WHERE original_asset_id = %s AND status = 'READY'",
-        (original_id,),
-    ).fetchone()
-    if existing is not None:
+    compatible_id = _ready_video_compatible_asset(
+        conn,
+        actor=actor,
+        original_asset_id=original_id,
+        storage=storage,
+    )
+    if compatible_id is not None:
         conn.execute(
             "UPDATE oral_avatars SET source_asset_id = %s WHERE id = %s",
-            (existing["compatible_asset_id"], avatar_id),
+            (compatible_id, avatar_id),
         )
         return dict(
             conn.execute("SELECT * FROM oral_avatars WHERE id = %s", (avatar_id,)).fetchone()
@@ -1534,7 +1591,10 @@ def _repair_avatar_video_compatibility_prototype(
         if inspected.width is None or inspected.height is None:
             raise OralDomainError("原始视频尺寸无效")
         normalized = normalize_generated_video(
-            content, target_width=inspected.width, target_height=inspected.height
+            content,
+            target_width=inspected.width,
+            target_height=inspected.height,
+            max_duration_seconds=None,
         )
         compatible_id = str(uuid4())
         stored = storage.put_object(
@@ -1612,15 +1672,13 @@ def repair_avatar_video_compatibility(
     # Avatar rows are distinct for old clones.  Locking their common original
     # serializes repairs and material-side conversion, leaving one derivative.
     conn.execute("SELECT id FROM assets WHERE id = %s FOR UPDATE", (original_id,)).fetchone()
-    existing = conn.execute(
-        "SELECT compatible_asset_id FROM video_compat_derivatives "
-        "WHERE original_asset_id = %s AND status = 'READY'",
-        (original_id,),
-    ).fetchone()
-    if existing is not None:
-        compatible_id = existing["compatible_asset_id"]
-        if compatible_id is None:
-            raise OralDomainError("视频兼容状态异常，请重试")
+    compatible_id = _ready_video_compatible_asset(
+        conn,
+        actor=actor,
+        original_asset_id=original_id,
+        storage=storage,
+    )
+    if compatible_id is not None:
         conn.execute(
             "UPDATE oral_avatars SET source_asset_id = %s, "
             "original_source_asset_id = COALESCE(original_source_asset_id, %s), "
@@ -1649,7 +1707,10 @@ def repair_avatar_video_compatibility(
         if inspected.width is None or inspected.height is None:
             raise OralDomainError("原始视频尺寸无效")
         normalized = normalize_generated_video(
-            content, target_width=inspected.width, target_height=inspected.height
+            content,
+            target_width=inspected.width,
+            target_height=inspected.height,
+            max_duration_seconds=None,
         )
         compatible_id = str(uuid4())
         stored = storage.put_object(

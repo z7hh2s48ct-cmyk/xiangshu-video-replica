@@ -438,6 +438,66 @@ def test_generated_video_rejects_unbounded_or_invalid_metadata_before_decode(
     assert calls == ["ffprobe"]
 
 
+def _generated_video_probe_payload(duration: str) -> bytes:
+    return json.dumps(
+        {
+            "format": {"duration": duration},
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "pix_fmt": "yuv420p",
+                    "width": 144,
+                    "height": 256,
+                    "sample_aspect_ratio": "1:1",
+                }
+            ],
+        }
+    ).encode()
+
+
+def test_ordinary_generated_video_rejects_61_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(media_tools, "resolve_media_binary", lambda tool: tool)
+    monkeypatch.setattr(
+        media_tools.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, _generated_video_probe_payload("61")
+        ),
+    )
+    with pytest.raises(media_tools.MediaValidationFailed):
+        media_tools.normalize_generated_video(
+            b"\x00\x00\x00\x18ftypisom",
+            target_width=144,
+            target_height=256,
+            max_duration_seconds=60,
+        )
+
+
+def test_oral_compatibility_allows_1801_seconds_without_a_duration_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(media_tools, "resolve_media_binary", lambda tool: tool)
+    monkeypatch.setattr(
+        media_tools.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, _generated_video_probe_payload("1801")
+        ),
+    )
+    content = b"\x00\x00\x00\x18ftypisom"
+    normalized = media_tools.normalize_generated_video(
+        content,
+        target_width=144,
+        target_height=256,
+        max_duration_seconds=None,
+    )
+    assert normalized.content == content
+    assert normalized.duration_seconds == 1801
+
+
 def test_generated_video_size_limit_precedes_tool_invocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

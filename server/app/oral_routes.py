@@ -315,6 +315,7 @@ class AvatarCloneRequest(BaseModel):
 def create_avatar_clone(
     request: AvatarCloneRequest,
     db: BusinessDbDep,
+    storage: MediaStorage,
 ) -> dict[str, Any]:
     domain_error: OralDomainError | None = None
     result = None
@@ -329,6 +330,7 @@ def create_avatar_clone(
                 source_kind=request.source_kind,
                 consent_id=request.consent_id,
                 idempotency_key=request.idempotency_key,
+                storage=storage,
             )
         except OralDomainError as exc:
             domain_error = exc

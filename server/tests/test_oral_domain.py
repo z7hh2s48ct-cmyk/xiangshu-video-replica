@@ -834,6 +834,48 @@ def test_avatar_compatibility_http_records_storage_failure_and_retries(
     assert relation["status"] == "READY"
 
 
+def test_avatar_compatibility_rebuilds_a_missing_ready_derivative(
+    scene: str, oral_test_media: OralTestMedia
+) -> None:
+    storage = FakeStorageAdapter(provider="fake", bucket="oral-compat")
+    _seed_legacy_ready_video_avatar(storage, oral_test_media)
+    before_wallet_entries = _count("SELECT COUNT(*) FROM wallet_transactions")
+    before_tasks = _count("SELECT COUNT(*) FROM oral_tasks")
+
+    with _avatar_compatibility_client(actor(), storage) as (client, _holder):
+        first = client.post("/api/oral/avatars/avatar-ready/compatibility")
+        assert first.status_code == 200, first.text
+        relation = _fetch(
+            "SELECT compatible_asset_id FROM video_compat_derivatives "
+            "WHERE original_asset_id = 'asset-src'"
+        )
+        assert relation is not None
+        old_id = str(relation["compatible_asset_id"])
+        old_asset = _fetch("SELECT storage_uri FROM assets WHERE id = %s", (old_id,))
+        assert old_asset is not None
+        old_key = str(old_asset["storage_uri"]).removeprefix("fake://oral-compat/")
+        storage.delete_object(old_key)
+
+        repaired = client.post("/api/oral/avatars/avatar-ready/compatibility")
+        assert repaired.status_code == 200, repaired.text
+
+    relation = _fetch(
+        "SELECT compatible_asset_id, status FROM video_compat_derivatives "
+        "WHERE original_asset_id = 'asset-src'"
+    )
+    assert relation is not None
+    rebuilt_id = str(relation["compatible_asset_id"])
+    assert relation["status"] == "READY"
+    assert rebuilt_id != old_id
+    rebuilt = _fetch("SELECT storage_uri FROM assets WHERE id = %s", (rebuilt_id,))
+    assert rebuilt is not None
+    rebuilt_key = str(rebuilt["storage_uri"]).removeprefix("fake://oral-compat/")
+    assert storage.head_object(old_key) is None
+    assert storage.head_object(rebuilt_key) is not None
+    assert _count("SELECT COUNT(*) FROM wallet_transactions") == before_wallet_entries
+    assert _count("SELECT COUNT(*) FROM oral_tasks") == before_tasks
+
+
 def test_avatar_compatibility_http_concurrent_legacy_clones_share_one_winner(
     scene: str, oral_test_media: OralTestMedia
 ) -> None:

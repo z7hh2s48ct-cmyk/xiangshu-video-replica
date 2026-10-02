@@ -88,7 +88,7 @@ def normalize_generated_video(
     target_width: int,
     target_height: int,
     max_bytes: int = GENERATED_VIDEO_MAX_BYTES,
-    max_duration_seconds: float = GENERATED_VIDEO_MAX_SECONDS,
+    max_duration_seconds: float | None = GENERATED_VIDEO_MAX_SECONDS,
 ) -> NormalizedGeneratedVideo:
     """Fit existing MP4 display pixels into a square-pixel canvas without cropping.
 
@@ -103,7 +103,7 @@ def normalize_generated_video(
         for value in (target_width, target_height)
     ):
         raise MediaValidationFailed("目标视频尺寸必须为有效的偶数尺寸")
-    if max_bytes <= 0 or max_duration_seconds <= 0:
+    if max_bytes <= 0 or (max_duration_seconds is not None and max_duration_seconds <= 0):
         raise MediaValidationFailed("视频规范化资源限制无效")
     if not content or len(content) > max_bytes or content[4:8] != b"ftyp":
         raise MediaValidationFailed("成片必须为大小合规的非空 MP4 视频")
@@ -303,7 +303,7 @@ def _run_generated_tool(command: list[str], deadline: float, *, probe: bool = Fa
 
 
 def _probe_generated_geometry(
-    ffprobe: str, path: Path, deadline: float, *, max_duration_seconds: float
+    ffprobe: str, path: Path, deadline: float, *, max_duration_seconds: float | None
 ) -> _GeneratedVideoGeometry:
     output = _run_generated_tool(
         [
@@ -334,7 +334,11 @@ def _probe_generated_geometry(
         if not (2 <= width <= 8192 and 2 <= height <= 8192 and width * height <= 33554432):
             raise ValueError("invalid dimensions")
         duration = float(payload["format"]["duration"])
-        if not math.isfinite(duration) or not 0 < duration <= max_duration_seconds:
+        if (
+            not math.isfinite(duration)
+            or duration <= 0
+            or (max_duration_seconds is not None and duration > max_duration_seconds)
+        ):
             raise ValueError("invalid duration")
         sar_text = video.get("sample_aspect_ratio", "1:1")
         sar = (

@@ -41,6 +41,7 @@ from app.media import (
     storage_key_from_uri,
 )
 from app.media_tools import (
+    GENERATED_VIDEO_MAX_SECONDS,
     MediaToolFailed,
     MediaToolUnavailable,
     MediaValidationFailed,
@@ -1212,6 +1213,100 @@ def require_material(
     return resolved.items[0]
 
 
+def _ready_compatible_derivative(
+    conn: BusinessConnection,
+    *,
+    actor: CurrentUser,
+    storage: StorageAdapter,
+    original_asset_id: str,
+) -> dict[str, Any] | None:
+    """仅在派生资产归属和对象均有效时复用 READY 关系。"""
+    row = conn.execute(
+        """
+        SELECT compatible_asset_id
+        FROM video_compat_derivatives
+        WHERE original_asset_id = %s AND status = 'READY'
+        """,
+        (original_asset_id,),
+    ).fetchone()
+    if row is None or row["compatible_asset_id"] is None:
+        return None
+    compatible = conn.execute(
+        """
+        SELECT id, kind, storage_uri, sha256, size_bytes, content_type
+        FROM assets
+        WHERE id = %s AND created_by_user_id = %s
+        """,
+        (str(row["compatible_asset_id"]), actor.id),
+    ).fetchone()
+    if (
+        compatible is None
+        or str(compatible["kind"]) != "oral_compatible_video"
+        or not str(compatible["content_type"] or "").startswith("video/")
+        or int(compatible["size_bytes"] or 0) <= 0
+    ):
+        return None
+    try:
+        reference = storage_object_ref_from_uri(str(compatible["storage_uri"]))
+        require_storage_match(storage, reference)
+        stored = storage.head_object(reference.key)
+    except (StorageBackendUnavailable, ValueError):
+        return None
+    if stored is None or stored.size != int(compatible["size_bytes"]):
+        return None
+    return dict(compatible)
+
+
+def _rebuild_registered_video_derivative(
+    *,
+    actor: CurrentUser,
+    storage: StorageAdapter,
+    original_asset_id: str,
+    object_key: str,
+    size_bytes: int,
+) -> dict[str, Any] | None:
+    """从仍被登记的原片本地重建一个缺失的派生件。"""
+    try:
+        content = read_uploaded_object(
+            storage,
+            object_key,
+            expected_size=size_bytes,
+            max_bytes=MAX_UPLOAD_BYTES,
+        )
+        inspection = inspect_media_bytes(
+            content, suffix=".mp4", expected_type="video", min_duration_seconds=0.001
+        )
+        if inspection.width is None or inspection.height is None:
+            return None
+        normalized = normalize_generated_video(
+            content,
+            target_width=inspection.width,
+            target_height=inspection.height,
+            max_duration_seconds=GENERATED_VIDEO_MAX_SECONDS,
+        )
+        compatible_asset_id = str(uuid4())
+        stored = storage.put_object(
+            f"materials/compatible/{actor.id}/{original_asset_id}/{compatible_asset_id}.mp4",
+            normalized.content,
+            content_type="video/mp4",
+        )
+    except (
+        MediaToolFailed,
+        MediaToolUnavailable,
+        MediaValidationFailed,
+        StorageBackendUnavailable,
+        UploadedObjectSizeMismatch,
+        OSError,
+    ):
+        return None
+    return {
+        "id": compatible_asset_id,
+        "storage_uri": stored.uri,
+        "sha256": hashlib.sha256(normalized.content).hexdigest(),
+        "size_bytes": stored.size,
+    }
+
+
 def _reuse_registered_material(
     conn: BusinessConnection,
     *,
@@ -1247,28 +1342,37 @@ def _reuse_registered_material(
     if storage.head_object(existing.object_key) is None:
         return None
     source = conn.execute(
-        "SELECT id, metadata_json FROM assets WHERE content_object_id = %s "
+        "SELECT id, metadata_json FROM assets "
+        "WHERE content_object_id = %s AND created_by_user_id = %s "
         "ORDER BY CASE WHEN metadata_json::jsonb ->> 'audio_duration_verified' = 'true' "
         "THEN 0 ELSE 1 END, created_at LIMIT 1",
-        (existing.id,),
+        (existing.id, actor.id),
     ).fetchone()
     source_metadata = _metadata(source["metadata_json"]) if source is not None else {}
     reused_compatible: dict[str, Any] | None = None
-    if media_type == "video" and source is not None:
-        compatible = conn.execute(
-            """
-            SELECT compatible_asset_id, status
-            FROM video_compat_derivatives
-            WHERE original_asset_id = %s
-            """,
-            (str(source["id"]),),
-        ).fetchone()
-        if compatible is None or str(compatible["status"]) != "READY":
-            # A registered video without a finished compatibility derivative is
-            # deliberately not eligible for instant reuse: fall through to the
-            # normal upload/probe path rather than letting HEVC bypass it.
+    rebuilt_compatible: dict[str, Any] | None = None
+    if media_type == "video":
+        if source is None:
             return None
-        reused_compatible = dict(compatible)
+        reused_compatible = _ready_compatible_derivative(
+            conn,
+            actor=actor,
+            storage=storage,
+            original_asset_id=str(source["id"]),
+        )
+        if reused_compatible is None:
+            # 关系可能在对象过期或被手动删除后残留；从保留原片本地重建，
+            # 不重新传输原片，也不触发供应商或计费操作。
+            rebuilt_compatible = _rebuild_registered_video_derivative(
+                actor=actor,
+                storage=storage,
+                original_asset_id=str(source["id"]),
+                object_key=existing.object_key,
+                size_bytes=existing.size_bytes,
+            )
+            if rebuilt_compatible is None:
+                return None
+            reused_compatible = rebuilt_compatible
     if media_type == "audio":
         duration = source_metadata.get("duration_seconds")
         if (
@@ -1315,10 +1419,43 @@ def _reuse_registered_material(
         # re-probing would cost a download and a media-tool invocation.
         metadata["duration_seconds"] = source_metadata["duration_seconds"]
     if reused_compatible is not None:
-        metadata["compatible_asset_id"] = str(reused_compatible["compatible_asset_id"])
+        metadata["compatible_asset_id"] = str(reused_compatible["id"])
         metadata["compatibility_status"] = "READY"
     reused_from = None if source is None else str(source["id"])
     with conn:
+        if rebuilt_compatible is not None:
+            conn.execute(
+                """
+                INSERT INTO assets (
+                    id, project_id, kind, storage_uri, sha256, size_bytes,
+                    content_type, metadata_json, created_by_user_id
+                ) VALUES (%s, NULL, 'oral_compatible_video', %s, %s, %s,
+                          'video/mp4', %s, %s)
+                """,
+                (
+                    rebuilt_compatible["id"],
+                    rebuilt_compatible["storage_uri"],
+                    rebuilt_compatible["sha256"],
+                    rebuilt_compatible["size_bytes"],
+                    json.dumps(
+                        {"compatibility_derived_from": str(source["id"])},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    actor.id,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO video_compat_derivatives (
+                    original_asset_id, compatible_asset_id, status, error_message
+                ) VALUES (%s, %s, 'READY', NULL)
+                ON CONFLICT (original_asset_id) DO UPDATE
+                SET compatible_asset_id = EXCLUDED.compatible_asset_id,
+                    status = 'READY', error_message = NULL
+                """,
+                (str(source["id"]), rebuilt_compatible["id"]),
+            )
         conn.execute(
             """
             INSERT INTO assets (
@@ -1345,7 +1482,7 @@ def _reuse_registered_material(
                     original_asset_id, compatible_asset_id, status
                 ) VALUES (%s, %s, 'READY')
                 """,
-                (asset_id, str(reused_compatible["compatible_asset_id"])),
+                (asset_id, str(reused_compatible["id"])),
             )
         if request.title or request.group:
             _upsert_preference(

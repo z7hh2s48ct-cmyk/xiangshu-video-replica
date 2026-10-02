@@ -62,7 +62,8 @@ def compat_state(compat_dsn: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[s
             "('http_owner_a', 'http_owner_a', 'HTTP Owner A', 'employee'), "
             "('http_owner_b', 'http_owner_b', 'HTTP Owner B', 'employee'), "
             "('reuse_owner_a', 'reuse_owner_a', 'Reuse Owner A', 'employee'), "
-            "('reuse_owner_b', 'reuse_owner_b', 'Reuse Owner B', 'employee') "
+            "('reuse_owner_b', 'reuse_owner_b', 'Reuse Owner B', 'employee'), "
+            "('recovery_owner', 'recovery_owner', 'Recovery Owner', 'employee') "
             "ON CONFLICT (id) DO NOTHING"
         )
     try:
@@ -327,3 +328,62 @@ def test_fresh_migration_hevc_instant_reuse_shares_derivative_and_isolates_owner
         )
         == 1
     )
+
+
+def test_instant_video_reuse_rebuilds_a_deleted_derived_object(
+    compat_state: str,
+) -> None:
+    """派生对象缺失后，本地重建且仍复用已保留的原片。"""
+    storage = FakeStorageAdapter(provider="fake", bucket="oral-video-compat")
+    payload, digest = _hevc_payload()
+
+    with _material_client("recovery_owner", storage) as (client, _db):
+        first = _new_video_intent(client, payload, digest)
+        assert first["storage_key"] is not None
+        storage.put_object(first["storage_key"], payload, content_type="video/mp4")
+        completed = client.post(f"{MATERIALS_URL}/uploads/{first['asset_id']}/complete")
+        assert completed.status_code == 200, completed.text
+
+        with psycopg.connect(compat_state, autocommit=True) as pg:
+            old = pg.execute(
+                """
+                SELECT d.compatible_asset_id, a.storage_uri
+                FROM video_compat_derivatives d
+                JOIN assets a ON a.id = d.compatible_asset_id
+                WHERE d.original_asset_id = %s
+                """,
+                (first["asset_id"],),
+            ).fetchone()
+        assert old is not None
+        old_compatible_id, old_uri = str(old[0]), str(old[1])
+        old_key = old_uri.removeprefix("fake://oral-video-compat/")
+        storage.delete_object(old_key)
+        assert storage.head_object(old_key) is None
+
+        recovered = _new_video_intent(client, payload, digest)
+        assert recovered["upload_required"] is False
+        assert recovered["reused_from_asset_id"] == first["asset_id"]
+        assert recovered["asset_id"] != first["asset_id"]
+
+    with psycopg.connect(compat_state, autocommit=True) as pg:
+        rebuilt = pg.execute(
+            """
+            SELECT d.compatible_asset_id, a.storage_uri
+            FROM video_compat_derivatives d
+            JOIN assets a ON a.id = d.compatible_asset_id
+            WHERE d.original_asset_id = %s
+            """,
+            (first["asset_id"],),
+        ).fetchone()
+        copied = pg.execute(
+            "SELECT compatible_asset_id FROM video_compat_derivatives WHERE original_asset_id = %s",
+            (recovered["asset_id"],),
+        ).fetchone()
+    assert rebuilt is not None and copied is not None
+    rebuilt_id, rebuilt_uri = str(rebuilt[0]), str(rebuilt[1])
+    assert rebuilt_id != old_compatible_id
+    assert str(copied[0]) == rebuilt_id
+    rebuilt_key = rebuilt_uri.removeprefix("fake://oral-video-compat/")
+    assert storage.head_object(rebuilt_key) is not None
+    assert _scalar(compat_state, "SELECT count(*) FROM wallet_transactions") == 0
+    assert _scalar(compat_state, "SELECT count(*) FROM generation_tasks") == 0
