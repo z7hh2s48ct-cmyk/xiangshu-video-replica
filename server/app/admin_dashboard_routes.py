@@ -60,7 +60,7 @@ def dashboard_summary(_actor: AdminReader) -> dict[str, Any]:
                          AND archive_status IN ('ARCHIVED', 'DIRECT')
                    ) AS succeeded
             FROM generation_tasks
-            WHERE {_day_expr("created_at_utc")} = {_timestamptz_day_expr("now()")}
+            WHERE {_timestamptz_day_expr("created_at_utc")} = {_timestamptz_day_expr("now()")}
             """
         ).fetchone()
         assert today_generation is not None
@@ -82,7 +82,7 @@ def dashboard_summary(_actor: AdminReader) -> dict[str, Any]:
                     interval '1 day'
                 )::date AS day
             ), generation_by_day AS (
-                SELECT {_day_expr("created_at_utc")} AS day,
+                SELECT {_timestamptz_day_expr("created_at_utc")} AS day,
                        count(*) FILTER (
                            WHERE status = 'SUCCEEDED'
                              AND archive_status IN ('ARCHIVED', 'DIRECT')

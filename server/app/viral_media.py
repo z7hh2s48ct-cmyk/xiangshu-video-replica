@@ -450,14 +450,15 @@ class CoverEnricher:
                     upload.finish("FAILED")
                     raise
                 upload.finish("SUCCEEDED")
-                stored_resource(
-                    enabled=self._metered,
-                    platform=video.platform,
-                    video_id=video.video_id,
-                    namespace=str(getattr(self._storage, "cache_namespace", "unknown")),
-                    key=stored.key,
-                    size=stored.size,
-                )
+                if self._metered:
+                    stored_resource(
+                        enabled=True,
+                        platform=video.platform,
+                        video_id=video.video_id,
+                        namespace=str(getattr(self._storage, "cache_namespace", "unknown")),
+                        key=stored.key,
+                        size=stored.size,
+                    )
         except Exception as exc:
             logger.warning(
                 "Viral cover unavailable for %s/%s: %s",
