@@ -5,6 +5,7 @@ import {
   listAdminAdjustments,
   listAllAdminAdjustments,
 } from "../api.admin";
+import { CustomerLink } from "./CustomerLink";
 import { DataTable } from "./ui/DataTable";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
@@ -50,9 +51,11 @@ const emptyFilters: Filters = {
 export function AdjustmentsPage({
   userId,
   readOnly = false,
+  onCustomer,
 }: {
   userId?: string;
   readOnly?: boolean;
+  onCustomer?: (id: string) => void;
 }) {
   const [adjustments, setAdjustments] = useState<AdjustmentListItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -215,7 +218,7 @@ export function AdjustmentsPage({
             headers={
               <>
                 <th>来源单类型</th>
-                {!userId ? <th>操作人 / 客户</th> : null}
+                <th>{userId ? "操作人" : "操作人 / 客户"}</th>
                 <th>来源单编号</th>
                 <th>原因</th>
                 <th>金额</th>
@@ -235,17 +238,23 @@ export function AdjustmentsPage({
                     )}
                   </StatusBadge>
                 </td>
-                {!userId ? (
-                  <td>
-                    {adj.admin_username} → {adj.target_username}
-                  </td>
-                ) : null}
+                <td>
+                  {adj.admin_username}
+                  {!userId && (
+                    <CustomerLink
+                      userId={adj.target_user_id}
+                      company={adj.target_display_name}
+                      username={adj.target_username || "账号未知"}
+                      onCustomer={onCustomer}
+                    />
+                  )}
+                </td>
                 <td>
                   <code>{adj.source_document_ref}</code>
                 </td>
                 <td>{adj.reason}</td>
                 <td className="amount">
-                  {/* B1：反向调账在系统内不产生资金流水（不建充值单），金额列
+                  {/* B1：退款扣减在系统内不产生资金流水（不建充值单），金额列
                       不编造一个不存在的数字；实际退付在支付通道后台，以来源单号对齐。 */}
                   {adj.credits < 0 ? "—" : formatFen(adj.amount_fen)}
                 </td>

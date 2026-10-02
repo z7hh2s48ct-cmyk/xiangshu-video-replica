@@ -492,6 +492,33 @@ def test_persist_viral_search_writes_pool_discoveries_and_billing(client, route_
             ).fetchone()
         ) == ("SUCCEEDED", 3)
 
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM viral_search_events WHERE id=%s", (operation,)
+            ).fetchone()[0]
+            == 1
+        )
+        zero = reserve_search_operation(
+            conn,
+            user_id=uid,
+            source_id="viral-search:zero-results",
+            request_fingerprint="douyin:空词:",
+        )
+        persist_viral_search(
+            conn,
+            user_id=uid,
+            source_id="viral-search:zero-results",
+            keyword="空词",
+            platform="douyin",
+            videos=[],
+            search_date="2026-09-22",
+            searched_at="2026-09-22T02:00:00+00:00",
+        )
+        row = raw.execute(
+            "SELECT video_ids_json FROM viral_search_events WHERE id=%s", (zero,)
+        ).fetchone()
+        assert row is not None and row[0] == "[]"
+
 
 @pytest.fixture()
 def search_client(client):

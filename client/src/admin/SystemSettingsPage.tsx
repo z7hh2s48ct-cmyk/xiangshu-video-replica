@@ -45,7 +45,7 @@ const controlBackend: SettingsBackend = {
   saveRuntime: updateControlRuntimeSettings,
   saveBilling: updateControlBillingSettings,
   testProvider: testControlProviderConnection,
-  // 付费探针：与免费连接测试并列挂在每个服务卡上。它可能真实扣费，服务端按
+  // 付费探针：与免费连接测试并列挂在每个服务卡上。它可能真生成扣费费，服务端按
   // 「敏感写」受理，所以走 `api.admin` 的 adminWrite（confirm + reason + 幂等键
   // + 审计），而不是 api.ts 那条不带写契约的封装。
   testPaidProvider: paidTestControlProvider,
@@ -53,7 +53,7 @@ const controlBackend: SettingsBackend = {
 
 /**
  * v4 导航合并 — 系统设置：支付与价格、费率管理、服务配置合并为一个菜单项。
- * 费率管理承载上游成本费率（按科目/分辨率）与对外售价（按秒）配置。
+ * 费率管理承载成本费率（按科目/分辨率）与对外售价（按秒）配置。
  */
 export function SystemSettingsPage({
   readOnly = false,
@@ -86,7 +86,7 @@ export function SystemSettingsPage({
   const [tab, setTab] = useState<string>(normalizeTab(initialTab));
   const [serviceTab, setServiceTab] = useState("providers");
   const visibleTabs = isSuperAdmin
-    ? [...baseTabs, technicalTab, teamTab]
+    ? [baseTabs[0], baseTabs[1], teamTab, baseTabs[2], technicalTab]
     : baseTabs;
   return (
     <div>

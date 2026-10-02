@@ -467,10 +467,11 @@ def confirm_recharge_payment(
                 SET status = 'PAID',
                     {spec.trade_no_column} = %s,
                     notify_digest = %s,
+                    payment_method = %s,
                     paid_at = CURRENT_TIMESTAMP
                 WHERE id = %s AND status IN ('PENDING', 'CLOSED')
                 """,
-                (provider_trade_no, source_digest, str(order["id"])),
+                (provider_trade_no, source_digest, channel, str(order["id"])),
             )
             if updated.rowcount != 1:
                 raise PaymentConfirmationError(

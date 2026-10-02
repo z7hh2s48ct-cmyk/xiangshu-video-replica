@@ -18,7 +18,7 @@ import psycopg
 
 from app import content_store
 from app.db_portable import BusinessConnection
-from app.external_calls import external_call_context
+from app.external_calls import external_call_context, parse_provider_error
 from app.generation import (
     ensure_user_queue_cursor,
     lock_shared_generation_capacity,
@@ -465,7 +465,8 @@ def _perform_oral_work(
             if avatar_snapshot.status == "DONE" and avatar_snapshot.avatar_id:
                 return OralWorkResult("ready", provider_resource_id=avatar_snapshot.avatar_id)
             if avatar_snapshot.status == "FAILED":
-                return OralWorkResult("failed", message="分身制作未通过")
+                _, reason = parse_provider_error(json.dumps(avatar_snapshot.raw), provider="hifly")
+                return OralWorkResult("failed", message=reason or "分身服务返回失败，未附原因")
             return OralWorkResult("waiting")
         if lease.kind == "voice_poll":
             voice_snapshot = vendor.voice_task(str(row["vendor_task_id"]))
@@ -484,7 +485,8 @@ def _perform_oral_work(
                     "ready", provider_resource_id=voice_snapshot.voice, stored=stored
                 )
             if voice_snapshot.status == "FAILED":
-                return OralWorkResult("failed", message="声音克隆未通过")
+                _, reason = parse_provider_error(json.dumps(voice_snapshot.raw), provider="hifly")
+                return OralWorkResult("failed", message=reason or "声音服务返回失败，未附原因")
             return OralWorkResult("waiting")
         if lease.kind == "task_poll":
             video_snapshot = vendor.video_task(str(row["vendor_task_id"]))
@@ -495,7 +497,8 @@ def _perform_oral_work(
                     duration_sec=video_snapshot.duration,
                 )
             if video_snapshot.status == "FAILED":
-                return OralWorkResult("failed", message="数字人服务生成失败")
+                _, reason = parse_provider_error(json.dumps(video_snapshot.raw), provider="hifly")
+                return OralWorkResult("failed", message=reason or "生成服务返回失败，未附原因")
             return OralWorkResult("waiting")
         if lease.kind == "task_archive":
             result_url = str(row["provider_result_url"] or "")

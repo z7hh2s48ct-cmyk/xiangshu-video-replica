@@ -166,6 +166,7 @@ def route_state(probe_dsn: str) -> Iterator[str]:
             "('admin_u', 'admin_u', 'Admin User', 'admin'), "
             "('auditor_u', 'auditor_u', 'Auditor User', 'auditor')"
         )
+        conn.execute("UPDATE users SET is_super_admin=1 WHERE id='admin_u'")
     yield probe_dsn
     close_pg_pool()
 

@@ -49,7 +49,7 @@ describe("vocabulary", () => {
 
   it("uses one REVOKED word per domain, not three", () => {
     // 激活码撤销与设备强制退出是两个动作：设备侧沿用操作动词，不再出现"已退出"。
-    expect(deviceStatusLabel("REVOKED")).toBe("已强制退出");
+    expect(deviceStatusLabel("REVOKED")).toBe("永久禁用");
     expect(deviceStatusLabel("BOUND")).toBe("已绑定");
     expect(deviceStatusLabel("UNBOUND")).toBe("已解绑");
     expect(customerStatusLabel("REVOKED")).toBe("已撤销");
@@ -73,22 +73,22 @@ describe("vocabulary", () => {
   it("names every transaction type with the P2-1 wording", () => {
     expect(transactionTypeLabel("CHARGE")).toBe("充值到账");
     // 与客户端 LEDGER_TERMS 同一套词，客服话术才对得上客户看到的。
-    expect(transactionTypeLabel("RESERVE")).toBe("暂扣");
-    expect(transactionTypeLabel("SETTLE")).toBe("实扣");
-    expect(transactionTypeLabel("RELEASE")).toBe("退回");
+    expect(transactionTypeLabel("RESERVE")).toBe("生成冻结");
+    expect(transactionTypeLabel("SETTLE")).toBe("生成扣费");
+    expect(transactionTypeLabel("RELEASE")).toBe("失败退回");
     expect(transactionTypeLabel("REFUND")).toBe("退款扣减");
     expect(transactionTypeLabel("CONVERSION")).toBe("历史转换");
-    expect(HELD_CREDITS_LABEL).toBe("暂扣中");
+    expect(HELD_CREDITS_LABEL).toBe("生成冻结");
   });
 
-  it("formats recent activity as relative time and falls back past a week", () => {
+  it("formats recent activity as minutes, hours and days", () => {
     const now = Date.parse("2026-09-29T12:00:00Z");
     expect(formatRelativeTime("2026-09-29T11:59:30Z", now)).toBe("刚刚");
     expect(formatRelativeTime("2026-09-29T11:30:00Z", now)).toBe("30 分钟前");
     expect(formatRelativeTime("2026-09-29T06:00:00Z", now)).toBe("6 小时前");
     expect(formatRelativeTime("2026-09-26T12:00:00Z", now)).toBe("3 天前");
     // 超过 7 天回退绝对时间，避免"89 天前"这类无意义数字。
-    expect(formatRelativeTime("2026-09-01T12:00:00Z", now)).toContain("2026");
+    expect(formatRelativeTime("2026-09-01T12:00:00Z", now)).toBe("28 天前");
     expect(formatRelativeTime(null, now)).toBe("—");
     expect(formatRelativeTime("not-a-date", now)).toBe("—");
   });

@@ -97,7 +97,253 @@ REPO_ROOT = SERVER_DIR.parent
 # 月度预算）与 20260930T1100_alert_notify_dedup（方案 P2 告警邮件推送防打扰）
 # 继续追加其上；20260930T1400_registration_bonus_settings（注册赠送积分单行
 # 配置表）追加在其后，故链尾为该值。
-HEAD_REVISION = "20261002T1000_oral_video_compatibility"
+HEAD_REVISION = "20261002T1015_merge_oral_compatibility_alerts"
+
+
+@pytest.mark.pg
+def test_legacy_realtime_running_upgrade_recovers_without_reissuing_requests():
+    from alembic import command
+    from alembic.config import Config
+
+    from app.admin_viral_collection_records import recover_interrupted_search_records
+    from app.db_portable import BusinessConnection
+
+    require_pg_or_explicit_skip()
+    dsn = create_test_database("cw056_failstate_test")
+    try:
+        config = Config(str(SERVER_DIR / "alembic.ini"))
+        config.set_main_option("script_location", str(MIGRATIONS_DIR))
+        config.set_main_option(
+            "sqlalchemy.url", dsn.replace("postgresql://", "postgresql+psycopg://")
+        )
+        command.upgrade(config, "20261001T2300_viral_collection_records")
+        with psycopg.connect(dsn) as raw:
+            assert (
+                raw.execute(
+                    "SELECT count(*) FROM information_schema.columns WHERE "
+                    "table_name='viral_collection_batches' AND column_name='lease_expires_at'"
+                ).fetchone()[0]
+                == 0
+            )
+            for identity, started, trigger in [
+                ("old-started", "clock_timestamp()-interval '1 hour'", "realtime"),
+                ("old-missing-start", "NULL", "realtime"),
+                ("live-record", "clock_timestamp()", "realtime"),
+                ("scheduled-record", "NULL", "scheduled"),
+            ]:
+                raw.execute(
+                    "INSERT INTO viral_collection_batches(id,platform,config_json,"
+                    "pricing_snapshot_json,run_status,created_at,started_at) "
+                    "VALUES(%s,'douyin',%s,'{}','RUNNING',"
+                    f"clock_timestamp()-interval '1 hour',{started})",
+                    (identity, json.dumps({"trigger_kind": trigger})),
+                )
+        command.upgrade(config, "head")
+        with psycopg.connect(dsn) as raw:
+            before = raw.execute("SELECT count(*) FROM billing_operations").fetchone()[0]
+            assert (
+                raw.execute(
+                    "SELECT count(*) FROM viral_collection_batches WHERE "
+                    "config_json::jsonb->>'trigger_kind'='realtime' AND lease_expires_at IS NULL"
+                ).fetchone()[0]
+                == 0
+            )
+            assert recover_interrupted_search_records(BusinessConnection.postgres(raw)) == 2
+        # 关闭连接后重新打开代表恢复器重启：终态不重复处理，也不重新排队。
+        with psycopg.connect(dsn) as raw:
+            assert recover_interrupted_search_records(BusinessConnection.postgres(raw)) == 0
+            rows = {
+                r[0]: r[1]
+                for r in raw.execute("SELECT id,run_status FROM viral_collection_batches")
+            }
+            assert rows == {
+                "old-started": "FAILED",
+                "old-missing-start": "FAILED",
+                "live-record": "RUNNING",
+                "scheduled-record": "RUNNING",
+            }
+            late = raw.execute(
+                "UPDATE viral_collection_batches SET run_status='SUCCEEDED',"
+                "completed_at=clock_timestamp() WHERE id='old-started' "
+                "AND run_status='RUNNING' AND lease_expires_at>clock_timestamp()"
+            )
+            assert late.rowcount == 0
+            assert raw.execute("SELECT count(*) FROM billing_operations").fetchone()[0] == before
+            assert raw.execute("SELECT count(*) FROM viral_refresh_tasks").fetchone()[0] == 0
+            assert raw.execute("SELECT count(*) FROM wallet_transactions").fetchone()[0] == 0
+            assert (
+                raw.execute(
+                    "SELECT started_at FROM viral_collection_batches WHERE id='old-missing-start'"
+                ).fetchone()[0]
+                is None
+            )
+    finally:
+        drop_test_database("cw056_failstate_test")
+
+
+@pytest.mark.pg
+def test_pre_observation_checkpoint_resume_keeps_unknown_stats_but_new_zero_is_zero(monkeypatch):
+    from datetime import UTC, date, datetime, timedelta
+
+    from alembic import command
+    from alembic.config import Config
+
+    from app.admin_viral_collection_records import read_collection_records
+    from app.db_pg import DATABASE_URL_ENV, close_pg_pool
+    from app.db_portable import BusinessConnection
+    from app.storage import FakeStorageAdapter
+    from app.viral_collection import enqueue_due_viral_collections, run_viral_collection
+    from app.viral_refresh import acquire_viral_refresh_task, complete_viral_refresh_task
+
+    require_pg_or_explicit_skip()
+    dsn = create_test_database("cw056_failstate_test")
+    config = Config(str(SERVER_DIR / "alembic.ini"))
+    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    config.set_main_option("sqlalchemy.url", dsn.replace("postgresql://", "postgresql+psycopg://"))
+    words = [{"platform": "douyin", "category": "推荐", "keyword": "旧已完成词"}]
+    batch_config = {
+        "keywords": words,
+        "limit": 1,
+        "window_end": int(datetime.now(UTC).timestamp()),
+        "trigger_kind": "scheduled",
+        "billing_batch_id": "legacy-batch",
+    }
+    try:
+        command.upgrade(config, "20261001T1800_viral_homepage_schedule")
+        with psycopg.connect(dsn) as raw:
+            assert raw.execute("SELECT to_regclass('viral_content_sources')").fetchone()[0] is None
+            raw.execute(
+                "INSERT INTO users(id,username,display_name,role) "
+                "VALUES('legacy-clone-user','legacy-clone-user','旧克隆客户','customer')"
+            )
+            raw.execute(
+                "INSERT INTO person_identities(id,owner_user_id,display_name,status) "
+                "VALUES('legacy-person','legacy-clone-user','旧人物','ACTIVE')"
+            )
+            raw.execute(
+                "INSERT INTO oral_voices"
+                "(id,identity_id,owner_user_id,title,status,source_asset_id) "
+                "VALUES('legacy-voice','legacy-person','legacy-clone-user','旧声音','PENDING','old-source')"
+            )
+            raw.execute(
+                "INSERT INTO viral_collection_batches"
+                "(id,platform,config_json,pricing_snapshot_json) "
+                "VALUES('legacy-batch','douyin',%s,'{}')",
+                (json.dumps(batch_config),),
+            )
+            raw.execute(
+                "INSERT INTO viral_videos(platform,video_id,title,collection_published) "
+                "VALUES('douyin','legacy-published','旧已发布视频',1)"
+            )
+            raw.execute(
+                "INSERT INTO viral_refresh_tasks"
+                "(id,platform,sort,status,collection_config_json,checkpoint_json) "
+                "VALUES('legacy-queue','douyin','hot','PENDING',%s,%s)",
+                (
+                    json.dumps(batch_config),
+                    json.dumps(
+                        {"keywords": {"0": ["legacy-published"]}, "prepared": ["legacy-published"]}
+                    ),
+                ),
+            )
+            raw.execute(
+                "UPDATE viral_runtime_controls SET collection_enabled=1,keywords_json=%s",
+                (json.dumps(words),),
+            )
+        command.upgrade(config, "head")
+        from app.control_routes import read_generation_record_history
+
+        with psycopg.connect(dsn) as raw:
+            history = read_generation_record_history(
+                "ORAL_VOICE",
+                "legacy-voice",
+                BusinessConnection.postgres(raw),
+                None,
+                limit=20,
+                offset=0,
+            )
+            assert history["total"] == 0 and history["items"] == []
+            raw.execute("UPDATE oral_voices SET status='FAILED' WHERE id='legacy-voice'")
+            history = read_generation_record_history(
+                "ORAL_VOICE",
+                "legacy-voice",
+                BusinessConnection.postgres(raw),
+                None,
+                limit=20,
+                offset=0,
+            )
+            assert [(item["before"], item["after"]) for item in history["items"]] == [
+                ("PENDING", "FAILED")
+            ]
+        close_pg_pool()
+        monkeypatch.setenv(DATABASE_URL_ENV, dsn)
+        calls = []
+
+        class Source:
+            def douyin_search(self, **kwargs):
+                calls.append(kwargs["keyword"])
+                return []
+
+        monkeypatch.setattr(
+            "app.viral_collection.viral_source_client_from_settings", lambda conn: Source()
+        )
+        monkeypatch.setattr(
+            "app.viral_collection.ViralMediaPipeline.fetch",
+            lambda *args, **kwargs: pytest.fail("已准备检查点不得重下载"),
+        )
+        storage = FakeStorageAdapter(provider="cos", bucket="test")
+        with psycopg.connect(dsn) as raw:
+            lease = acquire_viral_refresh_task(
+                BusinessConnection.postgres(raw), worker_id="legacy-resume"
+            )
+        assert lease is not None
+        run_viral_collection(lease, storage)
+        with psycopg.connect(dsn) as raw:
+            complete_viral_refresh_task(BusinessConnection.postgres(raw), lease=lease)
+            assert (
+                raw.execute(
+                    "SELECT collection_published FROM viral_videos "
+                    "WHERE video_id='legacy-published'"
+                ).fetchone()[0]
+                == 1
+            )
+            assert raw.execute("SELECT count(*) FROM viral_content_sources").fetchone()[0] == 0
+            assert tuple(
+                raw.execute(
+                    "SELECT run_status,stats_version FROM viral_collection_batches "
+                    "WHERE id='legacy-batch'"
+                ).fetchone()
+            ) == ("SUCCEEDED", None)
+            assert enqueue_due_viral_collections(BusinessConnection.postgres(raw), manual=True)
+        with psycopg.connect(dsn) as raw:
+            fresh = acquire_viral_refresh_task(
+                BusinessConnection.postgres(raw), worker_id="new-zero"
+            )
+        assert fresh is not None
+        run_viral_collection(fresh, storage)
+        with psycopg.connect(dsn) as raw:
+            complete_viral_refresh_task(BusinessConnection.postgres(raw), lease=fresh)
+        rows = read_collection_records(
+            None,
+            start=date.today() - timedelta(days=1),
+            end=date.today() + timedelta(days=1),
+            limit=20,
+            offset=0,
+        )["items"]
+        old = next(row for row in rows if row["id"] == "legacy-batch")
+        new = next(row for row in rows if row["id"] != "legacy-batch")
+        assert old["run_status"] == "SUCCEEDED"
+        assert all(old[field] is None for field in ["videos", "new_count", "ready"])
+        assert new["run_status"] == "SUCCEEDED" and new["stats_version"] == 1
+        assert [new[field] for field in ["videos", "new_count", "ready"]] == [0, 0, 0]
+        assert calls == ["旧已完成词"]
+        with psycopg.connect(dsn) as raw:
+            assert raw.execute("SELECT count(*) FROM wallet_transactions").fetchone()[0] == 0
+            assert raw.execute("SELECT count(*) FROM billing_operations").fetchone()[0] == 0
+    finally:
+        close_pg_pool()
+        drop_test_database("cw056_failstate_test")
+
 
 # 最后一个已发布（受支持）起点。其后的 056…090 与本迁移尚未随任何受支持版本发布，
 # 故冻结范围止于此——把未发布 revision 也纳入哈希会让每次新增迁移都必须改常量，
@@ -145,51 +391,21 @@ FAILSTATE_DATABASE = "cw056_failstate_test"
 # （净 0），另新增一条 `ck_admin_adjustments_order_required`（反向调账以外必须有充值单）
 # ——故 check_constraints +1，其余计数与表名全集不变。注意 `HEAD_SCHEMA_DIGEST`
 # 仍然会变：它把 `pg_get_constraintdef` 的文本一起哈希，约束体一改就换值。
+# 联合 head 在全新隔离 PG16 中重测：兼容派生表、原始素材外键与主线诊断告警 DDL 同时存在。
+# 已发布链哈希与支持的发行起点保持冻结，不因这次 merge revision 改写。
 HEAD_SCHEMA_COUNTS = {
-    # 20260928T1200（客户邮箱绑定与找回密码）的增量见该迁移自身说明。
-    # 本分支 20260928T1000 给 external_call_logs 追加 14 列（其中 2 列 jsonb）、
-    # 2 条 CHECK（outcome 取值、响应字节数非负）与 2 条部分索引（第三方任务号 /
-    # 请求编号），并按其重挂位置追加在 20260928T1200 之后：
-    # columns 1241 → 1255、jsonb_columns 6 → 8、check_constraints 330 → 332、
-    # partial_indexes 39 → 41；不加表 / 外键，digest 重算（见下）。
-    # 20260929T1000 新建 customer_annotations（方案 P2-3 客户标注：标签 JSONB / 备注 /
-    # 负责人）：tables 105 → 106、primary_keys 105 → 106、columns 1255 → 1261、
-    # foreign_keys 196 → 199（user_id / owner_user_id / updated_by_user_id → users）、
-    # check_constraints 332 → 335（tags 是数组 / ≤10 个 / 备注 ≤2000 字符）、
-    # jsonb_columns 8 → 9、timestamptz_columns 60 → 61；无部分索引增量。
-    # 20260929T1200 为 users 增加超管标记列（is_super_admin + 1 条 CHECK）并新建
-    # alert_settings 通知与告警单行配置表（7 列、2 条用户外键、4 条 CHECK；
-    # updated_at 为 timestamptz，Integer 主键 id 走序列）：tables/primary_keys
-    # 106 → 107、columns 1261 → 1269、foreign_keys 199 → 201、check_constraints
-    # 335 → 340、sequences 4 → 5、timestamptz_columns 61 → 62；jsonb / 部分索引
-    # 无增量。
-    # 20260930T1000（方案 P1 采集质量规则与月度预算）为 viral_runtime_controls
-    # 追加 5 列（4 个可空数值列 + 排除词 TEXT）与 4 条 CHECK：columns 1269 → 1274、
-    # check_constraints 340 → 344；不加表 / 外键 / 序列。
-    # 20260930T1100（方案 P2 告警邮件推送防打扰）新建 alert_notify_dedup 单行表
-    # （2 列、timestamptz、Integer 主键走序列）：tables/primary_keys 107 → 108、
-    # columns 1274 → 1276、sequences 5 → 6、timestamptz_columns 62 → 63；
-    # 无外键 / jsonb / 部分索引增量。
-    # 20260930T1400（注册赠送积分）新建 registration_bonus_settings 单行表
-    # （4 列：id / bonus_credits / updated_by_user_id / updated_at，其中
-    # updated_at 为 timestamptz、Integer 主键走序列；1 条 SET NULL 用户外键、
-    # 2 条 CHECK——singleton 与 credits 范围）：tables/primary_keys 108 → 109、
-    # columns 1276 → 1280、foreign_keys 201 → 202、check_constraints 344 → 346、
-    # sequences 6 → 7、timestamptz_columns 63 → 64；jsonb / 部分索引无增量。
-    # 以上数字均由 migration_manifest.py
-    # --print-schema 在空库迁移到 head 后实测得出，digest 同法重算（见下）。
-    "check_constraints": 347,
-    "columns": 1286,
-    "foreign_keys": 205,
+    "tables": 123,
+    "columns": 1392,
     "identity_columns": 0,
-    "jsonb_columns": 9,
+    "sequences": 8,
+    "jsonb_columns": 11,
+    "timestamptz_columns": 94,
+    "triggers": 55,
     "partial_indexes": 41,
-    "primary_keys": 110,
-    "sequences": 7,
-    "tables": 110,
-    "timestamptz_columns": 65,
-    "triggers": 27,
-    "unique_constraints": 39,
+    "unique_constraints": 40,
+    "check_constraints": 361,
+    "foreign_keys": 205,
+    "primary_keys": 123,
 }
 
 # head 的表名全集。counts 只能证明「数量没漂」，证明不了「同一批表」：
@@ -223,6 +439,7 @@ HEAD_TABLE_NAMES = (
     "admin_sessions",
     "admin_write_idempotency",
     "alembic_version",
+    "alert_deliveries",
     "alert_notify_dedup",
     "alert_settings",
     "analysis_task_attempts",
@@ -260,8 +477,12 @@ HEAD_TABLE_NAMES = (
     "daily_external_prices",
     "device_pairing_requests",
     "external_call_logs",
+    "external_call_observations",
+    "external_call_response_pending",
     "first_frame_tasks",
     "generation_batches",
+    "generation_record_history_coverage",
+    "generation_record_status_events",
     "generation_task_operations",
     "generation_tasks",
     "h3_provider_accounts",
@@ -300,6 +521,7 @@ HEAD_TABLE_NAMES = (
     "studio_saved_scripts",
     "sub_account_permissions",
     "sub_account_quotas",
+    "task_diagnostic_refs",
     "user_queue_cursors",
     "users",
     "versions",
@@ -307,14 +529,21 @@ HEAD_TABLE_NAMES = (
     "viral_collection_batches",
     "viral_collection_charges",
     "viral_collection_members",
+    "viral_content_measurement_state",
+    "viral_content_sources",
+    "viral_content_usage_events",
     "viral_fetch_state",
     "viral_import_tasks",
+    "viral_keyword_runs",
     "viral_link_resolution_receipts",
     "viral_media_preparations",
+    "viral_platform_probes",
     "viral_refresh_tasks",
     "viral_runtime_controls",
     "viral_script_cache",
     "viral_search_discoveries",
+    "viral_search_events",
+    "viral_search_metrics_state",
     "viral_video_favorites",
     "viral_video_visibility",
     "viral_videos",
@@ -420,7 +649,9 @@ HEAD_TABLE_NAMES = (
 #  两侧原来的 digest 都不能用——本分支那条是接在 viral 之后的旧链、main 那条只到
 #  MATERIAL-UX，合并后 head 变成接在 MATERIAL-UX 之后的本分支迁移，约束文本随之变化，
 #  digest 必然要重算。由 scripts/ci/migration_manifest.py --print-schema 在 PG 上重算后粘贴。
-HEAD_SCHEMA_DIGEST = "bcdf984cf18b09598cfda91007a3ab05f7686b3d1d4644fb0d8f5aebe03dff06"
+# 由 migration_manifest.py --print-schema 在联合 head 的全新 PG16 中测得；
+# 旧已发布链仍保持字节冻结。
+HEAD_SCHEMA_DIGEST = "68d468b915a74359ea8ad164cdbdff2e27d41c602e1e7ff2acac77798a7d32a4"
 
 _SCHEMA_COUNT_QUERIES: dict[str, str] = {
     "tables": (
@@ -642,10 +873,10 @@ def _is_ancestor(script: ScriptDirectory, candidate: str, target: str) -> bool:
 
 
 def test_migration_chain_has_single_head_with_registered_merge() -> None:
-    """Only the registered post-release merge may join the two installed branches.
+    """只有登记过的 merge revision 才能汇合已安装分支。
 
-    The published base..055 chain remains strictly linear and byte-frozen in the
-    following test. Additional or changed merge parents must still fail closed.
+    已发布的 base..055 链仍在后续测试中保持线性和字节冻结；额外 merge 或修改
+    既有父节点必须失败关闭。
     """
     script = _script_directory()
     heads = script.get_heads()
@@ -658,6 +889,13 @@ def test_migration_chain_has_single_head_with_registered_merge() -> None:
         if isinstance(rev.down_revision, tuple)
     ]
     assert branch_points == [
+        (
+            "20261002T1015_merge_oral_compatibility_alerts",
+            (
+                "20261002T0800_alert_delivery_rules",
+                "20261002T1000_oral_video_compatibility",
+            ),
+        ),
         (
             "20260921T0000_merge_wallet_actor_and_billing_metadata",
             (
@@ -1212,6 +1450,39 @@ def test_supported_head_matrix_upgrade_preserves_facts_and_schema(
             _singleton_write_viral_controls(conn, actor)
         assert conn.execute("SELECT count(*) FROM runtime_settings").fetchone()[0] == 1
         assert conn.execute("SELECT count(*) FROM viral_runtime_controls").fetchone()[0] == 1
+
+
+@pytest.mark.pg
+@pytest.mark.parametrize(
+    "starting_head",
+    (
+        "20261002T0800_alert_delivery_rules",
+        "20261002T1000_oral_video_compatibility",
+    ),
+)
+def test_parallel_branch_heads_upgrade_to_the_merged_head(
+    starting_head: str, matrix_database: str
+) -> None:
+    """两个已存在分支头都必须能收敛到同一个升级终点。"""
+    dsn = matrix_database
+    _upgrade(dsn, starting_head)
+    _upgrade(dsn, HEAD_REVISION)
+
+    with psycopg.connect(dsn) as conn:
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchall() == [
+            (HEAD_REVISION,)
+        ]
+        # 两条分支的 DDL 都要保留；merge revision 只负责图收敛，不能吞掉任一侧。
+        assert conn.execute("SELECT to_regclass('video_compat_derivatives')").fetchone()[0]
+        assert conn.execute("SELECT to_regclass('alert_deliveries')").fetchone()[0]
+        assert conn.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name='oral_avatars' AND column_name='original_source_asset_id'"
+        ).fetchone()
+        assert conn.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name='alert_settings' AND column_name='notification_policies_json'"
+        ).fetchone()
 
 
 def test_audit_lineage_downgrade_refusal_is_preserved(matrix_database: str) -> None:

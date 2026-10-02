@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 import app.wechat_native_provider  # noqa: F401 -- register the selectable provider
-from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_auth_routes import AdminReader, AdminWriter, SuperAdminReader, SuperAdminWriter
 from app.admin_write_contract import (
     AdminWriteContract,
     require_write_contract,
@@ -58,7 +58,7 @@ class H3AccountUpdate(AdminWriteContract):
 
 
 @router.get("/settings/h3-accounts")
-def get_h3_accounts(actor: AdminReader, response: Response) -> dict[str, Any]:
+def get_h3_accounts(actor: SuperAdminReader, response: Response) -> dict[str, Any]:
     from app.h3_account_pool import read_accounts
 
     response.headers["Cache-Control"] = "no-store"
@@ -68,7 +68,11 @@ def get_h3_accounts(actor: AdminReader, response: Response) -> dict[str, Any]:
 
 @router.put("/settings/h3-accounts/{account_id}")
 def put_h3_account(
-    account_id: str, body: H3AccountUpdate, request: Request, response: Response, actor: AdminWriter
+    account_id: str,
+    body: H3AccountUpdate,
+    request: Request,
+    response: Response,
+    actor: SuperAdminWriter,
 ) -> dict[str, Any]:
     from app.h3_account_pool import save_account
 

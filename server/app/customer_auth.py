@@ -193,6 +193,9 @@ def verify_session_context(
         ):
             raise _replaced("The customer account is unavailable.")
     else:
+        account = conn.execute("SELECT is_active FROM users WHERE id=%s", (user_id,)).fetchone()
+        if account is None or not account[0]:
+            raise _replaced("The customer account is unavailable.")
         code_row = conn.execute(
             "SELECT status FROM activation_codes WHERE id = %s", (activation_code_id,)
         ).fetchone()

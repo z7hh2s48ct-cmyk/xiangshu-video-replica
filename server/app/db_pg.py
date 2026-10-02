@@ -413,6 +413,20 @@ def pg_transaction(*, isolation: IsolationLevel | None = None) -> Iterator[psyco
             with conn.transaction():
                 if isolation is not None:
                     conn.execute(f"SET TRANSACTION ISOLATION LEVEL {level}")
+                # Transaction-local settings cannot leak through pooled connections.
+                # Task/audit triggers retain enqueue correlation without touching vendor payloads.
+                from app.ops_metrics import current_request_context, get_current_trace_fields
+
+                request_context = current_request_context()
+                if request_context is not None:
+                    conn.execute(
+                        "SELECT set_config('app.request_id', %s, true), "
+                        "set_config('app.task_id', %s, true)",
+                        (
+                            request_context.request_id,
+                            str(get_current_trace_fields().get("task_id", "")),
+                        ),
+                    )
                 yield conn
     except PoolTimeout:
         # CW-055：池耗尽必须留下可诊断且不泄密的痕迹。没有这条日志时，

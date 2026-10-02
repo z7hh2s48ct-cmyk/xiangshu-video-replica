@@ -26,6 +26,7 @@ from app.failure_runbook import (
     FAILURE_RUNBOOK,
     FailureCategory,
     FailureOwner,
+    failed_record_explanation,
     failure_advice,
     failure_classification,
     failure_explanation,
@@ -115,6 +116,25 @@ CHARACTER_FAILURE_PATTERN = re.compile(
 # 只匹配 ``"状态": "ORAL_*"`` 这种字典值位置，避免误抓 ORAL_VIDEO 等记录类型。
 ORAL_STATUS_CODE_FILE = "control_routes.py"
 ORAL_STATUS_CODE_PATTERN = re.compile(r'''"[A-Z_]+"\s*:\s*"(ORAL_[A-Z0-9_]+)"''')
+
+
+def test_sql_case_failure_codes_have_advice() -> None:
+    pattern = re.compile(r"error_code\s*=\s*CASE\b(.*?)\bEND", re.S | re.I)
+    codes: set[str] = set()
+    for name in SCANNED_FILES:
+        for match in pattern.finditer((APP_DIR / name).read_text(encoding="utf-8")):
+            codes.update(re.findall(r"THEN\s+'([A-Z][A-Z0-9_]+)'", match.group(1)))
+    assert "PROVIDER_POLL_TIMEOUT" in codes
+    assert codes <= FAILURE_RUNBOOK.keys()
+
+
+def test_failed_record_unknown_code_has_actionable_fallback() -> None:
+    for code in (None, "", "FUTURE_UNREGISTERED_FAILURE"):
+        explanation = failed_record_explanation(code, provider_message="secret raw vendor reason")
+        assert explanation.category == "UNCLASSIFIED"
+        assert explanation.owner == "ENGINEERING"
+        assert "核对" in explanation.advice
+        assert "secret" not in explanation.advice
 
 
 def test_variable_assigned_and_constructed_failure_codes_have_advice() -> None:

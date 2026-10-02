@@ -54,6 +54,58 @@ def test_redact_text_masks_bearer_tokens_and_secret_fields() -> None:
 
 
 @pytest.mark.parametrize(
+    "key",
+    ["signature", "authorization", "secret", "clientSecret", "apiKey", "accessKeyId", "cookie"],
+)
+def test_redaction_handles_nested_json_and_short_credentials(key: str) -> None:
+    text = json.dumps({"data": [{key: "X7", "message": "原始失败原因", "prompt": "客户提示词"}]})
+    redacted = redact_text(text)
+    assert "X7" not in redacted
+    assert json.loads(redacted)["data"][0][key] == "[已脱敏]"
+    assert "原始失败原因" in redacted
+    assert "客户提示词" in redacted
+    assert "X7" not in redact_text(f"{key}=X7 other=ok")
+    assert "X7" not in redact_url(f"https://example.test/a?{key}=X7&page=1")
+
+
+def test_redaction_tolerates_invalid_url_ports_and_preserves_ipv6() -> None:
+    assert "X7" not in redact_text("https://example.test:bad/a?token=X7")
+    assert redact_url("https://[::1]:8000/a?page=2") == "https://[::1]:8000/a?page=2"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'error={"token":"FICTIONAL-WRAPPED-CRED"}',
+        'message="upstream token=FICTIONAL-WRAPPED-CRED failed"',
+        json.dumps({"message": '{"token":"FICTIONAL-WRAPPED-CRED","reason":"失败"}'}),
+        r'error="{\"token\":\"FICTIONAL-WRAPPED-CRED\"}"',
+        'message="failure" error={"data":{"clientSecret":"FICTIONAL-WRAPPED-CRED"}}',
+    ],
+)
+def test_wrapped_text_and_embedded_json_do_not_hide_credentials(text: str) -> None:
+    redacted = redact_text(text)
+    assert "FICTIONAL-WRAPPED-CRED" not in redacted
+    assert "[已脱敏]" in redacted
+
+
+@pytest.mark.parametrize("header", ["Cookie", "Set-Cookie"])
+def test_cookie_headers_mask_all_values_and_preserve_surrounding_lines(header: str) -> None:
+    redacted = redact_text(f"safe before\n{header}: sid=FAKE_A; other=FAKE_B\nsafe after")
+    assert "FAKE_A" not in redacted and "FAKE_B" not in redacted
+    assert "safe before" in redacted and "safe after" in redacted
+
+
+@pytest.mark.parametrize("escaping", [1, 2, 3])
+def test_escaped_quoted_credentials_mask_spaces_and_preserve_safe_fields(escaping: int) -> None:
+    quote = "\\" * escaping + '"'
+    text = f"safe before error={{{quote}token{quote}:{quote}FAKE_A FAKE_B{quote}}} safe after"
+    redacted = redact_text(text)
+    assert "FAKE_A" not in redacted and "FAKE_B" not in redacted
+    assert "safe before" in redacted and "safe after" in redacted
+
+
+@pytest.mark.parametrize(
     ("body", "expected"),
     [
         (
@@ -93,8 +145,38 @@ def test_request_summary_drops_inline_media_and_secrets() -> None:
         json.dumps({"prompt": "秋日街头", "image": "A" * 5000, "api_key": "sk-123456789"})
     )
     assert summary["prompt"] == "秋日街头"
-    assert summary["image"] == "[已省略 5000 个字符]"
+    assert summary["image"] == {"media_reference": "inline_base64", "characters": 5000}
     assert summary["api_key"] == "[已脱敏]"
+
+
+def test_long_prompts_and_copy_keep_the_tail_but_inline_media_do_not() -> None:
+    prompt = "完整提示词 " * 1800 + " tail marker https://cdn.test/a?Signature=FICTIONAL-SIGNATURE"
+    summary = summarize_request_body(
+        json.dumps(
+            {"prompt": prompt, "text": "A" * 8000, "image": "data:image/png;base64," + "A" * 5000}
+        )
+    )
+    assert "tail marker" in summary["prompt"]
+    assert "FICTIONAL-SIGNATURE" not in summary["prompt"]
+    assert summary["text"] == "A" * 8000
+    assert summary["image"]["media_reference"] == "data:image/png;base64"
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_timeout_records_exception_type_and_latency(captured: list[Any], wrapped: bool) -> None:
+    def fail(_request: Any, timeout: float) -> Any:
+        error = TimeoutError("FICTIONAL-SENSITIVE-TIMEOUT-MESSAGE")
+        raise URLError(error) if wrapped else error
+
+    with pytest.raises((TimeoutError, URLError)):
+        recorded_urlopen(
+            "https://api.test/tasks", timeout=3, provider="apilio", endpoint="poll", opener=fail
+        )
+    [call] = captured
+    assert call.outcome == "TIMEOUT"
+    assert call.exception_type == "TimeoutError"
+    assert call.latency_ms is not None and call.latency_ms >= 0
+    assert "FICTIONAL-SENSITIVE-TIMEOUT-MESSAGE" not in (call.error_message or "")
 
 
 def test_failed_calls_keep_more_body_than_successful_ones() -> None:
@@ -115,11 +197,92 @@ def test_failed_calls_keep_more_body_than_successful_ones() -> None:
         outcome="SUCCEEDED",
         response_body=body,
     )
-    assert failed.response_body is not None and len(failed.response_body) == FAILED_BODY_LIMIT
+    assert failed.response_body == body
+    assert failed.response_truncated is False
     assert succeeded.response_body is not None
     assert len(succeeded.response_body) == SUCCEEDED_BODY_LIMIT
+    assert succeeded.response_truncated is True
     assert failed.response_body_bytes == len(body)
     assert failed.method == "POST"
+
+
+def test_success_summary_uses_utf8_bytes_and_does_not_mislabel_redaction() -> None:
+    call = prepare_external_call(
+        provider="p",
+        endpoint="e",
+        method="GET",
+        url=None,
+        outcome="SUCCEEDED",
+        response_body="中文" * 4000,
+    )
+    assert call.response_body is not None
+    assert len(call.response_body.encode("utf-8")) <= SUCCEEDED_BODY_LIMIT
+    assert call.response_truncated is True
+    redacted = prepare_external_call(
+        provider="p",
+        endpoint="e",
+        method="GET",
+        url=None,
+        outcome="PROVIDER_ERROR",
+        response_body=json.dumps({"secret": "fictional-long-secret"}),
+    )
+    assert redacted.response_truncated is False
+
+
+@pytest.mark.parametrize("transport_name", ["video", "oral"])
+@pytest.mark.parametrize("status", [429, 503])
+@pytest.mark.parametrize("wrapped", [False, True, "cookie", "escape"])
+def test_http_error_service_logs_never_contain_echoed_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    transport_name: str,
+    status: int,
+    wrapped: bool | str,
+) -> None:
+    from app.generation import H3ProviderFailed, UrllibMetasoHttpTransport
+    from app.hifly import HiflyError, UrllibHiflyHttpTransport
+
+    echoed = json.dumps(
+        {
+            "message": "虚构上游失败",
+            "signature": "FICTIONAL-SIGN-7",
+            "data": {"authorization": "FICTIONAL-AUTH-8", "clientSecret": "FICTIONAL-SECRET-9"},
+        },
+        ensure_ascii=False,
+    ).encode()
+    if wrapped:
+        echoed = b"error=" + echoed + b' message="token=FICTIONAL-WRAPPED-CRED failed"'
+    if wrapped == "cookie":
+        echoed += b"\nCookie: sid=FICTIONAL-COOKIE-A; other=FICTIONAL-COOKIE-B\nsafe after"
+    if wrapped == "escape":
+        quote = "\\" * 3 + '"'
+        escaped_error = (
+            f" error={{{quote}token{quote}:{quote}FICTIONAL-ESCAPE-A FICTIONAL-ESCAPE-B{quote}}}"
+        )
+        echoed += escaped_error.encode()
+
+    def fail(*args: Any, **kwargs: Any) -> Any:
+        raise HTTPError("https://fake.test/task", status, "fake", None, io.BytesIO(echoed))
+
+    module = "app.generation" if transport_name == "video" else "app.hifly"
+    monkeypatch.setattr(f"{module}.recorded_urlopen", fail)
+    transport = (
+        UrllibMetasoHttpTransport() if transport_name == "video" else UrllibHiflyHttpTransport()
+    )
+    with pytest.raises((H3ProviderFailed, HiflyError)):
+        transport.request("GET", "https://fake.test/task", headers={})
+    assert "虚构上游失败" in caplog.text
+    for secret in [
+        "FICTIONAL-SIGN-7",
+        "FICTIONAL-AUTH-8",
+        "FICTIONAL-SECRET-9",
+        "FICTIONAL-WRAPPED-CRED",
+        "FICTIONAL-COOKIE-A",
+        "FICTIONAL-COOKIE-B",
+        "FICTIONAL-ESCAPE-A",
+        "FICTIONAL-ESCAPE-B",
+    ]:
+        assert secret not in caplog.text
 
 
 def test_context_binds_task_and_restores_outer_scope() -> None:
@@ -208,6 +371,41 @@ def test_recorded_urlopen_keeps_http_error_body_readable(captured: list[Any]) ->
     assert (call.outcome, call.http_status) == ("PROVIDER_ERROR", 402)
     assert call.provider_error_code == "insufficient_quota"
     assert call.request_summary == {"n": 5}
+
+
+@pytest.mark.parametrize(
+    "body, provider, outcome",
+    [
+        (
+            '{"code":0,"data":{"status":4,"message":"虚构数字状态失败原话"}}',
+            "hifly",
+            "PROVIDER_ERROR",
+        ),
+        ('{"code":0,"data":{"status":3,"message":"done"}}', "hifly", "SUCCEEDED"),
+        ('{"status":4,"message":"unrelated numeric status"}', "other", "SUCCEEDED"),
+        ("not-json token=FICTIONAL-BODY-CRED", "hifly", "PARSE_ERROR"),
+    ],
+)
+def test_recorded_json_api_classifies_numeric_failures_and_invalid_json(
+    captured: list[Any],
+    body: str,
+    provider: str,
+    outcome: str,
+) -> None:
+    result, _, _ = recorded_urlopen(
+        Request("https://fake.test/task"),
+        timeout=5,
+        provider=provider,
+        endpoint="task",
+        expected_json=True,
+        opener=lambda request, timeout: _FakeResponse(body.encode("utf-8")),
+    )
+    assert result == body.encode("utf-8")
+    [call] = captured
+    assert call.outcome == outcome
+    assert "FICTIONAL-BODY-CRED" not in (call.response_body or "")
+    if outcome == "PROVIDER_ERROR":
+        assert call.provider_message == "虚构数字状态失败原话"
 
 
 @pytest.mark.parametrize(

@@ -22,6 +22,7 @@ from typing import Any, Literal, cast
 from uuid import uuid4
 
 from app.db_portable import BusinessConnection
+from app.viral_homepage import live_homepage_sql
 from app.viral_tikhub import MAX_TAGS, ViralVideo, WechatVideoDetail, is_irrelevant_viral_video
 
 VIRAL_FETCH_TTL = timedelta(hours=1)
@@ -91,7 +92,7 @@ _VIRAL_RANK_SENTINEL = 2147483647
 # Keep this predicate common to page rows and totals.
 _PUBLISHED_SQL = """
     AND deleted_at IS NULL
-    AND (cover_url IS NULL OR cover_key IS NOT NULL)
+    AND (COALESCE(cover_url,'')='' OR cover_key IS NOT NULL)
     AND EXISTS (
         SELECT 1 FROM viral_media_preparations media
         WHERE media.platform = viral_videos.platform AND media.video_id = viral_videos.video_id
@@ -129,6 +130,12 @@ def _row_to_video(row: Any) -> ViralVideo:
         cover_key=mapping.get("cover_key"),
         homepage_featured=bool(mapping.get("homepage_featured")),
         homepage_rank=mapping.get("homepage_rank"),
+        homepage_starts_at=(
+            str(mapping["homepage_starts_at"]) if mapping.get("homepage_starts_at") else None
+        ),
+        homepage_ends_at=(
+            str(mapping["homepage_ends_at"]) if mapping.get("homepage_ends_at") else None
+        ),
         duration_ms=int(mapping.get("duration_ms") or 0),
         likes=int(mapping.get("likes") or 0),
         comments=mapping.get("comments"),
@@ -225,13 +232,20 @@ def _merge_cached_statistics_metadata(
 
 def upsert_viral_videos(
     conn: BusinessConnection, videos: list[ViralVideo], *, commit: bool = True
-) -> None:
+) -> set[tuple[str, str]]:
     """按 (platform, video_id) 去重写入/刷新条目."""
+    inserted: set[tuple[str, str]] = set()
     with _NATIVE_JSON_RMW_LOCK:
         for video in _merge_cached_statistics_metadata(conn, videos):
-            conn.execute(_UPSERT_SQL, _video_row(video))
+            row = conn.execute(
+                _UPSERT_SQL + " RETURNING platform,video_id,(xmax=0) AS inserted",
+                _video_row(video),
+            ).fetchone()
+            if row is not None and row["inserted"]:
+                inserted.add((str(row["platform"]), str(row["video_id"])))
         if commit:
             conn.commit()
+    return inserted
 
 
 def _collection_window_end(conn: BusinessConnection, platform: str) -> int:
@@ -426,7 +440,7 @@ def _recent_relevant_total(
         f"""
         SELECT title FROM viral_videos
         WHERE platform = %s AND (%s OR (published_at BETWEEN %s AND %s AND collection_published=1))
-          AND (NOT %s OR homepage_featured=1)
+          AND (NOT %s OR {live_homepage_sql()})
           {_PUBLISHED_SQL}
           AND NOT EXISTS (
               SELECT 1 FROM viral_video_visibility visibility
@@ -440,6 +454,65 @@ def _recent_relevant_total(
     return sum(not is_irrelevant_viral_video(str(row["title"])) for row in rows)
 
 
+def _list_homepage_snapshot(
+    conn: BusinessConnection, *, platform: str, sort: str, limit: int, cursor: str | None
+) -> ViralVideoPage:
+    # AuthReader已查询过数据库，不能中途切换隔离级别；版本、页和总数由同一SQL快照读取。
+    ranked = sort == "hot"
+    order = _ORDER_BY.get(sort, _ORDER_BY["hot"])
+    if ranked:
+        order = f"homepage_rank ASC NULLS LAST, {order}"
+    boundary, expected = (
+        _decode_cursor(cursor, platform=platform, sort=sort) if cursor else (None, None)
+    )
+    if boundary is not None and len(boundary) != (4 if ranked else 3):
+        raise InvalidViralCursorError("viral video cursor belongs to another list")
+    boundary_sql, params = (
+        _page_boundary_sql(sort, boundary, featured=ranked) if boundary else ("", ())
+    )
+    result = conn.execute(
+        rf"""WITH homepage_snapshot AS MATERIALIZED (
+            SELECT * FROM viral_videos WHERE platform=%s
+                AND homepage_featured=1 AND deleted_at IS NULL
+        ), eligible AS MATERIALIZED (
+            SELECT * FROM homepage_snapshot AS viral_videos WHERE {live_homepage_sql()}
+            {_PUBLISHED_SQL}
+            AND NOT EXISTS (SELECT 1 FROM viral_video_visibility visibility
+                WHERE visibility.platform=viral_videos.platform
+                    AND visibility.video_id=viral_videos.video_id
+                AND visibility.status!='AVAILABLE')
+            AND regexp_replace(title,'<em[^>]*>|</em>','','gi') !~* 'minecraft|我的世界|\mmc\M'
+        ), revision AS (
+            SELECT md5(COALESCE(jsonb_agg(jsonb_build_array(video_id,homepage_rank,
+                homepage_starts_at,homepage_ends_at,likes,published_at,title,
+                EXISTS(SELECT 1 FROM eligible e WHERE e.video_id=homepage_snapshot.video_id))
+                ORDER BY video_id)::text,'[]')) AS value FROM homepage_snapshot
+        ), page AS (
+            SELECT * FROM eligible WHERE TRUE {boundary_sql} ORDER BY {order} LIMIT %s
+        ) SELECT revision.value AS data_version,(SELECT count(*) FROM eligible) AS total,
+            COALESCE((SELECT jsonb_agg(to_jsonb(page) ORDER BY {order})
+                FROM page),'[]'::jsonb) AS rows
+        FROM revision""",
+        (platform, *params, limit + 1),
+    ).fetchone()
+    version = f"home-snapshot:{result['data_version']}"
+    if expected is not None and expected != version:
+        raise InvalidViralCursorError("viral video cursor data version changed")
+    collected = [_row_to_video(row) for row in result["rows"]]
+    items = collected[:limit]
+    has_more = len(collected) > limit
+    return ViralVideoPage(
+        items=items,
+        total=int(result["total"]),
+        has_more=has_more,
+        next_cursor=_encode_cursor(
+            items[-1], platform=platform, sort=sort, data_version=version, featured=ranked
+        )
+        if has_more and items
+        else None,
+    )
+
+
 def list_viral_video_page(
     conn: BusinessConnection,
     *,
@@ -450,24 +523,27 @@ def list_viral_video_page(
     featured_only: bool = False,
 ) -> ViralVideoPage:
     """Read one stable keyset page without loading all video rows into memory."""
-    order = _ORDER_BY.get(sort, _ORDER_BY["hot"])
     if featured_only:
-        # 置顶序优先（NULLS LAST），同序内保持原排序，运营可控首页顺序。
+        return _list_homepage_snapshot(
+            conn, platform=platform, sort=sort, limit=limit, cursor=cursor
+        )
+    order = _ORDER_BY.get(sort, _ORDER_BY["hot"])
+    ranked_homepage = featured_only and sort == "hot"
+    if ranked_homepage:
+        # 编排顺序优先（NULLS LAST），同序内保持原排序，运营可控首页顺序。
         order = f"homepage_rank ASC NULLS LAST, {order}"
     now = _collection_window_end(conn, platform)
     cutoff = now - int(timedelta(days=7).total_seconds())
     data_version = viral_fetched_at(conn, platform=platform, sort=sort)
-    if featured_only:
-        data_version = f"home:{data_version}"
     boundary = None
     if cursor:
         boundary, cursor_version = _decode_cursor(cursor, platform=platform, sort=sort)
         if cursor_version != data_version:
             raise InvalidViralCursorError("viral video cursor data version changed")
-        if featured_only and len(boundary) != 4:
+        if ranked_homepage and len(boundary) != 4:
             # 升级前的 v2 旧游标不含置顶序：静默回到第一页，避免分页死循环。
             boundary = None
-        elif not featured_only and len(boundary) != 3:
+        elif not ranked_homepage and len(boundary) != 3:
             raise InvalidViralCursorError("viral video cursor belongs to another list")
     collected: list[ViralVideo] = []
     exhausted = False
@@ -475,7 +551,7 @@ def list_viral_video_page(
 
     while len(collected) <= limit and not exhausted:
         boundary_sql, boundary_params = (
-            _page_boundary_sql(sort, boundary, featured=featured_only)
+            _page_boundary_sql(sort, boundary, featured=ranked_homepage)
             if boundary is not None
             else ("", ())
         )
@@ -484,7 +560,7 @@ def list_viral_video_page(
             SELECT * FROM viral_videos
             WHERE platform = %s
               AND (%s OR (published_at BETWEEN %s AND %s AND collection_published=1))
-              AND (NOT %s OR homepage_featured=1)
+              AND (NOT %s OR {live_homepage_sql()})
               {_PUBLISHED_SQL}
               AND NOT EXISTS (
                   SELECT 1 FROM viral_video_visibility visibility
@@ -507,7 +583,7 @@ def list_viral_video_page(
                 collected.append(video)
                 if len(collected) > limit:
                     break
-        boundary = _cursor_values(_row_to_video(rows[-1]), sort, featured=featured_only)
+        boundary = _cursor_values(_row_to_video(rows[-1]), sort, featured=ranked_homepage)
 
     items = collected[:limit]
     has_more = len(collected) > limit
@@ -523,7 +599,7 @@ def list_viral_video_page(
                 platform=platform,
                 sort=sort,
                 data_version=data_version,
-                featured=featured_only,
+                featured=ranked_homepage,
             )
             if has_more and items
             else None

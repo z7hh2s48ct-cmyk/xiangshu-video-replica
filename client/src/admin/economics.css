@@ -445,3 +445,360 @@
     grid-template-columns: 1fr 1fr;
   }
 }
+
+.admin-shell--control .admin-workspace .business-dashboard .business-kpis {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+.admin-shell--control
+  .admin-workspace
+  .business-dashboard
+  .business-kpis
+  article {
+  min-width: 0;
+  padding: 12px 14px;
+  gap: 5px;
+  border-radius: 12px;
+}
+.admin-shell--control
+  .admin-workspace
+  .business-dashboard
+  .business-kpis
+  article
+  strong {
+  font-size: 24px;
+  overflow-wrap: anywhere;
+}
+.admin-shell--control
+  .admin-workspace
+  .business-dashboard
+  .business-kpis
+  article.business-card--warn {
+  border-color: #af8440;
+}
+.admin-shell--control
+  .admin-workspace
+  .business-dashboard
+  .business-kpis
+  article.business-card--warn
+  strong,
+.admin-shell--control
+  .admin-workspace
+  .business-dashboard
+  .business-kpis
+  article.business-card--warn
+  small {
+  color: #e0c17c;
+}
+.business-dashboard {
+  padding: 18px;
+}
+.business-dashboard > .admin-hint {
+  margin-block: 8px;
+}
+.business-trend-panel h3 {
+  margin-block: 14px 8px;
+}
+.business-trend {
+  display: block;
+  width: 100%;
+  height: 130px;
+  overflow: visible;
+}
+.business-trend text {
+  fill: #aaa39a;
+}
+.business-trend__revenue {
+  fill: #c6a45f;
+}
+.business-trend__cost {
+  fill: #77716a;
+}
+.business-trend__margin {
+  fill: #81c296;
+}
+.business-trend__margin-line {
+  stroke: #81c296;
+  fill: none;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+.business-dashboard .metric-help {
+  position: relative;
+  min-height: 0;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: #c6a45f;
+}
+.business-dashboard .metric-help [role="tooltip"] {
+  display: none;
+  position: absolute;
+  z-index: 20;
+  width: 235px;
+  max-width: 65vw;
+  padding: 12px;
+  top: 100%;
+  right: 0;
+  border: 1px solid #68552f;
+  border-radius: 8px;
+  background: #292723;
+  text-align: left;
+  color: #eee8dc;
+  white-space: normal;
+  font-size: 12px;
+  line-height: 1.6;
+  box-shadow: 0 5px 20px #0008;
+}
+.metric-help:hover [role="tooltip"],
+.metric-help:focus-visible [role="tooltip"] {
+  display: block;
+}
+.admin-shell--control
+  .admin-workspace
+  .business-dashboard
+  .business-kpis
+  article:nth-child(4n + 1)
+  .metric-help
+  [role="tooltip"] {
+  left: 0;
+  right: auto;
+}
+.admin-shell--control
+  .admin-workspace
+  .business-dashboard
+  .admin-data-table
+  td {
+  overflow-wrap: anywhere;
+}
+.admin-shell--control .admin-workspace .business-dashboard .table-link-button {
+  white-space: normal;
+  text-align: left;
+}
+.summary-export {
+  margin-block: 18px;
+  padding: 14px;
+  background: #1d1c1a;
+  border: 1px solid #2e2c29;
+  border-radius: 12px;
+}
+.summary-export p {
+  overflow-wrap: anywhere;
+}
+.cost-queues {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-block: 12px;
+}
+.cost-queues button {
+  width: 100%;
+  display: grid;
+  gap: 6px;
+  text-align: left;
+  white-space: normal;
+}
+.funds-month-filter {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+@media (min-width: 960px) and (max-width: 1200px) {
+  .admin-shell--control .admin-workspace .business-dashboard .business-kpis {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .admin-shell--control
+    .admin-workspace
+    .business-dashboard
+    .business-kpis
+    article {
+    padding: 10px;
+  }
+  .admin-shell--control
+    .admin-workspace
+    .business-dashboard
+    .business-kpis
+    article
+    strong {
+    font-size: 21px;
+  }
+}
+@media (max-width: 959px) {
+  .admin-shell--control .admin-workspace .business-dashboard .business-kpis,
+  .cost-queues {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.admin-shell--control
+  .admin-workspace
+  .business-dashboard
+  .billing-economics-filters {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 0;
+  margin: 0 0 8px;
+  border: 0;
+  background: transparent;
+  gap: 12px;
+}
+.admin-shell--control
+  .admin-workspace
+  .business-dashboard
+  .billing-economics-filters
+  label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.admin-shell--control
+  .admin-workspace
+  .business-dashboard
+  .billing-economics-filters
+  select {
+  width: 150px;
+  min-height: 36px;
+}
+.admin-shell--control
+  .admin-workspace
+  .business-dashboard
+  .business-kpis
+  article {
+  min-height: 95px;
+  align-content: start;
+  gap: 6px;
+}
+.admin-shell--control
+  .admin-workspace
+  .business-dashboard
+  .business-kpis
+  article
+  > span {
+  font-size: 12px;
+}
+.admin-shell--control
+  .admin-workspace
+  .business-dashboard
+  .business-kpis
+  article
+  > strong {
+  font-size: 22px;
+  line-height: 1.2;
+}
+.admin-shell--control
+  .admin-workspace
+  .business-dashboard
+  .business-kpis
+  article
+  > small {
+  font-size: 12px;
+  line-height: 1.4;
+}
+.admin-shell--control .admin-workspace .business-dashboard .metric-help {
+  min-height: 0;
+  padding: 0 4px;
+  background: transparent;
+  border: 0;
+}
+.admin-shell--control
+  .admin-workspace
+  .business-dashboard
+  .metric-help
+  [role="tooltip"] {
+  font-size: 12px;
+  line-height: 1.6;
+}
+.admin-shell--control
+  .admin-workspace
+  .business-dashboard
+  .metric-help:hover
+  [role="tooltip"],
+.admin-shell--control
+  .admin-workspace
+  .business-dashboard
+  .metric-help:focus-visible
+  [role="tooltip"] {
+  display: block;
+}
+.admin-shell--control
+  .admin-workspace
+  .business-dashboard
+  .business-trend-panel {
+  margin-block: 5px;
+}
+.admin-shell--control
+  .admin-workspace
+  .business-dashboard
+  .business-trend-panel
+  h3 {
+  margin-block: 0 5px;
+}
+.admin-shell--control
+  .admin-workspace
+  .business-dashboard
+  .business-trend-panel
+  p {
+  margin-block: 5px;
+  font-size: 12px;
+}
+@media (min-width: 960px) and (max-width: 1200px) {
+  .admin-shell--control
+    .admin-workspace
+    .business-dashboard
+    .business-kpis
+    article
+    > strong {
+    font-size: 20px;
+  }
+}
+
+.admin-shell--control .admin-workspace .funds-overview .admin-data-table {
+  min-width: 0;
+  width: 100%;
+  table-layout: fixed;
+}
+.admin-shell--control
+  .admin-workspace
+  .funds-overview
+  .admin-data-table
+  :is(th, td) {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  padding: 12px;
+}
+.admin-shell--control .admin-workspace .funds-overview .economics-kpis button {
+  display: grid;
+  width: 100%;
+  gap: 8px;
+  white-space: normal;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  color: #e0c17c;
+}
+.admin-shell--control
+  .admin-workspace
+  .business-dashboard
+  .metric-help:focus
+  [role="tooltip"] {
+  display: block;
+}
+
+.admin-shell--control .admin-workspace .cost-queues button {
+  background: transparent;
+  color: #e0c17c;
+  border: 1px solid transparent;
+}
+.admin-shell--control
+  .admin-workspace
+  .cost-queues
+  button:is(:hover, :focus-visible) {
+  background: #252219;
+  border-color: #c2a267;
+}
+.admin-shell--control .admin-workspace .cost-queues button strong {
+  color: #f1c875;
+}
+.admin-shell--control .admin-workspace .cost-queues button :is(span, small) {
+  color: #d5c7a4;
+}

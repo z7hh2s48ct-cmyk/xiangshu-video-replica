@@ -6,13 +6,13 @@ import {
   within,
 } from "@testing-library/react";
 import { beforeEach, describe, expect, test, vi } from "vitest";
-import { adminRead, exportBillingReportCsv } from "../api.admin";
+import { adminRead, exportSummaryReportCsv } from "../api.admin";
 import { AnalyticsPage } from "./AnalyticsPage";
 
 vi.mock("../api.admin", () => ({
   adminRead: vi.fn(),
   downloadBillingCsv: vi.fn(),
-  exportBillingReportCsv: vi.fn(),
+  exportSummaryReportCsv: vi.fn(),
 }));
 
 /** 新导航：默认页签是经营看板，计费明细在「成本核对」页签下。 */
@@ -284,86 +284,100 @@ test("customer name search reaches the operations query", async () => {
   });
 });
 
-describe("billing report export", () => {
-  const exportPanel = () =>
-    within(screen.getByRole("region", { name: "计费报表导出" }));
-
+describe("current range summary export", () => {
   beforeEach(() => {
     vi.mocked(adminRead).mockReset();
-    vi.mocked(exportBillingReportCsv).mockReset();
+    vi.mocked(exportSummaryReportCsv).mockReset();
     vi.mocked(adminRead).mockImplementation(
       async () =>
         ({
+          metrics: null,
           services: [],
           totals: {},
           periods: [],
-          basis: "",
           items: [],
           total: 0,
         }) as never,
     );
   });
-
-  test("exports the chosen window as a gzipped report and reports the file name", async () => {
-    vi.mocked(exportBillingReportCsv).mockResolvedValue({
-      filename: "billing_export_20260922_101530.csv.gz",
+  test("exports the dashboard selected month without independent date fields", async () => {
+    vi.mocked(exportSummaryReportCsv).mockResolvedValue({
+      filename: "business_2026-09-01_2026-09-30.csv",
       bytes: 2048,
     });
-    render(<AnalyticsPage />);
-
-    fireEvent.change(screen.getByLabelText("导出开始日期"), {
-      target: { value: "2026-08-01" },
-    });
-    fireEvent.change(screen.getByLabelText("导出结束日期"), {
-      target: { value: "2026-09-22" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "导出计费报表" }));
-
+    render(<AnalyticsPage initialStart="2026-09-01" initialEnd="2026-09-30" />);
+    expect(screen.queryByLabelText("导出开始日期")).toBeNull();
+    fireEvent.click(
+      screen.getByRole("button", { name: "导出当前经营报表 CSV" }),
+    );
     await waitFor(() =>
-      expect(exportBillingReportCsv).toHaveBeenCalledWith({
-        start_date: "2026-08-01",
-        end_date: "2026-09-22",
+      expect(exportSummaryReportCsv).toHaveBeenCalledWith({
+        kind: "business",
+        start_date: "2026-09-01",
+        end_date: "2026-09-30",
       }),
     );
-    expect(await exportPanel().findByRole("status")).toHaveTextContent(
-      "billing_export_20260922_101530.csv.gz",
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "范围 2026-09-01 至 2026-09-30",
     );
   });
-
-  test("blocks a window beyond the server's 90-day cap before any request", async () => {
-    render(<AnalyticsPage />);
-
-    fireEvent.change(screen.getByLabelText("导出开始日期"), {
-      target: { value: "2026-01-01" },
-    });
-    fireEvent.change(screen.getByLabelText("导出结束日期"), {
-      target: { value: "2026-09-22" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "导出计费报表" }));
-
-    expect(await exportPanel().findByRole("alert")).toHaveTextContent(
-      "不能超过 90 天",
+  test("surfaces server export errors and hides export for auditor", async () => {
+    vi.mocked(exportSummaryReportCsv).mockRejectedValue(
+      new Error("导出失败：范围无效"),
     );
-    expect(exportBillingReportCsv).not.toHaveBeenCalled();
-  });
-
-  test("surfaces the server rejection when an export fails", async () => {
-    vi.mocked(exportBillingReportCsv).mockRejectedValue(
-      new Error("导出计费报表失败：Date range cannot exceed 90 days（400）"),
+    const view = render(<AnalyticsPage />);
+    fireEvent.click(
+      screen.getByRole("button", { name: "导出当前经营报表 CSV" }),
     );
-    render(<AnalyticsPage />);
-
-    fireEvent.click(screen.getByRole("button", { name: "导出计费报表" }));
-
-    expect(await exportPanel().findByRole("alert")).toHaveTextContent(
-      "Date range cannot exceed 90 days",
-    );
-  });
-
-  test("hides the export entry from auditor sessions", async () => {
+    expect(await screen.findByRole("alert")).toHaveTextContent("范围无效");
+    view.unmount();
     render(<AnalyticsPage readOnly />);
-
-    await screen.findByRole("region", { name: "经营看板" });
-    expect(screen.queryByRole("region", { name: "计费报表导出" })).toBeNull();
+    expect(
+      screen.queryByRole("region", { name: "当前范围报表导出" }),
+    ).toBeNull();
+  });
+  test("queue counts and click carry exactly the applied dates and customer through tabs", async () => {
+    const urls: string[] = [];
+    vi.mocked(adminRead).mockImplementation(async (url) => {
+      urls.push(url);
+      if (url.includes("catalog")) return { services: [] } as never;
+      if (url.includes("statistics"))
+        return { totals: {}, periods: [] } as never;
+      return { items: [], total: 3 } as never;
+    });
+    render(
+      <AnalyticsPage
+        initialTab="cost"
+        initialStart="2026-09-01"
+        initialEnd="2026-09-30"
+      />,
+    );
+    await screen.findByRole("table", { name: "生成明细" });
+    fireEvent.change(screen.getByLabelText("客户"), {
+      target: { value: "同名公司" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /待结算/ })).not.toBeDisabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /待结算/ }));
+    await waitFor(() =>
+      expect(
+        urls.some((url) => {
+          const p = new URL(url, "http://local").searchParams;
+          return (
+            p.get("limit") === "100" &&
+            p.get("attention") === "pending" &&
+            p.get("start") === "2026-09-01" &&
+            p.get("end") === "2026-09-30" &&
+            p.get("username") === "同名公司"
+          );
+        }),
+      ).toBe(true),
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "采集账单" }));
+    expect(screen.getByLabelText("客户")).toHaveValue("同名公司");
+    fireEvent.click(screen.getByRole("tab", { name: "账务明细" }));
+    expect(screen.getByLabelText("开始日期")).toHaveValue("2026-09-01");
   });
 });

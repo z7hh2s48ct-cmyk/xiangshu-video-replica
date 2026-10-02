@@ -304,11 +304,20 @@ def _admin_session(client: TestClient) -> None:
 @pytest.fixture()
 def route_client(pg_env: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     """真实控制面路由 + 真实 PG，按客户生产形态用 per-operator 会话认证。"""
+    from app.account_admin_routes import router as account_router
     from app.admin_auth_routes import ADMIN_SESSION_HMAC_KEY_ENV
+    from app.admin_runtime_routes import router as runtime_router
     from app.control_routes import router as control_router
+    from app.provider_gateway_routes import router as gateway_router
 
     application = FastAPI()
     application.include_router(control_router)
+    application.include_router(account_router)
+    application.include_router(runtime_router)
+    application.include_router(gateway_router)
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("VIDEO_REPLICA_SETTINGS_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", "true")
     monkeypatch.setenv(ADMIN_SESSION_HMAC_KEY_ENV, TEST_ADMIN_SESSION_KEY)
     monkeypatch.delenv("VIDEO_REPLICA_AUTH_MODE", raising=False)
@@ -376,6 +385,285 @@ def test_calls_route_reports_total_beyond_the_truncation_limit(
     payload = response.json()
     assert payload["total"] == 201
     assert len(payload["items"]) == 200
+    first_ids = {item["call_id"] for item in payload["items"]}
+    last = route_client.get(
+        f"/api/control/generation-records/ANALYSIS/{task_id}/calls?offset=200&limit=50"
+    )
+    assert last.status_code == 200
+    assert last.json()["total"] == 201
+    assert len(last.json()["items"]) == 1
+    assert last.json()["items"][0]["call_id"] not in first_ids
+    beyond = route_client.get(
+        f"/api/control/generation-records/ANALYSIS/{task_id}/calls?offset=250"
+    )
+    assert beyond.json() == {"items": [], "total": 201}
+    invalid = route_client.get(
+        f"/api/control/generation-records/ANALYSIS/{task_id}/calls?offset=-1"
+    )
+    assert invalid.status_code == 422
+
+
+@pytest.mark.parametrize("fill", ["x", "多字节"])
+def test_long_failure_is_redacted_stored_read_and_expired_with_its_object(
+    pg_env: str,
+    monkeypatch: pytest.MonkeyPatch,
+    fill: str,
+) -> None:
+    from app.control_routes import list_generation_record_calls, read_external_call_response
+    from app.storage import FakeStorageAdapter, storage_object_ref_from_uri
+
+    task_id = _seed_failed_analysis(pg_env)
+    storage = FakeStorageAdapter(provider="cos", bucket="diagnostic-test")
+    monkeypatch.setattr("app.media_routes.get_media_storage", lambda conn: storage)
+    monkeypatch.setattr("app.control_routes.storage_for_asset", lambda conn, uri: storage)
+    monkeypatch.setattr("app.media_routes.storage_for_asset", lambda conn, uri: storage)
+    body = json.dumps({"secret": "FAKE-CREDENTIAL-7", "message": fill * 70000 + "尾部证据"})
+    with external_call_context("ANALYSIS", task_id):
+        record_external_call(
+            provider="p",
+            endpoint="test",
+            method="GET",
+            url=None,
+            outcome="PROVIDER_ERROR",
+            response_body=body,
+        )
+    with psycopg.connect(pg_env) as raw:
+        conn = BusinessConnection.postgres(raw)
+        [call] = list_generation_record_calls(conn, _admin(), "ANALYSIS", task_id).items
+        uri, excerpt, truncated = raw.execute(
+            "SELECT response_storage_uri, response_body, response_truncated "
+            "FROM external_call_logs WHERE id = %s",
+            (call.call_id,),
+        ).fetchone()
+        assert uri is not None
+        assert len(excerpt.encode("utf-8")) <= 65536
+        assert truncated is False
+        key = storage_object_ref_from_uri(uri).key
+        stored = storage.get_object(key).decode("utf-8")
+        assert stored.endswith('尾部证据"}')
+        assert "FAKE-CREDENTIAL-7" not in stored
+        response = read_external_call_response(conn, _admin(), call.call_id)
+        assert response.response_body == stored
+        assert response.truncated is False
+        raw.execute(
+            "UPDATE external_call_logs SET created_at = %s WHERE id = %s",
+            ((datetime.now(UTC) - timedelta(days=181)).isoformat(), call.call_id),
+        )
+        assert purge_expired_call_batch(raw, now=datetime.now(UTC)) == 1
+        assert storage.head_object(key) is None
+        assert (
+            raw.execute(
+                "SELECT id FROM external_call_logs WHERE id = %s", (call.call_id,)
+            ).fetchone()
+            is None
+        )
+
+
+def test_long_failure_falls_back_to_pg_full_text_when_storage_is_unavailable(
+    pg_env: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.control_routes import list_generation_record_calls, read_external_call_response
+    from app.storage import StorageBackendUnavailable
+
+    def unavailable(conn: object) -> None:
+        raise StorageBackendUnavailable("fake unavailable")
+
+    monkeypatch.setattr("app.media_routes.get_media_storage", unavailable)
+    task_id = _seed_failed_analysis(pg_env)
+    body = "x" * 70000 + "尾部证据"
+    with external_call_context("ANALYSIS", task_id):
+        record_external_call(
+            provider="p",
+            endpoint="test",
+            method="GET",
+            url=None,
+            outcome="PROVIDER_ERROR",
+            response_body=body,
+        )
+    with psycopg.connect(pg_env) as raw:
+        conn = BusinessConnection.postgres(raw)
+        [call] = list_generation_record_calls(conn, _admin(), "ANALYSIS", task_id).items
+        response = read_external_call_response(conn, _admin(), call.call_id)
+        assert response.response_body == body
+        assert response.truncated is False
+
+
+@pytest.mark.parametrize(
+    "provider, queued, running",
+    [
+        ("p", '{"status":"queued"}', '{"status":"running"}'),
+        ("hifly", '{"data":{"status":1}}', '{"data":{"status":2}}'),
+    ],
+)
+def test_repeated_pending_polls_keep_state_changes_and_final_failure(
+    pg_env: str,
+    provider: str,
+    queued: str,
+    running: str,
+) -> None:
+    from app.control_routes import list_generation_record_calls
+
+    task_id = _seed_failed_analysis(pg_env)
+    with external_call_context("ANALYSIS", task_id, attempt=1):
+        for _ in range(205):
+            record_external_call(
+                provider=provider,
+                endpoint="task/status",
+                method="GET",
+                url="https://fake.test/task",
+                outcome="SUCCEEDED",
+                http_status=200,
+                response_body=queued,
+            )
+        record_external_call(
+            provider=provider,
+            endpoint="task/status",
+            method="GET",
+            url="https://fake.test/task",
+            outcome="SUCCEEDED",
+            http_status=200,
+            response_body=running,
+        )
+        record_external_call(
+            provider=provider,
+            endpoint="task/status",
+            method="GET",
+            url="https://fake.test/task",
+            outcome="PROVIDER_ERROR",
+            http_status=200,
+            response_body='{"status":"failed","message":"最终失败原话"}',
+        )
+    with psycopg.connect(pg_env) as raw:
+        calls = list_generation_record_calls(
+            BusinessConnection.postgres(raw), _admin(), "ANALYSIS", task_id
+        )
+        assert calls.total == 3
+        assert calls.items[0].poll_count == 205
+        assert calls.items[0].last_seen_at is not None
+        assert calls.items[-1].outcome == "PROVIDER_ERROR"
+        assert calls.items[-1].provider_message == "最终失败原话"
+
+
+def test_orphan_object_is_removed_after_insert_failure_and_deferred_delete_can_retry(
+    pg_env: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.external_calls import resolve_pending_response_objects
+    from app.storage import (
+        FakeStorageAdapter,
+        StorageBackendUnavailable,
+        storage_object_ref_from_uri,
+    )
+
+    storage = FakeStorageAdapter(provider="cos", bucket="diagnostic-test", key_prefix="private")
+    monkeypatch.setattr("app.media_routes.get_media_storage", lambda conn: storage)
+    monkeypatch.setattr("app.media_routes.storage_for_asset", lambda conn, uri: storage)
+    real_delete = storage.delete_object
+    deleted: list[str] = []
+
+    def tracked_delete(key: str, *, actor_id: str | None = None) -> None:
+        deleted.append(key)
+        real_delete(key, actor_id=actor_id)
+
+    monkeypatch.setattr(storage, "delete_object", tracked_delete)
+    # endpoint 的 NOT NULL 约束模拟对象已写入但日志 SQL 拒绝，未触发真实外部服务。
+    record_external_call(
+        provider="p",
+        endpoint=None,
+        method="GET",
+        url=None,
+        outcome="PROVIDER_ERROR",
+        response_body="x" * 70000,
+    )
+    assert len(deleted) == 1
+    assert storage.head_object(deleted[0]) is None
+
+    def unavailable(key: str, *, actor_id: str | None = None) -> None:
+        raise StorageBackendUnavailable("fake unavailable")
+
+    monkeypatch.setattr(storage, "delete_object", unavailable)
+    record_external_call(
+        provider="p",
+        endpoint=None,
+        method="GET",
+        url=None,
+        outcome="PROVIDER_ERROR",
+        response_body="x" * 70000,
+    )
+    with psycopg.connect(pg_env) as raw:
+        pending = raw.execute(
+            "SELECT call_id, storage_uri FROM external_call_response_pending"
+        ).fetchall()
+        assert len(pending) == 1
+        call_id, uri = pending[0]
+        key = storage_object_ref_from_uri(uri).key
+        assert storage.head_object(key) is not None
+        monkeypatch.setattr(storage, "delete_object", real_delete)
+        # 活跃写入持锁时跳过，不能误删暂停中的写入。
+        with psycopg.connect(pg_env) as active:
+            active.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"external-response:{call_id}",),
+            )
+            assert (
+                resolve_pending_response_objects(raw, now=datetime.now(UTC) + timedelta(hours=2))
+                == 0
+            )
+            assert storage.head_object(key) is not None
+        assert (
+            resolve_pending_response_objects(raw, now=datetime.now(UTC) + timedelta(hours=4)) == 1
+        )
+        assert storage.head_object(key) is None
+
+
+def test_historical_response_reports_unknown_completeness(pg_env: str) -> None:
+    from app.control_routes import read_external_call_response
+
+    _seed_failed_analysis(pg_env)
+    call_id = str(uuid.uuid4())
+    with psycopg.connect(pg_env) as raw:
+        raw.execute(
+            "INSERT INTO external_call_logs (id, provider, endpoint_name, response_body) "
+            "VALUES (%s, 'p', 'legacy', 'legacy excerpt')",
+            (call_id,),
+        )
+        response = read_external_call_response(BusinessConnection.postgres(raw), _admin(), call_id)
+        assert response.truncated is None
+
+
+def test_purge_storage_failure_does_not_starve_later_database_only_rows(
+    pg_env: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.storage import StorageBackendUnavailable
+
+    def unavailable(conn: object, uri: str) -> None:
+        raise StorageBackendUnavailable("fake unavailable")
+
+    monkeypatch.setattr("app.media_routes.storage_for_asset", unavailable)
+    ids = [str(uuid.uuid4()) for _ in range(3)]
+    now = datetime.now(UTC)
+    with psycopg.connect(pg_env) as raw:
+        for i, call_id in enumerate(ids):
+            raw.execute(
+                "INSERT INTO external_call_logs "
+                "(id, provider, endpoint_name, outcome, created_at, response_storage_uri) "
+                "VALUES (%s, 'p', 'fake', 'PROVIDER_ERROR', %s, %s)",
+                (
+                    call_id,
+                    (now - timedelta(days=200 - i)).isoformat(),
+                    f"cos://fake/{call_id}.txt" if i < 2 else None,
+                ),
+            )
+        assert purge_expired_call_batch(raw, now=now, batch_size=2) == 0
+        assert count_expired_calls(raw, now=now, ready_only=True) == 1
+        assert purge_expired_call_batch(raw, now=now, batch_size=2) == 1
+        assert (
+            raw.execute("SELECT id FROM external_call_logs WHERE id = %s", (ids[2],)).fetchone()
+            is None
+        )
+        raw.execute("DELETE FROM external_call_logs WHERE id = ANY(%s)", (ids,))
 
 
 def test_calls_route_reads_recharge_order_probe_log(route_client: TestClient) -> None:
@@ -702,3 +990,686 @@ def test_purge_cli_dry_run_changes_nothing_and_real_run_deletes_only_expired(
     # 再跑一遍：没有可删的行，输出仍只有计数。
     assert purge_main(["--database-url", pg_env]) == 0
     assert "purged 0 external call log row(s)" in capsys.readouterr().out
+
+
+def test_orphan_cleanup_failure_does_not_starve_later_deletable_object(
+    pg_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.external_calls import resolve_pending_response_objects
+    from app.storage import FakeStorageAdapter, StorageBackendUnavailable
+
+    fake = FakeStorageAdapter(provider="cos", bucket="orphan-fairness")
+    ids = [str(uuid.uuid4()) for _ in range(3)]
+    real_delete = fake.delete_object
+    attempted: list[str] = []
+
+    def selective_delete(key: str, *, actor_id: str | None = None) -> None:
+        attempted.append(key)
+        if key in ids[:2]:
+            raise StorageBackendUnavailable("fictional deletion unavailable")
+        real_delete(key, actor_id=actor_id)
+
+    monkeypatch.setattr(fake, "delete_object", selective_delete)
+    monkeypatch.setattr("app.media_routes.storage_for_asset", lambda conn, uri: fake)
+    now = datetime.now(UTC)
+    with psycopg.connect(pg_env, autocommit=True) as raw:
+        raw.execute("DELETE FROM external_call_response_pending")
+        for i, call_id in enumerate(ids):
+            uri = fake.put_object(call_id, b"fake", content_type="text/plain").uri
+            raw.execute(
+                "INSERT INTO external_call_response_pending (call_id,storage_uri,created_at) "
+                "VALUES (%s,%s,%s)",
+                (call_id, uri, now - timedelta(hours=5 - i)),
+            )
+        assert resolve_pending_response_objects(raw, now=now, batch_size=2) == 0
+        assert resolve_pending_response_objects(raw, now=now, batch_size=2) == 1
+        assert attempted == ids
+        assert fake.head_object(ids[2]) is None
+        assert raw.execute("SELECT count(*) FROM external_call_response_pending").fetchone()[0] == 2
+        assert resolve_pending_response_objects(raw, now=now, batch_size=2) == 0
+        monkeypatch.setattr(fake, "delete_object", real_delete)
+        assert resolve_pending_response_objects(raw, now=now + timedelta(hours=2)) == 2
+
+
+@pytest.mark.parametrize("actor_id", ["admin_u", "auditor_u"])
+def test_technical_routes_reject_non_super_admin_sessions(
+    route_client: TestClient, pg_env: str, actor_id: str
+) -> None:
+    _seed_failed_analysis(pg_env)
+    with psycopg.connect(pg_env) as raw:
+        raw.execute("UPDATE users SET is_super_admin=0 WHERE id = %s", (actor_id,))
+    login = password_admin_session(route_client, actor_id)
+    from app.admin_auth_routes import ADMIN_CSRF_HEADER, ADMIN_SESSION_COOKIE
+
+    headers = {
+        ADMIN_CSRF_HEADER: login.json()["csrf_token"],
+        "Cookie": f"{ADMIN_SESSION_COOKIE}={route_client.cookies.get(ADMIN_SESSION_COOKIE)}",
+    }
+    routes = [
+        ("GET", "/api/control/settings"),
+        ("PUT", "/api/control/settings/providers/metaso"),
+        ("POST", "/api/control/settings/providers/metaso/connection-test"),
+        ("POST", "/api/control/settings/providers/metaso/paid-test"),
+        ("PATCH", "/api/control/settings/runtime"),
+        ("GET", "/api/control/settings/h3-accounts"),
+        ("PUT", "/api/control/settings/h3-accounts/fake"),
+        ("GET", "/api/control/settings/queue-mode"),
+        ("PATCH", "/api/control/settings/queue-mode"),
+        ("GET", "/api/admin/providers/list"),
+        ("GET", "/api/admin/providers/metaso/status"),
+        ("POST", "/api/admin/providers/metaso/switch"),
+        ("GET", "/api/admin/providers/metaso/usage-history"),
+        ("POST", "/api/admin/providers/test-connection"),
+        ("GET", "/api/control/external-calls"),
+    ]
+    for method, path in routes:
+        result = route_client.request(
+            method, path, headers=headers, json={} if method != "GET" else None
+        )
+        assert result.status_code == 403, (method, path, result.status_code, result.text)
+    # 资金、采集仍属于运营权限，没有连带禁止普通管理员/审计员读概要。
+    for path in (
+        "/api/control/recharge-orders",
+        "/api/control/settings/customer-payments",
+        "/api/control/settings/viral",
+    ):
+        assert route_client.get(path).status_code == 200
+
+
+def test_global_calls_super_admin_filters_paging_metrics_and_audited_response(
+    route_client: TestClient, pg_env: str
+) -> None:
+    from app.admin_auth_routes import ADMIN_CSRF_HEADER
+
+    task_id = _seed_failed_analysis(pg_env)
+    provider = "fake-global-" + uuid.uuid4().hex[:8]
+    with external_call_context("ANALYSIS", task_id, attempt=1):
+        for latency in (100, 200):
+            record_external_call(
+                provider=provider,
+                endpoint="fake/status",
+                method="GET",
+                url=None,
+                outcome="SUCCEEDED",
+                response_body='{"status":"queued"}',
+                latency_ms=latency,
+            )
+        record_external_call(
+            provider=provider,
+            endpoint="fake/status",
+            method="GET",
+            url=None,
+            outcome="PROVIDER_ERROR",
+            response_body='{"error":{"message":"原始失败"}}',
+            latency_ms=300,
+            provider_task_id="fake-third-task",
+        )
+    with psycopg.connect(pg_env) as raw:
+        raw.execute("UPDATE users SET is_super_admin=1 WHERE id='admin_u'")
+        raw.execute(
+            "UPDATE external_call_logs SET provider_request_id='fake-third-request' "
+            "WHERE task_id=%s AND outcome='PROVIDER_ERROR'",
+            (task_id,),
+        )
+        raw.execute(
+            "INSERT INTO external_call_observations(id,provider,outcome,latency_ms,created_at) "
+            "VALUES (%s,%s,'TIMEOUT',9000,now()-interval '25 hours')",
+            (str(uuid.uuid4()), provider),
+        )
+    login = password_admin_session(route_client, "admin_u")
+    assert login.status_code == 201
+    assert route_client.get("/api/control/settings").status_code == 200
+    assert route_client.get("/api/control/settings/h3-accounts").status_code == 200
+    assert route_client.get("/api/control/settings/queue-mode").status_code == 200
+    listed = route_client.get(
+        "/api/control/external-calls", params={"provider": provider, "limit": 1}
+    )
+    assert listed.status_code == 200, listed.text
+    data = listed.json()
+    assert data["total"] == 2 and len(data["items"]) == 1
+    assert listed.headers["cache-control"] == "no-store"
+    metric = next(m for m in data["metrics"] if m["provider"] == provider)
+    assert metric["total"] == 3 and metric["failed"] == 1
+    assert metric["failure_rate_pct"] == pytest.approx(100 / 3)
+    assert metric["avg_latency_ms"] == 200 and metric["latency_samples"] == 3
+    page2 = route_client.get(
+        "/api/control/external-calls", params={"provider": provider, "limit": 1, "offset": 1}
+    ).json()
+    assert page2["items"][0]["call"]["call_id"] != data["items"][0]["call"]["call_id"]
+    for ref in (task_id, task_id[:8], "fake-third-task", "fake-third-request"):
+        found = route_client.get(
+            "/api/control/external-calls", params={"provider": provider, "task_ref": ref}
+        ).json()
+        assert found["total"] >= 1
+        assert all(item["task_id"] == task_id for item in found["items"])
+    failed = route_client.get(
+        "/api/control/external-calls",
+        params={"provider": provider, "endpoint": "fake/status", "outcome": "PROVIDER_ERROR"},
+    ).json()
+    assert failed["total"] == 1
+    call_id = failed["items"][0]["call"]["call_id"]
+    assert route_client.get(f"/api/control/external-calls/{call_id}/response").status_code == 200
+    assert (
+        route_client.get(
+            "/api/control/external-calls", params={"created_from": "2099-01-01"}
+        ).json()["total"]
+        == 0
+    )
+    assert (
+        route_client.get(
+            "/api/control/external-calls", params={"created_from": "invalid"}
+        ).status_code
+        == 422
+    )
+    assert (
+        route_client.get(
+            "/api/control/external-calls",
+            params={"created_from": "2026-10-02", "created_to": "2026-10-01"},
+        ).status_code
+        == 422
+    )
+    # 已登录超管仍必须带 CSRF，不能因标记绕过写保护。
+    assert (
+        route_client.patch(
+            "/api/control/settings/queue-mode",
+            json={"fair_queue_enabled": False, "confirm": True, "reason": "fake"},
+        ).status_code
+        == 403
+    )
+    headers = {ADMIN_CSRF_HEADER: login.json()["csrf_token"], "Idempotency-Key": str(uuid.uuid4())}
+    written = route_client.patch(
+        "/api/control/settings/queue-mode",
+        headers=headers,
+        json={"fair_queue_enabled": False, "confirm": True, "reason": "隔离验证超管写入"},
+    )
+    assert written.status_code == 200, written.text
+    with psycopg.connect(pg_env) as raw:
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM audit_logs WHERE action='external_call.response_view' "
+                "AND entity_id=%s",
+                (call_id,),
+            ).fetchone()[0]
+            == 1
+        )
+        raw.execute("UPDATE users SET is_super_admin=0 WHERE id='admin_u'")
+
+
+@pytest.mark.parametrize(
+    "actor_id, super_admin", [("admin_u", False), ("auditor_u", False), ("admin_u", True)]
+)
+def test_legacy_technical_settings_cannot_bypass_super_admin_flag(
+    route_client: TestClient, pg_env: str, actor_id: str, super_admin: bool
+) -> None:
+    from app.auth import get_current_user
+    from app.settings_routes import router as legacy_router
+
+    _seed_failed_analysis(pg_env)
+    with psycopg.connect(pg_env) as raw:
+        raw.execute("UPDATE users SET is_super_admin=%s WHERE id=%s", (int(super_admin), actor_id))
+    route_client.app.include_router(legacy_router)
+    # 旧身份层用明确的测试替身；技术权限仍读取真实隔离PG，不覆盖权限依赖。
+    route_client.app.dependency_overrides[get_current_user] = (
+        _admin if actor_id == "admin_u" else _auditor
+    )
+    routes = [
+        ("GET", "/api/admin/settings", None),
+        ("PUT", "/api/admin/settings/providers/metaso", {"config": {}}),
+        ("POST", "/api/admin/settings/providers/metaso/secrets/api_key/reveal", None),
+        (
+            "PATCH",
+            "/api/admin/settings/runtime",
+            {"max_generation_count_per_batch": 4, "max_concurrent_h3_tasks": 2},
+        ),
+        ("POST", "/api/admin/settings/providers/metaso/connection-test", None),
+        ("POST", "/api/admin/settings/providers/metaso/paid-test", None),
+        ("POST", "/api/admin/settings/diagnostic-test", None),
+        ("GET", "/api/admin/settings/diagnostic-reports/fake/download", None),
+    ]
+    # 禁止真实探针。这里仅验证拒绝侧及读取侧，允许侧付费测试由既有假探针验证。
+    for method, path, body in routes if not super_admin else routes[:1]:
+        result = route_client.request(method, path, json=body)
+        assert result.status_code == (200 if super_admin else 403), (path, result.text)
+    if super_admin:
+        from app.settings import SettingsRepository
+
+        with psycopg.connect(pg_env) as raw:
+            SettingsRepository(BusinessConnection.postgres(raw)).save_provider_config(
+                "metaso", {"api_key": "FICTIONAL-REVEAL-VALUE"}, actor_user_id="admin_u"
+            )
+        result = route_client.post("/api/admin/settings/providers/metaso/secrets/api_key/reveal")
+        assert result.status_code == 200, result.text
+        assert result.json()["value"] == "FICTIONAL-REVEAL-VALUE"
+        assert result.headers["cache-control"] == "no-store"
+        with psycopg.connect(pg_env) as raw:
+            metadata = raw.execute(
+                "SELECT metadata_json FROM audit_logs "
+                "WHERE action='provider_settings.secret_reveal' AND actor_user_id='admin_u'"
+            ).fetchall()
+        assert metadata and all("FICTIONAL-REVEAL-VALUE" not in str(row) for row in metadata)
+    route_client.app.dependency_overrides.clear()
+    with psycopg.connect(pg_env) as raw:
+        raw.execute("UPDATE users SET is_super_admin=0 WHERE id=%s", (actor_id,))
+
+
+def test_response_cleanup_gate_keeps_shared_content_references(
+    pg_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import Mock
+
+    from app.external_calls import _resolve_pending_response_object
+
+    fake_storage = Mock()
+    monkeypatch.setattr("app.media_routes.storage_for_asset", lambda conn, uri: fake_storage)
+    call_id, pending_id = str(uuid.uuid4()), str(uuid.uuid4())
+    now = datetime.now(UTC)
+    with psycopg.connect(pg_env) as raw:
+        raw.execute(
+            "INSERT INTO external_call_logs "
+            "(id,provider,endpoint_name,outcome,created_at,response_storage_uri) "
+            "VALUES(%s,'p','gate-test','PROVIDER_ERROR','1900-01-01T00:00:00+00:00',%s)",
+            (call_id, "local://fake/content/protected-response.txt"),
+        )
+        raw.execute(
+            "INSERT INTO external_call_response_pending(call_id,storage_uri) VALUES(%s,%s)",
+            (pending_id, "local://fake/content/protected-pending.txt"),
+        )
+        try:
+            assert purge_expired_call_batch(raw, now=now, batch_size=1) == 0
+            remaining = raw.execute(
+                "SELECT response_storage_uri,cleanup_retry_at FROM external_call_logs WHERE id=%s",
+                (call_id,),
+            ).fetchone()
+            assert remaining is not None
+            assert remaining[0] == "local://fake/content/protected-response.txt"
+            assert datetime.fromisoformat(str(remaining[1])) == now + timedelta(hours=1)
+            assert _resolve_pending_response_object(raw, pending_id) is False
+            pending = raw.execute(
+                "SELECT storage_uri FROM external_call_response_pending WHERE call_id=%s",
+                (pending_id,),
+            ).fetchone()
+            assert (
+                pending is not None and pending[0] == "local://fake/content/protected-pending.txt"
+            )
+            fake_storage.delete_object.assert_not_called()
+        finally:
+            raw.execute("DELETE FROM external_call_logs WHERE id=%s", (call_id,))
+            raw.execute(
+                "DELETE FROM external_call_response_pending WHERE call_id=%s", (pending_id,)
+            )
+
+
+def test_short_reference_collision_and_ambiguous_legacy_prefix(pg_env: str) -> None:
+    from app.control_routes import _task_ref_filter
+
+    suffix = uuid.uuid4().hex
+    target = f"collision-{suffix}"
+    with psycopg.connect(pg_env) as raw:
+        candidate = raw.execute(
+            "SELECT upper(substr(md5(%s),1,8))", (f"VIDEO:{target}:0",)
+        ).fetchone()[0]
+        raw.execute(
+            "INSERT INTO task_diagnostic_refs(task_type,task_id,short_ref,request_id,"
+            "root_task_id) VALUES('VIDEO',%s,%s,'synthetic-root',%s)",
+            (f"occupied-{suffix}", candidate, f"occupied-{suffix}"),
+        )
+        raw.execute("SELECT register_task_diagnostic_ref('VIDEO',%s,'{}')", (target,))
+        conn = BusinessConnection.postgres(raw)
+        assigned = raw.execute(
+            "SELECT short_ref FROM task_diagnostic_refs WHERE task_id=%s", (target,)
+        ).fetchone()[0]
+        assert len(assigned) == 8 and assigned != candidate
+        assert _task_ref_filter(conn, assigned.lower()).ids == (target,)
+        for number in (1, 2):
+            raw.execute(
+                "SELECT register_task_diagnostic_ref('VIDEO',%s,'{}')",
+                (f"abcdef12-{suffix}-{number}",),
+            )
+        with pytest.raises(HTTPException) as error:
+            _task_ref_filter(conn, "abcdef12")
+        assert error.value.status_code == 409
+
+
+def test_enqueue_worker_retry_audit_and_service_log_share_a_stable_trace(
+    pg_env: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    from app.db_pg import pg_transaction
+    from app.ops_metrics import bind_request_context, current_request_context
+    from app.permissions import write_audit
+
+    seed = _seed_failed_analysis(pg_env)
+    task = str(uuid.uuid4())
+    request_id = "synthetic-enqueue-" + uuid.uuid4().hex
+    with bind_request_context(request_id=request_id, method="POST", route="/synthetic/queue"):
+        with pg_transaction() as raw:
+            raw.execute(
+                "INSERT INTO analysis_tasks(id,project_id,asset_id,created_by_user_id"
+                ",duration_seconds,status) SELECT %s,project_id,asset_id,created_by_u"
+                "ser_id,duration_seconds,'FAILED' FROM analysis_tasks WHERE id=%s",
+                (task, seed),
+            )
+            write_audit(
+                BusinessConnection.postgres(raw),
+                actor=_admin(),
+                action="synthetic.task.queued",
+                entity_type="analysis_task",
+                entity_id=task,
+                commit=False,
+            )
+    caplog.set_level(logging.INFO, logger="app.external_calls")
+    for attempt in (1, 2):
+        with external_call_context("ANALYSIS", task, attempt=attempt):
+            assert current_request_context().request_id == request_id
+            record_external_call(
+                provider="apilio_gemini",
+                endpoint="synthetic/poll",
+                method="GET",
+                url=None,
+                outcome="TIMEOUT",
+                exception_type="TimeoutError",
+                latency_ms=20,
+            )
+            with pg_transaction() as raw:
+                write_audit(
+                    BusinessConnection.postgres(raw),
+                    actor=_admin(),
+                    action="synthetic.task.retry",
+                    entity_type="analysis_task",
+                    entity_id=task,
+                    commit=False,
+                )
+    assert current_request_context() is None
+    with psycopg.connect(pg_env) as raw:
+        rows = raw.execute(
+            "SELECT request_id,attempt,exception_type FROM external_call_logs WHERE t"
+            "ask_id=%s ORDER BY attempt",
+            (task,),
+        ).fetchall()
+        assert rows == [(request_id, 1, "TimeoutError"), (request_id, 2, "TimeoutError")]
+        metadata = raw.execute(
+            "SELECT metadata_json FROM audit_logs WHERE entity_id=%s", (task,)
+        ).fetchall()
+        assert len(metadata) == 3
+        assert all(
+            json.loads(row[0])["trace_request_id"] == request_id
+            and json.loads(row[0])["request_id"] == request_id
+            for row in metadata
+        )
+    traced = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "app.external_calls" and record.message.startswith("{")
+    ]
+    assert len(traced) == 4 and all(
+        item["request_id"] == request_id and item["task_id"] == task for item in traced
+    )
+
+
+def test_two_replacements_keep_three_vendor_ids_and_global_calls_in_one_history(
+    pg_env: str,
+) -> None:
+    from fastapi import Response
+
+    from app.control_routes import (
+        _task_ref_filter,
+        list_generation_record_calls,
+        list_global_external_calls,
+    )
+
+    root, _ = _seed_video_with_thumbnail(pg_env)
+    ids = [root, str(uuid.uuid4()), str(uuid.uuid4())]
+    with psycopg.connect(pg_env) as raw:
+        for previous, current in zip(ids, ids[1:], strict=False):
+            raw.execute(
+                "INSERT INTO generation_tasks(id,batch_id,generation_mode,provider,mo"
+                "del,status,retry_of_task_id,created_at_utc) SELECT %s,batch_id,gener"
+                "ation_mode,provider,model,'FAILED',%s,now() FROM generation_tasks WH"
+                "ERE id=%s",
+                (current, previous, previous),
+            )
+    vendors = [f"synthetic-vendor-{uuid.uuid4().hex}" for _ in ids]
+    for attempt, (task, vendor) in enumerate(zip(ids, vendors, strict=True), 1):
+        with external_call_context("VIDEO", task, attempt=attempt):
+            record_external_call(
+                provider="metaso",
+                endpoint="synthetic/submit",
+                method="POST",
+                url=None,
+                outcome="PROVIDER_ERROR",
+                provider_task_id=vendor,
+                response_body='{"code":"SYNTHETIC_UNMAPPED","message":"synthetic reason"}',
+            )
+    with psycopg.connect(pg_env) as raw:
+        conn = BusinessConnection.postgres(raw)
+        refs = raw.execute(
+            "SELECT short_ref,root_task_id,request_id FROM task_diagnostic_refs WHERE"
+            " task_id=ANY(%s)",
+            (ids,),
+        ).fetchall()
+        assert len({row[0] for row in refs}) == 3
+        assert {row[1] for row in refs} == {root}
+        assert len({row[2] for row in refs}) == 1
+        for ref in [*ids, *vendors, *(row[0] for row in refs)]:
+            assert set(_task_ref_filter(conn, ref).ids) >= set(ids)
+        calls = list_generation_record_calls(conn, _admin(), "VIDEO", ids[-1], limit=200, offset=0)
+        assert calls.total == 3 and {call.provider_task_id for call in calls.items} == set(vendors)
+        page = list_global_external_calls(
+            conn,
+            _admin(),
+            Response(),
+            provider=None,
+            endpoint=None,
+            outcome=None,
+            task_ref=vendors[0],
+            created_from=None,
+            created_to=None,
+            limit=50,
+            offset=0,
+        )
+        assert page.total == 3
+
+
+def test_cross_provider_same_vendor_reference_requires_provider_qualification(pg_env: str) -> None:
+    from app.control_routes import _task_ref_filter
+
+    first = _seed_failed_analysis(pg_env)
+    second = _seed_failed_analysis(pg_env)
+    vendor = "shared-synthetic-" + uuid.uuid4().hex
+    for provider, task in [("provider-a", first), ("provider-b", second)]:
+        with external_call_context("ANALYSIS", task):
+            record_external_call(
+                provider=provider,
+                endpoint="synthetic/submit",
+                method="POST",
+                url=None,
+                outcome="SUCCEEDED",
+                provider_task_id=vendor,
+            )
+    with psycopg.connect(pg_env) as raw:
+        conn = BusinessConnection.postgres(raw)
+        with pytest.raises(HTTPException) as error:
+            _task_ref_filter(conn, vendor)
+        assert error.value.status_code == 409
+        assert _task_ref_filter(conn, "provider-a:" + vendor).ids == (first,)
+        assert _task_ref_filter(conn, "provider-b:" + vendor).ids == (second,)
+
+
+def test_same_internal_code_different_actual_reasons_do_not_merge(pg_env: str) -> None:
+    from app.control_routes import TaskRefFilter, _generation_failure_reasons
+
+    ids = [_seed_video_with_thumbnail(pg_env)[0] for _ in range(3)]
+    with psycopg.connect(pg_env) as raw:
+        raw.execute(
+            "UPDATE generation_tasks SET status='FAILED',error_code='PROVIDER_TERMINA"
+            "L' WHERE id=ANY(%s)",
+            (ids,),
+        )
+    for task, reason in zip(
+        ids, ["synthetic cause A", "synthetic cause B", "synthetic cause A"], strict=True
+    ):
+        with external_call_context("VIDEO", task):
+            record_external_call(
+                provider="metaso",
+                endpoint="synthetic/poll",
+                method="GET",
+                url=None,
+                outcome="PROVIDER_ERROR",
+                response_body=json.dumps({"status": "failed", "message": reason}),
+            )
+    with psycopg.connect(pg_env) as raw:
+        items = _generation_failure_reasons(
+            BusinessConnection.postgres(raw),
+            username=None,
+            status=None,
+            record_type=None,
+            failure_phase=None,
+            created_from=None,
+            created_to=None,
+            task_ref=TaskRefFilter(ids=tuple(ids), prefix=None),
+        )
+    assert {(item.reason, item.count) for item in items} == {
+        ("synthetic cause A", 2),
+        ("synthetic cause B", 1),
+    }
+
+
+def test_long_request_body_permissions_and_pending_provider_namespace(
+    route_client: TestClient, pg_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.failure_runbook import FailureExplanation
+    from app.provider_failure_runbook import PROVIDER_FAILURE_MAPPINGS, ProviderFailureMapping
+
+    task = _seed_failed_analysis(pg_env)
+    code = "SYNTHETIC_" + uuid.uuid4().hex
+    prompt = "synthetic long prompt " * 700 + "TAIL-MARKER"
+    for provider in ("synthetic-provider-a", "synthetic-provider-b"):
+        with external_call_context("ANALYSIS", task):
+            record_external_call(
+                provider=provider,
+                endpoint="synthetic/prompt",
+                method="POST",
+                url="https://api.synthetic.test/submit?prompt=TAIL-MARKER&sig=FICTIONAL-SIGNATURE",
+                outcome="PROVIDER_ERROR",
+                request_summary={"prompt": prompt},
+                response_body=json.dumps({"code": code, "message": prompt}),
+            )
+    _admin_session(route_client)
+    calls = route_client.get(f"/api/control/generation-records/ANALYSIS/{task}/calls")
+    assert calls.status_code == 200 and all(
+        item["request_summary"]["prompt"].endswith("TAIL-MARKER") for item in calls.json()["items"]
+    )
+    pending = route_client.get("/api/control/provider-errors/pending").json()
+    assert {item["provider"] for item in pending if item["error_code"] == code} == {
+        "synthetic-provider-a",
+        "synthetic-provider-b",
+    }
+    monkeypatch.setitem(
+        PROVIDER_FAILURE_MAPPINGS,
+        ("synthetic-provider-a", code.casefold()),
+        ProviderFailureMapping(
+            FailureExplanation(category="CONFIG", owner="ENGINEERING", advice="合成映射验证。"),
+            "synthetic-revision",
+            "synthetic-contract",
+        ),
+    )
+    mapped = route_client.get(f"/api/control/generation-records/ANALYSIS/{task}/calls").json()[
+        "items"
+    ]
+    assert (
+        mapped[0]["failure_category"] == "CONFIG"
+        and mapped[0]["mapping_revision"] == "synthetic-revision"
+    )
+    assert mapped[1]["failure_category"] == "UNCLASSIFIED"
+    pending = route_client.get("/api/control/provider-errors/pending").json()
+    assert {item["provider"] for item in pending if item["error_code"] == code} == {
+        "synthetic-provider-b"
+    }
+    response = password_admin_session(route_client, "auditor_u")
+    assert response.status_code == 201
+    auditor = route_client.get(f"/api/control/generation-records/ANALYSIS/{task}/calls")
+    assert "TAIL-MARKER" not in auditor.text
+    for item in auditor.json()["items"]:
+        assert (
+            item["request_summary"] is None
+            and item["provider_message"] is None
+            and item["error_message"] is None
+        )
+        assert (
+            route_client.get(f"/api/control/external-calls/{item['call_id']}/response").status_code
+            == 403
+        )
+
+
+def test_task_reference_customer_ownership_and_only_safe_field(pg_env: str) -> None:
+    from fastapi import Response
+
+    from app.task_diagnostic_routes import customer_task_reference
+
+    task = _seed_failed_analysis(pg_env)
+    with psycopg.connect(pg_env) as raw:
+        conn = BusinessConnection.postgres(raw)
+        owner = raw.execute(
+            "SELECT created_by_user_id FROM analysis_tasks WHERE id=%s", (task,)
+        ).fetchone()[0]
+        actor = CurrentUser(
+            id=owner, username="synthetic", display_name="合成客户", role="customer"
+        )
+        assert list(
+            customer_task_reference(conn, actor, Response(), "ANALYSIS", task).model_dump()
+        ) == ["short_ref"]
+        stranger = CurrentUser(
+            id="unrelated-customer", username="synthetic", display_name="合成客户", role="customer"
+        )
+        with pytest.raises(HTTPException) as error:
+            customer_task_reference(conn, stranger, Response(), "ANALYSIS", task)
+        assert error.value.status_code == 404
+
+
+def test_diagnostic_migrations_upgrade_downgrade_and_restore(pg_env: str) -> None:
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+
+    close_pg_pool()
+    with psycopg.connect(pg_env) as raw:
+        original_count = raw.execute("SELECT count(*) FROM external_call_logs").fetchone()[0]
+        assert raw.execute(
+            "SELECT indexdef FROM pg_indexes WHERE indexname='external_call_provider_outcome_idx'"
+        ).fetchone()
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM pg_trigger WHERE tgname='capture_task_diagnostic_ref'"
+            ).fetchone()[0]
+            == 9
+        )
+    server = Path(__file__).resolve().parent.parent
+    config = Config(str(server / "alembic.ini"))
+    config.set_main_option("script_location", str(server / "migrations"))
+    config.set_main_option(
+        "sqlalchemy.url", pg_env.replace("postgresql://", "postgresql+psycopg://")
+    )
+    try:
+        command.downgrade(config, "20261002T0430_payment_methods")
+        with psycopg.connect(pg_env) as raw:
+            assert raw.execute("SELECT to_regclass('task_diagnostic_refs')").fetchone()[0] is None
+            assert (
+                raw.execute(
+                    "SELECT count(*) FROM information_schema.columns WHERE table_name"
+                    "='external_call_logs' AND column_name='exception_type'"
+                ).fetchone()[0]
+                == 0
+            )
+            assert (
+                raw.execute("SELECT count(*) FROM external_call_logs").fetchone()[0]
+                == original_count
+            )
+    finally:
+        command.upgrade(config, "head")
+    with psycopg.connect(pg_env) as raw:
+        assert raw.execute("SELECT to_regclass('task_diagnostic_refs')").fetchone()[0]
+        assert (
+            raw.execute("SELECT count(*) FROM external_call_logs").fetchone()[0] == original_count
+        )

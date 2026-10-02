@@ -42,6 +42,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -3556,7 +3557,9 @@ def test_oral_manual_billing_reconciliation_is_admin_only_audited_and_idempotent
         (release_task.task_id,),
     )
     assert audit is not None
-    assert json.loads(str(audit["metadata_json"])) == {
+    metadata = json.loads(str(audit["metadata_json"]))
+    assert uuid.UUID(metadata.pop("request_id"))
+    assert metadata == {
         "evidence_asset_id": "evidence-release",
         "evidence_sha256": "a" * 64,
         "provider_charge_state": "NOT_CHARGED",
@@ -3564,6 +3567,8 @@ def test_oral_manual_billing_reconciliation_is_admin_only_audited_and_idempotent
         "reason": "供应商工单确认任务未创建",
         "reconciliation_operation_id": "reconcile-release-001",
         "resolution": "RELEASE",
+        "task_id": release_task.task_id,
+        "trace_request_id": f"task_ORAL_VIDEO_{release_task.task_id}",
     }
 
 
@@ -4556,7 +4561,13 @@ def test_clone_rename_updates_local_title_and_audits(
         "SELECT action, metadata_json FROM audit_logs WHERE entity_id = %s", (record_id,)
     )
     assert audit["action"] == f"{entity_type.replace('_', '.')}.rename"
-    assert json.loads(str(audit["metadata_json"])) == {"before": "旧名称", "after": "新名称"}
+    metadata = json.loads(str(audit["metadata_json"]))
+    assert metadata == {
+        "before": "旧名称",
+        "after": "新名称",
+        "task_id": record_id,
+        "trace_request_id": f"task_ORAL_{kind.upper()}_{record_id}",
+    }
 
     # 名称未变不产生审计噪音。
     rename(actor=actor(), title="新名称", **{id_field: record_id})

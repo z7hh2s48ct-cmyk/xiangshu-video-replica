@@ -204,6 +204,8 @@ def test_w20_download_uses_validated_ip_and_never_the_urllib_get_path(
     connections: list[tuple[object, ...]] = []
     requests: list[tuple[object, ...]] = []
     closed: list[str] = []
+    captured = []
+    monkeypatch.setattr("app.external_calls._insert", captured.append)
 
     def dns(host: str, *_args, **_kwargs):
         resolved.append(host)
@@ -254,6 +256,10 @@ def test_w20_download_uses_validated_ip_and_never_the_urllib_get_path(
     assert requests[0][0] == ("GET", "/image.png?sig=synthetic")
     assert requests[0][1]["headers"]["Host"] == "cdn.example"
     assert closed == ["response", "connection"]
+    [call] = captured
+    assert call.endpoint == "images/output/download" and call.outcome == "SUCCEEDED"
+    assert call.response_body is None and call.response_body_bytes == 5
+    assert "synthetic" not in call.url_redacted
 
 
 @pytest.mark.parametrize(
@@ -1231,6 +1237,9 @@ def test_w20_output_download_429_never_marks_rate_limited(monkeypatch: pytest.Mo
 
     from app import first_frames
 
+    captured = []
+    monkeypatch.setattr("app.external_calls._insert", captured.append)
+
     class RateLimitedOutput:
         status = 429
         headers = {"Content-Length": "0"}
@@ -1265,3 +1274,6 @@ def test_w20_output_download_429_never_marks_rate_limited(monkeypatch: pytest.Mo
             "https://cdn.example/output.png?sig=synthetic"
         )
     assert exc_info.value.rate_limited is False
+    [call] = captured
+    assert call.outcome == "PROVIDER_ERROR" and call.http_status == 429
+    assert call.exception_type == "RetryableImageProviderFailed"

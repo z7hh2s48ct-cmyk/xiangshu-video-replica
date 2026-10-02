@@ -25,6 +25,7 @@ from app.usage_billing import (
 
 _source: ContextVar[str | None] = ContextVar("billing_source", default=None)
 _collection: ContextVar[str | None] = ContextVar("billing_collection", default=None)
+_video: ContextVar[tuple[str, str] | None] = ContextVar("billing_video", default=None)
 _api_type: ContextVar[str | None] = ContextVar("billing_api_type", default=None)
 
 
@@ -38,6 +39,16 @@ class MeteredCall:
     def record_usage(self) -> None:
         """供应商已返回响应，因此该次用量可确定。"""
         self.usage = self.units
+
+
+@contextmanager
+def video_billing_context(platform: str, video_id: str) -> Iterator[None]:
+    """Attribute only requests made for this exact video; never split shared searches."""
+    token = _video.set((platform, video_id))
+    try:
+        yield
+    finally:
+        _video.reset(token)
 
 
 @contextmanager
@@ -81,7 +92,10 @@ def meter_call(service: str, *, units: float | int = 1) -> Iterator[MeteredCall]
     attempt = None
     platform_operation = None
     api_type = _api_type.get()
-    api_metadata = {"api_type": api_type} if api_type else None
+    api_metadata = {"api_type": api_type} if api_type else {}
+    if service == "viral_data" and _video.get():
+        platform, video_id = _video.get() or ("", "")
+        api_metadata.update(video_platform=platform, video_id=video_id)
 
     if source:
         with pg_transaction() as raw:

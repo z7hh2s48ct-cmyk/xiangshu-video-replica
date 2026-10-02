@@ -248,6 +248,8 @@ ADMIN_WRITE_AUTHORITIES = {
     # HTTP method, so the CSV dumps stay on this axis.
     "get_control_writer",
     "require_settings_admin",
+    "require_technical_settings_admin",
+    "get_control_super_admin",
     "get_character_admin",
     # 方案 P2-4 团队与权限：超管专属写门槛——是 get_admin_writer 的加强版，
     # 矩阵按「携带管理级权限」核销；role+is_super_admin 的具体判定在
@@ -258,6 +260,14 @@ ADMIN_READ_AUTHORITIES = ADMIN_WRITE_AUTHORITIES | {
     "get_admin_actor",
     # 方案 P2-4：团队信息只对超管可见，读侧门槛是 get_admin_actor 的加强版。
     "get_super_admin_actor",
+}
+
+# A JSON POST can be a read: this endpoint only estimates costs, without
+# enqueueing, billing, or changing records. Keep auditor read authority.
+# IncludedRouter's original-router walk exposes the relative path as well.
+READ_ONLY_POST_ROUTES = {
+    ("POST", "/viral/operations/estimate"),
+    ("POST", "/api/control/viral/operations/estimate"),
 }
 
 # Self-scoped recovery changes only the caller's password and revokes their
@@ -320,7 +330,12 @@ def test_every_admin_method_path_carries_an_admin_authority() -> None:
     writes: list[tuple[str, str, tuple[str, ...]]] = []
     reads: list[tuple[str, str, tuple[str, ...]]] = []
     for method, path, deps in rows:
-        kind = "WRITE" if method in {"POST", "PATCH", "PUT", "DELETE"} else "READ"
+        kind = (
+            "WRITE"
+            if method in {"POST", "PATCH", "PUT", "DELETE"}
+            and (method, path) not in READ_ONLY_POST_ROUTES
+            else "READ"
+        )
         if kind == "WRITE":
             writes.append((method, path, deps))
         else:

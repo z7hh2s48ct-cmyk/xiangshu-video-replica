@@ -14,7 +14,9 @@ export function RecordThumbnail({
   active,
   recordId,
   recordType,
+  compact = false,
 }: {
+  compact?: boolean;
   active: boolean;
   recordId: string;
   recordType: string;
@@ -54,24 +56,33 @@ export function RecordThumbnail({
   }, [active, recordId, recordType]);
 
   if (!active) {
-    return null;
+    return compact ? <span>—</span> : null;
   }
   if (status === "ready" && url) {
     return (
       <img
-        alt={`生成结果缩略图 ${recordId}`}
-        className="admin-generation-records__thumbnail"
+        alt={compact ? "生成结果缩略图" : `生成结果缩略图 ${recordId}`}
+        onError={() => setStatus("error")}
+        className={
+          compact
+            ? "admin-generation-records__thumbnail admin-generation-records__thumbnail--compact"
+            : "admin-generation-records__thumbnail"
+        }
         src={url}
       />
     );
   }
   return (
     <p className="admin-generation-records__thumbnail-note" role="status">
-      {status === "error"
-        ? "缩略图读取失败，可稍后重试。"
-        : status === "empty"
-          ? "无缩略图（历史记录，或当前存储不提供派生小图）。"
-          : "缩略图加载中…"}
+      {compact
+        ? status === "loading"
+          ? "加载中…"
+          : "暂无缩略图"
+        : status === "error"
+          ? "缩略图读取失败，可稍后重试。"
+          : status === "empty"
+            ? "无缩略图（历史记录，或当前存储不提供派生小图）。"
+            : "缩略图加载中…"}
     </p>
   );
 }

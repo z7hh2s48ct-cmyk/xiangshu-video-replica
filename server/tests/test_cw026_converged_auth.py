@@ -659,6 +659,8 @@ ADMIN_DEPS = {
     "get_admin_actor",
     "get_admin_writer",
     "require_settings_admin",
+    "require_technical_settings_admin",
+    "get_control_super_admin",
     "get_control_route_user",
     "get_character_admin",
 }

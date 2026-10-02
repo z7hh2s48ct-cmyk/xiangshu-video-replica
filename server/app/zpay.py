@@ -238,6 +238,7 @@ class ZPayOrderQueryClient:
             with external_call_context("RECHARGE_ORDER", merchant_order_no):
                 body, _headers, _status = recorded_urlopen(
                     request,
+                    expected_json=True,
                     timeout=self._timeout_seconds,
                     provider="zpay",
                     endpoint="order_query",
@@ -352,6 +353,7 @@ class ZPayPaymentCodeClient:
             with external_call_context("RECHARGE_ORDER", merchant_order_no):
                 body, _headers, _status = recorded_urlopen(
                     request,
+                    expected_json=True,
                     timeout=self._timeout_seconds,
                     provider="zpay",
                     endpoint="payment_code",

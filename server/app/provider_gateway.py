@@ -325,6 +325,7 @@ class ProviderGateway:
             # 方案 P0-9：网关调用与直连传输同样落调用日志，失败原因可在管理端查到。
             content, _headers, _status = recorded_urlopen(
                 request,
+                expected_json=True,
                 timeout=provider.timeout_seconds,
                 provider=provider.name,
                 endpoint=endpoint_from_url(url),

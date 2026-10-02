@@ -72,10 +72,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"expired external call log rows eligible for purge: {eligible}")
             return 0
         purged = 0
+        with conn.transaction():
+            conn.execute(
+                "DELETE FROM external_call_observations WHERE created_at < %s - interval '2 days'",
+                (now,),
+            )
         while True:
             with conn.transaction():
                 batch = purge_expired_call_batch(conn, now=now)
-            if batch == 0:
+            if batch == 0 and count_expired_calls(conn, now=now, ready_only=True) == 0:
                 break
             purged += batch
     print(

@@ -560,6 +560,71 @@ def test_audit_foreign_keys_refuse_cascade_delete(adjustments_dsn: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_wallet_business_references_show_order_number_and_generation_project(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.control_routes import router as control_router
+
+    client.app.include_router(control_router)
+    headers = _admin_session(client)
+    adjusted = _create_adjustment(client, headers, key="business-reference")
+    assert adjusted.status_code == 201, adjusted.text
+    order = adjusted.json()["order_id"]
+    with psycopg.connect(_t23_dsn()) as raw:
+        raw.execute(
+            "INSERT INTO projects(id,owner_user_id,name) "
+            "VALUES('ledger-project',%s,'庭院视频项目')",
+            (CUSTOMER_USER_ID,),
+        )
+        raw.execute(
+            "INSERT INTO generation_batches(id,project_id,created_by_user_id,idempotency_key,"
+            "request_hash,request_snapshot_json) "
+            "VALUES('ledger-batch','ledger-project',%s,'ledger-project','hash','{}')",
+            (CUSTOMER_USER_ID,),
+        )
+        raw.execute(
+            "INSERT INTO generation_tasks(id,batch_id,provider,model,status) "
+            "VALUES('ledger-task','ledger-batch','metaso','h3','RUNNING')"
+        )
+        raw.execute(
+            "INSERT INTO wallet_transactions(id,user_id,type,available_delta,reserved_delta,"
+            "task_id,billing_round,idempotency_key) "
+            "VALUES('ledger-hold',%s,'RESERVE',-3,3,'ledger-task',1,'ledger-hold')",
+            (CUSTOMER_USER_ID,),
+        )
+        number = raw.execute(
+            "SELECT merchant_order_no FROM recharge_orders WHERE id=%s", (order,)
+        ).fetchone()[0]
+    # Exercise the real per-operator cookie path on the isolated fixture DB.
+    monkeypatch.setenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", "1")
+    result = client.get(
+        "/api/control/wallet-transactions", headers=headers, params={"user_id": CUSTOMER_USER_ID}
+    )
+    assert result.status_code == 200, result.text
+    rows = result.json()["items"]
+    assert (
+        next(row for row in rows if row["recharge_order_id"] == order)["business_label"]
+        == f"充值订单 · {number}"
+    )
+    task = next(row for row in rows if row["task_id"] == "ledger-task")
+    assert task["business_label"] == "视频生成 · 庭院视频项目" and task["billing_round"] == 1
+    assert task["project_name"] == "庭院视频项目"
+    exact = client.get(
+        "/api/control/recharge-orders",
+        headers=headers,
+        params={"order_no": number, "user_id": CUSTOMER_USER_ID},
+    )
+    assert exact.status_code == 200 and exact.json()["total"] == 1
+    assert exact.json()["items"][0]["id"] == order
+    wrong_subject = client.get(
+        "/api/control/recharge-orders",
+        headers=headers,
+        params={"order_no": number, "user_id": "another-customer"},
+    )
+    assert wrong_subject.status_code == 200 and wrong_subject.json()["total"] == 0
+
+
 def test_adjustment_creates_paid_order_charge_and_audit_row(
     client: TestClient,
 ) -> None:
@@ -1281,6 +1346,211 @@ def test_missing_pg_runtime_fails_closed(monkeypatch: pytest.MonkeyPatch, route_
 # ---------------------------------------------------------------------------
 # The audit listing (read path)
 # ---------------------------------------------------------------------------
+
+
+def test_customer_full_adjustment_pages_and_merged_refund_history(
+    client: TestClient, route_state, monkeypatch
+) -> None:
+    from app.admin_audit_routes import router as audit_router
+
+    client.app.include_router(audit_router)
+    admin = _admin_session(client)
+    assert (
+        _create_adjustment(
+            client,
+            admin,
+            credits=100,
+            source_document_type="FREE_GRANT",
+            source_document_ref="opening-100",
+            key="open100",
+        ).status_code
+        == 201
+    )
+    refund = _create_adjustment(
+        client,
+        admin,
+        credits=-100,
+        source_document_type="REFUND_APPROVAL",
+        source_document_ref="refund100",
+        reason="已审批退款扣减100积分",
+        key="refund100",
+    )
+    assert refund.status_code == 201, refund.text
+    for index in range(23):
+        result = _create_adjustment(
+            client,
+            admin,
+            credits=1,
+            source_document_type="FREE_GRANT",
+            source_document_ref=f"paged-{index}",
+            key=f"paged-{index}",
+        )
+        assert result.status_code == 201, result.text
+    assert (
+        _create_adjustment(
+            client,
+            admin,
+            user_id=INTERNAL_USER_ID,
+            credits=1,
+            source_document_ref="other-customer",
+            key="other-customer",
+        ).status_code
+        == 201
+    )
+    pages = [
+        client.get(
+            _adjustment_path(CUSTOMER_USER_ID),
+            headers=admin,
+            params={"limit": 20, "offset": offset},
+        ).json()
+        for offset in [0, 20]
+    ]
+    items = [item for page in pages for item in page["items"]]
+    assert [len(page["items"]) for page in pages] == [20, 5]
+    assert all(page["total"] == 25 for page in pages)
+    assert len({item["adjustment_id"] for item in items}) == 25
+    returned = next(item for item in items if item["source_document_ref"] == "refund100")
+    assert returned["admin_username"] == "admin_u"
+    assert (returned["balance_before"], returned["balance_after"]) == (150, 50)
+    for action in ["suspend", "resume"]:
+        response = client.post(
+            f"/api/control/customers/{CUSTOMER_USER_ID}/{action}",
+            headers={**admin, IDEMPOTENCY_KEY_HEADER: f"merged-{action}"},
+            json={"confirm": True, "reason": f"客户操作记录验收-{action}"},
+        )
+        assert response.status_code == 200, response.text
+    changed_price = client.put(
+        _unit_price_path(),
+        headers={**admin, IDEMPOTENCY_KEY_HEADER: "merged-price"},
+        json={"confirm": True, "reason": "客户操作记录验收-改价", "unit_price_fen": 1100},
+    )
+    assert changed_price.status_code == 200, changed_price.text
+    reset_price = client.put(
+        _unit_price_path(),
+        headers={**admin, IDEMPOTENCY_KEY_HEADER: "merged-price-reset"},
+        json={"confirm": True, "reason": "客户操作记录验收-恢复默认", "unit_price_fen": None},
+    )
+    assert reset_price.status_code == 200, reset_price.text
+    with psycopg.connect(route_state) as raw:
+        raw.execute(
+            "INSERT INTO audit_logs(id,actor_user_id,action,entity_type,entity_id,metadata_json) "
+            "VALUES('customer-read',%s,'analysis.create','task','own-task','{}')",
+            (CUSTOMER_USER_ID,),
+        )
+    with psycopg.connect(route_state) as raw:
+        for event_id, metadata in [
+            ("legacy-price", {"old_unit_price_fen": None, "new_unit_price_fen": 1200}),
+            ("legacy-missing-price", {}),
+        ]:
+            raw.execute(
+                "INSERT INTO audit_logs(id,actor_user_id,action,entity_type,entity_id,"
+                "metadata_json,created_at) "
+                "VALUES(%s,'admin_u','customer_unit_price.update','customer_unit_p"
+                "rice',%s,%s,'2000-01-01T00:00:00+00:00')",
+                (event_id, CUSTOMER_USER_ID, json.dumps(metadata)),
+            )
+    pages = [
+        client.get(
+            "/api/control/audit-log",
+            headers=admin,
+            params={
+                "scope": "all",
+                "target_user_id": CUSTOMER_USER_ID,
+                "limit": 20,
+                "offset": offset,
+            },
+        ).json()
+        for offset in [0, 20]
+    ]
+    events = [item for page in pages for item in page["items"]]
+    assert all(page["total"] == 32 for page in pages)
+    assert [len(page["items"]) for page in pages] == [20, 12]
+    event = next(item for item in events if item["source_document_ref"] == "refund100")
+    assert event["actor_username"] == "admin_u" and event["reason"] == "已审批退款扣减100积分"
+    assert event["change_detail"]["changes"]["available_credits"] == {"before": 150, "after": 50}
+    assert any(item["event_type"] == "analysis.create" for item in events)
+    for event_type in ["customer.suspend", "customer.resume", "customer_unit_price.update"]:
+        operation = next(item for item in events if item["event_type"] == event_type)
+        assert operation["actor_username"] == "admin_u"
+        assert operation["reason"].startswith("客户操作记录验收-")
+    price_event = next(
+        item for item in events if item["event_type"] == "customer_unit_price.update"
+    )
+    assert (price_event["old_unit_price_fen"], price_event["new_unit_price_fen"]) == (None, 1100)
+    assert price_event["change_detail"]["changes"]["customer_unit_price"] == {
+        "before": {
+            "mode": "DEFAULT",
+            "custom_unit_price_fen": None,
+            "effective_unit_price_fen": 1000,
+        },
+        "after": {
+            "mode": "CUSTOM",
+            "custom_unit_price_fen": 1100,
+            "effective_unit_price_fen": 1100,
+        },
+    }
+    reset_event = next(item for item in events if item["event_type"] == "customer_unit_price.reset")
+    assert reset_event["change_detail"]["changes"]["customer_unit_price"] == {
+        "before": {
+            "mode": "CUSTOM",
+            "custom_unit_price_fen": 1100,
+            "effective_unit_price_fen": 1100,
+        },
+        "after": {
+            "mode": "DEFAULT",
+            "custom_unit_price_fen": None,
+            "effective_unit_price_fen": 1000,
+        },
+    }
+    legacy_event = next(item for item in events if item["event_id"] == "legacy-price")
+    assert legacy_event["change_detail"]["changes"]["customer_unit_price"]["before"] == {
+        "mode": "DEFAULT",
+        "custom_unit_price_fen": None,
+        "effective_unit_price_fen": None,
+    }
+    missing_event = next(item for item in events if item["event_id"] == "legacy-missing-price")
+    assert missing_event["change_detail"] is None
+    assert all(item["target_user_id"] == CUSTOMER_USER_ID for item in events)
+    import csv
+    import io
+
+    from app.control_routes import router as control_router
+
+    client.app.include_router(control_router)
+    monkeypatch.setenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", "1")
+    for path, expected_total, page_sizes in [
+        ("/api/control/recharge-orders", 26, [20, 6]),
+        ("/api/control/wallet-transactions", 26, [20, 6]),
+    ]:
+        responses = [
+            client.get(
+                path,
+                headers=admin,
+                params={"user_id": CUSTOMER_USER_ID, "limit": 20, "offset": offset},
+            )
+            for offset in [0, 20]
+        ]
+        assert all(response.status_code == 200 for response in responses)
+        fund_pages = [response.json() for response in responses]
+        assert all(page["total"] == expected_total for page in fund_pages)
+        assert [len(page["items"]) for page in fund_pages] == page_sizes
+        fund_items = [item for page in fund_pages for item in page["items"]]
+        assert len({item["id"] for item in fund_items}) == expected_total
+        assert all(item["user_id"] == CUSTOMER_USER_ID for item in fund_items)
+    exported = client.get(
+        "/api/control/wallet-transactions.csv", headers=admin, params={"user_id": CUSTOMER_USER_ID}
+    )
+    assert exported.status_code == 200, exported.text
+    csv_rows = list(csv.DictReader(io.StringIO(exported.text.lstrip("\ufeff"))))
+    assert len(csv_rows) == 26
+    assert all(row["user_id"] == CUSTOMER_USER_ID for row in csv_rows)
+    assert any(
+        row["business_label"] == "退款扣减" and row["available_delta"] == "-100" for row in csv_rows
+    )
+    assert any(
+        row["order_no"] and row["business_label"] == "充值订单 · " + row["order_no"]
+        for row in csv_rows
+    )
 
 
 def test_list_adjustments_returns_audit_trail(client: TestClient) -> None:
@@ -2520,6 +2790,53 @@ def test_suspend_and_resume_customer_with_audit_and_session_revoke(
             """,
             (CUSTOMER_USER_ID,),
         )
+        conn.execute(
+            "INSERT INTO customer_devices(id,user_id,slot_no,display_name,platform,status,bound_at,"
+            "fingerprint_hmac,fingerprint_key_version,token_digest,token_key_version) "
+            "VALUES('dev-suspend-2',%s,2,'另一设备','windows','BOUND',now(),'fp-two',1,'token-two',1)",
+            (CUSTOMER_USER_ID,),
+        )
+        conn.execute(
+            "INSERT INTO customer_session_state(session_id,user_id,device_id,session_epoch,"
+            "lease_until,last_heartbeat_at,token_digest) VALUES"
+            "('sess-suspend-2',%s,'dev-suspend-2',1,now()+interval '30 minutes',now(),'sess-two')",
+            (CUSTOMER_USER_ID,),
+        )
+        conn.execute(
+            "INSERT INTO projects(id,owner_user_id,name) VALUES('pause-project',%s,'在途项目')",
+            (CUSTOMER_USER_ID,),
+        )
+        conn.execute(
+            "INSERT INTO generation_batches(id,project_id,created_by_user_id,idempotency_key,"
+            "request_hash,request_snapshot_json) "
+            "VALUES('pause-batch','pause-project',%s,'pause','hash','{}')",
+            (CUSTOMER_USER_ID,),
+        )
+        conn.execute(
+            "INSERT INTO generation_tasks(id,batch_id,provider,model,status) "
+            "VALUES('pause-running','pause-batch','metaso','h3','RUNNING')"
+        )
+        wallet_before = conn.execute(
+            "SELECT * FROM wallets WHERE user_id=%s", (CUSTOMER_USER_ID,)
+        ).fetchone()
+        ledger_before = conn.execute("SELECT count(*) FROM wallet_transactions").fetchone()
+        conn.execute(
+            "INSERT INTO users(id,username,display_name,role,account_type,parent_user_id) "
+            "VALUES('paused-child','paused-child','暂停客户子账号','customer','SUB',%s)",
+            (CUSTOMER_USER_ID,),
+        )
+        conn.execute(
+            "INSERT INTO customer_devices(id,user_id,slot_no,display_name,platform,status,bound_at,"
+            "fingerprint_hmac,fingerprint_key_version,token_digest,token_key_version) "
+            "VALUES('child-dev','paused-child',1,'子账号设备','windows','BOUND',now(),"
+            "'child-fp',1,'child-token',1)"
+        )
+        conn.execute(
+            "INSERT INTO customer_session_state(session_id,user_id,device_id,session_epoch,"
+            "lease_until,last_heartbeat_at,token_digest) "
+            "VALUES('child-session','paused-child','child-dev',1,"
+            "now()+interval '30 minutes',now(),'child-session-token')"
+        )
 
     headers = _suspend_headers(client, f"suspend-{uuid.uuid4()}")
     suspended = client.post(
@@ -2530,6 +2847,20 @@ def test_suspend_and_resume_customer_with_audit_and_session_revoke(
     assert suspended.status_code == 200, suspended.text
     assert suspended.json()["is_active"] == 0
     assert suspended.json()["session_revoked"] in (True, False)
+    listed = client.get("/api/control/customers", headers=headers).json()["items"][0]
+    assert listed["status"] == "SUSPENDED" and listed["account_active"] is False
+    assert listed["activation_status"] == "ACTIVE"
+    assert (
+        client.get("/api/control/customers", headers=headers, params={"status": "active"}).json()[
+            "total"
+        ]
+        == 0
+    )
+    exported = client.get(
+        "/api/control/customers.csv", headers=headers, params={"status": "suspended"}
+    )
+    assert exported.status_code == 200, exported.text
+    assert "customer_u" in exported.text and "SUSPENDED" in exported.text
 
     with psycopg.connect(_t23_dsn(), autocommit=True) as conn:
         active = conn.execute(
@@ -2537,6 +2868,24 @@ def test_suspend_and_resume_customer_with_audit_and_session_revoke(
             (CUSTOMER_USER_ID,),
         ).fetchone()
         assert active == (0,)
+        sessions = conn.execute(
+            "SELECT session_epoch,lease_until::timestamptz<=clock_timestamp() "
+            "FROM customer_session_state WHERE user_id=%s",
+            (CUSTOMER_USER_ID,),
+        ).fetchall()
+        assert sessions == [(2, True), (2, True)]
+        assert conn.execute(
+            "SELECT session_epoch,lease_until::timestamptz<=clock_timestamp() "
+            "FROM customer_session_state WHERE user_id='paused-child'"
+        ).fetchone() == (2, True)
+        assert (
+            conn.execute("SELECT * FROM wallets WHERE user_id=%s", (CUSTOMER_USER_ID,)).fetchone()
+            == wallet_before
+        )
+        assert conn.execute("SELECT count(*) FROM wallet_transactions").fetchone() == ledger_before
+        assert conn.execute(
+            "SELECT status FROM generation_tasks WHERE id='pause-running'"
+        ).fetchone() == ("RUNNING",)
         audit_rows = conn.execute(
             "SELECT action FROM audit_logs WHERE action = 'customer.suspend' AND entity_id = %s",
             (CUSTOMER_USER_ID,),
@@ -2564,11 +2913,23 @@ def test_suspend_and_resume_customer_with_audit_and_session_revoke(
     )
     assert resume.status_code == 200, resume.text
     assert resume.json()["is_active"] == 1
+    resumed_list = client.get("/api/control/customers", headers=headers).json()["items"][0]
+    assert resumed_list["status"] == "ACTIVE" and resumed_list["account_active"] is True
     with psycopg.connect(_t23_dsn(), autocommit=True) as conn:
         resumed = conn.execute(
             "SELECT is_active FROM users WHERE id = %s", (CUSTOMER_USER_ID,)
         ).fetchone()
         assert resumed == (1,)
+        assert (
+            conn.execute("SELECT * FROM wallets WHERE user_id=%s", (CUSTOMER_USER_ID,)).fetchone()
+            == wallet_before
+        )
+        assert conn.execute("SELECT count(*) FROM wallet_transactions").fetchone() == ledger_before
+        assert conn.execute(
+            "SELECT count(*) FROM customer_session_state WHERE user_id=%s "
+            "AND lease_until::timestamptz>clock_timestamp()",
+            (CUSTOMER_USER_ID,),
+        ).fetchone() == (0,)
         conn.execute(
             "DELETE FROM audit_logs WHERE action IN ('customer.suspend', "
             "'customer.resume') AND entity_id = %s",
@@ -2595,3 +2956,249 @@ def test_suspend_rejects_blank_reason_and_missing_user(client: TestClient) -> No
         headers=_suspend_headers(client, f"missing-{uuid.uuid4()}"),
     )
     assert missing.status_code == 404
+
+
+def test_customer_attention_is_global_sorted_and_matches_export(client: TestClient) -> None:
+    with psycopg.connect(_t23_dsn(), autocommit=True) as conn:
+        for index in range(25):
+            conn.execute(
+                "INSERT INTO users(id,username,display_name,role,registration_source,created_at) "
+                "VALUES (%s,%s,%s,'customer','activation_code',now()-interval '40 days')",
+                (f"scope-{index}", f"scope-{index}", f"公司{index:02}"),
+            )
+            conn.execute(
+                "INSERT INTO wallets(user_id,available_credits,reserved_credits) VALUES (%s,%s,0)",
+                (f"scope-{index}", 49 if index == 24 else 50),
+            )
+        conn.execute(
+            "INSERT INTO projects(id,owner_user_id,name) VALUES ('scope-p','scope-24','项目')"
+        )
+        conn.execute(
+            "INSERT INTO generation_batches(id,project_id,created_by_user_id,idempotency_key,"
+            "request_hash,request_snapshot_json) VALUES "
+            "('scope-b','scope-p','scope-24','scope-key','hash','{}')"
+        )
+        conn.execute(
+            "INSERT INTO generation_tasks(id,batch_id,provider,model,status,ar"
+            "chive_status,created_at) "
+            "VALUES ('scope-success','scope-b','metaso','h3','SUCCEEDED','ARCHIVED',now()),"
+            "('scope-failed','scope-b','metaso','h3','FAILED','PENDING',now()),"
+            "('scope-old','scope-b','metaso','h3','FAILED','PENDING',now()-interval '31 days')"
+        )
+    headers = _admin_session(client)
+    params = {"username": "scope-", "low_balance_threshold": 50, "limit": 1}
+    page = client.get("/api/control/customers", params=params, headers=headers)
+    assert page.status_code == 200, page.text
+    assert page.json()["total"] == 25
+    assert page.json()["attention_counts"] == {
+        "low_balance": 1,
+        "recent_failure": 1,
+        "inactive": 24,
+    }
+    for attention, expected in [("low_balance", 1), ("recent_failure", 1), ("inactive", 24)]:
+        filtered = client.get(
+            "/api/control/customers", params={**params, "attention": attention}, headers=headers
+        )
+        assert filtered.status_code == 200, filtered.text
+        assert filtered.json()["total"] == expected
+        assert filtered.json()["attention_counts"] == page.json()["attention_counts"]
+    target = client.get(
+        "/api/control/customers",
+        params={"user_id": "scope-24", "low_balance_threshold": 50},
+        headers=headers,
+    ).json()["items"][0]
+    assert target["generation_total_30d"] == 2 and target["generation_failed_30d"] == 1
+    assert target["success_rate_30d"] == 50 and target["low_balance"] is True
+    target = client.get(
+        "/api/control/customers",
+        params={"user_id": "scope-23", "low_balance_threshold": 50},
+        headers=headers,
+    ).json()["items"][0]
+    assert target["success_rate_30d"] is None and target["low_balance"] is False
+    assert (
+        client.get(
+            "/api/control/customers", params={"attention": "low_balance"}, headers=headers
+        ).status_code
+        == 400
+    )
+    exported = client.get(
+        "/api/control/customers.csv", params={**params, "attention": "low_balance"}, headers=headers
+    )
+    assert exported.status_code == 200, exported.text
+    assert "scope-24" in exported.text and "scope-23" not in exported.text
+    for sort in ["recharge", "month_consumed", "last_active"]:
+        for direction in ["asc", "desc"]:
+            ids = []
+            for offset in [0, 10, 20]:
+                rows = client.get(
+                    "/api/control/customers",
+                    headers=headers,
+                    params={
+                        **params,
+                        "limit": 10,
+                        "offset": offset,
+                        "sort": sort,
+                        "direction": direction,
+                    },
+                ).json()["items"]
+                ids.extend(row["user_id"] for row in rows)
+            assert len(ids) == len(set(ids)) == 25
+            if sort == "last_active":
+                assert ids[0 if direction == "desc" else -1] == "scope-24"
+
+
+def test_customer_overview_has_thirty_days_and_five_mixed_events(client: TestClient) -> None:
+    headers = _admin_session(client)
+    with psycopg.connect(_t23_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "UPDATE users SET role='customer', registration_source='activation_code' WHERE id=%s",
+            (CUSTOMER_USER_ID,),
+        )
+        conn.execute(
+            "INSERT INTO projects(id,owner_user_id,name) VALUES ('timeline-p',%s,'趋势项目')",
+            (CUSTOMER_USER_ID,),
+        )
+        conn.execute(
+            "INSERT INTO generation_batches(id,project_id,created_by_user_id,i"
+            "dempotency_key,request_hash,request_snapshot_json) VALUES ('timel"
+            "ine-b','timeline-p',%s,'timeline-key','hash','{}')",
+            (CUSTOMER_USER_ID,),
+        )
+        for i in range(3):
+            conn.execute(
+                "INSERT INTO generation_tasks(id,batch_id,provider,model,status,ar"
+                "chive_status,created_at) VALUES (%s,'timeline-b','metaso','h3','S"
+                "UCCEEDED','ARCHIVED',now()-interval '5 minutes')",
+                (f"timeline-{i}",),
+            )
+        conn.execute(
+            "INSERT INTO wallet_transactions(id,user_id,type,available_delta,r"
+            "eserved_delta,task_id,billing_round,idempotency_key,created_at) V"
+            "ALUES ('timeline-settle',%s,'SETTLE',0,-7,'timeline-0',1,'timelin"
+            "e-settle',now()-interval '5 minutes')",
+            (CUSTOMER_USER_ID,),
+        )
+        conn.execute(
+            "INSERT INTO customer_devices(id,user_id,slot_no,display_name,plat"
+            "form,status,bound_at,fingerprint_hmac,fingerprint_key_version,tok"
+            "en_digest,token_key_version) VALUES ('synthetic-device',%s,1,'隔离设"
+            "备','windows','BOUND',now(),'synthetic-fingerprint',1,'synthetic-t"
+            "oken',1)",
+            (CUSTOMER_USER_ID,),
+        )
+        conn.execute(
+            "INSERT INTO customer_session_events(id,event,user_id,session_id,d"
+            "evice_id,session_epoch,request_id,created_at) VALUES ('timeline-l"
+            "ogin','LOGIN',%s,'synthetic-session','synthetic-device',1,'synthe"
+            "tic-login',now()-interval '3 minutes')",
+            (CUSTOMER_USER_ID,),
+        )
+    response = _create_adjustment(
+        client,
+        headers,
+        credits=4,
+        source_document_type="FREE_GRANT",
+        source_document_ref="timeline-free",
+        reason="合成时间线测试",
+    )
+    assert response.status_code == 201, response.text
+    result = client.get(f"/api/control/customers/{CUSTOMER_USER_ID}/overview", headers=headers)
+    assert result.status_code == 200, result.text
+    payload = result.json()
+    assert len(payload["daily_consumption"]) == 30
+    assert sum(day["credits"] for day in payload["daily_consumption"]) == 7
+    assert len(payload["timeline"]) == 5
+    assert {"recharge", "adjustment", "login", "generation"} <= {
+        event["kind"] for event in payload["timeline"]
+    }
+    assert len({(event["kind"], event["event_id"]) for event in payload["timeline"]}) == 5
+    assert (
+        client.get("/api/control/customers/no-such-user/overview", headers=headers).status_code
+        == 404
+    )
+    auditor = _admin_session(client, "auditor_u")
+    assert (
+        client.get(
+            f"/api/control/customers/{CUSTOMER_USER_ID}/overview", headers=auditor
+        ).status_code
+        == 200
+    )
+
+
+def test_customer_text_times_preserve_offsets(client: TestClient) -> None:
+    from app.admin_customer_metrics import utc_text_timestamp
+
+    del client
+    with psycopg.connect(_t23_dsn(), autocommit=True) as conn:
+        conn.execute("SET TIME ZONE 'Asia/Shanghai'")
+        rows = conn.execute(
+            "SELECT " + utc_text_timestamp("value") + " FROM (VALUES ('2026-10-02T05:00:00'),"
+            "('2026-10-02T13:00:00+08:00'),('2026-10-02T05:00:00Z')) times(value)"
+        ).fetchall()
+    assert rows[0][0] == rows[1][0] == rows[2][0]
+    assert rows[0][0].timestamp() == 1790917200
+
+
+def test_funds_compensation_offline_and_unverified_history_are_separate(client: TestClient) -> None:
+    from app.admin_dashboard_routes import router
+
+    client.app.include_router(router)
+    headers = _admin_session(client)
+    for source, credits in [("CS_TICKET", 10), ("COMPENSATION_APPROVAL", 2), ("FREE_GRANT", 3)]:
+        result = _create_adjustment(
+            client,
+            headers,
+            credits=credits,
+            source_document_type=source,
+            source_document_ref=f"synthetic-{source}",
+        )
+        assert result.status_code == 201, result.text
+    with psycopg.connect(_t23_dsn(), autocommit=True) as conn:
+        today = (
+            conn.execute("SELECT (now() AT TIME ZONE 'Asia/Shanghai')::date")
+            .fetchone()[0]
+            .isoformat()
+        )
+        conn.execute(
+            "INSERT INTO recharge_orders(id,user_id,merchant_order_no,provider"
+            ",status,pricing_scope,base_unit_price_fen_snapshot,charged_unit_p"
+            "rice_fen_snapshot,min_recharge_fen_snapshot,recharge_step_fen_sna"
+            "pshot,amount_fen,credits,paid_at) VALUES ('real-offline',%s,'synt"
+            "hetic-offline','admin_adjustment','PAID','CUSTOMER_STANDARD',1000"
+            ",1000,10000,1000,20000,20,now())",
+            (CUSTOMER_USER_ID,),
+        )
+        conn.execute(
+            "INSERT INTO admin_adjustments(id,recharge_order_id,target_user_id"
+            ",admin_user_id,source_document_type,source_document_ref,reason,re"
+            "quest_id) VALUES ('real-offline','real-offline',%s,'admin_u','OFF"
+            "LINE_PAYMENT','synthetic-offline-voucher','隔离线下凭证','synthetic-off"
+            "line-request')",
+            (CUSTOMER_USER_ID,),
+        )
+        conn.execute(
+            "INSERT INTO recharge_orders(id,user_id,merchant_order_no,provider"
+            ",status,pricing_scope,base_unit_price_fen_snapshot,charged_unit_p"
+            "rice_fen_snapshot,min_recharge_fen_snapshot,recharge_step_fen_sna"
+            "pshot,amount_fen,credits,paid_at) VALUES ('manual-history',%s,'sy"
+            "nthetic-history','admin_adjustment','PAID','CUSTOMER_STANDARD',10"
+            "00,1000,10000,1000,5000,5,now())",
+            (CUSTOMER_USER_ID,),
+        )
+    report = client.get(
+        "/api/control/funds/summary", headers=headers, params={"start": today, "end": today}
+    )
+    assert report.status_code == 200, report.text
+    payload = report.json()
+    assert payload["recharge_fen"] == payload["offline_fen"] == 20000
+    assert payload["grant_credits"] == 15
+    assert payload["by_method"] == [{"method": "offline", "orders": 1, "amount_fen": 20000}]
+    # Opening manual amounts carry no receipt evidence; keep separate, never infer offline.
+    assert payload["unverified_manual_orders"] >= 1 and payload["unverified_manual_fen"] >= 5000
+    business = client.get(
+        "/api/control/business/overview", headers=headers, params={"start": today, "end": today}
+    ).json()
+    assert (
+        business["metrics"]["recharge_fen"] == 20000
+        and business["metrics"]["paying_customers"] == 1
+    )

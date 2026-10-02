@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   listReconciliationItems,
   type ReconciliationAnomaly,
-  syncControlRechargeOrder,
+  repairPaidRechargeLedger,
 } from "../api";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { DataTable } from "./ui/DataTable";
@@ -21,7 +21,7 @@ const anomalyTabs: {
   {
     key: "paid_without_charge",
     label: "已支付未入账",
-    hint: "客户已付款但积分没有到账，可查单补单",
+    hint: "按已支付订单快照补记积分；钱包与已有流水不符时先人工核对",
   },
   {
     key: "charge_without_paid_order",
@@ -43,10 +43,14 @@ const text = (item: Item, key: string) => {
 };
 
 /** 资金中心·对账异常（方案 P1）：三类清单，每条一个处理动作，条数与汇总一致。 */
-export function ReconciliationPage() {
-  const [anomaly, setAnomaly] = useState<ReconciliationAnomaly>(
-    "paid_without_charge",
-  );
+export function ReconciliationPage({
+  readOnly = false,
+  initialAnomaly = "paid_without_charge",
+}: {
+  readOnly?: boolean;
+  initialAnomaly?: ReconciliationAnomaly;
+}) {
+  const [anomaly, setAnomaly] = useState<ReconciliationAnomaly>(initialAnomaly);
   const [items, setItems] = useState<Item[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
@@ -79,16 +83,26 @@ export function ReconciliationPage() {
   const activeHint = anomalyTabs.find((tab) => tab.key === anomaly)?.hint ?? "";
 
   async function confirmSync(reason: string) {
-    if (!pendingSync) return;
+    if (!pendingSync || readOnly) return;
+    const orderNo = pendingSync.order_no;
+    if (typeof orderNo !== "string" || !orderNo.trim()) {
+      setError("订单号缺失，请刷新明细后重试。");
+      setPendingSync(null);
+      return;
+    }
     try {
-      await syncControlRechargeOrder(text(pendingSync, "order_no"), reason);
-      setNotice(`订单 ${text(pendingSync, "order_no")} 已查单补单。`);
+      const result = await repairPaidRechargeLedger(orderNo, reason);
+      setNotice(
+        result.outcome === "repaired"
+          ? `订单 ${orderNo} 已补记 ${result.credits} 积分。`
+          : `订单 ${orderNo} 已有入账流水，未重复增加积分。`,
+      );
       setPendingSync(null);
       setOffset(0);
       await load();
     } catch (cause) {
       setPendingSync(null);
-      setError(cause instanceof Error ? cause.message : "查单补单失败");
+      setError(cause instanceof Error ? cause.message : "补记积分失败");
     }
   }
 
@@ -173,7 +187,7 @@ export function ReconciliationPage() {
               ? items.map((item) => (
                   <tr key={text(item, "order_id")}>
                     <td>
-                      <code>{text(item, "order_id")}</code>
+                      <code>{text(item, "order_no")}</code>
                     </td>
                     <td>
                       {text(item, "display_name")}
@@ -183,12 +197,18 @@ export function ReconciliationPage() {
                     <td>{text(item, "credits")} 积分</td>
                     <td>{formatDateTime(text(item, "paid_at"))}</td>
                     <td>
-                      <button
-                        type="button"
-                        onClick={() => setPendingSync(item)}
-                      >
-                        查单补单
-                      </button>
+                      {!readOnly && (
+                        <button
+                          type="button"
+                          disabled={
+                            typeof item.order_no !== "string" ||
+                            !item.order_no.trim()
+                          }
+                          onClick={() => setPendingSync(item)}
+                        >
+                          补记积分
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))
@@ -219,10 +239,10 @@ export function ReconciliationPage() {
       />
       <ConfirmDialog
         level="reason"
-        open={pendingSync !== null}
-        title={`查单补单 ${pendingSync ? text(pendingSync, "order_no") : ""}`}
-        description="向支付通道查询该订单的最新状态；已确认支付的会立即入账。原因将写入审计日志。"
-        confirmLabel="确认查单"
+        open={!readOnly && pendingSync !== null}
+        title={`补记积分 ${pendingSync ? text(pendingSync, "order_no") : ""}`}
+        description="按本地已支付订单的积分快照补记缺失的充值流水和钱包余额。已有流水不会重复入账；钱包不符时拒绝补记。原因将写入审计日志。"
+        confirmLabel="确认补记"
         onConfirm={(reason: string) => void confirmSync(reason)}
         onClose={() => setPendingSync(null)}
       />

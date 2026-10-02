@@ -104,12 +104,20 @@ def request_hash(route: str, path_params: Mapping[str, str], body: BaseModel) ->
     review P2). The concrete path parameters are therefore part of the
     fingerprint.
     """
+    canonical: dict[str, object] = {
+        "route": route,
+        "path_params": {name: path_params[name] for name in sorted(path_params)},
+        "body": body.model_dump(mode="json"),
+    }
+    if route.startswith("PATCH "):
+        explicit_nulls = sorted(
+            name for name in body.model_fields_set if getattr(body, name) is None
+        )
+        if explicit_nulls:
+            # 保留既有普通请求指纹；显式清空必须与省略字段区分，否则重放会执行错语义。
+            canonical["explicit_null_fields"] = explicit_nulls
     payload = json.dumps(
-        {
-            "route": route,
-            "path_params": {name: path_params[name] for name in sorted(path_params)},
-            "body": body.model_dump(mode="json"),
-        },
+        canonical,
         separators=(",", ":"),
         sort_keys=True,
         ensure_ascii=False,

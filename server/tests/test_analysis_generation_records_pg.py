@@ -31,6 +31,136 @@ from app.db_portable import BusinessConnection
 from app.usage_billing import accept_operation, finish_operation, record_attempt
 
 DATABASE = "billing_obs_records_test"
+
+
+def test_diagnostic_category_filter_paginates_complete_queue(records_dsn, seeded, owner):
+    from app.control_routes import list_generation_records
+
+    with psycopg.connect(records_dsn) as raw:
+        raw.execute(
+            "UPDATE analysis_tasks SET error_code='UNKNOWN_TEST_FAILURE' WHERE id=%s",
+            (seeded["network"],),
+        )
+        unknown = list_generation_records(
+            BusinessConnection.postgres(raw),
+            owner,
+            diagnostics=True,
+            failure_category="UNCLASSIFIED",
+            limit=1,
+            offset=0,
+        )
+        assert unknown.total == 1
+        assert unknown.items[0].record_id == seeded["network"]
+        assert unknown.items[0].failure_category == "UNCLASSIFIED"
+        all_failures = list_generation_records(
+            BusinessConnection.postgres(raw), owner, diagnostics=True, limit=1, offset=0
+        )
+        second = list_generation_records(
+            BusinessConnection.postgres(raw), owner, diagnostics=True, limit=1, offset=1
+        )
+        assert all_failures.total == second.total == 3
+        assert all_failures.items[0].record_id != second.items[0].record_id
+        raw.rollback()
+
+
+def test_clone_records_query_summary_and_measured_status_history(records_dsn, seeded, owner):
+    from app.control_routes import (
+        list_generation_records,
+        read_generation_record_history,
+        summarize_generation_records,
+    )
+
+    with psycopg.connect(records_dsn) as raw:
+        raw.execute(
+            "INSERT INTO person_identities(id,owner_user_id,display_name,status) "
+            "VALUES('history-person',%s,'隔离测试人物','ACTIVE')",
+            (seeded["user"],),
+        )
+        asset = raw.execute(
+            "SELECT id FROM assets WHERE created_by_user_id=%s LIMIT 1", (seeded["user"],)
+        ).fetchone()[0]
+        for table, kind in [("oral_avatars", "ORAL_AVATAR"), ("oral_voices", "ORAL_VOICE")]:
+            extra_columns = ",source_kind" if table == "oral_avatars" else ""
+            extra_values = ",'VIDEO'" if table == "oral_avatars" else ""
+            raw.execute(
+                f"INSERT INTO {table}"
+                f"(id,identity_id,owner_user_id,title,status,source_asset_id{extra_columns}) "
+                f"VALUES(%s,'history-person',%s,'测试克隆','PENDING',%s{extra_values})",
+                (kind, seeded["user"], asset),
+            )
+            raw.execute(
+                f"UPDATE {table} SET status='RUNNING',vendor_task_id=%s WHERE id=%s",
+                (kind + "-vendor", kind),
+            )
+            raw.execute(
+                f"UPDATE {table} SET status='FAILED',error_message='未分类错误' WHERE id=%s",
+                (kind,),
+            )
+            page = list_generation_records(
+                BusinessConnection.postgres(raw),
+                owner,
+                record_type=kind,
+                diagnostics=True,
+                failure_category="UNCLASSIFIED",
+                limit=20,
+                offset=0,
+            )
+            assert page.total == 1 and page.items[0].record_id == kind
+            assert page.items[0].failed_at is not None
+            assert (
+                page.items[0].user_id == seeded["user"]
+                and page.items[0].failure_category == "UNCLASSIFIED"
+            )
+            summary = summarize_generation_records(
+                BusinessConnection.postgres(raw), owner, record_type=kind
+            )
+            assert [(item.record_type, item.status, item.count) for item in summary.counts] == [
+                (kind, "FAILED", 1)
+            ]
+            assert summary.failure_reasons[0].count == 1
+            by_vendor = list_generation_records(
+                BusinessConnection.postgres(raw),
+                owner,
+                task_ref=kind + "-vendor",
+                limit=20,
+                offset=0,
+            )
+            assert [item.record_id for item in by_vendor.items] == [kind]
+            history = read_generation_record_history(
+                kind, kind, BusinessConnection.postgres(raw), owner, limit=2, offset=0
+            )
+            next_page = read_generation_record_history(
+                kind, kind, BusinessConnection.postgres(raw), owner, limit=2, offset=2
+            )
+            assert history["total"] == next_page["total"] == 3
+            assert [(item["before"], item["after"]) for item in history["items"]] == [
+                ("RUNNING", "FAILED"),
+                ("PENDING", "RUNNING"),
+            ]
+            assert [(item["before"], item["after"]) for item in next_page["items"]] == [
+                (None, "PENDING")
+            ]
+            raw.execute(f"UPDATE {table} SET title='改名不改变状态' WHERE id=%s", (kind,))
+            assert (
+                read_generation_record_history(
+                    kind, kind, BusinessConnection.postgres(raw), owner, limit=20, offset=0
+                )["total"]
+                == 3
+            )
+        # Old analysis rows have a current status but no invented transition backfill.
+        old = read_generation_record_history(
+            "ANALYSIS",
+            seeded["network"],
+            BusinessConnection.postgres(raw),
+            owner,
+            limit=20,
+            offset=0,
+        )
+        # This fixture is created after head migration, so actual INSERT/UPDATE events exist.
+        assert old["measurementStartedAt"] and old["historyRule"]
+        raw.rollback()
+
+
 UPSTREAM_REASON = "model gemini-3.8-flash is not available"
 
 
@@ -476,6 +606,96 @@ def test_status_group_filters_and_summary_cards(
     assert full.avg_duration_seconds == 60.0
 
 
+def test_refund_uses_current_billing_round_not_prior_release(records_dsn, seeded, owner):
+    from app.control_routes import list_generation_records
+
+    with psycopg.connect(records_dsn) as raw:
+        conn = BusinessConnection.postgres(raw)
+        first = accept_operation(
+            conn,
+            user_id=seeded["user"],
+            service="analysis",
+            source_id=seeded["network"],
+            units=1,
+            billing_round=1,
+        )
+        finish_operation(conn, operation_id=first, units=0, succeeded=False)
+        second = accept_operation(
+            conn,
+            user_id=seeded["user"],
+            service="analysis",
+            source_id=seeded["network"],
+            units=1,
+            billing_round=2,
+        )
+        page = list_generation_records(conn, owner, user_id=seeded["user"], limit=100, offset=0)
+        item = next(item for item in page.items if item.record_id == seeded["network"])
+        assert item.credits_refunded is False
+        finish_operation(conn, operation_id=second, units=0, succeeded=False)
+        page = list_generation_records(conn, owner, user_id=seeded["user"], limit=100, offset=0)
+        item = next(item for item in page.items if item.record_id == seeded["network"])
+        assert item.credits_refunded is True
+        raw.rollback()
+
+
+def test_company_keyword_and_project_keep_customer_id_scope(records_dsn, seeded, owner):
+    from app.control_routes import list_generation_records, summarize_generation_records
+
+    with psycopg.connect(records_dsn) as raw:
+        raw.execute(
+            "UPDATE users SET display_name='公司甲',username='same-prefix' WHERE id=%s",
+            (seeded["user"],),
+        )
+        raw.execute(
+            "INSERT INTO users(id,username,display_name,role) "
+            "VALUES('g21-other','same-prefix-other','公司甲分公司','customer')"
+        )
+        raw.execute(
+            "INSERT INTO projects(id,owner_user_id,name) "
+            "VALUES('g21-other-project','g21-other','拆解观测项目')"
+        )
+        raw.execute(
+            "INSERT INTO analysis_tasks(id,project_id,asset_id,created_by_user_id,"
+            "duration_seconds,status) "
+            "SELECT 'g21-other-task','g21-other-project',asset_id,'g21-other',"
+            "duration_seconds,'FAILED' "
+            "FROM analysis_tasks WHERE id=%s",
+            (seeded["network"],),
+        )
+        conn = BusinessConnection.postgres(raw)
+        hit = list_generation_records(
+            conn,
+            owner,
+            username="公司甲",
+            user_id=seeded["user"],
+            project_name="拆解观测",
+            limit=100,
+            offset=0,
+        )
+        assert hit.total == 5 and all(row.user_id == seeded["user"] for row in hit.items)
+        summary = summarize_generation_records(
+            conn, owner, username="公司甲", user_id=seeded["user"], project_name="拆解观测"
+        )
+        assert summary.total == 5 and sum(row.count for row in summary.failure_reasons) == 3
+        miss = list_generation_records(
+            conn,
+            owner,
+            username="公司甲",
+            user_id=seeded["user"],
+            project_name="其它项目",
+            limit=100,
+            offset=0,
+        )
+        assert miss.total == 0
+        assert (
+            summarize_generation_records(
+                conn, owner, username="公司甲", user_id=seeded["user"], project_name="其它项目"
+            ).total
+            == 0
+        )
+        raw.rollback()
+
+
 def test_project_name_filter_matches_video_and_analysis_only(
     records_dsn: str, seeded: dict[str, str], owner: CurrentUser
 ) -> None:
@@ -494,3 +714,41 @@ def test_project_name_filter_matches_video_and_analysis_only(
     assert hit.total == 5
     assert {item.record_id for item in hit.items} >= {seeded["ok"], seeded["pending"]}
     assert miss.total == 0
+
+
+def test_stable_user_id_isolates_same_prefix_list_summary_and_diagnostics(
+    records_dsn, seeded, owner
+):
+    from app.control_routes import list_generation_records, summarize_generation_records
+
+    with psycopg.connect(records_dsn) as raw:
+        raw.execute("UPDATE users SET username='a' WHERE id=%s", (seeded["user"],))
+        raw.execute("INSERT INTO users(id,username,display_name) VALUES('m14-ab','ab','同名展示')")
+        raw.execute(
+            "INSERT INTO analysis_tasks"
+            "(id,project_id,asset_id,created_by_user_id,duration_seconds,status) "
+            "SELECT 'm14-other-task',project_id,asset_id,'m14-ab',8,'FAILED' "
+            "FROM analysis_tasks WHERE id=%s",
+            (seeded["network"],),
+        )
+        conn = BusinessConnection.postgres(raw)
+        fuzzy = list_generation_records(conn, owner, username="a", limit=100, offset=0)
+        assert any(item.user_id == "m14-ab" for item in fuzzy.items)
+        for offset in [0, 1]:
+            page = list_generation_records(
+                conn, owner, user_id=seeded["user"], limit=1, offset=offset
+            )
+            assert page.total == 5 and len(page.items) == 1
+            assert page.items[0].user_id == seeded["user"]
+        summary = summarize_generation_records(conn, owner, user_id=seeded["user"])
+        assert sum(item.count for item in summary.counts) == 5
+        assert sum(reason.count for reason in summary.failure_reasons) == 3
+        diagnostics = list_generation_records(
+            conn, owner, diagnostics=True, user_id=seeded["user"], limit=100, offset=0
+        )
+        assert diagnostics.total == 3
+        assert all(item.user_id == seeded["user"] for item in diagnostics.items)
+        none = list_generation_records(
+            conn, owner, user_id="missing-stable-user", limit=100, offset=0
+        )
+        assert none.total == 0

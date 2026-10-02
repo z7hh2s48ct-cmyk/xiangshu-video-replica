@@ -371,6 +371,7 @@ class UrllibApilioChatTransport:
             # 测试替换它时照样生效。
             response_body, response_headers, _status = recorded_urlopen(
                 request,
+                expected_json=True,
                 timeout=self.timeout_seconds,
                 provider="apilio_gemini",
                 endpoint=endpoint_from_url(url),

@@ -672,17 +672,29 @@ def _alembic_config(dsn: str):  # type: ignore[no-untyped-def]
     return config
 
 
-def _upgrade_pg(dsn: str) -> None:
+# Offline cutover fixtures model the final compatible archived SQLite release.
+# Import at matching revisions, then upgrade the PG runtime separately.
+LEGACY_SQLITE_REVISION = "20260930T1400_registration_bonus_settings"
+
+
+@pytest.fixture
+def archived_cutover_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise the archived release contract; current CLI head gate stays strict."""
+    from scripts import sqlite_to_postgres as importer
+
+    monkeypatch.setattr(importer, "release_head_revision", lambda: LEGACY_SQLITE_REVISION)
+
+
+def _upgrade_pg(dsn: str, revision: str = LEGACY_SQLITE_REVISION) -> None:
     from alembic import command
 
-    command.upgrade(_alembic_config(dsn), "head")
+    command.upgrade(_alembic_config(dsn), revision)
 
 
 def _create_head_source(path: Path) -> None:
-    from app.db import connect_database, initialize_database
+    from app.db import connect_database, upgrade_database
 
-    conn = initialize_database(path)
-    conn.close()
+    upgrade_database(path, LEGACY_SQLITE_REVISION)
     with connect_database(path) as conn:
         conn.execute(
             "INSERT INTO users (id, username, display_name) VALUES (?, ?, ?)",
@@ -790,6 +802,7 @@ def _create_head_source(path: Path) -> None:
 
 
 @pg_only
+@pytest.mark.usefixtures("archived_cutover_release")
 def test_real_pg_migration_advisory_lock_blocks_concurrent_cutover(
     tmp_path: Path,
 ) -> None:
@@ -818,6 +831,7 @@ def test_real_pg_migration_advisory_lock_blocks_concurrent_cutover(
 
 
 @pg_only
+@pytest.mark.usefixtures("archived_cutover_release")
 def test_real_pg_import_reconcile_repeat_and_rollback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -903,6 +917,7 @@ def test_real_pg_import_reconcile_repeat_and_rollback(
 
 
 @pg_only
+@pytest.mark.usefixtures("archived_cutover_release")
 def test_real_pg_import_preserves_t37_typed_companion_timestamps(tmp_path: Path) -> None:
     import psycopg
 
@@ -949,6 +964,7 @@ def test_real_pg_import_preserves_t37_typed_companion_timestamps(tmp_path: Path)
 
 
 @pg_only
+@pytest.mark.usefixtures("archived_cutover_release")
 def test_real_pg_divergent_target_and_revision_mismatch_fail_closed(tmp_path: Path) -> None:
     import psycopg
 
@@ -984,6 +1000,7 @@ def test_real_pg_divergent_target_and_revision_mismatch_fail_closed(tmp_path: Pa
 
 
 @pg_only
+@pytest.mark.usefixtures("archived_cutover_release")
 def test_real_pg_reconciliation_detects_pk_row_wallet_and_asset_drift(
     tmp_path: Path,
 ) -> None:
@@ -1030,6 +1047,7 @@ def test_real_pg_reconciliation_detects_pk_row_wallet_and_asset_drift(
 
 
 @pg_only
+@pytest.mark.usefixtures("archived_cutover_release")
 def test_real_pg_import_rejects_non_empty_target_only_table(tmp_path: Path) -> None:
     """A non-empty PG-only table (admin_sessions, revision 026) is divergent
     state: the T07 cutover happens before the customer production line opens,
@@ -1065,6 +1083,7 @@ def test_real_pg_import_rejects_non_empty_target_only_table(tmp_path: Path) -> N
 
 
 @pg_only
+@pytest.mark.usefixtures("archived_cutover_release")
 def test_real_pg_import_rejects_modified_cost_rate_seed(tmp_path: Path) -> None:
     import psycopg
 
@@ -1090,6 +1109,7 @@ def test_real_pg_import_rejects_modified_cost_rate_seed(tmp_path: Path) -> None:
 
 
 @pg_only
+@pytest.mark.usefixtures("archived_cutover_release")
 def test_real_pg_import_rejects_modified_alert_settings_seed(tmp_path: Path) -> None:
     """``alert_settings`` 带迁移写入的默认行：默认值放行（其余导入用例已覆盖），
     被改过的阈值说明目标库已有人在用，必须拒绝且不导入任何业务行。"""
@@ -1114,6 +1134,7 @@ def test_real_pg_import_rejects_modified_alert_settings_seed(tmp_path: Path) -> 
 
 
 @pg_only
+@pytest.mark.usefixtures("archived_cutover_release")
 def test_real_pg_import_accepts_empty_activation_code_catalog_but_rejects_rows(
     tmp_path: Path,
 ) -> None:
@@ -1163,6 +1184,7 @@ def test_real_pg_import_accepts_empty_activation_code_catalog_but_rejects_rows(
 
 
 @pg_only
+@pytest.mark.usefixtures("archived_cutover_release")
 def test_real_pg_import_rejects_json_asset_orphan_before_writing_target(
     tmp_path: Path,
 ) -> None:
@@ -1222,6 +1244,7 @@ _BILLING_DRIFT_CASES = (
     _BILLING_DRIFT_CASES,
     ids=[case[0] for case in _BILLING_DRIFT_CASES],
 )
+@pytest.mark.usefixtures("archived_cutover_release")
 def test_real_pg_import_rejects_billing_drift_and_rolls_back(
     tmp_path: Path, expected_code: str, drift_sql: str, drift_doc: str
 ) -> None:
@@ -1253,6 +1276,7 @@ def test_real_pg_import_rejects_billing_drift_and_rolls_back(
 
 
 @pg_only
+@pytest.mark.usefixtures("archived_cutover_release")
 def test_real_pg_reconciliation_schema_contract_codes(tmp_path: Path) -> None:
     """M1 review H2: the schema-contract codes — a stray target table
     (target_table_extra), a dropped target column (table_column_mismatch)
@@ -1436,3 +1460,66 @@ def test_migration_report_file_is_private(tmp_path: Path) -> None:
     assert report.exists()
     if os.name == "posix":
         assert os.stat(report).st_mode & 0o777 == 0o600
+
+
+@pg_only
+@pytest.mark.usefixtures("archived_cutover_release")
+def test_real_pg_legacy_cutover_then_current_upgrade_preserves_imported_facts(
+    tmp_path: Path,
+) -> None:
+    import psycopg
+
+    source = tmp_path / "legacy-source.db"
+    _create_head_source(source)
+    snapshot = create_readonly_snapshot(source, tmp_path / "legacy-snapshot.db")
+    name = "t07_legacy_then_current"
+    dsn = _create_database(name)
+    try:
+        _upgrade_pg(dsn)
+        assert migrate_snapshot(snapshot, dsn).reconciliation.ok
+        with psycopg.connect(dsn) as conn:
+            before_ledger = conn.execute(
+                "SELECT id, available_delta, ledger_sequence FROM wallet_transactions "
+                "ORDER BY ledger_sequence"
+            ).fetchall()
+        _upgrade_pg(dsn, "head")
+        with psycopg.connect(dsn) as conn:
+            assert conn.execute("SELECT available_credits FROM wallets").fetchone()[0] == 10
+            assert conn.execute("SELECT merchant_order_no FROM recharge_orders").fetchone()[0] == (
+                "T07-ORDER"
+            )
+            assert (
+                conn.execute(
+                    "SELECT id, available_delta, ledger_sequence FROM wallet_transactions "
+                    "ORDER BY ledger_sequence"
+                ).fetchall()
+                == before_ledger
+            )
+            assert (
+                conn.execute(
+                    "SELECT to_regclass('public.generation_record_status_events')"
+                ).fetchone()[0]
+                is not None
+            )
+    finally:
+        _drop_database(name)
+
+
+@pg_only
+def test_real_pg_current_head_refuses_direct_legacy_schema_import(tmp_path: Path) -> None:
+    import psycopg
+
+    source = tmp_path / "legacy-source.db"
+    _create_head_source(source)
+    snapshot = create_readonly_snapshot(source, tmp_path / "legacy-snapshot.db")
+    name = "t07_legacy_current_refusal"
+    dsn = _create_database(name)
+    try:
+        _upgrade_pg(dsn, "head")
+        with pytest.raises(MigrationSafetyError, match="Alembic revision mismatch"):
+            migrate_snapshot(snapshot, dsn)
+        with psycopg.connect(dsn) as conn:
+            assert conn.execute("SELECT count(*) FROM users").fetchone()[0] == 0
+            assert conn.execute("SELECT count(*) FROM wallet_transactions").fetchone()[0] == 0
+    finally:
+        _drop_database(name)

@@ -23,7 +23,9 @@ vi.mock("./AdjustmentsPage", () => ({
   ),
 }));
 vi.mock("./ReconciliationPage", () => ({
-  ReconciliationPage: () => <div data-testid="reconciliation">对账异常</div>,
+  ReconciliationPage: ({ readOnly }: { readOnly?: boolean }) => (
+    <div data-testid="reconciliation">{`readOnly=${String(readOnly)}`}</div>
+  ),
 }));
 vi.mock("./FundsOverview", () => ({
   FundsOverview: ({
@@ -90,4 +92,12 @@ test("overview shortcut jumps straight to the reconciliation tab", () => {
 
   fireEvent.click(screen.getByRole("button", { name: "跳对账异常" }));
   expect(screen.getByTestId("reconciliation")).toBeInTheDocument();
+});
+
+test("auditor reconciliation remains read-only after navigating from overview", () => {
+  render(<FundsPage readOnly />);
+  fireEvent.click(screen.getByRole("button", { name: "跳对账异常" }));
+  expect(screen.getByTestId("reconciliation")).toHaveTextContent(
+    "readOnly=true",
+  );
 });

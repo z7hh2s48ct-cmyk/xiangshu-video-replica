@@ -316,8 +316,9 @@ def claim_browser_probe_work(
     ``connected`` accounts are probed; an ``invalid`` account waits for a re-scan.
     """
     moment = now or _probe_now()
-    now_text = moment.strftime(_PROBE_TIME_FORMAT)
-    expires_text = (moment + timedelta(seconds=lease_seconds)).strftime(_PROBE_TIME_FORMAT)
+    # Browser probe columns are timestamptz: preserve the offset across DB session zones.
+    now_text = moment.isoformat()
+    expires_text = (moment + timedelta(seconds=lease_seconds)).isoformat()
     with conn:
         row = conn.execute(
             """
@@ -375,7 +376,7 @@ def finalize_browser_probe(
     possible only via a fresh scan, not another probe of a dead cookie.
     """
     moment = now or _probe_now()
-    next_text = (moment + timedelta(seconds=interval_seconds)).strftime(_PROBE_TIME_FORMAT)
+    next_text = (moment + timedelta(seconds=interval_seconds)).isoformat()
     with conn:
         cursor = conn.execute(
             """

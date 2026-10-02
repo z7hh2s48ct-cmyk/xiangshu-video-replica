@@ -1450,6 +1450,23 @@ def test_switch_writes_no_wallet_charge(client: TestClient) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("path", [LOGIN_PATH, SWITCH_PATH])
+def test_active_code_cannot_reestablish_a_paused_account(client: TestClient, path: str) -> None:
+    customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
+    with psycopg.connect(_t19_dsn()) as conn:
+        conn.execute("UPDATE users SET is_active=0 WHERE id=%s", (customer["user_id"],))
+        assert conn.execute("SELECT status FROM activation_codes WHERE id='code-a'").fetchone() == (
+            "ACTIVE",
+        )
+    response = client.post(
+        path,
+        json={},
+        headers={**_bearer(customer["device_token"]), IDEMPOTENCY_KEY_HEADER: "paused-account"},
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"]["code"] == "ACCOUNT_SUSPENDED"
+
+
 def test_login_rejects_suspended_code(client: TestClient) -> None:
     customer = _activated_customer(client, code=FIRST_CODE, fingerprint="fp-a", suffix="a")
     suspended = _admin_code_action(client, "code-a", "suspend", reason="风控暂停")

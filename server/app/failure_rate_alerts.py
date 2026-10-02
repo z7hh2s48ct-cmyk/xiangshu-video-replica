@@ -27,13 +27,14 @@ from typing import Any, Literal
 
 import psycopg
 from fastapi import APIRouter, Request, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.admin_auth_routes import AdminReader, AdminWriter
 from app.admin_dates import utc_timestamp_sql
 from app.admin_write_contract import AdminWriteContract as AdminWriteRequest
 from app.admin_write_contract import http_error as _http
 from app.admin_write_contract import write_with_idempotency
+from app.alert_policy import FailureRule, NotificationPolicy, load_alert_rules, policy_for
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
 from app.failure_runbook import failure_explanation
@@ -54,7 +55,6 @@ _UNAVAILABLE_CODE = "ALERT_SETTINGS_SERVICE_UNAVAILABLE"
 _UNAVAILABLE_MESSAGE = "告警设置需要 PostgreSQL 运行时。"
 
 # 展示上限：每类任务最多列出几个错误码——告警页是「一眼看出」，不是账本。
-_TOP_ERROR_LIMIT = 5
 
 _SUCCEEDED_STATUSES = ("SUCCEEDED",)
 _FAILED_STATUSES = ("FAILED", "SUBMISSION_UNCERTAIN", "ARCHIVE_FAILED", "UNKNOWN")
@@ -86,6 +86,16 @@ _BRANCHES: tuple[tuple[str, str, str], ...] = (
     ("'CHARACTER_VIEW_IMAGE'", "character_generation_tasks", "task.error_code"),
     (_SOURCE_FRAME_TYPE_CASE, "source_frame_tasks", "task.error_code"),
     ("'ANALYSIS'", "analysis_tasks", "task.error_code"),
+    (
+        "'ORAL_AVATAR'",
+        "oral_avatars",
+        "CASE WHEN task.status='FAILED' THEN 'ORAL_AVATAR_FAILED' ELSE NULL END",
+    ),
+    (
+        "'ORAL_VOICE'",
+        "oral_voices",
+        "CASE WHEN task.status='FAILED' THEN 'ORAL_VOICE_FAILED' ELSE NULL END",
+    ),
 )
 
 
@@ -96,6 +106,11 @@ class FailureRateError(BaseModel):
 
     error_code: str | None
     count: int
+    total: int = 0
+    failure_rate_percent: float = 0
+    threshold_percent: float = FAILURE_RATE_THRESHOLD_PERCENT
+    min_sample_size: int = FAILURE_RATE_MIN_SAMPLE
+    exceeded: bool = False
     category: str | None
     owner: str | None
     advice: str | None
@@ -107,6 +122,8 @@ class FailureRateGroup(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     record_type: str
+    threshold_percent: float = FAILURE_RATE_THRESHOLD_PERCENT
+    min_sample_size: int = FAILURE_RATE_MIN_SAMPLE
     total: int
     failed: int
     failure_rate_percent: float
@@ -195,16 +212,25 @@ def build_failure_rate_report(
     """窗口内各类型任务的终局失败率；口径读 ``alert_settings``（两个参数仅测试注入）。"""
     moment = now.astimezone(UTC) if now else datetime.now(UTC)
     effective = settings or load_failure_rate_settings(conn)
+    policies, rules = load_alert_rules(conn)
     cutoff = (moment - timedelta(minutes=effective.window_minutes)).isoformat()
     timestamp_sql = utc_timestamp_sql("task.updated_at", postgres=conn.is_postgres)
     window_parameter = "%s::timestamptz" if conn.is_postgres else "datetime(%s)"
     status_placeholders = ", ".join(["%s"] * len(_COUNTED_STATUSES))
+
+    def state_sql(table: str) -> str:
+        return (
+            "CASE WHEN task.status='READY' THEN 'SUCCEEDED' ELSE task.status END"
+            if table in {"oral_avatars", "oral_voices"}
+            else "task.status"
+        )
+
     union_sql = "\n            UNION ALL\n".join(
-        f"""SELECT {record_type} AS record_type, task.status AS status,
+        f"""SELECT {record_type} AS record_type, {state_sql(table)} AS status,
                    {error_code} AS error_code
             FROM {table} AS task
             WHERE {timestamp_sql} >= {window_parameter}
-              AND task.status IN ({status_placeholders})"""
+              AND {state_sql(table)} IN ({status_placeholders})"""
         for record_type, table, error_code in _BRANCHES
     )
     params: list[Any] = []
@@ -236,19 +262,43 @@ def build_failure_rate_report(
 
     groups: list[FailureRateGroup] = []
     for record_type, total in totals.items():
+        rule = next(
+            (r for r in rules if r.record_type == record_type and r.error_code is None), None
+        )
+        threshold = rule.threshold_percent if rule else effective.threshold_percent
+        minimum = rule.min_sample_size if rule else effective.min_sample_size
         failed = failed_by_type.get(record_type, 0)
         top_errors: list[FailureRateError] = []
         for error_code, count in sorted(
             error_counts.get(record_type, {}).items(),
             key=lambda item: (-item[1], item[0] or ""),
-        )[:_TOP_ERROR_LIMIT]:
+        ):
             # 内容审核升级依赖服务商原话；告警页没有原话样本，按错误码
             # 静态分类展示（原话级判定在生成记录详情里做）。
+            code_rule = next(
+                (
+                    r
+                    for r in rules
+                    if r.record_type == record_type
+                    and r.error_code == error_code
+                    and r.error_code is not None
+                ),
+                None,
+            )
+            code_threshold = code_rule.threshold_percent if code_rule else threshold
+            code_minimum = code_rule.min_sample_size if code_rule else minimum
             explanation = failure_explanation(error_code)
             top_errors.append(
                 FailureRateError(
                     error_code=error_code,
                     count=count,
+                    total=total,
+                    failure_rate_percent=_failure_rate_percent(count, total),
+                    threshold_percent=code_threshold,
+                    min_sample_size=code_minimum,
+                    exceeded=_exceeds_threshold(
+                        count, total, threshold_percent=code_threshold, min_sample_size=code_minimum
+                    ),
                     category=explanation.category if explanation else None,
                     owner=explanation.owner if explanation else None,
                     advice=explanation.advice if explanation else None,
@@ -257,14 +307,16 @@ def build_failure_rate_report(
         groups.append(
             FailureRateGroup(
                 record_type=record_type,
+                threshold_percent=threshold,
+                min_sample_size=minimum,
                 total=total,
                 failed=failed,
                 failure_rate_percent=_failure_rate_percent(failed, total),
                 exceeded=_exceeds_threshold(
                     failed,
                     total,
-                    threshold_percent=effective.threshold_percent,
-                    min_sample_size=effective.min_sample_size,
+                    threshold_percent=threshold,
+                    min_sample_size=minimum,
                 ),
                 top_errors=top_errors,
             )
@@ -292,7 +344,8 @@ def build_failure_rate_report(
             threshold_percent=effective.threshold_percent,
             min_sample_size=effective.min_sample_size,
         ),
-        alerting=any(group.exceeded for group in groups),
+        alerting=policy_for("failure_rate", policies).enabled
+        and any(group.exceeded or any(e.exceeded for e in group.top_errors) for group in groups),
         groups=groups,
     )
 
@@ -326,6 +379,7 @@ class AlertOverviewItem(BaseModel):
     headline: str
     detail: str
     count: int
+    dedup_period: str | None = None
 
 
 class AlertsOverview(BaseModel):
@@ -385,7 +439,9 @@ def _reconciliation_bucket_counts(conn: BusinessConnection) -> dict[str, int]:
     }
 
 
-def _sensitive_audit_digest(conn: BusinessConnection) -> list[dict[str, object]]:
+def _sensitive_audit_digest(
+    conn: BusinessConnection, *, window_minutes: int = 1440
+) -> list[dict[str, object]]:
     """近 24h 高敏审计事件的按动作摘要（口径同 admin_audit_routes.SENSITIVE_EVENTS）。"""
     from app.admin_audit_routes import SENSITIVE_EVENTS
 
@@ -394,11 +450,11 @@ def _sensitive_audit_digest(conn: BusinessConnection) -> list[dict[str, object]]
         SELECT al.action, count(*) AS total, max({utc_timestamp_sql("al.created_at")}) AS last_at
         FROM audit_logs al
         WHERE al.action = ANY(%s)
-          AND {utc_timestamp_sql("al.created_at")} >= clock_timestamp() - interval '24 hours'
+          AND {utc_timestamp_sql("al.created_at")} >= clock_timestamp() - (%s * interval '1 minute')
         GROUP BY al.action
         ORDER BY total DESC, al.action
         """,
-        (sorted(SENSITIVE_EVENTS),),
+        (sorted(SENSITIVE_EVENTS), window_minutes),
     ).fetchall()
     return [
         {
@@ -415,7 +471,12 @@ def build_alerts_overview(conn: BusinessConnection) -> AlertsOverview:
     failure = build_failure_rate_report(conn)
     items: list[AlertOverviewItem] = []
 
-    breach = [group for group in failure.groups if group.exceeded]
+    policies, _rules = load_alert_rules(conn)
+    breach = [
+        group
+        for group in failure.groups
+        if group.exceeded or any(error.exceeded for error in group.top_errors)
+    ]
     if breach:
         worst = max(breach, key=lambda group: group.failure_rate_percent)
         items.append(
@@ -426,7 +487,14 @@ def build_alerts_overview(conn: BusinessConnection) -> AlertsOverview:
                 detail=(
                     f"近 {failure.window_minutes} 分钟 "
                     f"{worst.failed}/{worst.total} 条失败；"
-                    "按类型展开见下方失败率报告。"
+                    "按类型及错误码独立阈值展开见下方报告。"
+                    + " ".join(
+                        f"{g.record_type}/{e.error_code or '未记录码'}:"
+                        f"{e.count}/{e.total}({e.failure_rate_percent}%)"
+                        for g in breach
+                        for e in g.top_errors
+                        if e.exceeded
+                    )
                 ),
                 count=sum(group.failed for group in breach),
             )
@@ -462,7 +530,8 @@ def build_alerts_overview(conn: BusinessConnection) -> AlertsOverview:
                 count=recon_total,
             )
         )
-    sensitive = _sensitive_audit_digest(conn)
+    sensitive_policy = policy_for("sensitive_events", policies)
+    sensitive = _sensitive_audit_digest(conn, window_minutes=sensitive_policy.window_minutes)
     if sensitive:
         sensitive_total = sum(int(str(item["total"])) for item in sensitive)
         top_action = str(sensitive[0]["action"])
@@ -470,7 +539,7 @@ def build_alerts_overview(conn: BusinessConnection) -> AlertsOverview:
             AlertOverviewItem(
                 key="sensitive_events",
                 severity="warn",
-                headline=f"近 24 小时高敏操作 {sensitive_total} 次",
+                headline=f"近 {sensitive_policy.window_minutes} 分钟高敏操作 {sensitive_total} 次",
                 detail=(
                     f"最集中在 {top_action}（{int(str(sensitive[0]['total']))} 次）；"
                     "明细在「审计中心」，按分组「密钥与导出」筛选。"
@@ -478,6 +547,26 @@ def build_alerts_overview(conn: BusinessConnection) -> AlertsOverview:
                 count=sensitive_total,
             )
         )
+    from app.viral_collection_budget import collection_budget
+
+    budget = collection_budget(conn)
+    if budget["budget_usage_percent"] is not None and budget["budget_usage_percent"] >= 80:
+        items.append(
+            AlertOverviewItem(
+                key="collection_budget",
+                severity="warn",
+                headline="本月已知采集成本已达预算80%",
+                detail=f"已知使用率{budget['budget_usage_percent']:.1f}%；未知{budget['month_unknown_cost_count']}条、进行中{budget['month_pending_cost_count']}条单列，不按0成本处理。已知满额停定时采集，手动路径保持。",
+                count=1,
+                dedup_period=budget["budget_period_start"],
+            )
+        )
+    items = [
+        item
+        for item in items
+        if policy_for(item.key, policies).enabled
+        and item.count >= policy_for(item.key, policies).threshold_count
+    ]
     settings = load_failure_rate_settings(conn)
     return AlertsOverview(
         items=items,
@@ -494,9 +583,8 @@ def read_alerts_overview(
 ) -> AlertsOverview:
     """告警总览（方案 P2）：四类告警的首屏红黄条数据源。
 
-    ``notify=1`` 时在有 danger 级告警且接收人配了邮箱的情况下，后台投递一封
-    摘要邮件（失败只记日志，不影响响应）；防打扰：同一小时只发一封，
-    以 ``alert_notify_dedup`` 里的最近投递时间为准。
+    notify=1时按类别配置投递；成功、失败、重试和去重写入alert_deliveries。
+    预算按月、其他类别按小时去重。
     """
     response.headers["Cache-Control"] = "no-store"
     with pg_transaction() as raw:
@@ -507,8 +595,8 @@ def read_alerts_overview(
 
 
 def notify_if_dangerous(overview: AlertsOverview) -> None:
-    """有 danger 级告警才走投递；其余情况什么都不做。"""
-    if any(item.severity == "danger" for item in overview.items):
+    """保留旧入口名；达到独立阈值的warn与danger均可投递。"""
+    if overview.items:
         _deliver_alert_email_quietly(overview)
 
 
@@ -524,82 +612,11 @@ def dispatch_alert_digest() -> None:
     notify_if_dangerous(overview)
 
 
-def _alert_recipient_email(conn: BusinessConnection) -> str | None:
-    row = conn.execute(
-        "SELECT u.email FROM alert_settings s "
-        "JOIN users u ON u.id = s.recipient_user_id "
-        "WHERE s.id = 1 AND u.email IS NOT NULL AND u.email != ''"
-    ).fetchone()
-    return str(row[0]) if row is not None else None
-
-
-def _claim_alert_digest_slot(conn: BusinessConnection) -> datetime | None:
-    """原子认领「本小时的摘要名额」；返回认领时刻，已被别人认领则返回 None。
-
-    部署里有多个独立的 generation_worker 进程，进程内节流拦不住彼此。这里把
-    「近一小时没发过」的判断和记账合成一条 upsert：并发的第二个认领者会在唯一键上
-    等第一个提交，再按新行重新求值 WHERE，于是拿不到名额。
-    """
-    row = conn.execute(
-        "INSERT INTO alert_notify_dedup (id, last_sent_at) VALUES (1, clock_timestamp()) "
-        "ON CONFLICT (id) DO UPDATE SET last_sent_at = EXCLUDED.last_sent_at "
-        "WHERE alert_notify_dedup.last_sent_at <= clock_timestamp() - interval '1 hour' "
-        "RETURNING last_sent_at"
-    ).fetchone()
-    return row[0] if row is not None else None
-
-
 def _deliver_alert_email_quietly(overview: AlertsOverview) -> None:
-    """把 danger 告警摘要发给接收人；发送失败只记日志（P2 推送通道）。"""
+    """各类通知独立认领、配置检查、失败可见；不让邮件故障影响业务。"""
+    from app.alert_delivery import deliver_alerts
 
-    def _send() -> None:
-        from app.db_pg import pg_transaction as _pg
-        from app.email_delivery import deliver_quietly, email_sender_from_settings
-
-        with _pg() as raw:
-            conn = BusinessConnection.postgres(raw)
-            email = _alert_recipient_email(conn)
-            if email is None:
-                return
-            sender = email_sender_from_settings(conn)
-            if sender is None:
-                # 通道没配就不认领名额：否则配好之前的每一小时都会被白白占掉。
-                logger.info("alert email skipped: email provider not configured")
-                return
-            # 先认领再发信，且认领在发信之前提交。发信可能很慢，不能让事务或锁跨着网络
-            # 调用（连接层有空闲事务超时）；认领一提交，其它 worker 立刻看到「已有人在发」。
-            claimed_at = _claim_alert_digest_slot(conn)
-            if claimed_at is None:
-                return
-        dangerous = [item for item in overview.items if item.severity == "danger"]
-        lines = "\n".join(f"- {item.headline}（{item.detail}）" for item in dangerous)
-        delivered = False
-        try:
-            delivered = deliver_quietly(
-                lambda: sender.send_alert_digest(
-                    to=email,
-                    total=len(overview.items),
-                    danger_count=len(dangerous),
-                    items=lines,
-                    generated_at=overview.generated_at,
-                ),
-                kind="alert_digest",
-            )
-        finally:
-            if not delivered:
-                # 没发出去就撤销认领：一次发送失败（模板缺失、网络抖动）不能把接下来
-                # 一小时的重试全部挡掉，而告警其实一封都没送到。只撤销自己认领的那一行，
-                # 不误删之后别人重新认领的记录。
-                with _pg() as raw:
-                    BusinessConnection.postgres(raw).execute(
-                        "DELETE FROM alert_notify_dedup WHERE id = 1 AND last_sent_at = %s",
-                        (claimed_at,),
-                    )
-
-    try:
-        _send()
-    except Exception as exc:  # pragma: no cover - 通知绝不拖垮告警页
-        logger.warning("alert email dispatch failed: %s", type(exc).__name__)
+    deliver_alerts(overview)
 
 
 # ---------------------------------------------------------------------------
@@ -628,6 +645,8 @@ class AlertSettingsSnapshot(BaseModel):
     failure_rate_min_sample: int
     updated_by_user_id: str | None
     updated_at: str | None
+    notification_policies: list[NotificationPolicy] = Field(default_factory=list)
+    failure_rules: list[FailureRule] = Field(default_factory=list)
 
 
 class AlertSettingsUpdate(AdminWriteRequest):
@@ -643,6 +662,18 @@ class AlertSettingsUpdate(AdminWriteRequest):
     failure_rate_window_minutes: int = Field(ge=1, le=10080)
     failure_rate_threshold_percent: float = Field(ge=0, le=100)
     failure_rate_min_sample: int = Field(ge=1)
+    notification_policies: list[NotificationPolicy] | None = Field(default=None, max_length=5)
+    failure_rules: list[FailureRule] | None = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def unique_rules(self) -> AlertSettingsUpdate:
+        policies = self.notification_policies or []
+        rules = self.failure_rules or []
+        if len({p.key for p in policies}) != len(policies) or len(
+            {(r.record_type, r.error_code) for r in rules}
+        ) != len(rules):
+            raise ValueError("告警类别或类型/错误码配置不可重复。")
+        return self
 
 
 def _iso_timestamp(value: object) -> str | None:
@@ -659,6 +690,7 @@ def _load_alert_settings_snapshot(conn: BusinessConnection) -> AlertSettingsSnap
     row = conn.execute(_SETTINGS_SELECT).fetchone()
     if row is None:
         raise _http(503, _UNAVAILABLE_CODE, _UNAVAILABLE_MESSAGE)
+    policies, rules = load_alert_rules(conn)
     return AlertSettingsSnapshot(
         recipient_user_id=None if row[0] is None else str(row[0]),
         recipient_display_name=None if row[1] is None else str(row[1]),
@@ -667,6 +699,8 @@ def _load_alert_settings_snapshot(conn: BusinessConnection) -> AlertSettingsSnap
         failure_rate_min_sample=int(row[4]),
         updated_by_user_id=None if row[5] is None else str(row[5]),
         updated_at=_iso_timestamp(row[6]),
+        notification_policies=policies,
+        failure_rules=rules,
     )
 
 
@@ -698,6 +732,18 @@ def update_alert_settings(
                     "ALERT_SETTINGS_VALIDATION_FAILED",
                     "接收人必须是启用中的管理员账号。",
                 )
+        for policy in body.notification_policies or []:
+            if policy.recipient_user_id is not None:
+                valid = conn.execute(
+                    "SELECT 1 FROM users WHERE id=%s AND role=ANY(%s) AND is_active=1",
+                    (policy.recipient_user_id, list(_RECIPIENT_ROLES)),
+                ).fetchone()
+                if valid is None:
+                    raise _http(
+                        400,
+                        "ALERT_SETTINGS_VALIDATION_FAILED",
+                        "通知路由接收人必须是启用中的管理员账号。",
+                    )
         before = _load_alert_settings_snapshot(bridge)
         conn.execute(
             "UPDATE alert_settings SET recipient_user_id = %s, "
@@ -712,6 +758,16 @@ def update_alert_settings(
                 actor.user_id,
             ),
         )
+        if body.notification_policies is not None:
+            conn.execute(
+                "UPDATE alert_settings SET notification_policies_json=%s::jsonb WHERE id=1",
+                (json.dumps([v.model_dump() for v in body.notification_policies]),),
+            )
+        if body.failure_rules is not None:
+            conn.execute(
+                "UPDATE alert_settings SET failure_rules_json=%s::jsonb WHERE id=1",
+                (json.dumps([v.model_dump() for v in body.failure_rules]),),
+            )
         after = _load_alert_settings_snapshot(bridge)
         conn.execute(
             "INSERT INTO audit_logs "
@@ -778,4 +834,75 @@ def list_alert_recipient_candidates(actor: AdminReader) -> dict[str, object]:
             }
             for row in rows
         ]
+    }
+
+
+@router.get("/alerts/deliveries")
+def read_alert_deliveries(response: Response, _actor: AdminReader) -> dict[str, object]:
+    """通知元数据查询不发送邮件，也不返回邮箱/凭据。"""
+    response.headers["Cache-Control"] = "no-store"
+    from app.email_delivery import email_sender_from_settings
+
+    with pg_transaction() as raw:
+        rows = raw.execute(
+            "SELECT d.alert_key,d.state,d.attempts,d.last_error,d.updated_at,"
+            "d.sent_at,u.display_name,md5(d.event_key||':'||d.recipient_key) "
+            "FROM alert_deliveries d LEFT JOIN users u ON u.id=d.recipient_ke"
+            "y ORDER BY d.updated_at DESC LIMIT 100"
+        ).fetchall()
+        bridge = BusinessConnection.postgres(raw)
+        policies, _rules = load_alert_rules(bridge)
+        default = raw.execute("SELECT recipient_user_id FROM alert_settings WHERE id=1").fetchone()
+        try:
+            sender = email_sender_from_settings(bridge)
+            channel_ready = sender is not None and bool(
+                getattr(sender, "alert_digest_configured", True)
+            )
+        except Exception:  # noqa: BLE001 — 无效配置只展示待配置。
+            channel_ready = False
+        configuration = []
+        for key in [
+            "failure_rate",
+            "unconfigured_rates",
+            "reconciliation",
+            "sensitive_events",
+            "collection_budget",
+        ]:
+            policy = policy_for(key, policies)
+            recipient = policy.recipient_user_id or (
+                str(default[0]) if default and default[0] else None
+            )
+            target = (
+                raw.execute(
+                    "SELECT display_name,email FROM users WHERE id=%s AND role IN ('a"
+                    "dmin','auditor') AND is_active=1",
+                    (recipient,),
+                ).fetchone()
+                if recipient
+                else None
+            )
+            configuration.append(
+                {
+                    "key": key,
+                    "enabled": policy.enabled,
+                    "channel_configured": channel_ready and policy.channel is not None,
+                    "recipient_configured": bool(target and target[1]),
+                    "recipient_display_name": target[0] if target else None,
+                }
+            )
+    return {
+        "configuration": configuration,
+        "items": [
+            {
+                "id": row[7],
+                "alert_key": row[0],
+                "state": row[1],
+                "attempts": row[2],
+                "last_error": row[3],
+                "updated_at": _iso_timestamp(row[4]),
+                "sent_at": _iso_timestamp(row[5]),
+                "recipient_display_name": row[6],
+            }
+            for row in rows
+        ],
     }

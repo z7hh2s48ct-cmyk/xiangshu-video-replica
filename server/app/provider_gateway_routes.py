@@ -17,7 +17,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_auth_routes import AdminReader, AdminWriter, SuperAdminReader, SuperAdminWriter
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
 from app.provider_gateway import ProviderGateway
@@ -74,7 +74,7 @@ class BillingSettingsUpdate(BaseModel):
 
 
 @router.get("/list", response_model=list[str])
-def list_providers(_actor: AdminReader) -> list[str]:
+def list_providers(_actor: SuperAdminReader) -> list[str]:
     """List all available providers."""
     with pg_transaction(isolation="REPEATABLE READ") as raw:
         gateway = ProviderGateway(BusinessConnection.postgres(raw))
@@ -82,7 +82,7 @@ def list_providers(_actor: AdminReader) -> list[str]:
 
 
 @router.get("/{provider_name}/status", response_model=ProviderStatusResponse)
-def get_provider_status(provider_name: str, _actor: AdminReader) -> ProviderStatusResponse:
+def get_provider_status(provider_name: str, _actor: SuperAdminReader) -> ProviderStatusResponse:
     """Get status of a specific provider."""
     with pg_transaction(isolation="REPEATABLE READ") as raw:
         gateway = ProviderGateway(BusinessConnection.postgres(raw))
@@ -101,7 +101,7 @@ def get_provider_status(provider_name: str, _actor: AdminReader) -> ProviderStat
 def switch_provider(
     provider_name: str,
     config: ProviderConfigUpdate,
-    _actor: AdminWriter,
+    _actor: SuperAdminWriter,
 ) -> dict[str, Any]:
     """Switch to a different provider configuration.
 
@@ -144,7 +144,7 @@ def switch_provider(
 @router.get("/{provider_name}/usage-history", response_model=UsageHistoryResponse)
 def get_provider_usage_history(
     provider_name: str,
-    _actor: AdminReader,
+    _actor: SuperAdminReader,
     days: int = Query(7, ge=1, le=90),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
@@ -277,7 +277,7 @@ def update_billing_settings(
 def test_provider_connection(
     provider_name: str,
     config: ProviderConfigUpdate,
-    _actor: AdminWriter,
+    _actor: SuperAdminWriter,
 ) -> dict[str, Any]:
     """Test provider connection without making actual calls."""
     with pg_transaction(isolation="REPEATABLE READ") as raw:

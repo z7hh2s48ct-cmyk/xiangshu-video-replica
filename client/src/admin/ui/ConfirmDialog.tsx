@@ -1,4 +1,10 @@
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import {
+  type FormEvent,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 
 // 统一的高危操作确认对话框（2026-09-02 管理端评估 §交互规范）：
 // - standard：说明性确认（低危、不可逆性弱，如查单）；
@@ -40,11 +46,11 @@ export function ConfirmDialog({
   const confirmButtonRef = useRef<HTMLButtonElement | null>(null);
   const dialogRef = useRef<HTMLFormElement | null>(null);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) {
       return;
     }
-    // 每次打开都是一次新的确认：清掉上一次的输入与错误。
+    // 打开前清掉旧输入；被动 effect 可能晚于首次输入，导致新原因被清空。
     setReason("");
     setAcknowledged(false);
     setLocalError("");

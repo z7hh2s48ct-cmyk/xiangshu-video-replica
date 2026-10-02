@@ -7,6 +7,8 @@ import {
 } from "react";
 
 import {
+  type AlertFailureRule,
+  type AlertNotificationPolicy,
   type AlertRecipientCandidate,
   type AlertSettings,
   type AlertSettingsFields,
@@ -15,6 +17,7 @@ import {
   listAlertRecipientCandidates,
   updateAlertSettings,
 } from "../api.admin";
+import { AlertRuleEditor } from "./AlertRuleEditor";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { PageBanner } from "./ui/PageBanner";
 import { formatDateTime, roleLabel } from "./ui/vocabulary";
@@ -28,6 +31,8 @@ interface Draft {
   window: string;
   threshold: string;
   minSample: string;
+  policies?: AlertNotificationPolicy[];
+  rules?: AlertFailureRule[];
 }
 
 function toDraft(settings: AlertSettings): Draft {
@@ -36,6 +41,8 @@ function toDraft(settings: AlertSettings): Draft {
     window: String(settings.failure_rate_window_minutes),
     threshold: String(settings.failure_rate_threshold_percent),
     minSample: String(settings.failure_rate_min_sample),
+    policies: settings.notification_policies,
+    rules: settings.failure_rules,
   };
 }
 
@@ -45,6 +52,12 @@ function toFields(settings: AlertSettings): AlertSettingsFields {
     failure_rate_window_minutes: settings.failure_rate_window_minutes,
     failure_rate_threshold_percent: settings.failure_rate_threshold_percent,
     failure_rate_min_sample: settings.failure_rate_min_sample,
+    ...(settings.notification_policies === undefined
+      ? {}
+      : { notification_policies: settings.notification_policies }),
+    ...(settings.failure_rules === undefined
+      ? {}
+      : { failure_rules: settings.failure_rules }),
   };
 }
 
@@ -80,6 +93,36 @@ function parseDraft(
   ) {
     return { ok: false, message: "最小样本量需为不小于 1 的整数" };
   }
+  if (
+    draft.policies?.some(
+      (p) =>
+        !Number.isInteger(p.threshold_count) ||
+        p.threshold_count < 1 ||
+        p.threshold_count > 1000000 ||
+        !Number.isInteger(p.window_minutes) ||
+        p.window_minutes < 1 ||
+        p.window_minutes > 10080,
+    ) ||
+    draft.rules?.some(
+      (r) =>
+        !Number.isFinite(r.threshold_percent) ||
+        r.threshold_percent < 0 ||
+        r.threshold_percent > 100 ||
+        !Number.isInteger(r.min_sample_size) ||
+        r.min_sample_size < 1 ||
+        r.min_sample_size > 1000000 ||
+        (r.error_code !== null && r.error_code.trim().length === 0),
+    )
+  )
+    return {
+      ok: false,
+      message: "独立阈值、样本量或统计窗口无效，请核对告警规则。",
+    };
+  if (
+    new Set(draft.rules?.map((r) => `${r.record_type}:${r.error_code ?? "*"}`))
+      .size !== (draft.rules?.length ?? 0)
+  )
+    return { ok: false, message: "类型与错误码规则不可重复。" };
   return {
     ok: true,
     fields: {
@@ -87,6 +130,10 @@ function parseDraft(
       failure_rate_window_minutes: window,
       failure_rate_threshold_percent: threshold,
       failure_rate_min_sample: minSample,
+      ...(draft.policies === undefined
+        ? {}
+        : { notification_policies: draft.policies }),
+      ...(draft.rules === undefined ? {} : { failure_rules: draft.rules }),
     },
   };
 }
@@ -96,7 +143,10 @@ function sameFields(a: AlertSettingsFields, b: AlertSettingsFields): boolean {
     a.recipient_user_id === b.recipient_user_id &&
     a.failure_rate_window_minutes === b.failure_rate_window_minutes &&
     a.failure_rate_threshold_percent === b.failure_rate_threshold_percent &&
-    a.failure_rate_min_sample === b.failure_rate_min_sample
+    a.failure_rate_min_sample === b.failure_rate_min_sample &&
+    JSON.stringify(a.notification_policies) ===
+      JSON.stringify(b.notification_policies) &&
+    JSON.stringify(a.failure_rules) === JSON.stringify(b.failure_rules)
   );
 }
 
@@ -232,7 +282,7 @@ export function AlertSettingsPanel({
       <p className="admin-hint">
         决定「近 N
         分钟失败率超过多少算告警」。样本量不足时不告警，避免夜间低峰被个别失败刷屏。
-        接收人只会在告警页上被标出为负责人，暂不发送短信或邮件等外部提醒。
+        后台按已配置的邮件通道主动通知；未配接收人、通道或通知模板时明确待配置，不记为送达。类别独立去重，采集预算80%按上海自然月去重。
       </p>
       {error ? <PageBanner tone="error">{error}</PageBanner> : null}
       {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
@@ -257,6 +307,14 @@ export function AlertSettingsPanel({
               <dd>{settings.failure_rate_min_sample} 个终局任务</dd>
             </div>
           </dl>
+          <AlertRuleEditor
+            readOnly
+            policies={draft.policies}
+            rules={draft.rules}
+            candidates={candidates}
+            onPolicies={() => {}}
+            onRules={() => {}}
+          />
           <p className="admin-hint">审计员仅可查看告警设置，不能修改。</p>
         </>
       ) : (
@@ -304,6 +362,13 @@ export function AlertSettingsPanel({
               onChange={(event) => patch({ minSample: event.target.value })}
             />
           </label>
+          <AlertRuleEditor
+            policies={draft.policies}
+            rules={draft.rules}
+            candidates={candidates}
+            onPolicies={(policies) => patch({ policies })}
+            onRules={(rules) => patch({ rules })}
+          />
           {settings.updated_at ? (
             <p className="admin-hint">
               最后修改 {formatDateTime(settings.updated_at)}

@@ -847,6 +847,11 @@ async def extract_viral_video_copy(
             charged, deduped = charge_viral_copy(
                 conn, actor=actor, platform=platform, video_id=video_id
             )
+            from app.viral_content_observations import record_customer_read
+
+            record_customer_read(
+                conn, platform=platform, video_id=video_id, user_id=actor.id, kind="copy"
+            )
             response.status_code = status.HTTP_200_OK
             return ViralCopyExtractionResponse(
                 text=hit.result.text,

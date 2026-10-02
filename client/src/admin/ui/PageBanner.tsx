@@ -6,9 +6,16 @@ export function PageBanner({
   tone,
   children,
 }: {
-  tone: "error" | "notice";
+  tone: "error" | "notice" | "warning";
   children: React.ReactNode;
 }) {
+  if (tone === "warning") {
+    return (
+      <p className="admin-budget-warning" role="alert">
+        {children}
+      </p>
+    );
+  }
   if (tone === "error") {
     return (
       <p className="settings-error" role="alert">

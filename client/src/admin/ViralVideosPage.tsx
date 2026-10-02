@@ -5,17 +5,19 @@ import {
   adminActivationErrorMessage,
   adminSearchViralVideos,
   archiveCollectedViralVideo,
-  type CollectedViralStatus,
   type CollectedViralVideo,
   collectViralNow,
   curateViralVideo,
   curateViralVideosBatch,
+  estimateViralOperation,
   fetchViralRuntimeControls,
+  getViralVideoBusinessDetails,
   listCollectedViralVideos,
   previewCollectedViralVideo,
   refreshCollectedVideoStatistics,
   updateViralVideoAvailability,
   type ViralLibraryOverview,
+  type ViralOperationEstimate,
   type ViralRuntimeControls,
   viralLibraryOverview,
 } from "../api.admin";
@@ -23,6 +25,9 @@ import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
 import { type BadgeTone, StatusBadge } from "./ui/StatusBadge";
+import { ViralOperationCostSummary } from "./ViralOperationCostSummary";
+import { ViralRecycleBin } from "./ViralRecycleBin";
+import { ViralVideoBusinessDetails } from "./ViralVideoBusinessDetails";
 
 type Action =
   | "feature"
@@ -30,13 +35,20 @@ type Action =
   | "delete"
   | "archive"
   | "hide"
+  | "block"
   | "restore"
   | "pin"
   | "unpin"
   | "prepare";
 /** 批量接口支持的动作：置顶 / 隐藏必须逐条，否则整批会被服务端拒绝；
  * prepare（方案 P1 C-2）批量排队准备素材，就绪后再决定上首页。 */
-type BatchAction = "feature" | "unfeature" | "delete" | "prepare";
+type BatchAction =
+  | "feature"
+  | "unfeature"
+  | "delete"
+  | "prepare"
+  | "hide"
+  | "block";
 /** 「立即采集」不是对某条视频的动作，但共用同一个确认框与提交路径。 */
 type PendingAction = Action | "collect";
 
@@ -45,19 +57,27 @@ function isBatchAction(action: PendingAction): action is BatchAction {
     action === "feature" ||
     action === "unfeature" ||
     action === "delete" ||
-    action === "prepare"
+    action === "prepare" ||
+    action === "hide" ||
+    action === "block"
   );
 }
 
 type Pending = {
   action: PendingAction;
+  estimate?: ViralOperationEstimate;
   items: CollectedViralVideo[];
   key: string;
 };
 
 type Filters = {
   platform: "" | "douyin" | "wechat_channels";
-  status: "" | CollectedViralStatus;
+  status: "" | NonNullable<CollectedViralVideo["content_state"]>;
+  category: string;
+  sourceKeyword: string;
+  publishedFrom: string;
+  publishedTo: string;
+  customerVisible: "" | "visible" | "hidden";
   sort: "created" | "likes" | "published" | "usage";
   hasUsage: "" | "used" | "unused";
   query: string;
@@ -65,7 +85,7 @@ type Filters = {
 };
 
 /** 服务端 `curation:batch` 的 items 上限，前端先拦住，避免整批白跑一趟。 */
-const MAX_BATCH = 20;
+const MAX_BATCH = 50;
 
 const STAT_FIELDS: Array<
   [string, (video: CollectedViralVideo) => number | null]
@@ -101,10 +121,17 @@ const CONTENT_STATE_LABELS: Record<string, string> = {
 
 /** 内容状态 6 态判定（方案 P1）：归档 × 首页 × 可见性收敛为一个运营状态。 */
 export function contentStateOf(video: CollectedViralVideo): string {
+  if (video.content_state) return video.content_state;
   if (video.availability === "UNAVAILABLE") return "blocked";
   if (video.availability === "HIDDEN") return "removed";
-  if (video.homepage_featured) return "featured";
-  if (mediaReady(video)) return "ready";
+  if (
+    video.homepage_featured &&
+    mediaReady(video) &&
+    video.homepage_live !== false
+  )
+    return "featured";
+  if (mediaReady(video) && (!video.cover_required || video.cover_key))
+    return "ready";
   if (video.media_status === "FAILED" || video.archive_status === "FAILED") {
     return "prepare_failed";
   }
@@ -116,20 +143,22 @@ export function contentStateLabel(video: CollectedViralVideo): string {
 }
 
 export function archiveLabel(video: CollectedViralVideo) {
-  if (video.archive_status === "PENDING") return "转存排队中";
-  if (video.archive_status === "RUNNING") return "正在转存";
+  if (video.archive_status === "PENDING") return "准备排队中";
+  if (video.archive_status === "RUNNING") return "正在准备";
   if (mediaReady(video))
-    return video.cover_required && !video.cover_key ? "封面待补齐" : "归档就绪";
+    return video.cover_required && !video.cover_key
+      ? "封面待补齐"
+      : "素材已准备";
   return video.media_status === "FAILED" || video.archive_status === "FAILED"
-    ? "转存失败"
-    : "待转存";
+    ? "准备失败"
+    : "待准备";
 }
 
 function archiveTone(video: CollectedViralVideo): BadgeTone {
   const label = archiveLabel(video);
-  if (label === "归档就绪") return "good";
-  if (label === "转存失败") return "danger";
-  if (label === "转存排队中" || label === "正在转存") return "info";
+  if (label === "素材已准备") return "good";
+  if (label === "准备失败") return "danger";
+  if (label === "准备排队中" || label === "正在准备") return "info";
   return "warn";
 }
 
@@ -185,7 +214,7 @@ function formatDuration(durationMs: number) {
  */
 function statisticValue(video: CollectedViralVideo, value: number | null) {
   if (typeof value === "number") return value.toLocaleString("zh-CN");
-  return video.statistics_checked_at ? "未提供" : "—";
+  return video.statistics_checked_at ? "未提供" : "暂无数据";
 }
 
 /**
@@ -367,9 +396,9 @@ function ViralRow({
           <div>
             <dt>客户使用</dt>
             <dd>
-              详情 {video.usage_detail_count ?? 0} · 文案{" "}
-              {video.usage_copy_count ?? 0} · 收藏{" "}
-              {video.usage_favorite_count ?? 0}
+              详情授权账号 {video.usage_detail_count ?? "未知"} · 文案授权账号{" "}
+              {video.usage_copy_count ?? "未知"} · 当前收藏{" "}
+              {video.usage_favorite_count ?? "未知"}
             </dd>
           </div>
         </dl>
@@ -399,9 +428,11 @@ function ViralRow({
           </span>
         </div>
       </td>
-      <td data-label="归档 / 首页">
+      <td data-label="内容 / 首页">
         <div className="admin-viral-status">
-          <StatusBadge tone={archiveTone(video)}>{label}</StatusBadge>
+          <StatusBadge tone={archiveTone(video)}>
+            {contentStateLabel(video)}
+          </StatusBadge>
           <span
             className={
               video.homepage_featured
@@ -409,11 +440,15 @@ function ViralRow({
                 : "admin-viral-muted"
             }
           >
-            {video.homepage_featured
+            {video.homepage_featured &&
+            mediaReady(video) &&
+            video.homepage_live !== false
               ? video.homepage_rank == null
                 ? "展示中"
                 : "已置顶"
-              : "未展示"}
+              : video.homepage_featured
+                ? "准备或排期完成后展示"
+                : "未展示"}
           </span>
         </div>
       </td>
@@ -422,26 +457,24 @@ function ViralRow({
           <button type="button" onClick={onDetail}>
             详情
           </button>
-          {!readOnly && label !== "归档就绪" ? (
+          {!readOnly && label !== "素材已准备" ? (
             <button
               disabled={saving || archiveBusy(video)}
               type="button"
               onClick={() => onAction("archive")}
             >
               {archiveBusy(video)
-                ? "后台转存中"
+                ? "后台准备中"
                 : video.archive_status === "FAILED" ||
                     video.media_status === "FAILED"
-                  ? "重试转存"
-                  : "转存到云端"}
+                  ? "重试准备"
+                  : "准备素材"}
             </button>
           ) : null}
           {!readOnly ? (
             <button
               disabled={
-                saving ||
-                (!video.homepage_featured &&
-                  (isLinkImported(video) || !mediaReady(video)))
+                saving || (!video.homepage_featured && isLinkImported(video))
               }
               title={
                 !video.homepage_featured && isLinkImported(video)
@@ -450,23 +483,21 @@ function ViralRow({
               }
               type="button"
               onClick={() =>
-                onAction(video.homepage_featured ? "unfeature" : "feature")
+                onAction(
+                  video.homepage_featured || video.homepage_pending
+                    ? "unfeature"
+                    : "feature",
+                )
               }
             >
-              {video.homepage_featured ? "取消展示" : "展示到首页"}
+              {video.homepage_featured || video.homepage_pending
+                ? "取消展示"
+                : "展示到首页"}
             </button>
           ) : null}
-          {!readOnly && video.homepage_featured ? (
-            <button
-              disabled={saving}
-              type="button"
-              onClick={() =>
-                onAction(video.homepage_rank == null ? "pin" : "unpin")
-              }
-            >
-              {video.homepage_rank == null ? "置顶" : "取消置顶"}
-            </button>
-          ) : null}
+          {video.homepage_featured && (
+            <a href="#admin/viralHomepage">首页编排</a>
+          )}
           {!readOnly ? (
             (video.availability ?? "AVAILABLE") === "AVAILABLE" ? (
               <button
@@ -557,7 +588,7 @@ function ViralTable({
             <th scope="col">视频信息</th>
             <th scope="col">互动数据</th>
             <th scope="col">时间</th>
-            <th scope="col">归档 / 首页</th>
+            <th scope="col">内容 / 首页</th>
             <th scope="col">操作</th>
           </tr>
         </thead>
@@ -582,24 +613,30 @@ function ViralTable({
 
 function pendingCopy(action: PendingAction, count: number) {
   const batch = count > 1;
+  if (action === "prepare")
+    return {
+      title: `准备 ${count} 条视频的素材`,
+      description:
+        "只准备素材，不自动上首页，也不改变当前展示。准备完成后，可另行选择上首页。已准备的素材会复用。",
+    };
   if (action === "collect")
     return {
       title: "立即采集爆款视频",
       description:
-        "将按已配置的关键词触发一轮采集，采到的视频进入内容池，转存后才能展示到首页。供应商成本记平台账，不扣客户积分。",
+        "将按已配置的关键词触发一轮采集，采到的视频进入内容池，准备后才能展示到首页。供应商成本记平台账，不扣客户积分。",
     };
   if (action === "archive")
     return {
-      title: "转存单条视频",
+      title: "准备单条视频素材",
       description:
-        "后台将获取此视频并转存到已配置的云存储，可能产生供应商调用费用。已完成的视频文件会复用；不会重新搜索整个列表或修改首页展示。请填写操作原因。",
+        "后台将获取此视频并准备到已配置的云存储，可能产生供应商调用费用。已完成的视频文件会复用；不会重新搜索整个列表或修改首页展示。请填写操作原因。",
     };
   if (action === "delete")
     return batch
       ? {
           title: `批量删除 ${count} 条视频`,
           description:
-            "这些视频会从前台移除，后续采集也不会重新展示，已导入项目的素材保留。整批同事务执行，其中任一条已被删除则整批取消。",
+            "这些视频会从前台移除，后续采集也不会重新展示，已导入项目的素材保留。整批同时执行，其中任一条已被删除则整批取消。",
         }
       : {
           title: "删除爆款视频",
@@ -617,6 +654,11 @@ function pendingCopy(action: PendingAction, count: number) {
           description:
             "取消后首页不再展示，视频仍保留在爆款列表。请填写操作原因。",
         };
+  if (action === "block")
+    return {
+      title: `屏蔽 ${count} 条视频`,
+      description: "屏蔽后客户不可见，后续采集不再重新展示。请填写操作原因。",
+    };
   if (action === "hide")
     return {
       title: "隐藏爆款视频",
@@ -643,11 +685,11 @@ function pendingCopy(action: PendingAction, count: number) {
     ? {
         title: `批量展示 ${count} 条到首页`,
         description:
-          "整批同事务执行：其中任一条尚未归档或已下架，整批取消。已归档视频会自动补齐封面。",
+          "就绪视频立即上首页；其他视频自动准备素材，就绪后自动展示。已下架视频需先恢复。",
       }
     : {
         title: "展示到首页",
-        description: "已归档视频会自动补齐封面后展示到首页。请填写操作原因。",
+        description: "已准备视频会自动补齐封面后展示到首页。请填写操作原因。",
       };
 }
 
@@ -656,6 +698,8 @@ function batchNotice(action: BatchAction, count: number) {
   if (action === "prepare")
     return `已排队准备 ${count} 条视频的素材，完成后可在列表里上首页。`;
   if (action === "unfeature") return `已批量取消展示 ${count} 条视频。`;
+  if (action === "hide" || action === "block")
+    return `已${action === "hide" ? "下架" : "屏蔽"} ${count} 条视频。`;
   return `已删除 ${count} 条视频，前台不再展示。`;
 }
 
@@ -666,12 +710,30 @@ function curationNotice(action: Action) {
   return "首页展示设置已更新。";
 }
 
-export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
+export function ViralVideosPage({
+  readOnly = false,
+  initialSearch,
+  initialVideo,
+  onCustomer,
+}: {
+  readOnly?: boolean;
+  onCustomer?: (userId: string) => void;
+  initialVideo?: Pick<CollectedViralVideo, "platform" | "video_id"> | null;
+  initialSearch?: {
+    keyword: string;
+    platform: "douyin" | "wechat_channels";
+  } | null;
+}) {
   const [items, setItems] = useState<CollectedViralVideo[]>([]);
   const [total, setTotal] = useState(0);
   const [filters, setFilters] = useState<Filters>({
     platform: "",
     status: "",
+    category: "",
+    sourceKeyword: "",
+    publishedFrom: "",
+    publishedTo: "",
+    customerVisible: "",
     sort: "created",
     hasUsage: "",
     query: "",
@@ -682,6 +744,7 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [layout, setLayout] = useState<"cards" | "table">("cards");
   const [statisticsProgress, setStatisticsProgress] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [overview, setOverview] = useState<ViralLibraryOverview | null>(null);
@@ -694,16 +757,73 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
     video: CollectedViralVideo;
   } | null>(null);
   const detailRef = useRef<HTMLElement | null>(null);
+  const initialVideoPlatform = initialVideo?.platform;
+  const initialVideoId = initialVideo?.video_id;
+  useEffect(() => {
+    if (!initialVideoPlatform || !initialVideoId) return;
+    let active = true;
+    void getViralVideoBusinessDetails({
+      platform: initialVideoPlatform,
+      video_id: initialVideoId,
+    })
+      .then((result) => {
+        if (active)
+          setDetail({ key: rowKey(result.video), video: result.video });
+      })
+      .catch((cause) => {
+        if (active)
+          setError(adminActivationErrorMessage(cause, "定位视频失败"));
+      });
+    return () => {
+      active = false;
+    };
+  }, [initialVideoPlatform, initialVideoId]);
   const [preview, setPreview] = useState<{ key: string; url: string } | null>(
     null,
   );
   const [pending, setPending] = useState<Pending | null>(null);
-  // 实时搜索：外呼数据源，命中视频直接并入内容池（不扣客户积分）。
-  const [upstreamOpen, setUpstreamOpen] = useState(false);
-  const [upstreamKeyword, setUpstreamKeyword] = useState("");
+  const [costPending, setCostPending] = useState<{
+    estimate: ViralOperationEstimate;
+    execute: (snapshot: string) => Promise<void>;
+  } | null>(null);
+  const [estimating, setEstimating] = useState(false);
+
+  async function requestCost(action: "search" | "statistics", cursor?: string) {
+    if (readOnly || estimating || saving || upstreamLoading) return;
+    if (action === "search" && !upstreamKeyword.trim()) return;
+    setEstimating(true);
+    setError("");
+    try {
+      const targets = items.filter((v) => v.platform === "wechat_channels");
+      const estimate = await estimateViralOperation({
+        action,
+        platform: upstreamPlatform,
+        ...(action === "statistics" ? { items: targets } : {}),
+      });
+      setCostPending({
+        estimate,
+        execute: (snapshot) =>
+          action === "search"
+            ? runUpstreamSearch(cursor, snapshot)
+            : refreshStatistics(snapshot),
+      });
+    } catch (cause) {
+      setError(
+        adminActivationErrorMessage(cause, "费用预估失败，未执行操作。"),
+      );
+    } finally {
+      setEstimating(false);
+    }
+  }
+  // 实时搜索：数据接口，命中视频直接并入内容池（不扣客户积分）。
+  const [upstreamOpen, setUpstreamOpen] = useState(Boolean(initialSearch));
+  const [recycleOpen, setRecycleOpen] = useState(false);
+  const [upstreamKeyword, setUpstreamKeyword] = useState(
+    initialSearch?.keyword ?? "",
+  );
   const [upstreamPlatform, setUpstreamPlatform] = useState<
     "douyin" | "wechat_channels"
-  >("douyin");
+  >(initialSearch?.platform ?? "douyin");
   const [upstreamTimeRange, setUpstreamTimeRange] =
     useState<AdminViralSearchTimeRange>("week");
   const [upstreamCategory, setUpstreamCategory] = useState("推荐");
@@ -727,7 +847,15 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
     try {
       const result = await listCollectedViralVideos({
         platform: filters.platform || undefined,
-        status: filters.status || undefined,
+        contentState: filters.status || undefined,
+        category: filters.category || undefined,
+        sourceKeyword: filters.sourceKeyword || undefined,
+        publishedFrom: filters.publishedFrom || undefined,
+        publishedTo: filters.publishedTo || undefined,
+        customerVisible:
+          filters.customerVisible === ""
+            ? undefined
+            : filters.customerVisible === "visible",
         sort: filters.sort,
         hasUsage:
           filters.hasUsage === "" ? undefined : filters.hasUsage === "used",
@@ -736,6 +864,11 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
       });
       if (current !== generation.current) return;
       setItems(result.items);
+      setSelected((currentSelected) =>
+        currentSelected.filter((key) =>
+          result.items.some((video) => rowKey(video) === key),
+        ),
+      );
       setTotal(result.total);
     } catch (cause) {
       if (current === generation.current)
@@ -825,9 +958,23 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
     setSelected(next);
   }
 
-  function choose(action: PendingAction, videos: CollectedViralVideo[]) {
+  async function choose(action: PendingAction, videos: CollectedViralVideo[]) {
+    if (readOnly || estimating) return;
     setError("");
-    setPending({ action, items: videos, key: crypto.randomUUID() });
+    setEstimating(true);
+    try {
+      const estimate =
+        action === "prepare" || action === "feature" || action === "archive"
+          ? await estimateViralOperation({ action, items: videos })
+          : undefined;
+      setPending({ action, items: videos, key: crypto.randomUUID(), estimate });
+    } catch (cause) {
+      setError(
+        adminActivationErrorMessage(cause, "费用预估失败，未执行操作。"),
+      );
+    } finally {
+      setEstimating(false);
+    }
   }
 
   async function showPreview(video: CollectedViralVideo) {
@@ -861,6 +1008,14 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
   }
 
   async function confirm(reason: string) {
+    if (!reason.trim() && pending)
+      reason = ["feature", "prepare", "archive", "pin", "unpin"].includes(
+        pending.action,
+      )
+        ? pending.action === "feature"
+          ? "上首页"
+          : "准备素材或调整顺序"
+        : reason;
     if (!pending) return;
     const { action, items: rows, key } = pending;
     setSaving(true);
@@ -870,42 +1025,114 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
         await collectViralNow(reason, key);
         setNotice("已触发立即采集，概览里的数字会随采集进度更新。");
       } else if (action === "archive") {
-        await archiveCollectedViralVideo(rows[0], reason, key);
+        await archiveCollectedViralVideo(
+          rows[0],
+          reason,
+          key,
+          pending.estimate?.snapshot,
+        );
         setNotice(
-          "已提交后台转存，可刷新数据查看进度。归档不会自动修改首页展示。",
+          "已提交后台准备，可刷新数据查看进度。素材准备不会自动修改首页展示。",
         );
         patchUpstream(rows, { archive_status: "PENDING" });
-      } else if (action === "hide" || action === "restore") {
+      } else if (
+        rows.length === 1 &&
+        (action === "hide" || action === "block" || action === "restore")
+      ) {
         await updateViralVideoAvailability(
           rows[0].platform,
           rows[0].video_id,
-          action === "hide" ? "HIDDEN" : "AVAILABLE",
+          action === "hide"
+            ? "HIDDEN"
+            : action === "block"
+              ? "UNAVAILABLE"
+              : "AVAILABLE",
           reason,
           key,
         );
         setNotice(
           action === "hide"
             ? "视频已隐藏，前台不再展示。"
-            : "视频已恢复可用，前台可正常浏览。",
+            : action === "block"
+              ? "视频已屏蔽，后续采集不会重新展示。"
+              : "视频已恢复可用，前台可正常浏览。",
         );
         patchUpstream(rows, {
-          availability: action === "hide" ? "HIDDEN" : "AVAILABLE",
+          availability:
+            action === "hide"
+              ? "HIDDEN"
+              : action === "block"
+                ? "UNAVAILABLE"
+                : "AVAILABLE",
         });
       } else if (rows.length > 1 && isBatchAction(action)) {
-        const result = await curateViralVideosBatch(rows, action, reason, key);
-        setNotice(batchNotice(action, result.count));
-        patchUpstream(
+        const result = await curateViralVideosBatch(
           rows,
-          action === "delete"
-            ? null
-            : { homepage_featured: action === "feature" },
+          action,
+          reason,
+          key,
+          pending.estimate?.snapshot,
         );
+        const queued = result.items.filter(
+          (item) => item.queued_for_preparation,
+        ).length;
+        setNotice(
+          action === "prepare"
+            ? `已排队准备 ${queued} 条素材；不会自动上首页，准备完成后请另行选择。`
+            : queued > 0
+              ? `已排队准备 ${queued} 条，尚未上首页；其余 ${result.count} 条已完成操作。`
+              : batchNotice(action, result.count),
+        );
+        for (const item of result.items) {
+          patchUpstream(
+            rows.filter((row) => rowKey(row) === rowKey(item)),
+            action === "delete"
+              ? null
+              : item.queued_for_preparation
+                ? {
+                    archive_status: "PENDING",
+                    ...(action === "feature"
+                      ? { homepage_featured: false, homepage_pending: true }
+                      : {}),
+                  }
+                : {
+                    homepage_featured: item.homepage_featured,
+                    ...(action === "hide" || action === "block"
+                      ? {
+                          availability:
+                            action === "hide"
+                              ? ("HIDDEN" as const)
+                              : ("UNAVAILABLE" as const),
+                        }
+                      : {}),
+                  },
+          );
+        }
       } else {
-        await curateViralVideo(rows[0], action, reason, key);
-        setNotice(curationNotice(action));
+        if (action === "hide" || action === "block" || action === "restore")
+          throw new Error("此操作请逐条执行。");
+        const result = await curateViralVideo(
+          rows[0],
+          action,
+          reason,
+          key,
+          pending.estimate?.snapshot,
+        );
+        setNotice(
+          result.queued_for_preparation
+            ? action === "prepare"
+              ? "已排队准备素材；不会自动上首页，准备完成后请另行选择。"
+              : "已排队准备素材，尚未上首页；准备成功后自动展示。"
+            : curationNotice(action),
+        );
         if (action === "delete") patchUpstream(rows, null);
         else if (action === "feature")
-          patchUpstream(rows, { homepage_featured: true });
+          patchUpstream(rows, {
+            homepage_featured: result.homepage_featured,
+            ...(result.queued_for_preparation
+              ? { archive_status: "PENDING" }
+              : {}),
+          });
         else if (action === "unfeature")
           patchUpstream(rows, { homepage_featured: false });
         // 置顶只改顺序：本地先按「已置顶 / 已还原」回显，等下一次列表刷新对齐。
@@ -928,7 +1155,7 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
     }
   }
 
-  async function runUpstreamSearch(cursor?: string) {
+  async function runUpstreamSearch(cursor?: string, snapshot?: string) {
     if (readOnly || upstreamLoading) return;
     const keyword = upstreamKeyword.trim();
     if (!keyword) return;
@@ -945,6 +1172,7 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
         },
         `实时搜索「${keyword}」`,
         crypto.randomUUID(),
+        snapshot,
       );
       setUpstreamResults((previous) =>
         cursor ? [...(previous ?? []), ...result.items] : result.items,
@@ -1009,7 +1237,7 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
     }
   }
 
-  async function refreshStatistics() {
+  async function refreshStatistics(snapshot?: string) {
     if (readOnly || saving || loading) return;
     const videos = items.filter(
       (video) => video.platform === "wechat_channels",
@@ -1028,7 +1256,11 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
         const key =
           statisticsKeys.current.get(video.video_id) ?? crypto.randomUUID();
         statisticsKeys.current.set(video.video_id, key);
-        const result = await refreshCollectedVideoStatistics(video, key);
+        const result = await refreshCollectedVideoStatistics(
+          video,
+          key,
+          snapshot,
+        );
         statisticsKeys.current.delete(video.video_id);
         if (generation.current !== current) return;
         if (result.statistics_status === "complete") complete += 1;
@@ -1078,7 +1310,7 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
           <span className="admin-viral-eyebrow">客户运营</span>
           <h2>爆款视频库</h2>
           <p className="admin-hint">
-            关键词定时采集 → 转存云存储 →
+            关键词定时采集 → 准备云存储 →
             上首页展示；搜索、预览、展示与删除都在本页完成。
           </p>
         </div>
@@ -1095,19 +1327,10 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
           </button>
           {!readOnly ? (
             <button
-              aria-expanded={upstreamOpen}
-              type="button"
-              onClick={() => setUpstreamOpen((open) => !open)}
-            >
-              {upstreamOpen ? "收起实时搜索" : "实时搜索入库"}
-            </button>
-          ) : null}
-          {!readOnly ? (
-            <button
               disabled={saving || collectionEnabled === false}
               title={
                 collectionEnabled === false
-                  ? "采集已暂停，请先在系统设置 → 服务配置 → 运行控制中恢复采集。"
+                  ? "采集已暂停，请先在内容运营 → 采集设置中恢复采集。"
                   : undefined
               }
               type="button"
@@ -1118,102 +1341,146 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
           ) : null}
         </div>
       </header>
+      <div role="tablist" aria-label="视频库页签" className="admin-tabs">
+        <button
+          role="tab"
+          aria-selected={!upstreamOpen && !recycleOpen}
+          type="button"
+          onClick={() => {
+            setUpstreamOpen(false);
+            setRecycleOpen(false);
+          }}
+        >
+          视频库
+        </button>
+        {!readOnly ? (
+          <button
+            role="tab"
+            aria-selected={upstreamOpen}
+            type="button"
+            onClick={() => {
+              setUpstreamOpen(true);
+              setRecycleOpen(false);
+            }}
+          >
+            实时搜索入库
+          </button>
+        ) : null}
+        <button
+          role="tab"
+          aria-selected={recycleOpen}
+          type="button"
+          onClick={() => {
+            setRecycleOpen(true);
+            setUpstreamOpen(false);
+          }}
+        >
+          回收站
+        </button>
+      </div>
       {error ? <PageBanner tone="error">{error}</PageBanner> : null}
       {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
       {statisticsProgress ? (
         <PageBanner tone="notice">{statisticsProgress}</PageBanner>
       ) : null}
 
-      <dl aria-label="爆款视频库概览" className="admin-viral-tiles">
-        <Tile label="内容池总量" unit="条" value={overview?.content_total} />
-        <Tile label="归档就绪" unit="条" value={overview?.archive_ready} />
-        <Tile
-          label="首页展示中"
-          unit="条"
-          value={overview?.homepage_featured}
-        />
-        <Tile
-          label="待转存 / 失败"
-          value={
-            overview
-              ? `${overview.pending_archive ?? 0} / ${overview.archive_failed ?? 0}`
-              : undefined
-          }
-        />
-        <Tile label="今日新增" unit="条" value={overview?.added_today} />
-        <div className="admin-viral-tile admin-viral-tile--plan">
-          <dt>采集计划</dt>
-          <dd>
-            <span>
-              采集
-              <StatusBadge tone={collectionEnabled ? "good" : "neutral"}>
-                {collectionEnabled === undefined
-                  ? "读取中"
-                  : collectionEnabled
-                    ? "已开启"
-                    : "已暂停"}
-              </StatusBadge>
-            </span>
-            <span>
-              关键词 {keywords.length} 条（抖音{" "}
-              {overview?.keyword_count?.douyin ?? 0} / 视频号{" "}
-              {overview?.keyword_count?.wechat_channels ?? 0}）
-            </span>
-            <span>
-              {overview?.collection_interval_days === 1 ? "每天" : "每周"}
-              采集一次 · 下一次{" "}
-              {overview?.next_collection_at
-                ? displayDate(overview.next_collection_at, true)
-                : "等待后台调度"}
-            </span>
-            <span>
-              最后采集{" "}
-              {overview?.last_fetched_at
-                ? displayDate(overview.last_fetched_at, true)
-                : "暂无"}
-            </span>
-          </dd>
-        </div>
-      </dl>
+      {recycleOpen ? <ViralRecycleBin readOnly={readOnly} /> : null}
+      <div hidden={upstreamOpen || recycleOpen}>
+        <dl aria-label="爆款视频库概览" className="admin-viral-tiles">
+          <Tile label="内容池总量" unit="条" value={overview?.content_total} />
+          <Tile label="素材已准备" unit="条" value={overview?.archive_ready} />
+          <Tile
+            label="首页展示中"
+            unit="条"
+            value={overview?.homepage_featured}
+          />
+          <Tile
+            label="待准备 / 失败"
+            value={
+              overview
+                ? `${overview.pending_archive ?? 0} / ${overview.archive_failed ?? 0}`
+                : undefined
+            }
+          />
+          <Tile label="今日新增" unit="条" value={overview?.added_today} />
+        </dl>
 
-      <section aria-label="采集关键词" className="admin-viral-keywords">
-        <span className="admin-viral-keywords__label">采集关键词</span>
-        {controlsError ? (
-          <span className="admin-viral-muted">{controlsError}</span>
-        ) : keywords.length === 0 ? (
-          <span className="admin-viral-muted">
-            尚未配置关键词，未配置时后台不会采集。
-          </span>
-        ) : (
-          keywords.map((item) => (
-            <span
-              className="admin-viral-kw"
-              key={`${item.platform}:${item.category}:${item.keyword}`}
-            >
-              {item.keyword}
-              <i>
-                {platformLabel(item.platform)} · {item.category || "未分类"}
-              </i>
+        <details className="admin-viral-plan-details">
+          <summary>采集计划与关键词</summary>
+          <dl className="admin-viral-tiles">
+            <div className="admin-viral-tile admin-viral-tile--plan">
+              <dt>采集计划</dt>
+              <dd>
+                <span>
+                  采集
+                  <StatusBadge tone={collectionEnabled ? "good" : "neutral"}>
+                    {collectionEnabled === undefined
+                      ? "读取中"
+                      : collectionEnabled
+                        ? "已开启"
+                        : "已暂停"}
+                  </StatusBadge>
+                </span>
+                <span>
+                  关键词 {keywords.length} 条（抖音{" "}
+                  {overview?.keyword_count?.douyin ?? 0} / 视频号{" "}
+                  {overview?.keyword_count?.wechat_channels ?? 0}）
+                </span>
+                <span>
+                  {overview?.collection_interval_days === 1 ? "每天" : "每周"}
+                  采集一次 · 下一次{" "}
+                  {overview?.next_collection_at
+                    ? displayDate(overview.next_collection_at, true)
+                    : "等待后台调度"}
+                </span>
+                <span>
+                  最后采集{" "}
+                  {overview?.last_fetched_at
+                    ? displayDate(overview.last_fetched_at, true)
+                    : "暂无"}
+                </span>
+              </dd>
+            </div>
+          </dl>
+          <section aria-label="采集关键词" className="admin-viral-keywords">
+            <span className="admin-viral-keywords__label">采集关键词</span>
+            {controlsError ? (
+              <span className="admin-viral-muted">{controlsError}</span>
+            ) : keywords.length === 0 ? (
+              <span className="admin-viral-muted">
+                尚未配置关键词，未配置时后台不会采集。
+              </span>
+            ) : (
+              keywords.map((item) => (
+                <span
+                  className="admin-viral-kw"
+                  key={`${item.platform}:${item.category}:${item.keyword}`}
+                >
+                  {item.keyword}
+                  <i>
+                    {platformLabel(item.platform)} · {item.category || "未分类"}
+                  </i>
+                </span>
+              ))
+            )}
+            <span className="admin-viral-keywords__hint">
+              关键词在「内容运营 → 采集设置」维护，修改后下个采集周期生效。
             </span>
-          ))
-        )}
-        <span className="admin-viral-keywords__hint">
-          关键词在「系统设置 → 服务配置 →
-          运行控制」维护，修改后下个采集周期生效。
-        </span>
-      </section>
+          </section>
+        </details>
+      </div>
 
       {!readOnly && upstreamOpen ? (
         <section aria-label="实时搜索上游" className="admin-viral-upstream">
           <h3>实时搜索入库</h3>
           <p className="admin-hint">
-            外呼数据源按关键词检索，结果直接并入下方视频库；供应商成本记平台账，不扣客户积分。搜索后可转存到云端再展示到首页。
+            数据接口按关键词检索，结果保存到视频库；供应商成本记平台账，不扣客户积分。搜索后可准备素材再展示到首页。
           </p>
           <form
             className="admin-toolbar admin-viral-toolbar"
             onSubmit={(event) => {
               event.preventDefault();
-              void runUpstreamSearch();
+              void requestCost("search");
             }}
           >
             <label>
@@ -1272,7 +1539,7 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
             <PageBanner tone="notice">{upstreamNotice}</PageBanner>
           ) : null}
           {upstreamLoading ? (
-            <p role="status">正在搜索（需外呼数据源，请稍候）…</p>
+            <p role="status">正在搜索（需数据接口，请稍候）…</p>
           ) : null}
           {upstreamResults !== null && !upstreamLoading ? (
             <>
@@ -1296,9 +1563,9 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
                 <button
                   disabled={upstreamLoading}
                   type="button"
-                  onClick={() => void runUpstreamSearch(upstreamCursor)}
+                  onClick={() => void requestCost("search", upstreamCursor)}
                 >
-                  下一页（继续外呼数据源）
+                  下一页（继续数据接口）
                 </button>
               ) : null}
               {upstreamKeyword.trim() ? (
@@ -1329,189 +1596,307 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
         </section>
       ) : null}
 
-      <div className="admin-viral-filters">
-        <SegmentedGroup
-          disabled={saving}
-          label="平台筛选"
-          options={[
-            { value: "", label: "全部平台" },
-            { value: "douyin", label: "抖音" },
-            { value: "wechat_channels", label: "视频号" },
-          ]}
-          value={filters.platform}
-          onChange={(value) => changeFilters({ platform: value, offset: 0 })}
-        />
-        <SegmentedGroup
-          disabled={saving}
-          label="状态筛选"
-          options={[
-            { value: "", label: "全部状态", count: overview?.content_total },
-            {
-              value: "ready",
-              label: "归档就绪",
-              count: overview?.archive_ready,
-            },
-            {
-              value: "pending",
-              label: "待转存",
-              count: overview?.pending_archive,
-            },
-            {
-              value: "failed",
-              label: "转存失败",
-              count: overview?.archive_failed,
-            },
-            {
-              value: "featured",
-              label: "已展示",
-              count: overview?.homepage_featured,
-            },
-          ]}
-          value={filters.status}
-          onChange={(value) => changeFilters({ status: value, offset: 0 })}
-        />
-        <SegmentedGroup
-          disabled={saving}
-          label="排序"
-          options={[
-            { value: "created", label: "采集时间" },
-            { value: "likes", label: "点赞数" },
-            { value: "published", label: "发布时间" },
-            { value: "usage", label: "客户使用" },
-          ]}
-          value={filters.sort}
-          onChange={(value) =>
-            changeFilters({
-              sort: value as Filters["sort"],
-              offset: 0,
-            })
-          }
-        />
-        <SegmentedGroup
-          disabled={saving}
-          label="客户使用"
-          options={[
-            { value: "", label: "不限" },
-            { value: "used", label: "有使用" },
-            { value: "unused", label: "无使用" },
-          ]}
-          value={filters.hasUsage}
-          onChange={(value) =>
-            changeFilters({
-              hasUsage: value as Filters["hasUsage"],
-              offset: 0,
-            })
-          }
-        />
-        <form
-          className="admin-viral-searchbar"
-          onSubmit={(event) => {
-            event.preventDefault();
-            changeFilters({ query: search.trim(), offset: 0 });
-          }}
-        >
-          <label className="admin-viral-search">
-            搜索视频
-            <input
-              disabled={saving}
-              maxLength={100}
-              placeholder="标题、作者或视频 ID"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-            />
-          </label>
-          <button disabled={saving} type="submit">
-            搜索
-          </button>
-          {!readOnly && hasWechat ? (
-            <button
-              disabled={saving || loading}
-              type="button"
-              onClick={() => void refreshStatistics()}
-            >
-              补齐本页互动
+      <div
+        hidden={upstreamOpen || recycleOpen}
+        role="tabpanel"
+        aria-label="视频库列表"
+      >
+        <details className="admin-viral-advanced">
+          <summary>高级筛选</summary>
+          <div className="admin-toolbar admin-viral-toolbar">
+            <label>
+              分类
+              <select
+                value={filters.category}
+                onChange={(e) =>
+                  changeFilters({ category: e.target.value, offset: 0 })
+                }
+              >
+                <option value="">全部分类</option>
+                {Array.from(
+                  new Set([
+                    ...(controls?.keywords ?? []).map((k) => k.category),
+                    ...items.map((v) => v.category),
+                  ]),
+                )
+                  .filter(Boolean)
+                  .sort()
+                  .map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <label>
+              来源关键词
+              <input
+                maxLength={100}
+                value={filters.sourceKeyword}
+                onChange={(e) =>
+                  changeFilters({ sourceKeyword: e.target.value, offset: 0 })
+                }
+              />
+            </label>
+            <label>
+              发布起始日期
+              <input
+                type="date"
+                value={filters.publishedFrom}
+                onChange={(e) =>
+                  changeFilters({ publishedFrom: e.target.value, offset: 0 })
+                }
+              />
+            </label>
+            <label>
+              发布结束日期
+              <input
+                type="date"
+                min={filters.publishedFrom || undefined}
+                value={filters.publishedTo}
+                onChange={(e) =>
+                  changeFilters({ publishedTo: e.target.value, offset: 0 })
+                }
+              />
+            </label>
+            <label>
+              客户列表可见
+              <select
+                value={filters.customerVisible}
+                onChange={(e) =>
+                  changeFilters({
+                    customerVisible: e.target
+                      .value as Filters["customerVisible"],
+                    offset: 0,
+                  })
+                }
+              >
+                <option value="">不限</option>
+                <option value="visible">可见</option>
+                <option value="hidden">不可见</option>
+              </select>
+            </label>
+          </div>
+          <p className="admin-hint">
+            客户列表按实际采集周快照的发布窗口及素材、可用状态判断；来源未知的历史视频不会被猜测归入关键词。
+          </p>
+        </details>
+        <div className="admin-viral-filters">
+          <SegmentedGroup
+            disabled={saving}
+            label="平台筛选"
+            options={[
+              { value: "", label: "全部平台" },
+              { value: "douyin", label: "抖音" },
+              { value: "wechat_channels", label: "视频号" },
+            ]}
+            value={filters.platform}
+            onChange={(value) => changeFilters({ platform: value, offset: 0 })}
+          />
+          <SegmentedGroup
+            disabled={saving}
+            label="状态筛选"
+            options={[
+              { value: "", label: "全部状态" },
+              { value: "pending_prepare", label: "待准备" },
+              { value: "prepare_failed", label: "准备失败" },
+              { value: "ready", label: "可上首页" },
+              { value: "featured", label: "首页展示中" },
+              { value: "removed", label: "已下架" },
+              { value: "blocked", label: "已屏蔽" },
+            ]}
+            value={filters.status}
+            onChange={(value) => changeFilters({ status: value, offset: 0 })}
+          />
+          <SegmentedGroup
+            disabled={saving}
+            label="排序"
+            options={[
+              { value: "created", label: "采集时间" },
+              { value: "likes", label: "点赞数" },
+              { value: "published", label: "发布时间" },
+              { value: "usage", label: "客户使用" },
+            ]}
+            value={filters.sort}
+            onChange={(value) =>
+              changeFilters({
+                sort: value as Filters["sort"],
+                offset: 0,
+              })
+            }
+          />
+          <SegmentedGroup
+            disabled={saving}
+            label="客户使用"
+            options={[
+              { value: "", label: "不限" },
+              { value: "used", label: "有使用" },
+              { value: "unused", label: "无使用" },
+            ]}
+            value={filters.hasUsage}
+            onChange={(value) =>
+              changeFilters({
+                hasUsage: value as Filters["hasUsage"],
+                offset: 0,
+              })
+            }
+          />
+          <form
+            className="admin-viral-searchbar"
+            onSubmit={(event) => {
+              event.preventDefault();
+              changeFilters({ query: search.trim(), offset: 0 });
+            }}
+          >
+            <label className="admin-viral-search">
+              搜索视频
+              <input
+                disabled={saving}
+                maxLength={100}
+                placeholder="标题、作者或视频 ID"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+              />
+            </label>
+            <button disabled={saving} type="submit">
+              搜索
             </button>
-          ) : null}
-        </form>
-      </div>
-      {hasWechat ? (
-        <p className="admin-hint">
-          视频号互动按需获取，24 小时内复用已获取数据；失败后冷却 10
-          分钟。补采计入平台接口用量，不扣客户积分。
-        </p>
-      ) : null}
+            {!readOnly && hasWechat ? (
+              <button
+                disabled={saving || loading}
+                type="button"
+                onClick={() => void requestCost("statistics")}
+              >
+                补齐本页互动
+              </button>
+            ) : null}
+          </form>
+        </div>
+        {hasWechat ? (
+          <p className="admin-hint">
+            视频号互动按需获取，24 小时内复用已获取数据；失败后冷却 10
+            分钟。补采计入平台接口用量，不扣客户积分。
+          </p>
+        ) : null}
 
-      {selectedItems.length > 0 ? (
-        <section aria-label="批量操作" className="admin-viral-batch">
-          <span>
-            已选 <strong>{selectedItems.length}</strong> 项
-          </span>
-          <button
-            disabled={saving}
-            type="button"
-            onClick={() => choose("feature", selectedItems)}
-          >
-            批量展示到首页
-          </button>
-          <button
-            disabled={saving}
-            type="button"
-            onClick={() => choose("unfeature", selectedItems)}
-          >
-            批量取消展示
-          </button>
-          <button
-            className="admin-viral-action-danger"
-            disabled={saving}
-            type="button"
-            onClick={() => choose("delete", selectedItems)}
-          >
-            批量删除
-          </button>
-          <button
-            disabled={saving}
-            type="button"
-            onClick={() => setSelected([])}
-          >
-            取消选择
-          </button>
-          <span className="admin-hint">
-            批量操作整批同事务执行，任一条不满足条件则整批取消；删除后前台立即下架，已导入项目的素材保留。
-          </span>
-          {importedSelected > 0 ? (
-            <span className="admin-hint">
-              所选含 {importedSelected}{" "}
-              条链接导入素材：它们不进首页，批量展示到首页会被整批拒绝，可先取消勾选。
+        {selectedItems.length > 0 ? (
+          <section aria-label="批量操作" className="admin-viral-batch">
+            <span>
+              已选 <strong>{selectedItems.length}</strong> 项 / 最多50条
             </span>
-          ) : null}
-        </section>
-      ) : null}
+            <button
+              type="button"
+              disabled={saving}
+              onClick={() => choose("hide", selectedItems)}
+            >
+              批量下架
+            </button>
+            <button
+              type="button"
+              disabled={saving}
+              onClick={() => choose("block", selectedItems)}
+            >
+              批量屏蔽
+            </button>
+            <button
+              disabled={saving}
+              type="button"
+              onClick={() => choose("feature", selectedItems)}
+            >
+              批量展示到首页
+            </button>
+            <button
+              disabled={saving}
+              type="button"
+              onClick={() => choose("prepare", selectedItems)}
+            >
+              批量准备素材
+            </button>
+            <button
+              disabled={saving}
+              type="button"
+              onClick={() => choose("unfeature", selectedItems)}
+            >
+              批量取消展示
+            </button>
+            <button
+              className="admin-viral-action-danger"
+              disabled={saving}
+              type="button"
+              onClick={() => choose("delete", selectedItems)}
+            >
+              批量删除
+            </button>
+            <button
+              disabled={saving}
+              type="button"
+              onClick={() => setSelected([])}
+            >
+              取消选择
+            </button>
+            <span className="admin-hint">
+              上首页会自动准备未就绪素材；屏蔽后客户立即不可见，已导入项目的素材保留。
+            </span>
+            {importedSelected > 0 ? (
+              <span className="admin-hint">
+                所选含 {importedSelected}{" "}
+                条链接导入素材：它们不进首页，批量展示到首页会被整批拒绝，可先取消勾选。
+              </span>
+            ) : null}
+          </section>
+        ) : null}
 
-      {loading ? (
-        <p role="status">正在读取采集记录…</p>
-      ) : items.length === 0 ? (
-        <p>暂无符合条件的采集视频。</p>
-      ) : (
-        <ViralTable
-          ariaLabel="爆款视频明细，可横向滚动"
-          readOnly={readOnly}
-          saving={saving}
-          selectAllLabel="选择本页全部视频"
-          selected={selected}
-          videos={items}
-          onAction={(action, video) => choose(action, [video])}
-          onDetail={(video) => setDetail({ key: rowKey(video), video })}
-          onSelect={(video) => toggleKey(rowKey(video))}
-          onSelectAll={() => toggleSelectAll(items)}
+        <section className="admin-toolbar" aria-label="视频显示方式">
+          <button
+            type="button"
+            className={layout === "cards" ? "is-active" : ""}
+            aria-pressed={layout === "cards"}
+            onClick={() => setLayout("cards")}
+          >
+            卡片
+          </button>
+          <button
+            type="button"
+            className={layout === "table" ? "is-active" : ""}
+            aria-pressed={layout === "table"}
+            onClick={() => setLayout("table")}
+          >
+            表格
+          </button>
+        </section>
+        <p className="admin-hint">
+          平台互动为最近已采集的累计值，平台播放量暂无数据。客户详情和文案按历史成功台账的授权账号去重，收藏为当前有效收藏，均不是页面点击次数。
+        </p>
+        <div
+          className={layout === "cards" ? "admin-viral-card-layout" : undefined}
+        >
+          {loading ? (
+            <p role="status">正在读取采集记录…</p>
+          ) : items.length === 0 ? (
+            <p>暂无符合条件的采集视频。</p>
+          ) : (
+            <ViralTable
+              ariaLabel="爆款视频明细，可横向滚动"
+              readOnly={readOnly}
+              saving={saving}
+              selectAllLabel="选择本页全部视频"
+              selected={selected}
+              videos={items}
+              onAction={(action, video) => choose(action, [video])}
+              onDetail={(video) => setDetail({ key: rowKey(video), video })}
+              onSelect={(video) => toggleKey(rowKey(video))}
+              onSelectAll={() => toggleSelectAll(items)}
+            />
+          )}
+        </div>
+        <Pagination
+          disabled={loading || saving}
+          limit={25}
+          offset={filters.offset}
+          total={total}
+          onPageChange={(offset) => changeFilters({ offset })}
         />
-      )}
-      <Pagination
-        disabled={loading || saving}
-        limit={25}
-        offset={filters.offset}
-        total={total}
-        onPageChange={(offset) => changeFilters({ offset })}
-      />
+      </div>
 
       {detailVideo ? (
         <div className="admin-viral-drawer-layer">
@@ -1557,7 +1942,7 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
                 ) : null}
                 <div className="admin-viral-player__tags">
                   <StatusBadge tone={archiveTone(detailVideo)}>
-                    {archiveLabel(detailVideo)}
+                    {contentStateLabel(detailVideo)}
                   </StatusBadge>
                   <span className="admin-viral-muted">
                     {detailVideo.duration_ms > 0
@@ -1570,6 +1955,14 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
                 {detailVideo.title || "未命名视频"}
               </h3>
               <AuthorBadge video={detailVideo} />
+              <p>
+                内容状态：{contentStateLabel(detailVideo)}；首页状态：
+                {detailVideo.homepage_featured ? "展示中" : "未展示"}
+              </p>
+              <h4 className="admin-viral-drawer__section">平台累计互动</h4>
+              <p className="admin-hint">
+                播放量：暂无数据；以下为最近已采集的平台累计值，缺失字段不作零处理。
+              </p>
               <dl className="admin-viral-drawer__stats">
                 {STAT_FIELDS.map(([statLabel, read]) => (
                   <div key={statLabel}>
@@ -1584,12 +1977,19 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
                   互动数据以解析上游 实际返回为准，缺的部分不会用默认值顶替。
                 </p>
               ) : null}
+              <ViralVideoBusinessDetails
+                key={rowKey(detailVideo)}
+                video={detailVideo}
+                onCustomer={onCustomer}
+                onRelated={(video) => setDetail({ key: rowKey(video), video })}
+              />
+              {detailVideo.archive_error && (
+                <PageBanner tone="error">
+                  准备失败原因：{detailVideo.archive_error}
+                </PageBanner>
+              )}
               <h4 className="admin-viral-drawer__section">基础信息</h4>
               <dl className="admin-viral-drawer__meta">
-                <div>
-                  <dt>视频 ID</dt>
-                  <dd>{detailVideo.video_id}</dd>
-                </div>
                 <div>
                   <dt>发布时间</dt>
                   <dd>{publishedLabel(detailVideo)}</dd>
@@ -1631,7 +2031,7 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
                 <div>
                   <dt>归档状态</dt>
                   <dd>
-                    {archiveLabel(detailVideo)}
+                    {contentStateLabel(detailVideo)}
                     {detailVideo.archive_error
                       ? `：${detailVideo.archive_error}`
                       : ""}
@@ -1642,10 +2042,6 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
                   <dd>
                     {detailVideo.homepage_featured ? "首页展示中" : "未展示"}
                   </dd>
-                </div>
-                <div className="admin-viral-drawer__storage">
-                  <dt>云存储地址</dt>
-                  <dd>{detailVideo.storage_uri ?? "尚未生成"}</dd>
                 </div>
               </dl>
             </div>
@@ -1663,18 +2059,18 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
                   预览视频
                 </button>
               )}
-              {!readOnly && archiveLabel(detailVideo) !== "归档就绪" ? (
+              {!readOnly && archiveLabel(detailVideo) !== "素材已准备" ? (
                 <button
                   disabled={saving || archiveBusy(detailVideo)}
                   type="button"
                   onClick={() => choose("archive", [detailVideo])}
                 >
                   {archiveBusy(detailVideo)
-                    ? "后台转存中"
+                    ? "后台准备中"
                     : detailVideo.archive_status === "FAILED" ||
                         detailVideo.media_status === "FAILED"
-                      ? "重试转存"
-                      : "转存到云端"}
+                      ? "重试准备"
+                      : "准备素材"}
                 </button>
               ) : null}
               {!readOnly ? (
@@ -1683,7 +2079,7 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
                   disabled={
                     saving ||
                     (!detailVideo.homepage_featured &&
-                      (isLinkImported(detailVideo) || !mediaReady(detailVideo)))
+                      isLinkImported(detailVideo))
                   }
                   title={
                     !detailVideo.homepage_featured &&
@@ -1694,12 +2090,17 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
                   type="button"
                   onClick={() =>
                     choose(
-                      detailVideo.homepage_featured ? "unfeature" : "feature",
+                      detailVideo.homepage_featured ||
+                        detailVideo.homepage_pending
+                        ? "unfeature"
+                        : "feature",
                       [detailVideo],
                     )
                   }
                 >
-                  {detailVideo.homepage_featured ? "取消展示" : "展示到首页"}
+                  {detailVideo.homepage_featured || detailVideo.homepage_pending
+                    ? "取消展示"
+                    : "展示到首页"}
                 </button>
               ) : null}
               {!readOnly ? (
@@ -1717,17 +2118,48 @@ export function ViralVideosPage({ readOnly = false }: { readOnly?: boolean }) {
         </div>
       ) : null}
 
+      {estimating ? <p role="status">正在预估费用，尚未执行操作…</p> : null}
+      <ConfirmDialog
+        open={costPending !== null}
+        title="确认操作费用"
+        level="standard"
+        busy={saving || upstreamLoading}
+        error={error}
+        confirmLabel="确认费用并执行"
+        onClose={() => setCostPending(null)}
+        onConfirm={() => {
+          if (!costPending) return;
+          const current = costPending;
+          setCostPending(null);
+          void current.execute(current.estimate.snapshot);
+        }}
+      >
+        {costPending ? (
+          <ViralOperationCostSummary estimate={costPending.estimate} />
+        ) : null}
+      </ConfirmDialog>
       <ConfirmDialog
         busy={saving}
         confirmLabel="确认操作"
         description={copy?.description}
         error={error}
-        level="reason"
+        level={
+          pending &&
+          ["feature", "prepare", "archive", "pin", "unpin"].includes(
+            pending.action,
+          )
+            ? "standard"
+            : "reason"
+        }
         open={pending !== null}
         title={copy?.title ?? ""}
         onClose={() => setPending(null)}
         onConfirm={(reason) => void confirm(reason)}
-      />
+      >
+        {pending?.estimate ? (
+          <ViralOperationCostSummary estimate={pending.estimate} />
+        ) : null}
+      </ConfirmDialog>
     </section>
   );
 }

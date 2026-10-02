@@ -1,7 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-
 import { apiBaseUrl, resolveManagedMediaUrl } from "./apiBase";
+import { attachCustomerTaskReferences } from "./customerTaskReferences";
 import type { components } from "./generated/api";
 
 // MATERIAL-PERF-C（P0-6）：启动扇出约 20–40 个请求，5 秒硬超时会让任何一片
@@ -1600,11 +1600,14 @@ export type FundsSummary = {
   recharge_fen: number;
   orders: number;
   offline_fen: number;
+  unverified_manual_orders?: number;
+  unverified_manual_fen?: number;
   grant_credits: number;
   refund_credits: number;
   refund_fen: number | null;
   net_fen: number | null;
   by_channel: { provider: string; orders: number; amount_fen: number }[];
+  by_method?: { method: string; orders: number; amount_fen: number }[];
   prepaid_credits: number;
   prepaid_fen: number | null;
   reconciliation_problems: number;
@@ -1772,6 +1775,22 @@ export async function updateControlRuntimeSettings(
   );
 }
 
+export async function repairPaidRechargeLedger(
+  orderNo: string,
+  reason: string,
+): Promise<{
+  order_no: string;
+  outcome: "repaired" | "already_recorded";
+  credits: number;
+}> {
+  return requestControlJson(
+    `/api/control/recharge-orders/${encodeURIComponent(orderNo)}/repair-ledger`,
+    "补记已支付订单积分失败",
+    controlWriteInit("POST", {}, reason),
+    CLOUD_OP_TIMEOUT_MS,
+  );
+}
+
 export async function syncControlRechargeOrder(
   orderNo: string,
   reason: string,
@@ -1794,6 +1813,10 @@ export async function downloadCustomersCsv(
     createdTo?: string;
     balanceMin?: number;
     balanceMax?: number;
+    attention?: string;
+    lowBalanceThreshold?: number;
+    sort?: string;
+    direction?: string;
   } = {},
 ): Promise<void> {
   const query = new URLSearchParams();
@@ -1805,6 +1828,11 @@ export async function downloadCustomersCsv(
     query.set("balance_min", String(options.balanceMin));
   if (options.balanceMax !== undefined)
     query.set("balance_max", String(options.balanceMax));
+  if (options.attention) query.set("attention", options.attention);
+  if (options.lowBalanceThreshold !== undefined)
+    query.set("low_balance_threshold", String(options.lowBalanceThreshold));
+  if (options.sort) query.set("sort", options.sort);
+  if (options.direction) query.set("direction", options.direction);
   const suffix = query.toString() ? `?${query.toString()}` : "";
   await downloadControlCsv(
     `/api/control/customers.csv${suffix}`,
@@ -5717,7 +5745,18 @@ async function requestApiJson<T>(
     error.requestId = response.headers?.get?.("X-Request-Id") ?? undefined;
     throw error;
   }
-  return (await response.json()) as T;
+  return (await attachCustomerTaskReferences(
+    path,
+    await response.json(),
+    (type, id) =>
+      requestApiJson<{ short_ref: string }>(
+        `/api/task-references/${type}/${encodeURIComponent(id)}`,
+        "读取任务编号失败",
+        {},
+        5000,
+      ),
+    customerVisibleErrorMessage,
+  )) as T;
 }
 
 async function requestGenerationJson<T>(
@@ -6071,6 +6110,8 @@ export function customerVisibleErrorMessage(
   if (!branded) {
     return message || fallback;
   }
+  const shortReference = message.match(/错误编号：[0-9A-F]{8}/)?.[0];
+  if (shortReference) return `${branded.message} ${shortReference}`;
   return requestId
     ? `${branded.message} 问题编号：${requestId}`
     : branded.message;
@@ -7801,6 +7842,8 @@ export type ViralSearchTimeRange = "all" | "day" | "week" | "half_year";
 export type ViralVideoItem = {
   homepageFeatured?: boolean;
   homepageRank?: number | null;
+  homepageStartsAt?: string | null;
+  homepageEndsAt?: string | null;
   platform: ViralPlatform;
   videoId: string;
   category: string;
@@ -7844,6 +7887,8 @@ export type ViralListResponse = {
   hasMore?: boolean;
   nextCursor?: string | null;
   total?: number;
+  serverTime?: string | null;
+  nextChangeAt?: string | null;
 };
 
 /** 一次搜索的计费回执：本次实际扣分与服务单位（服务端权威值，客户端只展示）。 */
