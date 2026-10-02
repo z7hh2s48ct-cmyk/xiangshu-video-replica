@@ -170,6 +170,42 @@ function writesOf(fetchMock: ReturnType<typeof installFetch>) {
   );
 }
 
+it("分类目录覆盖当前页之外，未分类和批次筛选准确请求并保留导航范围", async () => {
+  const fetchMock = installFetch({
+    list: () => ({
+      items: [row()],
+      total: 52,
+      categories: ["当前页", "分页以外"],
+    }),
+  });
+  const onScopeChange = vi.fn();
+  render(
+    <ViralVideosPage
+      initialListQuery="cohortStage=copy&collectedFrom=2026-09-01&collectedTo=2026-09-30&platform=wechat_channels"
+      onScopeChange={onScopeChange}
+    />,
+  );
+  await screen.findByRole("option", { name: "分页以外" });
+  expect(screen.queryByRole("button", { name: "批量屏蔽" })).toBeNull();
+  fireEvent.change(screen.getByLabelText("分类"), {
+    target: { value: "__uncategorized__" },
+  });
+  await waitFor(() =>
+    expect(
+      fetchMock.mock.calls.some(
+        ([url]) =>
+          url.includes("uncategorized=true") &&
+          url.includes("cohort_stage=copy") &&
+          url.includes("collected_from=2026-09-01"),
+      ),
+    ).toBe(true),
+  );
+  expect(onScopeChange.mock.lastCall?.[0].listQuery).toContain(
+    "category=__uncategorized__",
+  );
+  expect(writesOf(fetchMock)).toHaveLength(0);
+});
+
 describe("ViralVideosPage", () => {
   it("未知费用先明确确认，取消搜索不调用付费接口", async () => {
     const fetchMock = installFetch();
@@ -939,7 +975,9 @@ describe("ViralVideosPage", () => {
       target: { value: "内容复核通过" },
     });
     fireEvent.click(await screen.findByRole("button", { name: "确认操作" }));
-    await screen.findByText("视频已恢复可用，前台可正常浏览。");
+    await screen.findByText(
+      "视频已恢复到库中，客户可见性仍按发布时间、素材和首页排期判断。",
+    );
 
     const patch = writesOf(fetchMock).find(([url]) =>
       url.includes("/availability"),

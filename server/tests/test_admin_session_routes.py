@@ -16,6 +16,7 @@ import os
 import secrets
 import threading
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Set HMAC key before importing app modules
@@ -1156,6 +1157,110 @@ def test_admin_collected_video_requires_manual_homepage_selection_and_delete_is_
 
 
 @pytest.mark.pg
+def test_single_block_keeps_tombstone_and_recycle_state_after_recollection(
+    client: TestClient,
+    route_state: str,
+) -> None:
+    from app.db_portable import BusinessConnection
+    from app.viral_store import get_viral_video, upsert_viral_videos
+
+    headers = _admin_session(client)
+    video_id = "admin-video/opaque=id"
+    with psycopg.connect(route_state) as raw:
+        original = get_viral_video(
+            BusinessConnection.postgres(raw), platform="douyin", video_id=video_id
+        )
+        assert original is not None
+    blocked = client.patch(
+        "/api/control/viral/videos/douyin/admin-video%2Fopaque%3Did/curation",
+        headers={**headers, "Idempotency-Key": "single-block"},
+        json={"action": "block", "reason": "隔离屏蔽重复内容", "confirm": True},
+    )
+    assert blocked.status_code == 200 and blocked.json()["deleted"] is True, blocked.text
+    with psycopg.connect(route_state) as raw:
+        upsert_viral_videos(BusinessConnection.postgres(raw), [original])
+        assert raw.execute(
+            "SELECT deleted_at IS NOT NULL FROM viral_videos WHERE video_id=%s", (video_id,)
+        ).fetchone()[0]
+    assert client.get("/api/control/viral/videos", headers=headers).json()["total"] == 0
+    filtered = client.get(
+        "/api/control/viral/videos", headers=headers, params={"content_state": "blocked"}
+    ).json()
+    assert filtered["total"] == 1 and filtered["items"][0]["content_state"] == "blocked"
+    recycled = client.get("/api/control/viral/recycle", headers=headers)
+    assert recycled.status_code == 200, recycled.text
+    assert recycled.json()["items"][0]["content_state"] == "blocked"
+
+
+@pytest.mark.pg
+def test_seven_day_visibility_uses_database_clock_when_collection_is_paused(
+    client: TestClient,
+    route_state: str,
+) -> None:
+    from app.db_portable import BusinessConnection
+    from app.viral_store import (
+        list_viral_video_page,
+        list_viral_videos,
+        reclaimable_viral_video_ids,
+    )
+
+    headers = _admin_session(client)
+    with psycopg.connect(route_state) as raw:
+        now = int(raw.execute("SELECT floor(extract(epoch FROM now()))").fetchone()[0])
+        raw.execute(
+            "INSERT INTO viral_fetch_state(platform,sort,fetched_at) "
+            "VALUES('douyin','weekly_window', (now()-interval '30 days')::text) "
+            "ON CONFLICT(platform,sort) DO UPDATE SET fetched_at=excluded.fetched_at"
+        )
+        for video_id, age, featured in [
+            ("seventh-day", 7 * 86400 - 60, 0),
+            ("eighth-day", 8 * 86400, 0),
+            ("old-featured", 8 * 86400, 1),
+            ("old-favorite", 8 * 86400, 0),
+        ]:
+            raw.execute(
+                "INSERT INTO viral_videos(platform,video_id,title,published_at,"
+                "collection_published,homepage_featured) "
+                "VALUES('douyin',%s,'隔离七天内容',%s,1,%s)",
+                (video_id, now - age, featured),
+            )
+            raw.execute(
+                "INSERT INTO viral_media_preparations(id,platform,video_id,"
+                "media_kind,status,storage_uri) "
+                "VALUES(%s,'douyin',%s,'video','SUCCEEDED','fake://video')",
+                (video_id, video_id),
+            )
+        raw.execute(
+            "INSERT INTO viral_video_favorites(user_id,platform,video_id) "
+            "VALUES('customer_u','douyin','old-favorite')"
+        )
+        conn = BusinessConnection.postgres(raw)
+        assert [v.video_id for v in list_viral_videos(conn, platform="douyin", sort="hot")] == [
+            "seventh-day"
+        ]
+        assert [
+            v.video_id
+            for v in list_viral_video_page(conn, platform="douyin", sort="hot", limit=12).items
+        ] == ["seventh-day"]
+        assert [
+            v.video_id
+            for v in list_viral_video_page(
+                conn, platform="douyin", sort="hot", limit=12, featured_only=True
+            ).items
+        ] == ["old-featured"]
+        assert reclaimable_viral_video_ids(
+            conn,
+            user_id="customer_u",
+            platform="douyin",
+            video_ids=["seventh-day", "eighth-day", "old-featured", "old-favorite"],
+        ) == ["eighth-day"]
+    visible = client.get(
+        "/api/control/viral/videos", headers=headers, params={"customer_visible": True}
+    ).json()
+    assert {row["video_id"] for row in visible["items"]} == {"seventh-day", "old-featured"}
+
+
+@pytest.mark.pg
 def test_link_imported_material_cannot_be_featured(
     client: TestClient,
     route_state: str,
@@ -1291,6 +1396,181 @@ def test_collected_video_list_projects_card_fields_and_status_segments(
     assert (
         client.get("/api/control/viral/videos?status=unknown", headers=headers).status_code == 422
     )
+
+
+@pytest.mark.pg
+def test_viral_category_catalog_includes_off_page_and_explicit_uncategorized(
+    client: TestClient, route_state: str
+) -> None:
+    headers = _admin_session(client)
+    with psycopg.connect(route_state) as raw:
+        for index in range(52):
+            raw.execute(
+                "INSERT INTO viral_videos(platform,video_id,title,category,created_at) "
+                "VALUES('douyin',%s,'目录验证',%s,%s)",
+                (
+                    f"catalog-{index}",
+                    "分页以外" if index == 51 else "当前页",
+                    "2000-01-01" if index == 51 else "2099-01-01",
+                ),
+            )
+        raw.execute(
+            "INSERT INTO viral_videos(platform,video_id,title,category) VALUES"
+            "('douyin','catalog-empty','目录验证',''),"
+            "('wechat_channels','catalog-space','目录验证','  ')"
+        )
+    page = client.get("/api/control/viral/videos", headers=headers, params={"limit": 25}).json()
+    assert "分页以外" in page["categories"]
+    assert "catalog-51" not in {item["video_id"] for item in page["items"]}
+    empty = client.get(
+        "/api/control/viral/videos",
+        headers=headers,
+        params={"uncategorized": "true", "query": "目录验证"},
+    ).json()
+    assert empty["total"] == 2
+    chosen = client.get(
+        "/api/control/viral/videos", headers=headers, params={"category": "分页以外"}
+    ).json()
+    assert chosen["total"] == 1 and chosen["items"][0]["video_id"] == "catalog-51"
+
+
+@pytest.mark.pg
+def test_resource_metering_tracks_shared_preparation_partial_reads_retention_and_bill_evidence(
+    client: TestClient,
+    route_state: str,
+) -> None:
+    from dataclasses import replace
+
+    from app.db_portable import BusinessConnection
+    from app.storage import FakeStorageAdapter
+    from app.viral_media import ViralMediaPipeline
+    from app.viral_resource_metering import deleted_resource, measured_object_chunks
+    from app.viral_store import get_viral_video
+
+    headers = _admin_session(client)
+    with psycopg.connect(route_state) as raw:
+        original = get_viral_video(
+            BusinessConnection.postgres(raw), platform="douyin", video_id="admin-video/opaque=id"
+        )
+        before_wallets = raw.execute("SELECT * FROM wallets ORDER BY user_id").fetchall()
+    assert original is not None
+    content = b"\x00\x00\x00\x18ftypisom" + b"x" * 100
+
+    class Fetcher:
+        last_content_type = "video/mp4"
+        calls = 0
+
+        def iter_fetch(self, url):
+            self.calls += 1
+            yield content[:12]
+            yield content[12:]
+
+    storage = FakeStorageAdapter(provider="cos", bucket="fake-metered", key_prefix="scoped")
+    fetcher = Fetcher()
+    pipeline = ViralMediaPipeline(client=None, storage=storage, fetcher=fetcher, shared=True)
+    video = replace(original, play_url="https://source.example/fake.mp4")
+    first = pipeline.fetch(video, prefer="video")
+    second = pipeline.fetch(video, prefer="video")
+    assert not first.cache_hit and second.cache_hit and fetcher.calls == 1
+    with psycopg.connect(route_state) as raw:
+        key = (
+            raw.execute(
+                "SELECT storage_uri FROM viral_media_preparations WHERE video_id=%s",
+                (video.video_id,),
+            )
+            .fetchone()[0]
+            .split("/", 3)[3]
+        )
+    chunks = measured_object_chunks(
+        iter([b"12", b"345"]), namespace=storage.cache_namespace, key=key
+    )
+    assert next(chunks) == b"12"
+    chunks.close()
+    storage.delete_object(key)
+    deleted_resource(storage.cache_namespace, key)
+    deleted_resource(storage.cache_namespace, key)
+    response = client.get(
+        "/api/control/viral/resource-events",
+        headers=headers,
+        params={"platform": "douyin", "video_id": video.video_id, "limit": 50},
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+    rows = data["records"]
+    by_kind = {row["kind"]: row for row in rows}
+    assert data["total"] == 6
+    assert by_kind["download"]["quantity"] == len(content)
+    assert by_kind["upload"]["quantity"] == len(content)
+    assert by_kind["storage_snapshot"]["quantity"] == len(content)
+    assert by_kind["storage_retention"]["state"] == "SUCCEEDED"
+    assert int(by_kind["storage_retention"]["quantity"]) >= 0
+    assert by_kind["backend_read"]["state"] == "ABORTED"
+    assert by_kind["backend_read"]["quantity"] == 2
+    assert data["costFen"] is None and not data["coverageComplete"]
+    assert all(row["cost_fen"] is None and row["rate_fen"] is None for row in rows)
+    ident = by_kind["download"]["id"]
+    body = {
+        "confirm": True,
+        "reason": "核对测试账单实际下载行",
+        "cost_fen": "12.3456",
+        "bill_reference": "FAKE-BILL-001:line-1",
+        "expected_evidence_id": None,
+    }
+    path = f"/api/control/viral/resource-events/{ident}/verify-cost"
+    auditor = _admin_session(client, "auditor_u")
+    assert client.get("/api/control/viral/resource-events", headers=auditor).status_code == 200
+    assert (
+        client.post(
+            path, headers={**auditor, "Idempotency-Key": "audit-forbidden"}, json=body
+        ).status_code
+        == 403
+    )
+    headers = _admin_session(client)
+    bad_csrf = {k: v for k, v in headers.items() if k.lower() != ADMIN_CSRF_HEADER.lower()}
+    assert (
+        client.post(
+            path, headers={**bad_csrf, "Idempotency-Key": "missing-csrf"}, json=body
+        ).status_code
+        == 403
+    )
+    saved = client.post(path, headers={**headers, "Idempotency-Key": "resource-proof"}, json=body)
+    assert saved.status_code == 200, saved.text
+    replay = client.post(path, headers={**headers, "Idempotency-Key": "resource-proof"}, json=body)
+    assert replay.json() == saved.json()
+    stale = client.post(path, headers={**headers, "Idempotency-Key": "resource-stale"}, json=body)
+    assert stale.status_code == 409
+    other = by_kind["upload"]["id"]
+    duplicate = client.post(
+        f"/api/control/viral/resource-events/{other}/verify-cost",
+        headers={**headers, "Idempotency-Key": "resource-other"},
+        json=body,
+    )
+    assert duplicate.status_code == 409
+    summary = client.get("/api/control/viral/resource-events", headers=headers).json()
+    assert summary["knownCostFen"] == pytest.approx(12.3456)
+    assert summary["costFen"] is None
+    from concurrent.futures import ThreadPoolExecutor
+
+    competing = {**body, "bill_reference": "FAKE-BILL-002:line-1", "cost_fen": "7"}
+
+    def compete(kind):
+        target = by_kind[kind]["id"]
+        return client.post(
+            f"/api/control/viral/resource-events/{target}/verify-cost",
+            headers={**headers, "Idempotency-Key": f"bill-race-{kind}"},
+            json=competing,
+        ).status_code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert sorted(pool.map(compete, ["preparation", "backend_read"])) == [200, 409]
+    with psycopg.connect(route_state) as raw:
+        assert raw.execute("SELECT * FROM wallets ORDER BY user_id").fetchall() == before_wallets
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM audit_logs WHERE action='viral_resource.cost_verified'"
+            ).fetchone()[0]
+            == 2
+        )
 
 
 @pytest.mark.pg
@@ -2157,12 +2437,27 @@ class _AdminSearchFakeStorage:
 
     def __init__(self) -> None:
         self.puts = 0
+        self.cache_namespace = "fake-admin-search-storage"
 
     def head_object(self, key):
         return None
 
     def put_object(self, key, data, *, content_type=None):
         self.puts += 1
+        from hashlib import sha256
+
+        from app.storage import StoredObject
+
+        return StoredObject(
+            provider="fake",
+            bucket="test",
+            key=key,
+            uri=f"fake://test/{key}",
+            size=len(data),
+            content_type=content_type or "image/jpeg",
+            sha256=sha256(data).hexdigest(),
+            updated_at=datetime.now(UTC),
+        )
 
 
 def test_admin_realtime_search_upserts_pool_without_customer_charge(
@@ -3606,11 +3901,17 @@ def test_content_business_states_filters_and_same_cohort_never_use_inventory(
                     "VALUES(%s,'douyin',%s,'video','FAILED')",
                     (state, state),
                 )
-            if state in ("removed", "blocked"):
+            if state == "blocked":
+                raw.execute(
+                    "UPDATE viral_videos SET deleted_at=now() "
+                    "WHERE platform='douyin' AND video_id=%s",
+                    (state,),
+                )
+            if state == "removed":
                 raw.execute(
                     "INSERT INTO viral_video_visibility(platform,video_id,status,reason) "
                     "VALUES('douyin',%s,%s,'本地测试')",
-                    (state, "HIDDEN" if state == "removed" else "UNAVAILABLE"),
+                    (state, "HIDDEN"),
                 )
         conn = BusinessConnection.postgres(raw)
         record_content_source(
@@ -3671,6 +3972,47 @@ def test_content_business_states_filters_and_same_cohort_never_use_inventory(
     assert overview["topVideos"][0]["requests"] == 2
     assert overview["finance"]["grossRate"] is None
     assert overview["measurementStartedAt"] and "无法还原" in overview["historyNote"]
+    detail = client.get("/api/control/viral/videos/douyin/featured/details", headers=headers)
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["sourceKeywords"] == ["庭院"]
+    for step in overview["funnel"]:
+        page = client.get(
+            "/api/control/viral/videos",
+            headers=headers,
+            params={
+                "cohort_stage": step["stage"],
+                "collected_from": overview["from"],
+                "collected_to": overview["to"],
+                "platform": "douyin",
+            },
+        )
+        assert page.status_code == 200, page.text
+        assert page.json()["total"] == step["count"]
+        assert [v["video_id"] for v in page.json()["items"]] == ["featured"]
+    with psycopg.connect(route_state) as raw:
+        raw.execute("UPDATE viral_videos SET deleted_at=now() WHERE video_id='featured'")
+    historical = client.get(
+        "/api/control/viral/videos",
+        headers=headers,
+        params={
+            "cohort_stage": "copy",
+            "collected_from": overview["from"],
+            "collected_to": overview["to"],
+        },
+    ).json()
+    assert historical["total"] == 1 and historical["items"][0]["content_state"] == "blocked"
+    platform_empty = client.get(
+        "/api/control/viral/content-overview",
+        headers=headers,
+        params={"platform": "wechat_channels"},
+    ).json()
+    assert [step["count"] for step in platform_empty["funnel"]] == [0] * 5
+    assert (
+        client.get(
+            "/api/control/viral/videos", headers=headers, params={"cohort_stage": "copy"}
+        ).status_code
+        == 422
+    )
     assert (
         client.get(
             "/api/control/viral/content-overview", headers=_admin_session(client, "auditor_u")
@@ -3680,12 +4022,12 @@ def test_content_business_states_filters_and_same_cohort_never_use_inventory(
 
 
 @pytest.mark.pg
-@pytest.mark.parametrize("action,status", [("hide", "HIDDEN"), ("block", "UNAVAILABLE")])
+@pytest.mark.parametrize("action,status", [("hide", "HIDDEN"), ("block", None)])
 def test_batch_hide_block_are_atomic_and_cancel_pending_homepage(
     client: TestClient,
     route_state: str,
     action: str,
-    status: str,
+    status: str | None,
 ) -> None:
     headers = _admin_session(client)
     with psycopg.connect(route_state) as raw:
@@ -3709,12 +4051,16 @@ def test_batch_hide_block_are_atomic_and_cancel_pending_homepage(
     assert response.status_code == 200, response.text
     assert response.json()["count"] == 2 and response.json()["queued_count"] == 0
     with psycopg.connect(route_state) as raw:
-        assert (
-            raw.execute(
-                "SELECT count(*) FROM viral_video_visibility WHERE status=%s", (status,)
-            ).fetchone()[0]
-            == 2
-        )
+        if status:
+            assert (
+                raw.execute(
+                    "SELECT count(*) FROM viral_video_visibility WHERE status=%s", (status,)
+                ).fetchone()[0]
+                == 2
+            )
+        assert raw.execute(
+            "SELECT count(*) FROM viral_videos WHERE deleted_at IS NOT NULL"
+        ).fetchone()[0] == (2 if action == "block" else 0)
         assert (
             raw.execute("SELECT count(*) FROM viral_videos WHERE homepage_featured=1").fetchone()[0]
             == 0

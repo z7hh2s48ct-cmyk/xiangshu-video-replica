@@ -8,11 +8,24 @@ import {
 } from "../api.admin";
 import { PageBanner } from "./ui/PageBanner";
 import { formatDateTime, formatFen } from "./ui/vocabulary";
+import { ViralResourceCosts } from "./ViralResourceCosts";
 
-export function ViralOverviewPage() {
+function videoListHref(filters: Record<string, string>) {
+  return `#admin/viralVideos?${new URLSearchParams({ listQuery: new URLSearchParams(filters).toString() })}`;
+}
+
+export function ViralOverviewPage({
+  readOnly = false,
+}: {
+  readOnly?: boolean;
+}) {
   const [data, setData] = useState<ViralLibraryOverview | null>(null);
   const [error, setError] = useState("");
   const [business, setBusiness] = useState<ViralContentOverview | null>(null);
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [platform, setPlatform] = useState("");
+  const [scope, setScope] = useState({ from: "", to: "", platform: "" });
   useEffect(() => {
     let active = true;
     void viralLibraryOverview()
@@ -23,9 +36,17 @@ export function ViralOverviewPage() {
         if (active)
           setError(adminActivationErrorMessage(cause, "读取内容概览失败"));
       });
-    void getViralContentOverview()
+    void getViralContentOverview(
+      scope.from || undefined,
+      scope.to || undefined,
+      scope.platform || undefined,
+    )
       .then((value) => {
-        if (active) setBusiness(value);
+        if (active) {
+          setBusiness(value);
+          setFrom((previous) => previous || value.from);
+          setTo((previous) => previous || value.to);
+        }
       })
       .catch((cause) => {
         if (active)
@@ -34,7 +55,7 @@ export function ViralOverviewPage() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [scope]);
   return (
     <section
       className="admin-panel admin-content-overview"
@@ -48,17 +69,70 @@ export function ViralOverviewPage() {
         </p>
       </header>
       {error && <PageBanner tone="error">{error}</PageBanner>}
+      <form
+        className="admin-toolbar"
+        onSubmit={(event) => {
+          event.preventDefault();
+          setError("");
+          setScope({ from, to, platform });
+        }}
+      >
+        <label>
+          采集起始日期
+          <input
+            type="date"
+            value={from}
+            onChange={(event) => setFrom(event.target.value)}
+            required
+          />
+        </label>
+        <label>
+          采集结束日期
+          <input
+            type="date"
+            value={to}
+            min={from || undefined}
+            onChange={(event) => setTo(event.target.value)}
+            required
+          />
+        </label>
+        <label>
+          采集漏斗平台
+          <select
+            value={platform}
+            onChange={(event) => setPlatform(event.target.value)}
+          >
+            <option value="">全部平台</option>
+            <option value="douyin">抖音</option>
+            <option value="wechat_channels">视频号</option>
+          </select>
+        </label>
+        <button type="submit">查看区间</button>
+      </form>
       {business && (
         <>
           <h3>
-            本周采集转化（仅起计以来） · {business.from} 至 {business.to}
+            采集转化（仅起计以来） · {business.from} 至 {business.to}
           </h3>
           <p className="admin-hint">{business.cohortRule}</p>
           <dl className="admin-content-funnel">
             {business.funnel.map((step) => (
               <div key={step.name}>
                 <dt>{step.name}</dt>
-                <dd>{step.count} 条</dd>
+                <dd>
+                  <a
+                    href={videoListHref({
+                      cohortStage: step.stage,
+                      collectedFrom: business.from,
+                      collectedTo: business.to,
+                      ...(business.platform
+                        ? { platform: business.platform }
+                        : {}),
+                    })}
+                  >
+                    {step.count} 条
+                  </a>
+                </dd>
                 <small>
                   {step.conversion == null
                     ? "无可比较基数"
@@ -73,11 +147,11 @@ export function ViralOverviewPage() {
             。直接获取文案但未记录详情读取：{business.directCopyWithoutDetail}{" "}
             条。
           </p>
-          <h3>爆款业务收支 · 同一区间</h3>
+          <h3>爆款业务收支 · 同一区间全部平台</h3>
           <dl className="admin-viral-tiles">
             {[
               ["确认收入", business.finance.revenueFen],
-              ["平台调用成本", business.finance.costFen],
+              ["全部业务成本", business.finance.costFen],
               ["业务毛利", business.finance.grossFen],
             ].map(([label, value]) => (
               <div className="admin-viral-tile" key={String(label)}>
@@ -110,7 +184,12 @@ export function ViralOverviewPage() {
               <ol>
                 {business.topVideos.map((v) => (
                   <li key={`${v.platform}:${v.video_id}`}>
-                    {v.title || "历史视频"} · {v.requests} 次成功读取
+                    <a
+                      href={`#admin/viralVideos?${new URLSearchParams({ videoId: v.video_id, platform: v.platform })}`}
+                    >
+                      {v.title || "历史视频"}
+                    </a>{" "}
+                    · {v.requests} 次成功读取
                   </li>
                 ))}
               </ol>
@@ -128,8 +207,18 @@ export function ViralOverviewPage() {
                   {(keywords as ViralContentOverview["bestKeywords"]).map(
                     (k) => (
                       <li key={`${k.platform}:${k.keyword}`}>
-                        {k.keyword} · 采集 {k.collected} 条 / 客户详情使用{" "}
-                        {k.used} 条
+                        <a
+                          href={videoListHref({
+                            cohortStage: "collected",
+                            collectedFrom: business.from,
+                            collectedTo: business.to,
+                            platform: k.platform,
+                            sourceKeyword: k.keyword,
+                          })}
+                        >
+                          {k.keyword}
+                        </a>{" "}
+                        · 采集 {k.collected} 条 / 客户详情使用 {k.used} 条
                       </li>
                     ),
                   )}
@@ -138,29 +227,55 @@ export function ViralOverviewPage() {
             ))}
           </div>
           <p className="admin-hint">{business.keywordRule}</p>
+          <ViralResourceCosts
+            key={`${business.from}:${business.to}`}
+            from={business.from}
+            to={business.to}
+            readOnly={readOnly}
+          />
         </>
       )}
       {data ? (
         <>
           <dl className="admin-viral-tiles">
-            {[
-              ["内容池", data.content_total],
-              ["素材已准备", data.archive_ready],
-              ["首页当前展示", data.homepage_featured],
-              ["待准备", data.pending_archive],
-              ["准备失败", data.archive_failed],
-            ].map(([label, value]) => (
+            {(
+              [
+                ["内容池", data.content_total, {}],
+                ["素材已准备", data.archive_ready, { libraryStatus: "ready" }],
+                [
+                  "首页当前展示",
+                  data.homepage_featured,
+                  { libraryStatus: "featured" },
+                ],
+                ["待准备", data.pending_archive, { libraryStatus: "pending" }],
+                ["准备失败", data.archive_failed, { libraryStatus: "failed" }],
+                [
+                  "缺少归档封面",
+                  data.missing_cover ?? 0,
+                  { attention: "missing_cover" },
+                ],
+              ] as Array<[string, number, Record<string, string>]>
+            ).map(([label, value, filters]) => (
               <div className="admin-viral-tile" key={label}>
                 <dt>{label}</dt>
-                <dd>{value} 条</dd>
+                <dd>
+                  <a href={videoListHref(filters as Record<string, string>)}>
+                    {value} 条
+                  </a>
+                </dd>
               </div>
             ))}
           </dl>
           <div className="admin-content-next">
             <h3>运营待办</h3>
-            <a href="#admin/viralVideos">
-              处理 {data.archive_failed} 条准备失败与 {data.pending_archive}{" "}
-              条待准备内容
+            <a href={videoListHref({ libraryStatus: "failed" })}>
+              处理 {data.archive_failed} 条准备失败
+            </a>
+            <a href={videoListHref({ libraryStatus: "pending" })}>
+              准备 {data.pending_archive} 条内容
+            </a>
+            <a href={videoListHref({ attention: "missing_cover" })}>
+              补齐 {data.missing_cover ?? 0} 条封面
             </a>
             <a href="#admin/viralHomepage">检查首页封面、素材状态与排期</a>
             <a href="#admin/viralDiscoveries">查看客户搜索需求与补货方向</a>

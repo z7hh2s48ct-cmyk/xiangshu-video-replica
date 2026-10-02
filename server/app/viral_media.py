@@ -17,6 +17,7 @@ import socket
 import ssl
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -29,6 +30,7 @@ from app.net_safety import FAKE_IP_NETWORK
 from app.storage import DownloadIntent, StorageAdapter, StoredObject
 from app.viral_decrypt import decrypt_chunks, is_encrypted_mp4
 from app.viral_media_preparation import ViralMediaPreparation
+from app.viral_resource_metering import ResourceMeasurement, measured_chunks, stored_resource
 from app.viral_tikhub import (
     PLATFORM_DOUYIN,
     PLATFORM_WECHAT,
@@ -402,9 +404,12 @@ class CoverEnricher:
     每个封面只下载一次（head 去重）；下载失败保留源站链接兜底。
     """
 
-    def __init__(self, *, storage: ViralStorage, fetcher: UrlFetcher) -> None:
+    def __init__(
+        self, *, storage: ViralStorage, fetcher: UrlFetcher, metered: bool = False
+    ) -> None:
         self._storage = storage
         self._fetcher = fetcher
+        self._metered = metered
 
     def stable_url(self, platform: str, video_id: str) -> str:
         return f"/api/viral/covers/{platform}/{quote(video_id, safe='')}"
@@ -415,11 +420,43 @@ class CoverEnricher:
         key = viral_cover_key(video.platform, video.video_id)
         try:
             if self._storage.head_object(key) is None:
-                content = _fetch_or_raise(self._fetcher, video.cover_url)
-                self._storage.put_object(
-                    key,
-                    content,
-                    content_type=guess_image_content_type(content, video.cover_url),
+                download = ResourceMeasurement(
+                    enabled=self._metered,
+                    platform=video.platform,
+                    video_id=video.video_id,
+                    kind="download",
+                )
+                try:
+                    content = _fetch_or_raise(self._fetcher, video.cover_url)
+                    download.quantity = len(content)
+                except BaseException:
+                    download.finish("FAILED")
+                    raise
+                download.finish("SUCCEEDED")
+                upload = ResourceMeasurement(
+                    enabled=self._metered,
+                    platform=video.platform,
+                    video_id=video.video_id,
+                    kind="upload",
+                )
+                try:
+                    stored = self._storage.put_object(
+                        key,
+                        content,
+                        content_type=guess_image_content_type(content, video.cover_url),
+                    )
+                    upload.quantity = len(content)
+                except BaseException:
+                    upload.finish("FAILED")
+                    raise
+                upload.finish("SUCCEEDED")
+                stored_resource(
+                    enabled=self._metered,
+                    platform=video.platform,
+                    video_id=video.video_id,
+                    namespace=str(getattr(self._storage, "cache_namespace", "unknown")),
+                    key=stored.key,
+                    size=stored.size,
                 )
         except Exception as exc:
             logger.warning(
@@ -467,16 +504,32 @@ class ViralMediaPipeline:
         self.detail = None
 
         def prepare(destination: str, check: Callable[[], None]) -> StoredObject:
+            measurement = ResourceMeasurement(
+                enabled=self._shared,
+                platform=video.platform,
+                video_id=video.video_id,
+                kind="preparation",
+            )
+            started = time.monotonic()
+
             def combined_check() -> None:
                 check()
                 self._cancellation_check()
 
-            combined_check()
-            current = self._refresh_video(video) if self._refresh_video is not None else video
-            combined_check()
-            return self._download_to_storage(
-                current, kind, destination, content_type, combined_check
-            )
+            try:
+                combined_check()
+                current = self._refresh_video(video) if self._refresh_video is not None else video
+                combined_check()
+                result = self._download_to_storage(
+                    current, kind, destination, content_type, combined_check
+                )
+            except BaseException:
+                measurement.quantity = max(0, round((time.monotonic() - started) * 1000))
+                measurement.finish("FAILED")
+                raise
+            measurement.quantity = max(0, round((time.monotonic() - started) * 1000))
+            measurement.finish("SUCCEEDED")
+            return result
 
         if self._shared:
             coordinator = ViralMediaPreparation(storage=cast(StorageAdapter, self._storage))
@@ -536,9 +589,17 @@ class ViralMediaPipeline:
         with tempfile.TemporaryDirectory(prefix="viral-media-") as directory:
             path = Path(directory) / "source"
             head = bytearray()
+            download = ResourceMeasurement(
+                enabled=self._shared,
+                platform=video.platform,
+                video_id=video.video_id,
+                kind="download",
+            )
             try:
                 with (
-                    _closing_chunks(self._fetcher.iter_fetch(url)) as source,
+                    _closing_chunks(
+                        measured_chunks(self._fetcher.iter_fetch(url), download)
+                    ) as source,
                     path.open("wb") as output,
                 ):
                     chunks = decrypt_chunks(source, decode_key) if decode_key else source
@@ -559,7 +620,28 @@ class ViralMediaPipeline:
             if self._validator is not None:
                 self._validator(path, kind, self._fetcher.last_content_type)
             check()
-            return self._storage.put_file(key, path, content_type=content_type)
+            upload = ResourceMeasurement(
+                enabled=self._shared,
+                platform=video.platform,
+                video_id=video.video_id,
+                kind="upload",
+            )
+            try:
+                stored = self._storage.put_file(key, path, content_type=content_type)
+                upload.quantity = path.stat().st_size
+            except BaseException:
+                upload.finish("FAILED")
+                raise
+            upload.finish("SUCCEEDED")
+            stored_resource(
+                enabled=self._shared,
+                platform=video.platform,
+                video_id=video.video_id,
+                namespace=str(getattr(self._storage, "cache_namespace", "unknown")),
+                key=stored.key,
+                size=stored.size,
+            )
+            return stored
 
     # -- 内部 -----------------------------------------------------------------
 

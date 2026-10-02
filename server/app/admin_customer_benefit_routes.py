@@ -86,6 +86,7 @@ def _discount_payload(view: CustomerDiscountView) -> dict[str, object]:
         "applicable_interfaces": list(view.applicable_interfaces),
         "priority": view.priority,
         "is_active": view.is_active,
+        "state": view.state,
         "valid_from": view.valid_from.isoformat(),
         "valid_until": view.valid_until.isoformat() if view.valid_until is not None else None,
         "source": view.source,

@@ -8,6 +8,7 @@ import {
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
 import { formatDateTime, formatFen } from "./ui/vocabulary";
+import { ViralResourceCosts } from "./ViralResourceCosts";
 
 function mediaLabel(status: string, ready: boolean) {
   if (ready) return "已准备";
@@ -26,10 +27,12 @@ export function ViralVideoBusinessDetails({
   video,
   onRelated,
   onCustomer,
+  readOnly = false,
 }: {
   video: CollectedViralVideo;
   onRelated: (video: CollectedViralVideo) => void;
   onCustomer?: (userId: string) => void;
+  readOnly?: boolean;
 }) {
   const [details, setDetails] = useState<ViralBusinessData | null>(null);
   const [offset, setOffset] = useState(0);
@@ -144,6 +147,21 @@ export function ViralVideoBusinessDetails({
             次，进行中 {details.business.pendingDataCostCalls ?? "未记录"} 次。
           </p>
           <p className="admin-hint">{details.business.costNote}</p>
+          {details.business.transcriptionCalls !== undefined && (
+            <p>
+              精确归属本视频的转写调用 {details.business.transcriptionCalls} 次
+              · 已确认转写成本{" "}
+              {formatFen(details.business.knownTranscriptionCostFen ?? 0)} ·{" "}
+              {details.business.unknownTranscriptionCostCalls ?? 0}{" "}
+              项成本待核对。
+            </p>
+          )}
+          <ViralResourceCosts
+            key={`${platform}:${video_id}`}
+            platform={platform}
+            videoId={video_id}
+            readOnly={readOnly}
+          />
           <details>
             <summary>
               客户使用明细（{details.business.customerTotal} 个收费主体）

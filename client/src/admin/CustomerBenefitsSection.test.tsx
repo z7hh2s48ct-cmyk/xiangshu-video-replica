@@ -63,6 +63,7 @@ const packageDiscount: CustomerDiscount = {
   priority: 100,
   is_active: true,
   valid_from: "2026-09-27T00:00:00+00:00",
+  state: "effective",
   valid_until: null,
   source: "recharge_package",
   source_recharge_order_id: "order-1",
@@ -91,6 +92,41 @@ beforeEach(() => {
     manualDiscount,
     packageDiscount,
   ]);
+});
+
+test("rejects a tiny discount rounded to zero without opening a write dialog", async () => {
+  render(
+    <CustomerBenefitsSection
+      userId="cust-1"
+      readOnly={false}
+      onChanged={vi.fn()}
+    />,
+  );
+  await waitForBenefits();
+  fireEvent.change(screen.getByLabelText(/折扣（折）/), {
+    target: { value: "0.000001" },
+  });
+  fireEvent.submit(
+    screen
+      .getByRole("button", { name: "设置专项折扣" })
+      .closest("form") as HTMLFormElement,
+  );
+  expect(await screen.findByText(/精度不能小到取整为零/)).toBeInTheDocument();
+  expect(createCustomerDiscount).not.toHaveBeenCalled();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
+test("renders database effective states instead of treating every active flag as effective", async () => {
+  vi.mocked(listCustomerDiscounts).mockResolvedValue([
+    { ...manualDiscount, id: "expired", state: "expired" },
+    { ...packageDiscount, id: "pending", state: "pending" },
+  ]);
+  render(
+    <CustomerBenefitsSection userId="cust-1" readOnly onChanged={vi.fn()} />,
+  );
+  expect(await screen.findByText("已过期")).toBeInTheDocument();
+  expect(screen.getByText("未生效")).toBeInTheDocument();
+  expect(screen.queryByText("生效中")).not.toBeInTheDocument();
 });
 
 // 等到数据行出现：「专项折扣」小标题在数据到达前就已渲染，不能作为加载完成信号。
@@ -174,7 +210,12 @@ test("grants a package with the displayed version and voucher, then refreshes", 
     "对公转账已到账",
     expect.any(String),
   );
-  expect(await screen.findByText(/已开通「年度档」/)).toBeTruthy();
+  const notice = await screen.findByText(/已开通「年度档」/);
+  expect(notice).toHaveTextContent("到账 2000 积分，余额 2050 积分");
+  expect(notice).not.toHaveTextContent("req-1");
+  const details = screen.getByText("操作技术信息").closest("details");
+  expect(details).not.toHaveAttribute("open");
+  expect(details).toHaveTextContent("req-1");
   expect(listCustomerDiscounts).toHaveBeenCalledTimes(2);
 });
 
@@ -294,7 +335,7 @@ test("rejects an out-of-range zhe before opening the dialog", async () => {
   if (!form) throw new Error("discount form missing");
   fireEvent.submit(form);
 
-  expect(await screen.findByText(/折扣须为 0–10/)).toBeTruthy();
+  expect(await screen.findByText(/折扣须大于 0 且不超过 10 折/)).toBeTruthy();
   expect(screen.queryByLabelText(/原因/)).toBeNull();
 });
 

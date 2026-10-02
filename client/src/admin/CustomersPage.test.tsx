@@ -15,6 +15,8 @@ import { CustomersPage } from "./CustomersPage";
 
 // Mock the admin API module
 vi.mock("../api.admin", () => ({
+  adminRead: vi.fn().mockResolvedValue({ services: [] }),
+  submitBillingQuote: vi.fn(),
   getAccountCreditSummary: vi.fn().mockResolvedValue({
     user_id: "user-1",
     available_credits: 0,

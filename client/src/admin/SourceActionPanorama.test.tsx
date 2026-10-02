@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { expect, test, vi } from "vitest";
 import { adminRead } from "../api.admin";
 import { AnalyticsPage } from "./AnalyticsPage";
@@ -11,6 +17,7 @@ vi.mock("../api.admin", () => ({
 const settled = {
   user_id: "u-1",
   source_id: "action-1",
+  business_label: "分析修复、首帧制作",
   username: "测试用户",
   operation_count: 2,
   pending_count: 0,
@@ -58,6 +65,46 @@ function mockPanorama(items: unknown[], detail: unknown) {
   });
 }
 
+test("wallet deep link reads only its exact business and customer, with a restorable query", async () => {
+  vi.mocked(adminRead).mockClear();
+  mockPanorama([settled], { action: settled, operations: [] });
+  const query = new URLSearchParams({
+    start: "2000-01-01",
+    end: "9998-12-31",
+    user_id: "u-1",
+    source_id: "action-1",
+  }).toString();
+  const rendered = render(
+    <AnalyticsPage initialTab="cost" initialCostQuery={query} />,
+  );
+  expect(
+    await screen.findByRole("region", { name: "关联业务账单" }),
+  ).toBeVisible();
+  await waitFor(() =>
+    expect(
+      screen.getByRole("complementary", { name: "操作明细" }),
+    ).toHaveTextContent("分析修复、首帧制作"),
+  );
+  const reads = vi.mocked(adminRead).mock.calls.map(([url]) => String(url));
+  const listRead = reads.find((url) => url.includes("source-actions?")) ?? "";
+  expect(new URLSearchParams(listRead.split("?")[1]).get("source_id")).toBe(
+    "action-1",
+  );
+  expect(new URLSearchParams(listRead.split("?")[1]).get("user_id")).toBe(
+    "u-1",
+  );
+  expect(reads).toContain(
+    "/api/control/billing/source-actions/action-1?user_id=u-1",
+  );
+  expect(reads.some((url) => /statistics|\/operations/.test(url))).toBe(false);
+  expect(screen.queryByRole("button", { name: /导出/ })).toBeNull();
+  rendered.unmount();
+  render(<AnalyticsPage initialTab="cost" initialCostQuery={query} />);
+  expect(
+    await screen.findByRole("region", { name: "关联业务账单" }),
+  ).toBeVisible();
+});
+
 test("folds one business action into a row and keeps unproven costs visible", async () => {
   mockPanorama([settled, uncertain], {});
   render(<AnalyticsPage />);
@@ -73,12 +120,16 @@ test("folds one business action into a row and keeps unproven costs visible", as
     .slice(1)
     .map((row) => within(row).getAllByRole("cell"));
   const settledCells = rows[0];
-  expect(settledCells[headers.indexOf("操作编号")]).toHaveTextContent(
+  expect(settledCells[headers.indexOf("业务动作")]).toHaveTextContent(
     "action-1",
   );
+  expect(settledCells[headers.indexOf("业务动作")]).toHaveTextContent(
+    "分析修复、首帧制作",
+  );
+  expect(within(table).getByText("action-1")).not.toBeVisible();
   expect(settledCells[headers.indexOf("用户")]).toHaveTextContent("测试用户");
-  expect(settledCells[headers.indexOf("生成与调用")]).toHaveTextContent(
-    "2 次生成 · 3 次调用",
+  expect(settledCells[headers.indexOf("业务与调用")]).toHaveTextContent(
+    "2 次业务 · 3 次调用",
   );
   expect(settledCells[headers.indexOf("积分")]).toHaveTextContent("5 积分");
   expect(settledCells[headers.indexOf("成本")]).toHaveTextContent("¥0.12");
@@ -178,8 +229,8 @@ test("opens one action panorama with its own requests and provider calls", async
   const detail = await screen.findByRole("complementary", {
     name: "操作明细",
   });
-  expect(detail).toHaveTextContent("2 次生成 · 3 次调用 · 净扣 5 积分");
-  const requests = within(detail).getByRole("table", { name: "动作内生成" });
+  expect(detail).toHaveTextContent("2 次业务 · 3 次调用 · 净扣 5 积分");
+  const requests = within(detail).getByRole("table", { name: "动作内业务" });
   expect(within(requests).getAllByRole("row").slice(1)).toHaveLength(2);
   const calls = within(detail).getByRole("table", {
     name: "first_frame 供应商调用",

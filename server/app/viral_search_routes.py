@@ -249,7 +249,7 @@ def search_viral_videos(
     try:
         # 封面归档同样限时；超时不放弃整页结果——未归档条目保留源站
         # 链接兜底（archive_search_covers 的既有语义）。
-        enriched = archive_search_covers_bounded(storage, page.items)
+        enriched = archive_search_covers_bounded(storage, page.items, metered=True)
     except TimeoutError:
         enriched = page.items
     searched_at = datetime.now(UTC).isoformat()

@@ -13,6 +13,26 @@
 
 type LabelMap = Record<string, string>;
 
+export const RESOURCE_STATE_LABELS: LabelMap = {
+  PENDING: "计量尚未终结",
+  SUCCEEDED: "已观察完成",
+  FAILED: "未完整完成",
+  ABORTED: "读取已中断",
+};
+export const RESOURCE_UNIT_LABELS: LabelMap = {
+  byte: "字节",
+  millisecond: "毫秒",
+  byte_millisecond: "字节·毫秒",
+  intent: "次",
+};
+export const CONTENT_FUNNEL_LABELS: LabelMap = {
+  collected: "本期采集",
+  prepared: "素材就绪",
+  homepage: "首页展示",
+  detail: "客户打开详情",
+  copy: "获取文案",
+};
+
 export const ACTIVATION_CODE_STATUS_LABELS: LabelMap = {
   GENERATED: "待启用",
   ISSUED: "可使用",

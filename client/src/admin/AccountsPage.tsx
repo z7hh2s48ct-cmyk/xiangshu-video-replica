@@ -257,11 +257,18 @@ export function AccountsPage({
                       查看订单
                     </a>
                   ) : null}
-                  {tx.task_id || tx.oral_task_id || tx.source_id ? (
+                  {tx.task_id || tx.oral_task_id ? (
                     <a
-                      href={`#admin/generationRecords?taskId=${encodeURIComponent(tx.task_id ?? tx.oral_task_id ?? tx.source_id ?? "")}&userId=${encodeURIComponent(tx.user_id)}`}
+                      href={`#admin/generationRecords?taskId=${encodeURIComponent(tx.task_id ?? tx.oral_task_id ?? "")}&userId=${encodeURIComponent(tx.user_id)}`}
                     >
                       查看关联任务
+                    </a>
+                  ) : null}
+                  {tx.source_id ? (
+                    <a
+                      href={`#admin/analytics?analyticsTab=cost&billingQuery=${encodeURIComponent(new URLSearchParams({ start: "2000-01-01", end: "9998-12-31", user_id: tx.user_id, source_id: tx.source_id }).toString())}`}
+                    >
+                      查看业务账单
                     </a>
                   ) : null}
                 </div>

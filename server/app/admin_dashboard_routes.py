@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.admin_auth_routes import AdminReader
 from app.admin_cash_evidence import CASH_ORDER_ELIGIBLE, NONCASH_ADJUSTMENT, OFFLINE_CASH_EVIDENCE
+from app.admin_customer_metrics import utc_text_timestamp
 from app.billing_catalog import SERVICES
 from app.billing_reports import UNMETERED_DELIVERED_CHARGE, date_bounds, statistics
 from app.db_pg import pg_transaction
@@ -30,7 +31,7 @@ def _one(conn: Any, sql: str) -> Any:
 
 
 def _day_expr(column: str) -> str:
-    return _SHANGHAI_DATE % f"{column}::timestamp AT TIME ZONE 'UTC'"
+    return _SHANGHAI_DATE % utc_text_timestamp(column)
 
 
 def _timestamptz_day_expr(column: str) -> str:
@@ -295,7 +296,7 @@ def _recharge_metrics(conn: Any, *, lower: Any, upper: Any) -> dict[str, int]:
         f"""
         WITH paid AS (
             SELECT user_id, amount_fen,
-                   (paid_at::timestamp AT TIME ZONE 'UTC') AS paid_utc
+                   {utc_text_timestamp("paid_at")} AS paid_utc
             FROM recharge_orders ro
             WHERE status = 'PAID' AND paid_at IS NOT NULL AND amount_fen > 0
               AND {CASH_ORDER_ELIGIBLE}
@@ -460,12 +461,12 @@ def _prepaid_snapshot(conn: Any, *, since: Any) -> tuple[int, int | None, int, i
     ).fetchone()
     assert current is not None
     deltas = conn.execute(
-        """
+        f"""
         SELECT COALESCE(SUM(t.available_delta), 0) AS available_delta,
                COALESCE(SUM(t.reserved_delta), 0) AS reserved_delta
         FROM wallet_transactions t JOIN users u ON u.id = t.user_id
         WHERE u.role = 'customer'
-          AND (t.created_at::timestamp AT TIME ZONE 'UTC') >= %s
+          AND {utc_text_timestamp("t.created_at")} >= %s
         """,
         (since,),
     ).fetchone()
@@ -616,8 +617,8 @@ def funds_summary(start: date, end: date, _actor: AdminReader) -> dict[str, Any]
             FROM recharge_orders ro
             WHERE status = 'PAID' AND paid_at IS NOT NULL AND amount_fen > 0
               AND {CASH_ORDER_ELIGIBLE}
-              AND (paid_at::timestamp AT TIME ZONE 'UTC') >= %s
-              AND (paid_at::timestamp AT TIME ZONE 'UTC') < %s
+              AND {utc_text_timestamp("paid_at")} >= %s
+              AND {utc_text_timestamp("paid_at")} < %s
             GROUP BY provider, 2
             """,
             (lower, upper),
@@ -628,8 +629,8 @@ def funds_summary(start: date, end: date, _actor: AdminReader) -> dict[str, Any]
             FROM recharge_orders ro
             WHERE status = 'PAID' AND provider = 'admin_adjustment'
               AND (amount_fen = 0 OR {NONCASH_ADJUSTMENT})
-              AND (paid_at::timestamp AT TIME ZONE 'UTC') >= %s
-              AND (paid_at::timestamp AT TIME ZONE 'UTC') < %s
+              AND {utc_text_timestamp("paid_at")} >= %s
+              AND {utc_text_timestamp("paid_at")} < %s
             """,
             (lower, upper),
         ).fetchone()
@@ -638,17 +639,17 @@ def funds_summary(start: date, end: date, _actor: AdminReader) -> dict[str, Any]
             f"""SELECT COUNT(*), COALESCE(SUM(amount_fen),0) FROM recharge_orders ro
             WHERE provider='admin_adjustment' AND status='PAID' AND amount_fen>0
               AND NOT ({CASH_ORDER_ELIGIBLE}) AND NOT ({NONCASH_ADJUSTMENT})
-              AND paid_at::timestamp AT TIME ZONE 'UTC'>=%s
-              AND paid_at::timestamp AT TIME ZONE 'UTC'<%s""",
+              AND {utc_text_timestamp("paid_at")} >=%s
+              AND {utc_text_timestamp("paid_at")} <%s""",
             (lower, upper),
         ).fetchone()
         refund_row = business_conn.execute(
-            """
+            f"""
             SELECT COALESCE(SUM(-t.available_delta), 0)
             FROM wallet_transactions t JOIN users u ON u.id = t.user_id
             WHERE u.role = 'customer' AND t.type = 'REFUND'
-              AND (t.created_at::timestamp AT TIME ZONE 'UTC') >= %s
-              AND (t.created_at::timestamp AT TIME ZONE 'UTC') < %s
+              AND {utc_text_timestamp("t.created_at")} >= %s
+              AND {utc_text_timestamp("t.created_at")} < %s
             """,
             (lower, upper),
         ).fetchone()

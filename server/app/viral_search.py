@@ -133,11 +133,14 @@ def archive_search_covers_bounded(
     *,
     max_workers: int = SEARCH_COVER_WORKERS,
     deadline_seconds: float = SEARCH_DEADLINE_SECONDS,
+    metered: bool = False,
 ) -> list[ViralVideo]:
     """封面归档的限时版本；超时同样抛 ``TimeoutError``，已完成的封面保留."""
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="viral-cover-bounded")
     try:
-        future = pool.submit(archive_search_covers, storage, videos, max_workers=max_workers)
+        future = pool.submit(
+            archive_search_covers, storage, videos, max_workers=max_workers, metered=metered
+        )
         return future.result(timeout=deadline_seconds)
     finally:
         pool.shutdown(wait=False)
@@ -148,11 +151,14 @@ def archive_search_covers(
     videos: list[ViralVideo],
     *,
     max_workers: int = SEARCH_COVER_WORKERS,
+    metered: bool = False,
 ) -> list[ViralVideo]:
     """并发把搜索结果封面归档到自有存储；单条失败保留源站链接兜底."""
     if not videos:
         return []
-    enricher = CoverEnricher(storage=storage, fetcher=UrlFetcher(max_bytes=SEARCH_COVER_MAX_BYTES))
+    enricher = CoverEnricher(
+        storage=storage, fetcher=UrlFetcher(max_bytes=SEARCH_COVER_MAX_BYTES), metered=metered
+    )
     with ThreadPoolExecutor(max_workers=min(max_workers, len(videos))) as pool:
         return list(pool.map(enricher.enrich, videos))
 

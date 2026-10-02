@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   listReconciliationItems,
   type ReconciliationAnomaly,
   repairPaidRechargeLedger,
 } from "../api";
+import { AdminControlError, adminWrite } from "../api.admin";
+import { CustomerLink } from "./CustomerLink";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { DataTable } from "./ui/DataTable";
 import { PageBanner } from "./ui/PageBanner";
@@ -31,7 +33,7 @@ const anomalyTabs: {
   {
     key: "wallet_mismatch",
     label: "钱包余额与流水不符",
-    hint: "钱包当前余额对不上流水累计，需技术核对",
+    hint: "钱包当前余额对不上流水累计，记录核对结果后仍需处理差异",
   },
 ];
 
@@ -58,6 +60,19 @@ export function ReconciliationPage({
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [pendingSync, setPendingSync] = useState<Item | null>(null);
+  const [pendingVerify, setPendingVerify] = useState<{
+    item: Item;
+    anomaly: ReconciliationAnomaly;
+    key: string;
+    reason?: string;
+  } | null>(null);
+  const [verifyBusy, setVerifyBusy] = useState(false);
+  const [verifyError, setVerifyError] = useState("");
+  const unresolvedVerifications = useRef(
+    new Map<string, NonNullable<typeof pendingVerify>>(),
+  );
+  const verificationIdentity = (item: Item, kind: ReconciliationAnomaly) =>
+    `${kind}:${item[kind === "wallet_mismatch" ? "user_id" : "transaction_id"]}:${item.snapshot}`;
 
   const load = useCallback(async () => {
     setBusy(true);
@@ -106,6 +121,108 @@ export function ReconciliationPage({
     }
   }
 
+  async function confirmVerification(reason: string) {
+    if (!pendingVerify || readOnly || verifyBusy) return;
+    if (pendingVerify.reason && pendingVerify.reason !== reason) {
+      setVerifyError("上次提交结果未确定，请保留原核对说明后重试。");
+      return;
+    }
+    const pending = { ...pendingVerify, reason };
+    const identity = verificationIdentity(pending.item, pending.anomaly);
+    unresolvedVerifications.current.set(identity, pending);
+    setPendingVerify(pending);
+    setVerifyBusy(true);
+    setVerifyError("");
+    try {
+      await adminWrite(
+        "/api/control/billing-reconciliation/verify",
+        {
+          anomaly: pending.anomaly,
+          entity_id:
+            pending.item[
+              pending.anomaly === "wallet_mismatch"
+                ? "user_id"
+                : "transaction_id"
+            ],
+          snapshot: pending.item.snapshot,
+        },
+        reason,
+        "记录核对结果失败",
+        pending.key,
+      );
+      setPendingVerify(null);
+      unresolvedVerifications.current.delete(identity);
+      setNotice("已记录核对说明，异常仍保留；请继续处理账务差异。");
+      await load();
+    } catch (cause) {
+      if (
+        cause instanceof AdminControlError &&
+        cause.status &&
+        cause.status < 500
+      ) {
+        setPendingVerify(null);
+        unresolvedVerifications.current.delete(identity);
+        setError(cause.message);
+      } else {
+        setVerifyError(
+          "提交结果暂未确定，请保留核对说明并重试，避免重复记录。",
+        );
+      }
+    } finally {
+      setVerifyBusy(false);
+    }
+  }
+
+  const customer = (item: Item) => (
+    <CustomerLink
+      userId={typeof item.user_id === "string" ? item.user_id : undefined}
+      company={text(item, "display_name")}
+      username={text(item, "username")}
+    />
+  );
+  function verification(item: Item) {
+    const record = item.verification as
+      | { state: string; reason: string; operator: string; at: string }
+      | null
+      | undefined;
+    return (
+      <>
+        <span>
+          {record?.state === "verified"
+            ? "已核对，待处理"
+            : record
+              ? "数据已变化，需重新核对"
+              : "待人工核对"}
+        </span>
+        {record && (
+          <details>
+            <summary>查看核对记录</summary>
+            <p>{record.reason}</p>
+            <p>
+              {record.operator} · {formatDateTime(record.at)}
+            </p>
+          </details>
+        )}
+        {!readOnly && (
+          <button
+            type="button"
+            disabled={typeof item.snapshot !== "string"}
+            onClick={() => {
+              setVerifyError("");
+              setPendingVerify(
+                unresolvedVerifications.current.get(
+                  verificationIdentity(item, anomaly),
+                ) ?? { item, anomaly, key: crypto.randomUUID() },
+              );
+            }}
+          >
+            记录核对结果
+          </button>
+        )}
+      </>
+    );
+  }
+
   return (
     <div className="reconciliation-page">
       <div role="tablist" aria-label="对账异常类型">
@@ -152,7 +269,7 @@ export function ReconciliationPage({
                 </>
               ) : (
                 <>
-                  <th>流水编号</th>
+                  <th>关联订单</th>
                   <th>客户</th>
                   <th>入账积分</th>
                   <th>订单状态</th>
@@ -166,10 +283,7 @@ export function ReconciliationPage({
           {anomaly === "wallet_mismatch"
             ? items.map((item) => (
                 <tr key={text(item, "user_id")}>
-                  <td>
-                    {text(item, "display_name")}
-                    <small>（{text(item, "username")}）</small>
-                  </td>
+                  <td>{customer(item)}</td>
                   <td>
                     {text(item, "available_credits")} /{" "}
                     {text(item, "reserved_credits")} 积分
@@ -178,9 +292,7 @@ export function ReconciliationPage({
                     {text(item, "ledger_available_credits")} /{" "}
                     {text(item, "ledger_reserved_credits")} 积分
                   </td>
-                  <td>
-                    <span className="admin-hint">需技术核对</span>
-                  </td>
+                  <td>{verification(item)}</td>
                 </tr>
               ))
             : anomaly === "paid_without_charge"
@@ -189,10 +301,7 @@ export function ReconciliationPage({
                     <td>
                       <code>{text(item, "order_no")}</code>
                     </td>
-                    <td>
-                      {text(item, "display_name")}
-                      <small>（{text(item, "username")}）</small>
-                    </td>
+                    <td>{customer(item)}</td>
                     <td>{formatFen(Number(item.amount_fen ?? 0))}</td>
                     <td>{text(item, "credits")} 积分</td>
                     <td>{formatDateTime(text(item, "paid_at"))}</td>
@@ -215,18 +324,25 @@ export function ReconciliationPage({
               : items.map((item) => (
                   <tr key={text(item, "transaction_id")}>
                     <td>
-                      <code>{text(item, "transaction_id")}</code>
+                      {typeof item.order_no === "string" ? (
+                        <a
+                          href={`#admin/funds?intent=order&orderNo=${encodeURIComponent(item.order_no)}&userId=${encodeURIComponent(String(item.user_id ?? ""))}`}
+                        >
+                          {item.order_no}
+                        </a>
+                      ) : (
+                        "历史订单号未记录"
+                      )}
+                      <details>
+                        <summary>查看流水编号</summary>
+                        <code>{text(item, "transaction_id")}</code>
+                      </details>
                     </td>
-                    <td>
-                      {text(item, "display_name")}
-                      <small>（{text(item, "username")}）</small>
-                    </td>
+                    <td>{customer(item)}</td>
                     <td>{text(item, "available_delta")} 积分</td>
                     <td>{text(item, "order_status")}</td>
                     <td>{formatDateTime(text(item, "created_at"))}</td>
-                    <td>
-                      <span className="admin-hint">需技术核对</span>
-                    </td>
+                    <td>{verification(item)}</td>
                   </tr>
                 ))}
         </DataTable>
@@ -245,6 +361,19 @@ export function ReconciliationPage({
         confirmLabel="确认补记"
         onConfirm={(reason: string) => void confirmSync(reason)}
         onClose={() => setPendingSync(null)}
+      />
+      <ConfirmDialog
+        level="reason"
+        open={!readOnly && pendingVerify !== null}
+        title="记录人工核对结果"
+        description="记录当前差异的核对说明、操作人和时间。记录不会改动余额或隐藏异常；账务数据变化后须重新核对。"
+        confirmLabel={verifyError ? "重试原核对记录" : "确认记录"}
+        busy={verifyBusy}
+        error={verifyError}
+        onConfirm={(reason: string) => void confirmVerification(reason)}
+        onClose={() => {
+          if (!verifyBusy) setPendingVerify(null);
+        }}
       />
     </div>
   );

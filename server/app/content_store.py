@@ -502,6 +502,11 @@ def delete_object_outside_content_namespace(
         logger.warning("refused direct deletion of content-addressed object %s", object_key)
         return False
     storage.delete_object(object_key, actor_id=actor_id)
+    from app.viral_resource_metering import deleted_resource
+
+    namespace = getattr(storage, "cache_namespace", None)
+    if namespace:
+        deleted_resource(namespace, object_key)
     return True
 
 
@@ -548,6 +553,11 @@ def delete_object_if_unreferenced(
     ):
         return False
     storage.delete_object(object_key, actor_id=actor_id)
+    from app.viral_resource_metering import deleted_resource
+
+    namespace = getattr(storage, "cache_namespace", None)
+    if namespace:
+        deleted_resource(namespace, object_key)
     return True
 
 

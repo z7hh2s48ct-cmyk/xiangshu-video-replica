@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { ViralOverviewPage } from "./ViralOverviewPage";
 
@@ -18,8 +18,18 @@ it("同批次漏斗不使用库存；未知收支和历史不伪装为零", asyn
               cohortRule: "同一采集批次",
               historyNote: "更早历史无法还原",
               funnel: [
-                { name: "本期采集", count: 2, conversion: null },
-                { name: "素材就绪", count: 1, conversion: 0.5 },
+                {
+                  stage: "collected",
+                  name: "本期采集",
+                  count: 2,
+                  conversion: null,
+                },
+                {
+                  stage: "prepared",
+                  name: "素材就绪",
+                  count: 1,
+                  conversion: 0.5,
+                },
               ],
               directCopyWithoutDetail: 0,
               finance: {
@@ -55,4 +65,33 @@ it("同批次漏斗不使用库存；未知收支和历史不伪装为零", asyn
   expect(screen.getAllByText("待核对")).toHaveLength(3);
   expect(screen.getByText(/更早历史无法还原/)).toBeInTheDocument();
   expect(screen.queryByText(/NaN/)).toBeNull();
+  const href =
+    screen.getByRole("link", { name: "2 条" }).getAttribute("href") ?? "";
+  const listQuery =
+    new URLSearchParams(href.split("?")[1]).get("listQuery") ?? "";
+  expect(new URLSearchParams(listQuery).get("cohortStage")).toBe("collected");
+  expect(new URLSearchParams(listQuery).get("collectedFrom")).toBe(
+    "2026-09-28",
+  );
+  fireEvent.change(screen.getByLabelText("采集起始日期"), {
+    target: { value: "2026-09-01" },
+  });
+  fireEvent.change(screen.getByLabelText("采集结束日期"), {
+    target: { value: "2026-09-30" },
+  });
+  fireEvent.change(screen.getByLabelText("采集漏斗平台"), {
+    target: { value: "wechat_channels" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "查看区间" }));
+  await waitFor(() =>
+    expect(
+      vi
+        .mocked(fetch)
+        .mock.calls.some(([url]) =>
+          String(url).includes(
+            "from=2026-09-01&to=2026-09-30&platform=wechat_channels",
+          ),
+        ),
+    ).toBe(true),
+  );
 });

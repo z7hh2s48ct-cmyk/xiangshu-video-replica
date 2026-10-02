@@ -48,6 +48,9 @@ def test_panorama_name_and_stable_id_filter_match_operations(pricing_client, rou
             accept_operation(
                 conn, user_id=owner, service="analysis", source_id="same-action", units=1
             )
+        accept_operation(
+            conn, user_id=uid, service="analysis", source_id="unrelated-action", units=1
+        )
     admin = admin_login(pricing_client, route_state)
     for name, expected in [("精准A公司", uid), ("精准B公司", other)]:
         params = {"start": "2000-01-01", "end": "2099-01-01", "username": name}
@@ -66,6 +69,31 @@ def test_panorama_name_and_stable_id_filter_match_operations(pricing_client, rou
         params={"start": "2000-01-01", "end": "2099-01-01", "user_id": uid},
     )
     assert {row["user_id"] for row in exact.json()["items"]} == {uid}
+    for owner in [uid, other, "missing-owner"]:
+        scoped = pricing_client.get(
+            "/api/control/billing/source-actions",
+            headers=admin,
+            params={
+                "start": "2000-01-01",
+                "end": "2099-01-01",
+                "user_id": owner,
+                "source_id": "same-action",
+            },
+        )
+        assert scoped.status_code == 200, scoped.text
+        assert scoped.json()["total"] == (0 if owner == "missing-owner" else 1)
+        assert all(
+            row["user_id"] == owner
+            and row["source_id"] == "same-action"
+            and row["business_label"] == SERVICES["analysis"].name
+            for row in scoped.json()["items"]
+        )
+    missing = pricing_client.get(
+        "/api/control/billing/source-actions",
+        headers=admin,
+        params={"start": "2000-01-01", "end": "2099-01-01", "source_id": "missing-action"},
+    )
+    assert missing.status_code == 200 and missing.json()["total"] == 0
 
 
 def test_admin_catalog_money_and_margin_require_known_cost_and_positive_price(

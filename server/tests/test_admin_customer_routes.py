@@ -596,6 +596,20 @@ def test_wallet_business_references_show_order_number_and_generation_project(
         number = raw.execute(
             "SELECT merchant_order_no FROM recharge_orders WHERE id=%s", (order,)
         ).fetchone()[0]
+        from app.db_portable import BusinessConnection
+        from app.usage_billing import accept_operation
+
+        raw.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_credits) VALUES('asr',true,1) "
+            "ON CONFLICT(service) DO UPDATE SET enabled=true,unit_credits=1"
+        )
+        operation = accept_operation(
+            BusinessConnection.postgres(raw),
+            user_id=CUSTOMER_USER_ID,
+            service="asr",
+            source_id="ledger-asr-business",
+            units=1,
+        )
     # Exercise the real per-operator cookie path on the isolated fixture DB.
     monkeypatch.setenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", "1")
     result = client.get(
@@ -610,6 +624,25 @@ def test_wallet_business_references_show_order_number_and_generation_project(
     task = next(row for row in rows if row["task_id"] == "ledger-task")
     assert task["business_label"] == "视频生成 · 庭院视频项目" and task["billing_round"] == 1
     assert task["project_name"] == "庭院视频项目"
+    from app.billing_catalog import SERVICES
+
+    business = next(row for row in rows if row["billing_operation_id"] == operation)
+    assert business["source_id"] == "ledger-asr-business"
+    assert business["business_label"] == SERVICES["asr"].name
+    assert business["task_id"] is None and business["oral_task_id"] is None
+    exported = client.get(
+        "/api/control/wallet-transactions.csv",
+        headers=headers,
+        params={"user_id": CUSTOMER_USER_ID},
+    )
+    assert exported.status_code == 200, exported.text
+    import csv
+    import io
+
+    csv_rows = list(csv.DictReader(io.StringIO(exported.text.lstrip("\ufeff"))))
+    assert {row["id"]: row["business_label"] for row in csv_rows} == {
+        row["id"]: row["business_label"] for row in rows
+    }
     exact = client.get(
         "/api/control/recharge-orders",
         headers=headers,
@@ -1641,6 +1674,22 @@ def test_list_all_adjustments_includes_users_filters_and_balances(client: TestCl
                 "WHERE recharge_order_id = %s",
                 (item["order_id"],),
             )
+
+
+def test_list_customers_with_real_request_observability(client: TestClient) -> None:
+    from app.admin_customer_routes import router as customer_router
+    from app.ops_metrics import request_observability_middleware
+
+    headers = _admin_session(client)
+    observed_app = FastAPI()
+    observed_app.include_router(customer_router)
+    observed_app.middleware("http")(request_observability_middleware)
+    with TestClient(observed_app) as observed:
+        observed.cookies.update(client.cookies)
+        response = observed.get("/api/control/customers", headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["total"] >= 1
+    assert response.headers["X-Request-ID"]
 
 
 def test_list_customers_returns_activated_customers(client: TestClient) -> None:
@@ -3165,7 +3214,7 @@ def test_funds_compensation_offline_and_unverified_history_are_separate(client: 
             "rice_fen_snapshot,min_recharge_fen_snapshot,recharge_step_fen_sna"
             "pshot,amount_fen,credits,paid_at) VALUES ('real-offline',%s,'synt"
             "hetic-offline','admin_adjustment','PAID','CUSTOMER_STANDARD',1000"
-            ",1000,10000,1000,20000,20,now())",
+            ",1000,10000,1000,20000,20,(now() AT TIME ZONE 'UTC')::text)",
             (CUSTOMER_USER_ID,),
         )
         conn.execute(
@@ -3182,7 +3231,7 @@ def test_funds_compensation_offline_and_unverified_history_are_separate(client: 
             "rice_fen_snapshot,min_recharge_fen_snapshot,recharge_step_fen_sna"
             "pshot,amount_fen,credits,paid_at) VALUES ('manual-history',%s,'sy"
             "nthetic-history','admin_adjustment','PAID','CUSTOMER_STANDARD',10"
-            "00,1000,10000,1000,5000,5,now())",
+            "00,1000,10000,1000,5000,5,(now() AT TIME ZONE 'UTC')::text)",
             (CUSTOMER_USER_ID,),
         )
     report = client.get(

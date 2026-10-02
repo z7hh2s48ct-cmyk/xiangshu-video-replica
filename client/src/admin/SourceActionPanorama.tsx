@@ -7,6 +7,7 @@ type Action = {
   source_id: string;
   user_id: string | null;
   username: string;
+  business_label?: string;
   operation_count: number;
   pending_count: number;
   failed_count: number;
@@ -51,6 +52,9 @@ type Page = { items: Action[]; total: number };
 const money = (value: string | number | null | undefined) =>
   value == null ? "待核对" : formatFen(Number(value));
 const pageSize = 50;
+const businessName = (action: Action, name: (service: string) => string) =>
+  action.business_label ??
+  (action.services.map(name).join("、") || "历史业务名称未记录");
 
 export function SourceActionPanorama({
   query,
@@ -69,13 +73,27 @@ export function SourceActionPanorama({
     void revision;
     let active = true;
     setList(undefined);
+    setSelected(undefined);
     setError("");
     void adminRead<Page>(
       `/api/control/billing/source-actions?${query}&limit=${pageSize}&offset=${offset}`,
       "读取操作全景失败",
     )
       .then((result) => {
-        if (active) setList(result);
+        if (active) {
+          setList(result);
+          const scope = new URLSearchParams(query);
+          const source = scope.get("source_id");
+          const owner = scope.get("user_id");
+          if (source && (owner || scope.get("platform") === "true")) {
+            setSelected(
+              result.items.find(
+                (item) =>
+                  item.source_id === source && item.user_id === (owner ?? null),
+              ),
+            );
+          }
+        }
       })
       .catch((cause: unknown) => {
         if (active)
@@ -117,7 +135,7 @@ export function SourceActionPanorama({
       <h3>操作全景</h3>
       <p>
         一次操作 =
-        同一操作编号下的所有生成与供应商调用，含内部质检。客户只为用户业务被扣分；
+        同一业务下的所有计费请求与调用，含内部质检。客户只为用户业务被扣分；
         内部业务与质检成本单独列出，证据不齐时按待核对显示，不计成零成本。
       </p>
       <button
@@ -138,9 +156,9 @@ export function SourceActionPanorama({
             <table className="admin-data-table" aria-label="操作列表">
               <thead>
                 <tr>
-                  <th>操作编号</th>
+                  <th>业务动作</th>
                   <th>用户</th>
-                  <th>生成与调用</th>
+                  <th>业务与调用</th>
                   <th>积分</th>
                   <th>成本</th>
                   <th>质检成本</th>
@@ -152,11 +170,15 @@ export function SourceActionPanorama({
                 {list.items.map((item) => (
                   <tr key={`${item.user_id ?? "platform"}:${item.source_id}`}>
                     <td>
-                      <small>{item.source_id}</small>
+                      <strong>{businessName(item, name)}</strong>
+                      <details>
+                        <summary>查看操作编号</summary>
+                        <code>{item.source_id}</code>
+                      </details>
                     </td>
                     <td>{item.username}</td>
                     <td>
-                      {item.operation_count} 次生成 · {item.attempt_count}{" "}
+                      {item.operation_count} 次业务 · {item.attempt_count}{" "}
                       次调用
                       {item.pending_count > 0 &&
                         ` · 处理中 ${item.pending_count}`}
@@ -214,8 +236,12 @@ export function SourceActionPanorama({
         <aside aria-label="操作明细">
           <h4>操作明细</h4>
           <p>
-            操作编号 {selected.source_id}；{selected.username}。
+            {businessName(selected, name)}；{selected.username}。
           </p>
+          <details>
+            <summary>查看操作编号</summary>
+            <code>{selected.source_id}</code>
+          </details>
           <button type="button" onClick={() => setSelected(undefined)}>
             关闭明细
           </button>
@@ -223,7 +249,7 @@ export function SourceActionPanorama({
           {detail && (
             <>
               <p>
-                {detail.action.operation_count} 次生成 ·{" "}
+                {detail.action.operation_count} 次业务 ·{" "}
                 {detail.action.attempt_count} 次调用 · 净扣{" "}
                 {detail.action.charged_credits} 积分；成本{" "}
                 {money(detail.action.cost_fen)}（已知{" "}
@@ -233,9 +259,9 @@ export function SourceActionPanorama({
                   : money(detail.action.inspection_cost_fen)}
                 。
               </p>
-              <h5>动作内生成</h5>
+              <h5>动作内业务</h5>
               <div className="admin-table-scroll">
-                <table className="admin-data-table" aria-label="动作内生成">
+                <table className="admin-data-table" aria-label="动作内业务">
                   <thead>
                     <tr>
                       <th>业务</th>
