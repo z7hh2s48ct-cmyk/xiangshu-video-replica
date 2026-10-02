@@ -169,6 +169,18 @@ class ControlRechargeOrderPage(BaseModel):
     offset: int
 
 
+_WALLET_BUSINESS_LABEL_SQL = """
+    CASE WHEN ro.merchant_order_no IS NOT NULL THEN '充值订单 · ' || ro.merchant_order_no
+         WHEN tx.task_id IS NOT NULL THEN
+              '视频生成 · ' || COALESCE(project.name,'历史项目未记录')
+         WHEN tx.oral_task_id IS NOT NULL THEN
+              '口播生成 · ' || COALESCE(oral.title,'历史标题未记录')
+         WHEN tx.type='REFUND' THEN '退款扣减'
+         WHEN tx.type='CONVERSION' THEN '旧积分转换'
+         ELSE COALESCE(%s::jsonb ->> op.service,'历史关联未记录') END
+"""
+
+
 class ControlWalletTransaction(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -849,10 +861,7 @@ def list_wallet_transactions(
             tx.task_id,
             tx.oral_task_id,
             tx.billing_operation_id,
-            (SELECT op.source_id FROM billing_operations op
-             WHERE op.id=tx.billing_operation_id AND op.user_id=tx.user_id) AS source_id,
-            (SELECT op.service FROM billing_operations op
-             WHERE op.id=tx.billing_operation_id AND op.user_id=tx.user_id) AS service,
+            op.source_id,op.service,
             tx.billing_round,
             tx.created_at,
             CASE WHEN tx.ledger_sequence IS NULL THEN NULL ELSE
@@ -869,7 +878,8 @@ def list_wallet_transactions(
                    AND (prev.ledger_sequence IS NULL
                         OR prev.ledger_sequence <= tx.ledger_sequence))
             END AS reserved_balance_after,
-            ro.merchant_order_no AS order_no,project.name AS project_name,oral.title AS oral_title
+            ro.merchant_order_no AS order_no,project.name AS project_name,oral.title AS oral_title,
+            {_WALLET_BUSINESS_LABEL_SQL} AS business_label
         FROM wallet_transactions AS tx
         JOIN users ON users.id = tx.user_id
         LEFT JOIN recharge_orders ro ON ro.id=tx.recharge_order_id
@@ -877,29 +887,24 @@ def list_wallet_transactions(
         LEFT JOIN generation_batches batch ON batch.id=task.batch_id
         LEFT JOIN projects project ON project.id=batch.project_id
         LEFT JOIN oral_tasks oral ON oral.id=tx.oral_task_id
+        LEFT JOIN billing_operations op ON op.id=tx.billing_operation_id AND op.user_id=tx.user_id
         {where}
         ORDER BY (tx.ledger_sequence IS NULL), tx.ledger_sequence DESC,
                  tx.created_at DESC, tx.id DESC
         {PAGE_CLAUSE}
         """,  # noqa: S608
-        (*params, limit, offset),
+        (
+            json.dumps({key: value.name for key, value in SERVICES.items()}, ensure_ascii=False),
+            *params,
+            limit,
+            offset,
+        ),
     ).fetchall()
     return ControlWalletTransactionPage(
         items=[
             ControlWalletTransaction(
                 **dict(row),
                 service_name=SERVICES[row["service"]].name if row["service"] in SERVICES else None,
-                business_label=(
-                    f"充值订单 · {row['order_no']}"
-                    if row["order_no"]
-                    else f"视频生成 · {row['project_name'] or '历史项目未记录'}"
-                    if row["task_id"]
-                    else f"口播生成 · {row['oral_title'] or '历史标题未记录'}"
-                    if row["oral_task_id"]
-                    else SERVICES[row["service"]].name
-                    if row["service"] in SERVICES
-                    else "历史关联未记录"
-                ),
             )
             for row in rows
         ],
@@ -2664,29 +2669,7 @@ def read_reconciliation(conn: Database, actor: ControlUser) -> ReconciliationSum
     return ReconciliationSummary(**dict(row))
 
 
-@router.get("/billing-reconciliation/items")
-def read_reconciliation_items(
-    conn: Database,
-    actor: ControlUser,
-    anomaly: Literal["wallet_mismatch", "paid_without_charge", "charge_without_paid_order"] = Query(
-        ...
-    ),
-    limit: int = Query(default=50, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
-) -> dict[str, Any]:
-    """对账异常明细（方案 P1 资金中心）：三类清单按类型分页，条数与汇总一致。
-
-    总览待办与资金中心的异常数字必须「点进去条数一致」，所以这里的筛选口径
-    逐字复用 /billing-reconciliation 汇总里的三个子查询，只加客户信息与分页。
-    """
-    write_audit(
-        conn,
-        actor=actor,
-        action="control.reconciliation.read",
-        entity_type="control_ledger",
-        entity_id=f"billing_reconciliation:{anomaly}",
-    )
-    page = " LIMIT %s OFFSET %s"
+def _reconciliation_definition(anomaly: str) -> tuple[str, str, str]:
     if anomaly == "wallet_mismatch":
         base = """
             FROM wallets w
@@ -2694,7 +2677,8 @@ def read_reconciliation_items(
             LEFT JOIN (
                 SELECT user_id,
                        SUM(available_delta) AS available_total,
-                       SUM(reserved_delta) AS reserved_total
+                       SUM(reserved_delta) AS reserved_total,
+                       COUNT(*) AS ledger_count, MAX(ledger_sequence) AS ledger_sequence
                 FROM wallet_transactions
                 GROUP BY user_id
             ) AS ledger ON ledger.user_id = w.user_id
@@ -2706,7 +2690,8 @@ def read_reconciliation_items(
             "COALESCE(NULLIF(u.display_name, ''), u.username) AS display_name, "
             "w.available_credits, w.reserved_credits, "
             "COALESCE(ledger.available_total, 0) AS ledger_available_credits, "
-            "COALESCE(ledger.reserved_total, 0) AS ledger_reserved_credits "
+            "COALESCE(ledger.reserved_total, 0) AS ledger_reserved_credits, "
+            "COALESCE(ledger.ledger_count, 0) AS ledger_count, ledger.ledger_sequence "
         )
         order = " ORDER BY w.user_id"
     elif anomaly == "paid_without_charge":
@@ -2734,18 +2719,172 @@ def read_reconciliation_items(
             "SELECT tx.id AS transaction_id, tx.user_id, u.username, "
             "COALESCE(NULLIF(u.display_name, ''), u.username) AS display_name, "
             "tx.available_delta, tx.recharge_order_id AS order_id, "
-            "tx.created_at, o.status AS order_status, o.provider "
+            "tx.created_at, o.merchant_order_no AS order_no, o.status AS order_status, o.provider "
         )
         order = " ORDER BY tx.created_at DESC, tx.id"
+    return select, base, order
+
+
+def _reconciliation_identity(anomaly: str, item: dict[str, Any]) -> str:
+    key = {
+        "wallet_mismatch": "user_id",
+        "paid_without_charge": "order_id",
+        "charge_without_paid_order": "transaction_id",
+    }[anomaly]
+    return str(item[key])
+
+
+def _reconciliation_fingerprint(anomaly: str, item: dict[str, Any]) -> str:
+    # 客户改名不改变账务事实；流水计数与序号保证净额不变的新账也会要求重新核对。
+    fact = {
+        key: value
+        for key, value in item.items()
+        if key not in {"username", "display_name", "verification", "snapshot"}
+    }
+    encoded = json.dumps(
+        {"anomaly": anomaly, "fact": fact}, sort_keys=True, ensure_ascii=True, default=str
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _reconciliation_verifications(
+    conn: BusinessConnection,
+    anomaly: str,
+    items: list[dict[str, Any]],
+) -> None:
+    if not items:
+        return
+    keys = [f"{anomaly}:{_reconciliation_identity(anomaly, item)}" for item in items]
+    rows = conn.execute(
+        "SELECT DISTINCT ON (a.entity_id) a.entity_id, a.metadata_json, a.created_at, "
+        "COALESCE(NULLIF(u.display_name,''),u.username) AS operator "
+        "FROM audit_logs a JOIN users u ON u.id=a.actor_user_id "
+        "WHERE a.action='control.reconciliation.verify' "
+        "AND a.entity_type='reconciliation_anomaly' AND a.entity_id=ANY(%s) "
+        "ORDER BY a.entity_id,a.created_at DESC,a.id DESC",
+        (keys,),
+    ).fetchall()
+    latest = {row["entity_id"]: row for row in rows}
+    for item, key in zip(items, keys, strict=True):
+        item["snapshot"] = _reconciliation_fingerprint(anomaly, item)
+        previous = latest.get(key)
+        item["verification"] = None
+        if previous:
+            metadata = json.loads(previous["metadata_json"])
+            item["verification"] = {
+                "state": "verified"
+                if metadata.get("snapshot") == item["snapshot"]
+                else "needs_recheck",
+                "reason": metadata.get("reason"),
+                "operator": previous["operator"],
+                "at": previous["created_at"],
+            }
+
+
+class ReconciliationVerificationRequest(AdminWriteContract):
+    model_config = ConfigDict(extra="forbid")
+    anomaly: Literal["wallet_mismatch", "charge_without_paid_order"]
+    entity_id: str = Field(min_length=1, max_length=200)
+    snapshot: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+@router.post("/billing-reconciliation/verify")
+def verify_reconciliation(
+    payload: ReconciliationVerificationRequest,
+    request: Request,
+    response: Response,
+    actor: ControlWriter,
+) -> dict[str, object]:
+    def business(raw: psycopg.Connection, request_id: str) -> dict[str, object]:
+        conn = BusinessConnection.postgres(raw)
+        if payload.anomaly == "wallet_mismatch":
+            raw.execute(
+                "SELECT user_id FROM wallets WHERE user_id=%s FOR UPDATE", (payload.entity_id,)
+            )
+            target = "w.user_id"
+        else:
+            # 与充值入账同样先锁订单，防止查单/支付回调在核对提交中途改变事实。
+            raw.execute(
+                "SELECT o.id FROM recharge_orders o JOIN wallet_transactions tx "
+                "ON tx.recharge_order_id=o.id WHERE tx.id=%s FOR UPDATE OF o",
+                (payload.entity_id,),
+            )
+            target = "tx.id"
+        select, base, _ = _reconciliation_definition(payload.anomaly)
+        # base 的 OR 条件必须整体括起，再添加精确身份筛选。
+        before, predicate = base.split("WHERE", 1)
+        row = conn.execute(
+            f"{select}{before} WHERE ({predicate}) AND {target}=%s",  # noqa: S608
+            (payload.entity_id,),
+        ).fetchone()
+        if (
+            row is None
+            or _reconciliation_fingerprint(payload.anomaly, dict(row)) != payload.snapshot
+        ):
+            raise HTTPException(409, detail="对账数据已变化，请刷新后重新核对。")
+        write_audit(
+            conn,
+            actor=actor,
+            action="control.reconciliation.verify",
+            entity_type="reconciliation_anomaly",
+            entity_id=f"{payload.anomaly}:{payload.entity_id}",
+            metadata={
+                "snapshot": payload.snapshot,
+                "reason": payload.reason.strip(),
+                "request_id": request_id,
+                "fact": json.loads(json.dumps(dict(row), default=str)),
+            },
+            commit=False,
+        )
+        return {"state": "verified", "request_id": request_id}
+
+    return _write_with_idempotency(
+        request,
+        response,
+        _ControlWriteActor(actor.id),
+        payload,
+        business,
+        success_status=200,
+        unavailable_code="RECONCILIATION_UNAVAILABLE",
+        unavailable_message="对账核对暂不可用，请稍后重试。",
+    )
+
+
+@router.get("/billing-reconciliation/items")
+def read_reconciliation_items(
+    conn: Database,
+    actor: ControlUser,
+    anomaly: Literal["wallet_mismatch", "paid_without_charge", "charge_without_paid_order"] = Query(
+        ...
+    ),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """对账异常明细（方案 P1 资金中心）：三类清单按类型分页，条数与汇总一致。
+
+    总览待办与资金中心的异常数字必须「点进去条数一致」，所以这里的筛选口径
+    逐字复用 /billing-reconciliation 汇总里的三个子查询，只加客户信息与分页。
+    """
+    write_audit(
+        conn,
+        actor=actor,
+        action="control.reconciliation.read",
+        entity_type="control_ledger",
+        entity_id=f"billing_reconciliation:{anomaly}",
+    )
+    page = " LIMIT %s OFFSET %s"
+    select, base, order = _reconciliation_definition(anomaly)
     rows = conn.execute(
         f"{select}{base}{order}{page}",  # noqa: S608 -- 排序方向为常量，无用户输入。
         (limit, offset),
     ).fetchall()
     total_row = conn.execute(f"SELECT COUNT(*) {base}").fetchone()  # noqa: S608
     assert total_row is not None
+    items = [dict(row) for row in rows]
+    _reconciliation_verifications(conn, anomaly, items)
     return {
         "anomaly": anomaly,
-        "items": [dict(row) for row in rows],
+        "items": items,
         "total": int(total_row[0]),
         "limit": limit,
         "offset": offset,
@@ -3110,14 +3249,7 @@ def export_wallet_transactions_csv(
             COALESCE(CAST(tx.billing_round AS TEXT), '') AS billing_round,
             tx.created_at,
             COALESCE(ro.merchant_order_no,'') AS order_no,
-            CASE WHEN ro.merchant_order_no IS NOT NULL THEN '充值订单 · ' || ro.merchant_order_no
-                 WHEN tx.task_id IS NOT NULL THEN
-                      '视频生成 · ' || COALESCE(project.name,'历史项目未记录')
-                 WHEN tx.oral_task_id IS NOT NULL THEN
-                      '口播生成 · ' || COALESCE(oral.title,'历史标题未记录')
-                 WHEN tx.type='REFUND' THEN '退款扣减'
-                 WHEN tx.type='CONVERSION' THEN '旧积分转换'
-                 ELSE COALESCE(%s::jsonb ->> op.service,'历史关联未记录') END AS business_label,
+            {_WALLET_BUSINESS_LABEL_SQL} AS business_label,
             COALESCE(op.source_id,'') AS source_id,
             COUNT(*) OVER () AS export_total
         FROM wallet_transactions AS tx

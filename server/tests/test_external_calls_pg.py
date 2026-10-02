@@ -214,6 +214,47 @@ def test_records_are_found_by_third_party_id_or_short_code_with_explanations(
     assert record.provider_message == "upstream overloaded"
 
 
+@pytest.mark.parametrize(
+    ("provider", "path"),
+    [
+        ("hifly", "/api/v2/hifly/video/task"),
+        ("asr", "/api/v1/services/audio/asr/transcription"),
+    ],
+)
+def test_official_json_receipt_is_persisted_and_finds_exact_local_task(
+    pg_env: str,
+    provider: str,
+    path: str,
+) -> None:
+    from app.control_routes import list_generation_records
+
+    task_id = _seed_failed_analysis(pg_env)
+    receipt = f"synthetic-body-{uuid.uuid4().hex}"
+    with external_call_context(task_type="ANALYSIS", task_id=task_id, attempt=2):
+        record_external_call(
+            provider=provider,
+            endpoint=path,
+            method="GET",
+            url=f"https://provider.invalid{path}",
+            outcome="PROVIDER_ERROR",
+            http_status=200,
+            response_body=json.dumps(
+                {"request_id": receipt, "code": 400, "message": "隔离服务商失败回执"}
+            ),
+        )
+    with psycopg.connect(pg_env) as raw:
+        row = raw.execute(
+            "SELECT provider_request_id,provider_task_id,request_id FROM external_call_logs "
+            "WHERE task_id=%s",
+            (task_id,),
+        ).fetchone()
+        assert row is not None and row[0] == receipt and row[1] is None and row[2] != receipt
+        found = list_generation_records(
+            BusinessConnection.postgres(raw), _admin(), task_ref=receipt, limit=50, offset=0
+        )
+    assert [item.record_id for item in found.items] == [task_id]
+
+
 def test_records_are_found_by_our_own_request_id(pg_env: str) -> None:
     """按调用日志里的我方请求编号（与审计、服务日志同源）也能反查到记录（P0-12）。"""
     from app.control_routes import list_generation_records

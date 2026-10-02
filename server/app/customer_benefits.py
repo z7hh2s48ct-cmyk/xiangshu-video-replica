@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import cast
+from typing import Literal, cast
 from uuid import uuid4
 
 import psycopg
@@ -57,6 +57,7 @@ class CustomerDiscountView:
     source_recharge_order_id: str | None
     package_name: str | None
     created_at: datetime
+    state: Literal["effective", "pending", "expired", "disabled"]
 
 
 def lock_customer_discounts(conn: psycopg.Connection, user_id: str) -> None:
@@ -71,8 +72,13 @@ def list_customer_discounts(conn: psycopg.Connection, user_id: str) -> list[Cust
     rows = conn.execute(
         "SELECT d.id, d.discount_rate, d.applicable_interfaces, d.priority, d.is_active, "
         "d.valid_from, d.valid_until, d.source_recharge_order_id, d.created_at, "
-        "o.package_snapshot_json "
+        "o.package_snapshot_json, "
+        "CASE WHEN NOT d.is_active THEN 'disabled' "
+        "WHEN d.valid_from > discount_clock.at_time THEN 'pending' "
+        "WHEN d.valid_until IS NOT NULL AND d.valid_until <= discount_clock.at_time "
+        "THEN 'expired' ELSE 'effective' END "
         "FROM customer_discounts d "
+        "CROSS JOIN (SELECT clock_timestamp() AS at_time) discount_clock "
         "LEFT JOIN recharge_orders o ON o.id = d.source_recharge_order_id "
         "WHERE d.user_id = %s "
         "ORDER BY d.is_active DESC, d.created_at DESC, d.id "
@@ -97,6 +103,8 @@ def create_manual_discount(
     由数据库时钟判定（SES-01），不信任应用墙钟。
     """
     rate = validate_discount_rate(discount_rate).quantize(_RATE_QUANTUM)
+    # 量化可能把很小的正数变成零，必须在停用旧权益之前拒绝。
+    validate_discount_rate(rate)
     interfaces = normalize_interfaces(list(applicable_interfaces))
     if valid_until is not None:
         row = conn.execute("SELECT %s > clock_timestamp()", (valid_until,)).fetchone()
@@ -184,4 +192,5 @@ def _row_to_view(row: Sequence[object]) -> CustomerDiscountView:
         source_recharge_order_id=source_order_id,
         package_name=package_name,
         created_at=created_at,
+        state=cast(Literal["effective", "pending", "expired", "disabled"], str(row[10])),
     )

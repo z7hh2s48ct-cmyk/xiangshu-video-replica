@@ -426,13 +426,65 @@ def _kept_headers(headers: Mapping[str, str] | None) -> dict[str, str] | None:
     return kept or None
 
 
+def _safe_receipt_id(value: object) -> str | None:
+    # 不截断编号，不把任务编号、文本或密钥误认成服务商可检索的请求回执。
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,200}", value):
+        return None
+    return value if redact_text(value) == value else None
+
+
+def _body_request_id(provider: str, url: str | None, body: bytes | str | None) -> str | None:
+    if not url or body is None:
+        return None
+    try:
+        path = urlsplit(url).path
+    except ValueError:
+        return None
+    # 仅从已核实协议的顶层字段读取；其他服务的模型文本不作为回执证据。
+    hifly_paths = {
+        "/api/v2/hifly/avatar/create_by_video",
+        "/api/v2/hifly/avatar/create_by_image",
+        "/api/v2/hifly/avatar/task",
+        "/api/v2/hifly/avatar/list",
+        "/api/v2/hifly/voice/create",
+        "/api/v2/hifly/voice/edit",
+        "/api/v2/hifly/voice/list",
+        "/api/v2/hifly/voice/task",
+        "/api/v2/hifly/video/create_by_audio",
+        "/api/v2/hifly/video/create_by_tts",
+        "/api/v2/hifly/audio/create_by_tts",
+        "/api/v2/hifly/video/task",
+        "/api/v2/hifly/tool/create_upload_url",
+        "/api/v2/hifly/account/credit",
+    }
+    supported = (provider == "hifly" and path in hifly_paths) or (
+        provider == "asr"
+        and (
+            path
+            in {
+                "/api/v1/services/audio/asr/transcription",
+                "/api/v1/services/aigc/multimodal-generation/generation",
+            }
+            or re.fullmatch(r"/api/v1/tasks/[^/]+", path)
+        )
+    )
+    if not supported:
+        return None
+    try:
+        payload = json.loads(body)
+    except (ValueError, UnicodeError):
+        return None
+    return _safe_receipt_id(payload.get("request_id")) if isinstance(payload, dict) else None
+
+
 def _provider_request_id(headers: Mapping[str, str] | None) -> str | None:
     if not headers:
         return None
     lowered = {str(name).lower(): str(value) for name, value in headers.items()}
     for name in ("x-request-id", "request-id", "x-trace-id", "x-tt-logid"):
-        if lowered.get(name):
-            return lowered[name][:200]
+        receipt = _safe_receipt_id(lowered.get(name))
+        if receipt:
+            return receipt
     return None
 
 
@@ -520,7 +572,8 @@ def prepare_external_call(
         provider_error_code=code,
         provider_message=message,
         provider_task_id=provider_task_id,
-        provider_request_id=_provider_request_id(response_headers),
+        provider_request_id=_provider_request_id(response_headers)
+        or (_body_request_id(provider, url, response_body) if not binary_response else None),
         error_code=error_code,
         error_message=_clean_message(error_message) if error_message else None,
         exception_type=exception_type,

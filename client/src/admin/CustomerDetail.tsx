@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { AdjustmentWriteResult, CustomerListItem } from "../api.admin";
 import { AccountCreditPanel } from "./AccountCreditPanel";
+import { BillingQuoteCalculator } from "./BillingQuoteCalculator";
 import { CustomerActivitySection } from "./CustomerActivitySection";
 import { CustomerBenefitsSection } from "./CustomerBenefitsSection";
 import { CustomerDeviceSection } from "./CustomerDeviceSection";
@@ -291,6 +292,12 @@ export function CustomerDetail({
               userId={customer.user_id}
             />
           )}
+          <BillingQuoteCalculator
+            key={`quote:${customer.user_id}`}
+            userId={customer.user_id}
+            customerLabel={companyNameOf(customer)}
+            readOnly={readOnly}
+          />
         </>
       ) : null}
 

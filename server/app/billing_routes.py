@@ -29,6 +29,7 @@ from app.customer_fence import customer_read_transaction
 from app.customer_pricing import read_pricing
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
+from app.ops_metrics import get_or_create_request_id
 
 router = APIRouter(tags=["itemized-billing"])
 
@@ -310,6 +311,93 @@ class BillingQuoteRequest(AdminWriteContract):
     user_id: str | None = None
 
 
+def _billing_quote_result(
+    conn: psycopg.Connection,
+    *,
+    service: str,
+    units: Decimal,
+    user_id: str | None,
+    request_id: str,
+) -> dict[str, object]:
+    service = service.strip()
+    if service not in SERVICES:
+        raise HTTPException(422, detail="未知计费科目")
+    customer = user_id.strip() if user_id is not None else None
+    if customer is not None:
+        if conn.execute("SELECT 1 FROM users WHERE id = %s", (customer,)).fetchone() is None:
+            raise HTTPException(404, detail="客户不存在")
+    business_conn = BusinessConnection.postgres(conn)
+    now = conn.execute("SELECT clock_timestamp()").fetchone()
+    assert now is not None
+    snapshot = retail_snapshot(business_conn, service, units, user_id=customer, at_time=now[0])
+    # 独立的一单位计价保留取整/最低扣费规则，不能用总额除数量冒充最终单价。
+    single = retail_snapshot(business_conn, service, Decimal(1), user_id=customer, at_time=now[0])
+    tariff = read_tariff(business_conn, service)
+    _, config = read_pricing(business_conn)
+    points_per_yuan = config.points_per_yuan if config else None
+    credits = Decimal(str(snapshot["credits"]))
+    single_credits = Decimal(str(single["credits"]))
+    unit_cost = tariff.unit_cost_fen if tariff and tariff.unit_cost_fen is not None else None
+    cost_fen = None if unit_cost is None else (unit_cost * units).quantize(Decimal("0.01"))
+    nominal_fen = (
+        None
+        if points_per_yuan is None
+        else (credits * 100 / Decimal(points_per_yuan)).quantize(Decimal("0.01"))
+    )
+    unit_nominal_fen = (
+        None
+        if points_per_yuan is None
+        else (single_credits * 100 / Decimal(points_per_yuan)).quantize(Decimal("0.000001"))
+    )
+    discount_kind = snapshot.get("discount_source")
+    if discount_kind is None:
+        discount_kind = "global" if int(str(snapshot["discount_basis_points"])) < 10000 else "none"
+    return {
+        "service": service,
+        "label": SERVICES[service].name,
+        "units": str(units),
+        "unit": SERVICES[service].unit,
+        "credits": str(credits),
+        "unit_credits": str(snapshot.get("unit_credits", "")),
+        "final_unit_credits": str(single_credits),
+        "unit_nominal_fen": str(unit_nominal_fen) if unit_nominal_fen is not None else None,
+        "unit_rounding": snapshot["unit_rounding"],
+        "consumption_rounding": snapshot["consumption_rounding"],
+        "customer_charge_allowed": SERVICES[service].customer_charge_allowed,
+        "billing_enabled": snapshot["enabled"],
+        "discount_basis_points": snapshot.get("discount_basis_points"),
+        "discount_rate": snapshot.get("discount_rate"),
+        "discount_source": snapshot.get("discount_source"),
+        "discount_kind": discount_kind,
+        "nominal_fen": str(nominal_fen) if nominal_fen is not None else None,
+        "cost_fen": str(cost_fen) if cost_fen is not None else None,
+        "gross_fen": (
+            str((nominal_fen - cost_fen).quantize(Decimal("0.01")))
+            if nominal_fen is not None and cost_fen is not None
+            else None
+        ),
+        "request_id": request_id,
+    }
+
+
+@router.get("/api/control/billing/quote")
+def read_billing_quote(
+    request: Request,
+    response: Response,
+    _actor: AdminReader,
+    service: str,
+    units: Decimal = Query(gt=0, le=1_000_000),
+    user_id: str | None = None,
+) -> dict[str, object]:
+    response.headers["Cache-Control"] = "no-store"
+    request_id = get_or_create_request_id(request)
+    response.headers["X-Request-Id"] = request_id
+    with pg_transaction(isolation="REPEATABLE READ") as raw:
+        return _billing_quote_result(
+            raw, service=service, units=units, user_id=user_id, request_id=request_id
+        )
+
+
 @router.post("/api/control/billing/quote")
 def billing_quote(
     payload: BillingQuoteRequest,
@@ -326,58 +414,13 @@ def billing_quote(
     """
 
     def business(conn: psycopg.Connection, request_id: str) -> dict[str, object]:
-        service = payload.service.strip()
-        if service not in SERVICES:
-            raise HTTPException(422, detail="未知计费科目")
-        business_conn = BusinessConnection.postgres(conn)
-        if payload.user_id is not None:
-            exists = conn.execute(
-                "SELECT 1 FROM users WHERE id = %s", (payload.user_id.strip(),)
-            ).fetchone()
-            if exists is None:
-                raise HTTPException(404, detail="客户不存在")
-        snapshot = retail_snapshot(
-            business_conn,
-            service,
-            payload.units,
-            user_id=payload.user_id.strip() if payload.user_id else None,
+        return _billing_quote_result(
+            conn,
+            service=payload.service,
+            units=payload.units,
+            user_id=payload.user_id,
+            request_id=request_id,
         )
-        tariff = read_tariff(business_conn, service)
-        _, config = read_pricing(business_conn)
-        points_per_yuan = config.points_per_yuan if config else None
-        credits = Decimal(str(snapshot["credits"]))
-        unit_cost = tariff.unit_cost_fen if tariff and tariff.unit_cost_fen is not None else None
-        cost_fen = (
-            None if unit_cost is None else (unit_cost * payload.units).quantize(Decimal("0.01"))
-        )
-        nominal_fen = (
-            None
-            if points_per_yuan is None
-            else (credits * 100 / Decimal(points_per_yuan)).quantize(Decimal("0.01"))
-        )
-        return {
-            "service": service,
-            "label": SERVICES[service].name,
-            "units": str(payload.units),
-            "unit": SERVICES[service].unit,
-            "credits": str(credits),
-            "unit_credits": str(snapshot.get("unit_credits", "")),
-            "discount_basis_points": snapshot.get("discount_basis_points"),
-            "discount_rate": (
-                str(snapshot["discount_rate"])
-                if snapshot.get("discount_rate") is not None
-                else None
-            ),
-            "discount_source": snapshot.get("discount_source"),
-            "nominal_fen": str(nominal_fen) if nominal_fen is not None else None,
-            "cost_fen": str(cost_fen) if cost_fen is not None else None,
-            "gross_fen": (
-                str((nominal_fen - cost_fen).quantize(Decimal("0.01")))
-                if nominal_fen is not None and cost_fen is not None
-                else None
-            ),
-            "request_id": request_id,
-        }
 
     return write_with_idempotency(request, response, actor, payload, business, success_status=200)
 
@@ -472,6 +515,7 @@ def source_actions(
     start: date,
     end: date,
     user_id: str | None = None,
+    source_id: str | None = Query(default=None, min_length=1, max_length=200),
     username: str | None = None,
     service: str | None = None,
     module: str | None = None,
@@ -488,6 +532,7 @@ def source_actions(
             start=start,
             end=end,
             user_id=user_id,
+            source_id=source_id,
             username=username,
             service=service,
             module=module,

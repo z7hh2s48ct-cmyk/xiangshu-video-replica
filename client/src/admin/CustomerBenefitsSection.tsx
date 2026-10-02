@@ -55,7 +55,8 @@ function zheToRate(text: string): string | null {
   if (!text.trim() || !Number.isFinite(zhe) || zhe <= 0 || zhe > 10) {
     return null;
   }
-  return (zhe / 10).toFixed(4);
+  const rate = (zhe / 10).toFixed(4);
+  return Number(rate) > 0 ? rate : null;
 }
 
 /**
@@ -87,6 +88,7 @@ export function CustomerBenefitsSection({
   const [validUntilDate, setValidUntilDate] = useState("");
   const [formError, setFormError] = useState("");
   const [notice, setNotice] = useState("");
+  const [lastRequestId, setLastRequestId] = useState("");
   const [pending, setPending] = useState<PendingAction | null>(null);
   const [dialogError, setDialogError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -141,7 +143,9 @@ export function CustomerBenefitsSection({
     event.preventDefault();
     const discountRate = zheToRate(zhe);
     if (discountRate === null) {
-      setFormError("折扣须为 0–10 之间的折数（8.5 表示 85 折）");
+      setFormError(
+        "折扣须大于 0 且不超过 10 折（8.5 表示 8.5 折），精度不能小到取整为零",
+      );
       return;
     }
     setFormError("");
@@ -189,8 +193,9 @@ export function CustomerBenefitsSection({
           key,
         );
         setNotice(
-          `已开通「${result.package_name}」：到账 ${result.credits} 积分，余额 ${result.wallet_balance_after} 积分（request id: ${result.request_id}）`,
+          `已开通「${result.package_name}」：到账 ${result.credits} 积分，余额 ${result.wallet_balance_after} 积分`,
         );
+        setLastRequestId(result.request_id);
         setPackageId("");
         setVoucherRef("");
         onChanged();
@@ -206,8 +211,9 @@ export function CustomerBenefitsSection({
           key,
         );
         setNotice(
-          `专项折扣已生效：${scopeLabel(result.discount.applicable_interfaces)} ${formatDiscountZhe(result.discount.discount_rate)}（request id: ${result.request_id}）`,
+          `专项折扣已设置：${scopeLabel(result.discount.applicable_interfaces)} ${formatDiscountZhe(result.discount.discount_rate)}`,
         );
+        setLastRequestId(result.request_id);
         setZhe("");
         setInterfaces([]);
         setValidUntilDate("");
@@ -218,7 +224,8 @@ export function CustomerBenefitsSection({
           reason,
           key,
         );
-        setNotice(`专项折扣已停用（request id: ${result.request_id}）`);
+        setNotice("专项折扣已停用");
+        setLastRequestId(result.request_id);
       }
       retry.current = null;
       setPending(null);
@@ -310,7 +317,8 @@ export function CustomerBenefitsSection({
     >
       <h3>套餐与折扣</h3>
       <p className="admin-hint">
-        计费时只取一条折扣：专项折扣优先于套餐权益；同类权益只保留最近一次设置。
+        客户权益内专项折扣优先于套餐权益；同类权益只保留最近一次设置。
+        全局折扣更优惠时仍按全局折扣计价，最终售价可在下方试算。
       </p>
       {loadError ? (
         <PageBanner tone="error">
@@ -321,6 +329,12 @@ export function CustomerBenefitsSection({
         </PageBanner>
       ) : null}
       {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
+      {lastRequestId ? (
+        <details className="admin-technical-details">
+          <summary>操作技术信息</summary>
+          <p>请求编号：{lastRequestId}</p>
+        </details>
+      ) : null}
       {formError ? <PageBanner tone="error">{formError}</PageBanner> : null}
 
       {discounts === null ? (
@@ -356,7 +370,18 @@ export function CustomerBenefitsSection({
                         ? formatDateTime(discount.valid_until)
                         : "永久"}
                     </td>
-                    <td>{discount.is_active ? "生效中" : "已停用"}</td>
+                    <td>
+                      {discount.state === "effective"
+                        ? "生效中"
+                        : discount.state === "pending"
+                          ? "未生效"
+                          : discount.state === "expired"
+                            ? "已过期"
+                            : discount.state === "disabled" ||
+                                !discount.is_active
+                              ? "已停用"
+                              : "待核对（缺少生效状态）"}
+                    </td>
                     <td>
                       {!readOnly &&
                       discount.source === "manual" &&

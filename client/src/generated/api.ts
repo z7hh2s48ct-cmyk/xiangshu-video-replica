@@ -2070,6 +2070,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/control/billing-reconciliation/verify": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Verify Reconciliation */
+    post: operations["verify_reconciliation_api_control_billing_reconciliation_verify_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/control/billing-reconciliation/items": {
     parameters: {
       query?: never;
@@ -3200,7 +3217,8 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    get?: never;
+    /** Read Billing Quote */
+    get: operations["read_billing_quote_api_control_billing_quote_get"];
     put?: never;
     /**
      * Billing Quote
@@ -3772,6 +3790,40 @@ export interface paths {
     put?: never;
     /** Probe Viral Platform */
     post: operations["probe_viral_platform_api_control_viral_platforms__platform__probe_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/viral/resource-events": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Resource Events */
+    get: operations["read_resource_events_api_control_viral_resource_events_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/viral/resource-events/{measurement_id}/verify-cost": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Verify Resource Cost */
+    post: operations["verify_resource_cost_api_control_viral_resource_events__measurement_id__verify_cost_post"];
     delete?: never;
     options?: never;
     head?: never;
@@ -12415,6 +12467,28 @@ export interface components {
       /** Pending Order Count */
       pending_order_count: number;
     };
+    /** ReconciliationVerificationRequest */
+    ReconciliationVerificationRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /**
+       * Anomaly
+       * @enum {string}
+       */
+      anomaly: "wallet_mismatch" | "charge_without_paid_order";
+      /** Entity Id */
+      entity_id: string;
+      /** Snapshot */
+      snapshot: string;
+    };
     /** Reference */
     Reference: {
       /** Asset Id */
@@ -12494,6 +12568,25 @@ export interface components {
       reset: boolean;
       /** Sessions Revoked */
       sessions_revoked: number;
+    };
+    /** ResourceCostVerification */
+    ResourceCostVerification: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /** Cost Fen */
+      cost_fen: number | string;
+      /** Bill Reference */
+      bill_reference: string;
+      /** Expected Evidence Id */
+      expected_evidence_id?: string | null;
     };
     /** RuntimeSettingsRequest */
     RuntimeSettingsRequest: {
@@ -13968,7 +14061,14 @@ export interface components {
        * Action
        * @enum {string}
        */
-      action: "feature" | "unfeature" | "delete" | "pin" | "unpin" | "prepare";
+      action:
+        | "feature"
+        | "unfeature"
+        | "delete"
+        | "block"
+        | "pin"
+        | "unpin"
+        | "prepare";
       /** Expected Cost Snapshot */
       expected_cost_snapshot?: string | null;
     };
@@ -19552,6 +19652,43 @@ export interface operations {
       };
     };
   };
+  verify_reconciliation_api_control_billing_reconciliation_verify_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Control-Proxy-Token"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ReconciliationVerificationRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   read_reconciliation_items_api_control_billing_reconciliation_items_get: {
     parameters: {
       query: {
@@ -21646,6 +21783,41 @@ export interface operations {
       };
     };
   };
+  read_billing_quote_api_control_billing_quote_get: {
+    parameters: {
+      query: {
+        service: string;
+        units: number | string;
+        user_id?: string | null;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   billing_quote_api_control_billing_quote_post: {
     parameters: {
       query?: never;
@@ -21802,6 +21974,7 @@ export interface operations {
         start: string;
         end: string;
         user_id?: string | null;
+        source_id?: string | null;
         username?: string | null;
         service?: string | null;
         module?: string | null;
@@ -22871,6 +23044,81 @@ export interface operations {
       };
     };
   };
+  read_resource_events_api_control_viral_resource_events_get: {
+    parameters: {
+      query?: {
+        platform?: ("douyin" | "wechat_channels") | null;
+        video_id?: string | null;
+        from?: string | null;
+        to?: string | null;
+        offset?: number;
+        limit?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  verify_resource_cost_api_control_viral_resource_events__measurement_id__verify_cost_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        measurement_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ResourceCostVerification"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   read_viral_runtime_api_control_settings_viral_get: {
     parameters: {
       query?: never;
@@ -23068,6 +23316,13 @@ export interface operations {
             )
           | null;
         category?: string;
+        uncategorized?: boolean;
+        cohort_stage?:
+          | ("collected" | "prepared" | "homepage" | "detail" | "copy")
+          | null;
+        collected_from?: string | null;
+        collected_to?: string | null;
+        attention?: "missing_cover" | null;
         source_keyword?: string;
         published_from?: string | null;
         published_to?: string | null;
@@ -23585,7 +23840,9 @@ export interface operations {
   };
   read_viral_content_overview_api_control_viral_content_overview_get: {
     parameters: {
-      query?: never;
+      query?: {
+        platform?: ("douyin" | "wechat_channels") | null;
+      };
       header?: never;
       path?: never;
       cookie?: never;
@@ -23601,6 +23858,15 @@ export interface operations {
           "application/json": {
             [key: string]: unknown;
           };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
         };
       };
     };

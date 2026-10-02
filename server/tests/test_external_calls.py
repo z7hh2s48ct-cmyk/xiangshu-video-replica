@@ -42,6 +42,105 @@ def test_redact_url_masks_signature_parameters_and_credentials() -> None:
     assert redacted.startswith("https://bucket.cos.example.com/a/b.mp4?")
 
 
+@pytest.mark.parametrize(
+    ("provider", "path"),
+    [
+        ("hifly", "/api/v2/hifly/avatar/create_by_video"),
+        ("hifly", "/api/v2/hifly/avatar/task"),
+        ("hifly", "/api/v2/hifly/voice/create"),
+        ("hifly", "/api/v2/hifly/voice/task"),
+        ("hifly", "/api/v2/hifly/video/create_by_audio"),
+        ("hifly", "/api/v2/hifly/video/task"),
+        ("asr", "/api/v1/services/audio/asr/transcription"),
+        ("asr", "/api/v1/services/aigc/multimodal-generation/generation"),
+        ("asr", "/api/v1/tasks/synthetic-task"),
+    ],
+)
+def test_documented_body_receipt_is_distinct_from_task_and_our_request(
+    provider: str, path: str
+) -> None:
+    body = json.dumps({"request_id": "synthetic-provider-receipt", "task_id": "synthetic-task"})
+    with external_call_context(task_type="ORAL_VIDEO", task_id="our-task", attempt=2):
+        call = prepare_external_call(
+            provider=provider,
+            endpoint=path,
+            method="POST",
+            url=f"https://provider.invalid{path}",
+            outcome="SUCCEEDED",
+            response_body=body,
+            provider_task_id="synthetic-task",
+        )
+    assert call.provider_request_id == "synthetic-provider-receipt"
+    assert call.provider_task_id == "synthetic-task"
+    assert call.request_id != call.provider_request_id
+    assert call.context is not None and call.context.task_id == "our-task"
+
+
+@pytest.mark.parametrize(
+    "value", [None, 123, True, [], {}, "", "a" * 201, "bad\nreceipt", "bad receipt"]
+)
+def test_invalid_body_receipts_are_not_truncated_or_invented(value: object) -> None:
+    call = prepare_external_call(
+        provider="hifly",
+        endpoint="hifly/video/task",
+        method="GET",
+        url="https://provider.invalid/api/v2/hifly/video/task",
+        outcome="PROVIDER_ERROR",
+        response_body=json.dumps({"request_id": value, "task_id": "not-a-receipt"}),
+    )
+    assert call.provider_request_id is None
+
+
+@pytest.mark.parametrize(
+    ("provider", "path", "body"),
+    [
+        ("other", "/api/v2/hifly/video/task", {"request_id": "unproven"}),
+        ("hifly", "/unverified", {"request_id": "unproven"}),
+        ("asr", "/api/v1/tasks/a/extra", {"request_id": "unproven"}),
+        ("hifly", "/api/v2/hifly/video/task", {"data": {"request_id": "unproven"}}),
+        ("hifly", "/api/v2/hifly/video/task", {"id": "completion-id", "task_id": "task-id"}),
+    ],
+)
+def test_body_receipt_requires_known_top_level_contract(
+    provider: str, path: str, body: object
+) -> None:
+    call = prepare_external_call(
+        provider=provider,
+        endpoint=path,
+        method="GET",
+        url=f"https://provider.invalid{path}",
+        outcome="SUCCEEDED",
+        response_body=json.dumps(body),
+    )
+    assert call.provider_request_id is None
+
+
+def test_distinct_header_and_body_receipts_keep_both_original_evidence() -> None:
+    body = json.dumps({"request_id": "body-receipt", "message": "x" * (SUCCEEDED_BODY_LIMIT + 100)})
+    call = prepare_external_call(
+        provider="hifly",
+        endpoint="hifly/video/task",
+        method="GET",
+        url="https://provider.invalid/api/v2/hifly/video/task",
+        outcome="SUCCEEDED",
+        response_headers={"X-Request-Id": "header-receipt"},
+        response_body=body,
+    )
+    assert call.provider_request_id == "header-receipt"
+    assert call.response_headers == {"x-request-id": "header-receipt"}
+    assert call.response_body is not None and "body-receipt" in call.response_body
+    assert call.response_truncated is True
+    body_only = prepare_external_call(
+        provider="hifly",
+        endpoint="hifly/video/task",
+        method="GET",
+        url="https://provider.invalid/api/v2/hifly/video/task",
+        outcome="SUCCEEDED",
+        response_body=body,
+    )
+    assert body_only.provider_request_id == "body-receipt"
+
+
 def test_redact_text_masks_bearer_tokens_and_secret_fields() -> None:
     text = (
         'Authorization: Bearer sk-live-1234567890abcdef {"api_key": "sk-abcdefgh1234"} '

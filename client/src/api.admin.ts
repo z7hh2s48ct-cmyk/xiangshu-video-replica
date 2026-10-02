@@ -1151,6 +1151,13 @@ export type BillingQuoteResult = {
   unit: "second" | "image" | "call";
   credits: string;
   unit_credits: string;
+  final_unit_credits?: string;
+  unit_nominal_fen?: string | null;
+  unit_rounding?: string;
+  consumption_rounding?: string;
+  customer_charge_allowed?: boolean;
+  billing_enabled?: boolean;
+  discount_kind?: "manual" | "recharge_package" | "global" | "none";
   discount_basis_points?: number | null;
   discount_rate?: string | null;
   discount_source?: string | null;
@@ -1160,22 +1167,19 @@ export type BillingQuoteResult = {
   request_id?: string;
 };
 
-/** 只读试算走写契约（confirm+reason+幂等键）：服务端只留痕不落业务数据。 */
+/** 价格试算是读取，审计员可用；不携带写契约或改动客户权益。 */
 export async function submitBillingQuote(input: {
   service: string;
   units: number;
   userId?: string;
 }): Promise<BillingQuoteResult> {
-  return adminWrite(
-    "/api/control/billing/quote",
-    {
-      confirm: true,
-      reason: "价格试算",
-      service: input.service,
-      units: input.units,
-      user_id: input.userId ?? null,
-    },
-    "价格试算",
+  const query = new URLSearchParams({
+    service: input.service,
+    units: String(input.units),
+  });
+  if (input.userId) query.set("user_id", input.userId);
+  return adminRead(
+    `/api/control/billing/quote?${query.toString()}`,
     "试算失败",
   );
 }
@@ -2544,6 +2548,7 @@ export interface CustomerDiscount {
   applicable_interfaces: string[];
   priority: number;
   is_active: boolean;
+  state?: "effective" | "pending" | "expired" | "disabled";
   valid_from: string;
   valid_until: string | null;
   source: "manual" | "recharge_package";
@@ -2974,6 +2979,11 @@ export async function listCollectedViralVideos(options: {
   platform?: string;
   status?: CollectedViralStatus;
   category?: string;
+  uncategorized?: boolean;
+  cohortStage?: "collected" | "prepared" | "homepage" | "detail" | "copy";
+  collectedFrom?: string;
+  collectedTo?: string;
+  attention?: "missing_cover";
   contentState?: CollectedViralVideo["content_state"];
   sourceKeyword?: string;
   publishedFrom?: string;
@@ -2983,7 +2993,11 @@ export async function listCollectedViralVideos(options: {
   sort?: "created" | "likes" | "published" | "usage";
   query?: string;
   offset?: number;
-}): Promise<{ items: CollectedViralVideo[]; total: number }> {
+}): Promise<{
+  items: CollectedViralVideo[];
+  total: number;
+  categories: string[];
+}> {
   const query = new URLSearchParams({
     limit: "25",
     offset: String(options.offset ?? 0),
@@ -2991,6 +3005,11 @@ export async function listCollectedViralVideos(options: {
   if (options.platform) query.set("platform", options.platform);
   if (options.status) query.set("status", options.status);
   if (options.category) query.set("category", options.category);
+  if (options.uncategorized) query.set("uncategorized", "true");
+  if (options.cohortStage) query.set("cohort_stage", options.cohortStage);
+  if (options.collectedFrom) query.set("collected_from", options.collectedFrom);
+  if (options.collectedTo) query.set("collected_to", options.collectedTo);
+  if (options.attention) query.set("attention", options.attention);
   if (options.contentState) query.set("content_state", options.contentState);
   if (options.sourceKeyword) query.set("source_keyword", options.sourceKeyword);
   if (options.publishedFrom) query.set("published_from", options.publishedFrom);
@@ -3011,6 +3030,7 @@ export async function listCollectedViralVideos(options: {
   const result = (await response.json()) as {
     items: CollectedViralVideo[];
     total: number;
+    categories: string[];
   };
   return { ...result, items: result.items.map(withManagedCover) };
 }
@@ -3033,7 +3053,14 @@ export function archiveCollectedViralVideo(
 
 export function curateViralVideo(
   video: CollectedViralVideo,
-  action: "feature" | "unfeature" | "delete" | "pin" | "unpin" | "prepare",
+  action:
+    | "feature"
+    | "unfeature"
+    | "delete"
+    | "block"
+    | "pin"
+    | "unpin"
+    | "prepare",
   reason: string,
   idempotencyKey: string,
   expectedCostSnapshot?: string,
@@ -3098,6 +3125,7 @@ export function curateViralVideosBatch(
 // ---------------------------------------------------------------------------
 
 export type ViralLibraryOverview = {
+  missing_cover?: number;
   content_total: number;
   archive_ready: number;
   homepage_featured: number;
@@ -3130,10 +3158,16 @@ export type ViralHomepageVideo = CollectedViralVideo & {
 export type ViralContentOverview = {
   from: string;
   to: string;
+  platform?: string | null;
   measurementStartedAt: string;
   cohortRule: string;
   historyNote: string;
-  funnel: Array<{ name: string; count: number; conversion: number | null }>;
+  funnel: Array<{
+    stage: "collected" | "prepared" | "homepage" | "detail" | "copy";
+    name: string;
+    count: number;
+    conversion: number | null;
+  }>;
   directCopyWithoutDetail: number;
   finance: {
     knownRevenueFen: number;
@@ -3169,10 +3203,12 @@ export type ViralContentOverview = {
 export async function getViralContentOverview(
   from?: string,
   to?: string,
+  platform?: string,
 ): Promise<ViralContentOverview> {
   const query = new URLSearchParams();
   if (from) query.set("from", from);
   if (to) query.set("to", to);
+  if (platform) query.set("platform", platform);
   const response = await requestControl(
     `/api/control/viral/content-overview?${query}`,
     {},
@@ -3327,6 +3363,9 @@ export type ViralVideoBusinessDetails = {
     unknownRevenueOperations: number;
     collectionCostFen: number | null;
     attributedDataCalls?: number;
+    transcriptionCalls?: number;
+    knownTranscriptionCostFen?: number;
+    unknownTranscriptionCostCalls?: number;
     knownDataCostFen?: number;
     unknownDataCostCalls?: number;
     pendingDataCostCalls?: number;
@@ -3917,6 +3956,84 @@ export type ViralOperationEstimate = {
 };
 export function estimateViralOperation(payload: ViralOperationEstimateRequest) {
   return readViralOperationEstimate(payload);
+}
+
+export type ViralResourceRecord = {
+  id: string;
+  platform: string;
+  video_id: string;
+  label: string;
+  kind: string;
+  unit: string;
+  quantity: number | string | null;
+  state: string;
+  created_at: string;
+  cost_fen: number | null;
+  evidence: {
+    id: string;
+    bill_reference: string;
+    reason: string;
+    verified_at: string;
+    operator_id: string;
+  } | null;
+};
+export type ViralResourceSummary = {
+  records: ViralResourceRecord[];
+  total: number;
+  offset: number;
+  limit: number;
+  components: Array<{
+    kind: string;
+    label: string;
+    unit: string;
+    events: number;
+    knownQuantity: number | string;
+    unknownQuantityEvents: number;
+    knownCostFen: number;
+    unknownCostEvents: number;
+    costFen: number | null;
+  }>;
+  knownCostFen: number;
+  costFen: number | null;
+  coverageComplete: boolean;
+  missingEvidence: string[];
+  countingRule: string;
+};
+export function getViralResourceEvents(options: {
+  platform?: string;
+  videoId?: string;
+  from?: string;
+  to?: string;
+  offset?: number;
+}): Promise<ViralResourceSummary> {
+  const query = new URLSearchParams({ offset: String(options.offset ?? 0) });
+  if (options.platform) query.set("platform", options.platform);
+  if (options.videoId) query.set("video_id", options.videoId);
+  if (options.from) query.set("from", options.from);
+  if (options.to) query.set("to", options.to);
+  return adminRead(
+    `/api/control/viral/resource-events?${query}`,
+    "读取素材计量失败",
+  );
+}
+export function verifyViralResourceCost(
+  record: ViralResourceRecord,
+  costFen: string,
+  billReference: string,
+  reason: string,
+  key: string,
+) {
+  return adminWrite(
+    `/api/control/viral/resource-events/${encodeURIComponent(record.id)}/verify-cost`,
+    {
+      cost_fen: costFen,
+      bill_reference: billReference,
+      expected_evidence_id: record.evidence?.id ?? null,
+    },
+    reason,
+    "账单核对失败",
+    key,
+  );
 }
 async function readViralOperationEstimate(
   payload: ViralOperationEstimateRequest,

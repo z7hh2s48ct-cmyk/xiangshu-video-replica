@@ -1364,8 +1364,7 @@ def list_customers(
     if direction == "asc":
         order_sql = order_sql.replace(" DESC", " ASC")
     try:
-        with pg_transaction() as conn:
-            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        with pg_transaction(isolation="REPEATABLE READ") as conn:
             rows = conn.execute(
                 CUSTOMER_FACTS_CTE
                 + "SELECT aca.user_id, u.username, u.display_name, aca.activated_at, "

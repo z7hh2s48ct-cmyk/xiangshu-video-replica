@@ -582,6 +582,9 @@ def read_stored_object(
         ),
         length,
     )
+    from app.viral_resource_metering import measured_object_chunks
+
+    source = measured_object_chunks(source, namespace=storage.cache_namespace, key=stored.key)
     try:
         first = next(source)
     except StorageBackendUnavailable as exc:

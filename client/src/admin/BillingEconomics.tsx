@@ -121,6 +121,7 @@ type BillingFilters = {
   end: string;
   grain: string;
   user_id: string;
+  source_id: string;
   username: string;
   service: string;
   module: string;
@@ -158,6 +159,7 @@ const initialFilters = (
   end: end ?? today(),
   grain: "day",
   user_id: "",
+  source_id: "",
   username: "",
   service: "",
   module: "",
@@ -231,6 +233,8 @@ export function BillingEconomics({
   }, []);
   useEffect(() => {
     void revision;
+    // 来源范围只由业务全景接口支持；普通统计不能混入其他动作的金额。
+    if (new URLSearchParams(query).get("source_id")) return;
     let active = true;
     setBusy(true);
     setError("");
@@ -295,6 +299,20 @@ export function BillingEconomics({
         version: number;
       })
     : undefined;
+  if (new URLSearchParams(query).get("source_id")) {
+    return (
+      <section
+        className="admin-panel billing-economics"
+        aria-label="关联业务账单"
+      >
+        <h2>关联业务账单</h2>
+        <p>查看这次业务的积分与调用成本；证据不齐时显示待核对。</p>
+        {error && <p role="alert">{error}</p>}
+        <a href="#admin/analytics?analyticsTab=cost">查看全部成本账单</a>
+        <SourceActionPanorama key={query} query={query} name={name} />
+      </section>
+    );
+  }
   return (
     <section
       className="admin-panel billing-economics"

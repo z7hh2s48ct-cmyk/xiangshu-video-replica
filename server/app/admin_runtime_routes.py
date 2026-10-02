@@ -46,6 +46,7 @@ from app.admin_viral_demand import enrich_demand
 from app.admin_viral_keywords import router as keyword_router
 from app.admin_viral_metrics import usage_count_sql, video_business_metrics
 from app.admin_viral_platform_probe import router as platform_probe_router
+from app.admin_viral_resources import router as resource_router
 from app.admin_write_contract import (
     AdminWriteContract,
     http_error,
@@ -59,6 +60,7 @@ from app.sql_pagination import PAGE_CLAUSE
 from app.viral_collection_billing import freeze_collection_billing
 from app.viral_collection_budget import collection_budget
 from app.viral_collection_schedule import collection_estimate, next_collection_time
+from app.viral_content_cohort import STAGES, CohortStage, cohort_sql
 from app.viral_content_observations import record_content_source, record_content_stage
 from app.viral_content_state import (
     archive_task_match_sql,
@@ -75,6 +77,7 @@ router.include_router(keyword_router)
 router.include_router(operation_cost_router)
 router.include_router(collection_records_router)
 router.include_router(platform_probe_router)
+router.include_router(resource_router)
 
 RUNTIME_SETTINGS_SERVICE_UNAVAILABLE = "RUNTIME_SETTINGS_SERVICE_UNAVAILABLE"
 RUNTIME_SETTINGS_SERVICE_UNAVAILABLE_MESSAGE = (
@@ -823,7 +826,7 @@ class ViralCurationRequest(AdminWriteContract):
     model_config = ConfigDict(extra="forbid")
     # prepare（方案 P1 内容模块 C-2）：只排队准备素材，不改首页状态；
     # feature 遇到未准备的视频同样自动排队，就绪后由后台自动上首页。
-    action: Literal["feature", "unfeature", "delete", "pin", "unpin", "prepare"]
+    action: Literal["feature", "unfeature", "delete", "block", "pin", "unpin", "prepare"]
     expected_cost_snapshot: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
     @model_validator(mode="after")
@@ -989,6 +992,11 @@ def read_collected_viral_videos(
     ]
     | None = None,
     category: Annotated[str, Query(max_length=50)] = "",
+    uncategorized: bool = False,
+    cohort_stage: CohortStage | None = None,
+    collected_from: date | None = None,
+    collected_to: date | None = None,
+    attention: Literal["missing_cover"] | None = None,
     source_keyword: Annotated[str, Query(max_length=100)] = "",
     published_from: date | None = None,
     published_to: date | None = None,
@@ -999,8 +1007,29 @@ def read_collected_viral_videos(
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=50)] = 25,
 ) -> dict[str, object]:
-    filters = "v.deleted_at IS NULL AND v.platform IN ('douyin','wechat_channels')"
+    filters = "v.platform IN ('douyin','wechat_channels')"
+    filters += (
+        ""
+        if cohort_stage
+        else (
+            " AND v.deleted_at IS NOT NULL"
+            if content_state == "blocked"
+            else " AND v.deleted_at IS NULL"
+        )
+    )
     params: list[object] = []
+    if cohort_stage:
+        if not collected_from or not collected_to or collected_to < collected_from:
+            raise http_error(422, "VIRAL_COHORT_RANGE_REQUIRED", "采集批次筛选需要有效的起止日期。")
+        cohort, cohort_params = cohort_sql(collected_from, collected_to, platform, source_keyword)
+        filters += (
+            f" AND EXISTS (SELECT 1 FROM ({cohort}) cs_cohort "
+            "WHERE cs_cohort.platform=v.platform AND cs_cohort.video_id=v.video_id "
+            f"AND ({STAGES[cohort_stage]}))"
+        )
+        params.extend(cohort_params)
+    if attention == "missing_cover":
+        filters += " AND COALESCE(v.cover_url,'')!='' AND v.cover_key IS NULL"
     if published_from and published_to and published_to < published_from:
         raise http_error(422, "VIRAL_PUBLISH_RANGE_INVALID", "结束日期不能早于开始日期。")
     if content_state:
@@ -1032,8 +1061,10 @@ def read_collected_viral_videos(
     if status:
         # 状态分段在服务端过滤：只筛当前页会给出「这页里没有」的错觉。
         filters += f" AND ({_COLLECTED_STATUS_FILTERS[status]})"
-    if category.strip():
-        filters += " AND v.category=%s"
+    if uncategorized:
+        filters += " AND btrim(COALESCE(v.category,''))=''"
+    elif category.strip():
+        filters += " AND btrim(v.category)=%s"
         params.append(category.strip())
     if has_usage is not None:
         # 有无客户使用（方案 P1 C-1 的筛选维度）：决定「哪些内容值得上首页」。
@@ -1063,11 +1094,20 @@ def read_collected_viral_videos(
             f"{row_select} WHERE {filters} ORDER BY {order_by} {PAGE_CLAUSE}",
             (*params, limit, offset),
         ).fetchall()
+        categories = conn.execute(
+            "SELECT DISTINCT category FROM ("
+            "SELECT btrim(category) AS category FROM viral_videos "
+            "WHERE platform IN ('douyin','wechat_channels') UNION "
+            "SELECT btrim(item->>'category') FROM viral_runtime_controls, "
+            "jsonb_array_elements(keywords_json::jsonb) item WHERE id=1) catalog "
+            "WHERE COALESCE(category,'')!='' ORDER BY category"
+        ).fetchall()
     return {
         "items": [_collected_video_payload(dict(row)) for row in rows],
         "total": int(total),
         "offset": offset,
         "limit": limit,
+        "categories": [str(row[0]) for row in categories],
     }
 
 
@@ -1411,7 +1451,7 @@ def search_viral_videos_for_admin(
             ) from exc
         storage = get_media_storage(BusinessConnection.postgres(conn))
         try:
-            enriched = archive_search_covers_bounded(storage, page.items)
+            enriched = archive_search_covers_bounded(storage, page.items, metered=True)
         except TimeoutError:
             # 封面归档超时不放弃整页结果：未归档条目保留源站链接兜底。
             enriched = page.items
@@ -1880,6 +1920,8 @@ def read_viral_video_business_details(
             """SELECT DISTINCT keyword FROM (
                 SELECT keyword FROM viral_search_discoveries WHERE platform=%s AND video_id=%s
                 UNION ALL
+                SELECT keyword FROM viral_content_sources WHERE platform=%s AND video_id=%s
+                UNION ALL
                 SELECT t.collection_config_json::jsonb->'keywords'->
                     (CASE WHEN kv.key ~ '^[0-9]{1,9}$' THEN kv.key::int ELSE NULL END)->>'keyword'
                 FROM viral_refresh_tasks t CROSS JOIN LATERAL
@@ -1887,7 +1929,7 @@ def read_viral_video_business_details(
                 WHERE t.platform=%s AND kv.key ~ '^[0-9]+$'
                   AND kv.value @> jsonb_build_array(%s::text)
             ) known WHERE keyword IS NOT NULL AND keyword<>'' ORDER BY keyword""",
-            (platform, video_id, platform, video_id),
+            (platform, video_id, platform, video_id, platform, video_id),
         ).fetchall()
         related = (
             conn.execute(
@@ -1964,9 +2006,9 @@ def _prepare_feature_cover(platform: str, video_id: str) -> tuple[str, str] | No
         storage = get_media_storage(conn)
     # Only the existing public cover is fetched, with a bounded download and
     # deterministic cache key. No provider collection request or long PG lock.
-    cover = CoverEnricher(storage=storage, fetcher=UrlFetcher(max_bytes=10 * 1024 * 1024)).enrich(
-        video
-    )
+    cover = CoverEnricher(
+        storage=storage, fetcher=UrlFetcher(max_bytes=10 * 1024 * 1024), metered=True
+    ).enrich(video)
     return (video.cover_url, cover.cover_key) if cover.cover_key else None
 
 
@@ -2121,7 +2163,7 @@ def curate_collected_viral_video(
             (
                 featured_value,
                 payload.action == "feature",
-                payload.action == "delete",
+                payload.action in ("delete", "block"),
                 next_rank,
                 payload.action in ("pin", "unpin"),
                 payload.action in ("pin", "unpin"),
@@ -2167,7 +2209,7 @@ def curate_collected_viral_video(
             "video_id": video_id,
             "homepage_featured": bool(featured_value),
             "homepage_rank": next_rank,
-            "deleted": payload.action == "delete",
+            "deleted": payload.action in ("delete", "block"),
         }
 
     return write_with_idempotency(
@@ -2372,13 +2414,13 @@ def curate_collected_viral_videos_batch(
                 (
                     int(payload.action == "feature"),
                     payload.action == "feature",
-                    payload.action == "delete",
+                    payload.action in ("delete", "block"),
                     payload.action == "feature",
                     target.platform,
                     target.video_id,
                 ),
             )
-            if payload.action in ("hide", "block"):
+            if payload.action == "hide":
                 conn.execute(
                     "INSERT INTO "
                     "viral_video_visibility(platform,video_id,status,reason,updated_by_user"
@@ -2432,7 +2474,7 @@ def curate_collected_viral_videos_batch(
                     "platform": target.platform,
                     "video_id": target.video_id,
                     "homepage_featured": payload.action == "feature",
-                    "deleted": payload.action == "delete",
+                    "deleted": payload.action in ("delete", "block"),
                     "queued_for_preparation": False,
                 }
             )
@@ -2729,6 +2771,8 @@ def read_viral_library_overview(_actor: AdminReader) -> dict[str, object]:
                        WHERE {utc_timestamp_sql("v.created_at")} >= %s::timestamptz
                    ) AS added_today,
                    max(v.created_at) AS last_created_at
+                   ,count(*) FILTER (WHERE COALESCE(v.cover_url,'')!='' AND v.cover_key IS NULL)
+                     AS missing_cover
             FROM viral_videos v WHERE {base}
             """,
             (day_start,),
@@ -2751,6 +2795,7 @@ def read_viral_library_overview(_actor: AdminReader) -> dict[str, object]:
         "homepage_featured": int(mapping.get("featured") or 0),
         "pending_archive": int(mapping.get("pending") or 0),
         "archive_failed": int(mapping.get("failed") or 0),
+        "missing_cover": int(mapping.get("missing_cover") or 0),
         "added_today": int(mapping.get("added_today") or 0),
         "last_created_at": str(last_created) if last_created is not None else None,
         "collection_enabled": bool(controls[0]) if controls is not None else False,
@@ -2771,7 +2816,11 @@ def read_viral_library_overview(_actor: AdminReader) -> dict[str, object]:
 
 
 @router.get("/viral/content-overview")
-def read_viral_content_overview(request: Request, _actor: AdminReader) -> dict[str, object]:
+def read_viral_content_overview(
+    request: Request,
+    _actor: AdminReader,
+    platform: Literal["douyin", "wechat_channels"] | None = None,
+) -> dict[str, object]:
     from app.viral_content_overview import content_overview
 
     if request.query_params.get("from") or request.query_params.get("date"):
@@ -2781,7 +2830,9 @@ def read_viral_content_overview(request: Request, _actor: AdminReader) -> dict[s
         end = datetime.now(SHANGHAI).date()
         start = end - timedelta(days=end.weekday())
     with pg_transaction() as raw:
-        return content_overview(BusinessConnection.postgres(raw), start=start, end=end)
+        return content_overview(
+            BusinessConnection.postgres(raw), start=start, end=end, platform=platform
+        )
 
 
 @router.get("/settings/queue-mode", response_model=QueueModeResponse)

@@ -31,6 +31,7 @@ import {
   revokeCustomerSession,
   revokeDeviceCredential,
   selfCheckWechatNative,
+  submitBillingQuote,
   suspendActivationCode,
   unbindDevice,
   updateCustomerUnitPrice,
@@ -47,6 +48,29 @@ function jsonResponse(payload: unknown, status = 200) {
 // The mock literal is indirect so the repo secret scan (which flags
 // `token:` followed by a quoted literal) stays quiet — the T29 precedent.
 const CSRF_TOKEN_TEXT = "csrf-token-1";
+
+it("只读价格试算使用 GET 和精确客户编号，不携带写契约", async () => {
+  setAdminCsrfToken("");
+  const fetchMock = vi
+    .fn()
+    .mockImplementation(() => jsonResponse({ credits: "1" }));
+  vi.stubGlobal("fetch", fetchMock);
+  const result = await submitBillingQuote({
+    service: "asr",
+    units: 0.4,
+    userId: "opaque/user A",
+  });
+  expect(result.credits).toBe("1");
+  const [address, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+  const url = new URL(address, "http://localhost");
+  expect(url.pathname).toBe("/api/control/billing/quote");
+  expect(url.searchParams.get("user_id")).toBe("opaque/user A");
+  expect(url.searchParams.get("units")).toBe("0.4");
+  expect(init.method).toBe("GET");
+  expect(init.body).toBeUndefined();
+  expect(new Headers(init.headers).get("Idempotency-Key")).toBeNull();
+  expect(new Headers(init.headers).get("X-CSRF-Token")).toBeNull();
+});
 
 it("视频号互动补采允许超过普通管理请求的五秒等待", async () => {
   vi.useFakeTimers();

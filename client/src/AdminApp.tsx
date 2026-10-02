@@ -978,7 +978,7 @@ export function AdminApp() {
           ) : null}
           {activeTab === "analytics" || activeTab === "costReview" ? (
             <AnalyticsPage
-              key={`${activeTab}:${navigationIntent}`}
+              key={`${activeTab}:${navigationIntent}:${businessTarget.get("billingQuery") ?? ""}`}
               readOnly={readOnly}
               onCustomer={(userId) =>
                 navigateAdmin("customersMgmt", "customer", { userId })
@@ -1095,7 +1095,9 @@ export function AdminApp() {
           {activeTab === "auditCenter" ? (
             <AuditCenterPage readOnly={readOnly} />
           ) : null}
-          {activeTab === "viralOverview" ? <ViralOverviewPage /> : null}
+          {activeTab === "viralOverview" ? (
+            <ViralOverviewPage readOnly={readOnly} />
+          ) : null}
           {activeTab === "viralHomepage" ? (
             <ViralHomepagePage readOnly={readOnly} />
           ) : null}
@@ -1109,6 +1111,8 @@ export function AdminApp() {
           {activeTab === "viralVideos" ? (
             <ViralVideosPage
               key={`videos:${businessTarget}`}
+              initialListQuery={businessTarget.get("listQuery") ?? ""}
+              onScopeChange={persistBusinessScope}
               onCustomer={(userId) =>
                 navigateAdmin("customersMgmt", "customer", { userId })
               }

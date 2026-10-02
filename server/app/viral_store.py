@@ -249,15 +249,11 @@ def upsert_viral_videos(
 
 
 def _collection_window_end(conn: BusinessConnection, platform: str) -> int:
-    # Keep this week's saved snapshot readable until the next collection, even
-    # if the worker is temporarily offline. The seven-day source window is fixed.
-    row = conn.execute(
-        "SELECT fetched_at FROM viral_fetch_state WHERE platform=%s AND sort='weekly_window'",
-        (platform,),
-    ).fetchone()
-    if row is not None:
-        return int(datetime.fromisoformat(str(row[0])).timestamp())
-    return int(datetime.now(UTC).timestamp())
+    # 采集快照用于分页版本；客户可见期始终由数据库当前时间判断，停采不能延长七天。
+    del platform
+    row = conn.execute("SELECT extract(epoch FROM now())").fetchone()
+    assert row is not None
+    return int(row[0])
 
 
 def list_viral_videos(conn: BusinessConnection, *, platform: str, sort: str) -> list[ViralVideo]:
@@ -294,8 +290,8 @@ def reclaimable_viral_video_ids(
         f"""
         SELECT video_id, title FROM viral_videos
         WHERE platform = %s AND video_id IN ({placeholders})
-            AND collection_published = 1
-            AND published_at BETWEEN %s AND %s
+            AND ((collection_published = 1 AND published_at BETWEEN %s AND %s)
+                 OR {live_homepage_sql()})
             {_PUBLISHED_SQL}
         """,
         (

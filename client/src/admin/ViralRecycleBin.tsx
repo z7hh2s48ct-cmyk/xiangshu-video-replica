@@ -7,6 +7,7 @@ import {
 } from "../api.admin";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { Pagination } from "./ui/Pagination";
+import { CONTENT_STATE_LABELS } from "./ui/vocabulary";
 
 export function ViralRecycleBin({ readOnly }: { readOnly: boolean }) {
   const [items, setItems] = useState<ViralRecycleVideo[]>([]);
@@ -78,6 +79,7 @@ export function ViralRecycleBin({ readOnly }: { readOnly: boolean }) {
                 <tr key={`${video.platform}:${video.video_id}`}>
                   <td>
                     {video.title || "未命名视频"}
+                    <span>{CONTENT_STATE_LABELS.blocked}</span>
                     <small>
                       {video.platform === "douyin" ? "抖音" : "视频号"} ·{" "}
                       {video.author || "未知作者"}

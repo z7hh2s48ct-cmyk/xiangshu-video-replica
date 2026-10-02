@@ -730,12 +730,80 @@ def test_reconciliation_items_page_each_anomaly_type(
         # display_name 为空的客户回退显示用户名。
         assert first["display_name"] == "customer-2"
         assert first["username"] == "customer-2"
+        path = "/api/control/billing-reconciliation/verify"
+        for anomaly in ["wallet_mismatch", "charge_without_paid_order"]:
+            query = {"anomaly": anomaly}
+            item = recon_client.get(
+                "/api/control/billing-reconciliation/items",
+                params=query,
+                headers=recon_headers,
+            ).json()["items"][0]
+            identity = item["user_id"] if anomaly == "wallet_mismatch" else item["transaction_id"]
+            if anomaly == "charge_without_paid_order":
+                assert item["order_no"] == "BIZ-order_pending"
+            body = {
+                "anomaly": anomaly,
+                "entity_id": identity,
+                "snapshot": item["snapshot"],
+                "confirm": True,
+                "reason": "隔离核对：差异仍待处理",
+            }
+            headers = {**recon_headers, "Idempotency-Key": f"verification-{anomaly}"}
+            with psycopg.connect(overview_pg_dsn) as raw:
+                before = raw.execute("SELECT * FROM wallets ORDER BY user_id").fetchall()
+                ledger_count = raw.execute("SELECT count(*) FROM wallet_transactions").fetchone()[0]
+            verified = recon_client.post(path, headers=headers, json=body)
+            assert verified.status_code == 200, verified.text
+            replay = recon_client.post(path, headers=headers, json=body)
+            assert replay.status_code == 200 and replay.json() == verified.json()
+            assert replay.headers["X-Idempotent-Replay"] == "true"
+            refreshed = recon_client.get(
+                "/api/control/billing-reconciliation/items",
+                params=query,
+                headers=recon_headers,
+            ).json()
+            assert refreshed["total"] == 1
+            record = refreshed["items"][0]["verification"]
+            assert record["state"] == "verified" and record["reason"] == body["reason"]
+            assert record["operator"] and record["at"]
+            with psycopg.connect(overview_pg_dsn) as raw:
+                assert raw.execute("SELECT * FROM wallets ORDER BY user_id").fetchall() == before
+                assert (
+                    raw.execute("SELECT count(*) FROM wallet_transactions").fetchone()[0]
+                    == ledger_count
+                )
+                assert (
+                    raw.execute(
+                        "SELECT count(*) FROM audit_logs "
+                        "WHERE action='control.reconciliation.verify' "
+                        "AND entity_id=%s",
+                        (f"{anomaly}:{identity}",),
+                    ).fetchone()[0]
+                    == 1
+                )
+                if anomaly == "wallet_mismatch":
+                    raw.execute("UPDATE wallets SET reserved_credits=7 WHERE user_id='cust_1'")
+                else:
+                    raw.execute(
+                        "UPDATE recharge_orders SET status='CLOSED' WHERE id='order_pending'"
+                    )
+            changed = recon_client.get(
+                "/api/control/billing-reconciliation/items",
+                params=query,
+                headers=recon_headers,
+            ).json()["items"][0]
+            assert changed["verification"]["state"] == "needs_recheck"
+            stale = recon_client.post(
+                path, headers={**recon_headers, "Idempotency-Key": f"stale-{anomaly}"}, json=body
+            )
+            assert stale.status_code == 409, stale.text
     finally:
         with psycopg.connect(overview_pg_dsn, autocommit=True) as raw:
             raw.execute("DELETE FROM billing_credit_lots WHERE id = 'tx_orphan_charge'")
             raw.execute("DELETE FROM wallet_transactions WHERE id = 'tx_orphan_charge'")
             raw.execute("DELETE FROM recharge_orders WHERE id = 'order_orphan_paid'")
             raw.execute("UPDATE wallets SET reserved_credits = 5 WHERE user_id = 'cust_1'")
+            raw.execute("UPDATE recharge_orders SET status='PENDING' WHERE id='order_pending'")
 
 
 def test_reconciliation_items_reject_unknown_anomaly(
@@ -820,6 +888,20 @@ def test_auditor_reads_reconciliation_but_cannot_sync(
         json={"confirm": True, "reason": "只读角色权限回归"},
     )
     assert rejected.status_code == 403, rejected.text
+    assert (
+        recon_client.post(
+            "/api/control/billing-reconciliation/verify",
+            headers={**headers, "Idempotency-Key": "auditor-verification-rejected"},
+            json={
+                "anomaly": "wallet_mismatch",
+                "entity_id": "cust_1",
+                "snapshot": "0" * 64,
+                "confirm": True,
+                "reason": "只读角色禁止写核对记录",
+            },
+        ).status_code
+        == 403
+    )
     with psycopg.connect(overview_pg_dsn) as raw:
         after = raw.execute(
             "SELECT user_id, available_credits, reserved_credits FROM wallets ORDER BY user_id"

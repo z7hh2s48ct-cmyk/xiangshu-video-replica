@@ -43,21 +43,157 @@ from test_admin_customer_routes import (  # noqa: F401
 from app.admin_auth_routes import ADMIN_SESSION_HMAC_KEY_ENV
 from app.customer_benefits import MANUAL_DISCOUNT_PRIORITY
 from app.db_pg import DATABASE_URL_ENV
+from app.db_portable import BusinessConnection
 from app.discount_service import get_best_discount
 from app.recharge_packages import PACKAGE_DISCOUNT_PRIORITY
+from app.usage_billing import accept_operation, finish_operation
 
 GRANT_PATH = f"/api/control/customers/{CUSTOMER_USER_ID}/package-grants"
 DISCOUNTS_PATH = f"/api/control/customers/{CUSTOMER_USER_ID}/discounts"
+
+
+@pytest.mark.parametrize(
+    "kind", ["none", "global", "manual", "recharge_package", "global_over_manual"]
+)
+def test_read_quote_source_matches_actual_settlement(client, kind):
+    admin = _admin_session(client)
+    if kind in {"manual", "global_over_manual"}:
+        assert _create_discount(client, admin).status_code == 201
+    if kind == "recharge_package":
+        assert _grant(client, admin, _seed_package(interfaces=[])).status_code == 201
+    with psycopg.connect(_t23_dsn()) as raw:
+        raw.execute(
+            "UPDATE customer_credit_pricing SET config_json=%s WHERE id=1",
+            (
+                json.dumps(
+                    {
+                        "points_per_yuan": 100000,
+                        "discount_basis_points": 7000
+                        if kind in {"global", "global_over_manual"}
+                        else 10000,
+                    }
+                ),
+            ),
+        )
+        raw.execute(
+            "INSERT INTO billing_tariffs(service,enabled,unit_credits,unit_rounding) "
+            "VALUES ('asr',true,2.5,'exact') ON CONFLICT(service) DO UPDATE "
+            "SET enabled=true,unit_credits=2.5,unit_rounding='exact'"
+        )
+    before_wallet, before_ledger = _wallet_balance(CUSTOMER_USER_ID), _ledger_counts()
+    response = client.get(
+        "/api/control/billing/quote",
+        headers=admin,
+        params={
+            "service": "asr",
+            "units": "0.4",
+            "user_id": CUSTOMER_USER_ID,
+        },
+    )
+    assert response.status_code == 200, response.text
+    quote = response.json()
+    assert response.headers["Cache-Control"] == "no-store"
+    assert quote["discount_kind"] == ("global" if kind == "global_over_manual" else kind)
+    assert Decimal(quote["credits"]) == 1
+    assert Decimal(quote["final_unit_credits"]) >= 2
+    assert 0 < Decimal(quote["unit_nominal_fen"]) < 1
+    assert quote["cost_fen"] is None and quote["gross_fen"] is None
+    assert _wallet_balance(CUSTOMER_USER_ID) == before_wallet
+    assert _ledger_counts() == before_ledger
+    with psycopg.connect(_t23_dsn()) as raw:
+        conn = BusinessConnection.postgres(raw)
+        operation = accept_operation(
+            conn,
+            user_id=CUSTOMER_USER_ID,
+            service="asr",
+            source_id="quote-settlement",
+            units=Decimal("0.4"),
+        )
+        finish_operation(conn, operation_id=operation, units=Decimal("0.4"), succeeded=True)
+        row = raw.execute(
+            "SELECT -reserved_delta FROM wallet_transactions "
+            "WHERE billing_operation_id=%s AND type='SETTLE'",
+            (operation,),
+        ).fetchone()
+        assert row is not None and Decimal(row[0]) == Decimal(quote["credits"])
+
+
+def test_auditor_can_read_quote_but_cannot_post_or_change_discounts(client):
+    auditor = _admin_session(client, actor="auditor_u")
+    assert (
+        client.get("/api/control/billing/quote?service=oral&units=1", headers=auditor).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/api/control/billing/quote",
+            headers=auditor,
+            json={"service": "oral", "units": 1, "confirm": True, "reason": "probe"},
+        ).status_code
+        == 403
+    )
+    assert _create_discount(client, auditor).status_code == 403
+    assert _ledger_counts() == (0, 0, 0)
+
+
+def test_legacy_post_quote_retains_write_contract_and_idempotency(client):
+    admin = _admin_session(client)
+    data = {"service": "oral", "units": 1, "confirm": True, "reason": "legacy quote"}
+    assert client.post("/api/control/billing/quote", headers=admin, json=data).status_code == 400
+    headers = {**admin, IDEMPOTENCY_KEY_HEADER: "legacy-quote-contract"}
+    first = client.post("/api/control/billing/quote", headers=headers, json=data)
+    second = client.post("/api/control/billing/quote", headers=headers, json=data)
+    assert first.status_code == second.status_code == 200
+    assert first.json() == second.json()
+    assert second.headers[REPLAY_HEADER] == "true"
+    assert _ledger_counts() == (0, 0, 0)
+
+
+def test_quantized_zero_discount_keeps_existing_manual_discount(client):
+    admin = _admin_session(client)
+    first = _create_discount(client, admin)
+    assert first.status_code == 201
+    rejected = _create_discount(client, admin, rate="0.000001")
+    assert rejected.status_code == 422, rejected.text
+    rows = _discount_rows()
+    assert len(rows) == 1 and rows[0][0] == first.json()["discount"]["id"]
+    assert rows[0][3] is True
+    assert _best_rate() == Decimal("0.8")
+
+
+def test_discount_list_uses_database_clock_for_effective_state(client):
+    admin = _admin_session(client)
+    for identity, active, start, end in [
+        ("effective", True, "-1 day", None),
+        ("pending", True, "1 day", "2 days"),
+        ("expired", True, "-2 days", "-1 day"),
+        ("disabled", False, "-1 day", None),
+    ]:
+        with psycopg.connect(_t23_dsn()) as raw:
+            raw.execute(
+                "INSERT INTO customer_discounts"
+                "(id,user_id,discount_rate,priority,is_active,valid_from,valid_until) "
+                "VALUES (%s,%s,0.8,200,%s,clock_timestamp()+%s::interval,"
+                "CASE WHEN %s::text IS NULL THEN NULL ELSE clock_timestamp()+%s::interval END)",
+                (identity, CUSTOMER_USER_ID, active, start, end, end),
+            )
+    response = client.get(DISCOUNTS_PATH, headers=admin)
+    assert response.status_code == 200, response.text
+    assert {row["id"]: row["state"] for row in response.json()["items"]} == {
+        name: name for name in ["effective", "pending", "expired", "disabled"]
+    }
 
 
 @pytest.fixture()
 def client(monkeypatch: pytest.MonkeyPatch, route_state: str) -> Iterator[TestClient]:
     from app.admin_auth_routes import router as admin_auth_router
     from app.admin_customer_benefit_routes import router as benefit_router
+    from app.billing_routes import router as billing_router
 
     app = FastAPI()
     app.include_router(admin_auth_router)
     app.include_router(benefit_router)
+    app.include_router(billing_router)
     monkeypatch.setenv(DATABASE_URL_ENV, route_state)
     monkeypatch.delenv("VIDEO_REPLICA_CUSTOMER_PRODUCTION", raising=False)
     monkeypatch.setenv(ADMIN_SESSION_HMAC_KEY_ENV, TEST_ADMIN_SESSION_KEY)

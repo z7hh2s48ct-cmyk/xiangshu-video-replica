@@ -204,6 +204,7 @@ def retail_snapshot(
     units: Decimal | str | int | float,
     *,
     user_id: str | None = None,
+    at_time: datetime | None = None,
 ) -> dict[str, object]:
     """零售计价快照；``user_id`` 给出时合并该用户的消耗侧折扣（取更优）.
 
@@ -227,8 +228,9 @@ def retail_snapshot(
         # 取 DB 时钟；用应用墙钟会在进程时钟落后时漏掉刚授予的套餐权益，
         # 让客户按原价被预扣（上线评审 H-1）。SELECT 无 FROM 恒返回一行，
         # None 分支仅为类型收窄（不可达）。
-        now_row = conn.raw.execute("SELECT clock_timestamp()").fetchone()
-        at_time = now_row[0] if now_row is not None else datetime.now(UTC)
+        if at_time is None:
+            now_row = conn.raw.execute("SELECT clock_timestamp()").fetchone()
+            at_time = now_row[0] if now_row is not None else datetime.now(UTC)
         record = get_best_discount(
             conn.raw,
             user_id=user_id,

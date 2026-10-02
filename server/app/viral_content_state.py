@@ -53,8 +53,8 @@ def content_state_sql(alias: str = "v") -> str:
     )
     ready = ready_sql(alias)
     return (
-        f"CASE WHEN {visibility}='UNAVAILABLE' THEN 'blocked' "
-        f"WHEN {visibility}='HIDDEN' THEN 'removed' "
+        f"CASE WHEN {alias}.deleted_at IS NOT NULL THEN 'blocked' "
+        f"WHEN {visibility} IN ('HIDDEN','UNAVAILABLE') THEN 'removed' "
         f"WHEN {ready} AND {live_homepage_sql(alias)} THEN 'featured' "
         f"WHEN {ready} THEN 'ready' WHEN {task} IN ('PENDING','RUNNING') THEN 'pending_prepare' "
         f"WHEN {failed} OR {task}='FAILED' THEN 'prepare_failed' ELSE 'pending_prepare' END"
@@ -62,12 +62,8 @@ def content_state_sql(alias: str = "v") -> str:
 
 
 def customer_visible_sql(alias: str = "v") -> str:
-    # 与客户读取的冻结周快照相同，避免管理端按今日而客户按采集日计算。
-    end = (
-        "COALESCE((SELECT extract(epoch FROM fetched_at::timestamptz) "
-        f"FROM viral_fetch_state WHERE platform={alias}.platform AND sort='weekly_window'),"
-        "extract(epoch FROM now()))"
-    )
+    # 与客户列表同样使用数据库时钟；旧采集快照不延长内容可见期。
+    end = "floor(extract(epoch FROM now()))"
     return (
         f"({ready_sql(alias)} AND {alias}.deleted_at IS NULL AND NOT EXISTS "
         f"(SELECT 1 FROM viral_video_visibility cs_vis WHERE cs_vis.platform={alias}.platform "

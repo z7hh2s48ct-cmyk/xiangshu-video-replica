@@ -133,6 +133,20 @@ describe("AccountsPage", () => {
     expect(screen.getByText("人物形象及任务图片")).toBeVisible();
     expect(screen.getByText("18 积分")).toBeVisible();
     expect(screen.queryByText("18 秒")).toBeNull();
+    expect(screen.queryByRole("link", { name: "查看关联任务" })).toBeNull();
+    const href =
+      screen.getByRole("link", { name: "查看业务账单" }).getAttribute("href") ??
+      "";
+    const scope = new URLSearchParams(href.split("?")[1]);
+    expect(scope.get("analyticsTab")).toBe("cost");
+    expect(
+      Object.fromEntries(new URLSearchParams(scope.get("billingQuery") ?? "")),
+    ).toEqual({
+      start: "2000-01-01",
+      end: "9998-12-31",
+      user_id: "user-1",
+      source_id: "image-task-1",
+    });
   });
   it("展示可读订单号及项目业务，技术身份收进关联编号", async () => {
     const page = transactionPage(0, 1);
@@ -159,6 +173,10 @@ describe("AccountsPage", () => {
     fireEvent.click(screen.getByText("查看关联编号"));
     expect(screen.getByText("full-task-identity")).toBeVisible();
     expect(screen.getByText("计费轮次 2")).toBeVisible();
+    expect(screen.getByRole("link", { name: "查看关联任务" })).toHaveAttribute(
+      "href",
+      "#admin/generationRecords?taskId=full-task-identity&userId=user-1",
+    );
     expect(
       screen.getByText(/生成冻结是在任务提交时保留预计积分/),
     ).toBeVisible();

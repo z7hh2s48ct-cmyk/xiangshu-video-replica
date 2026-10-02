@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
 
+from app.billing_catalog import SERVICES
 from app.db_portable import BusinessConnection
 from app.sql_pagination import PAGE_CLAUSE
 
@@ -265,6 +266,10 @@ def source_action_rows(
     for row in rows:
         item = dict(row)
         item["pending_count"] = int(item["pending_count"] or 0)
+        item["business_label"] = "、".join(
+            SERVICES[service].name if service in SERVICES else "历史业务名称未记录"
+            for service in item["services"]
+        )
         item["failed_count"] = int(item["failed_count"] or 0)
         item["attempt_count"] = int(item["attempt_count"] or 0)
         item["unknown_cost_count"] = int(item["unknown_cost_count"] or 0)

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.db_portable import BusinessConnection
+from app.viral_resource_metering import resource_records, resource_summary
 
 # 结算流水保留当时的钱包主体，避免将子账号操作者当作收费主体。
 # 无结算流水的历史/免费记录才回落当前母账号关系；从不截取含任意字符的视频ID。
@@ -105,6 +106,17 @@ def video_business_metrics(
         "AND o.api_metadata::jsonb->>'video_id'=%s",
         (platform, video_id),
     ).fetchone()
+    transcription = conn.execute(
+        "SELECT count(*),COALESCE(sum(a.effective_cost_fen),0),"
+        "count(*) FILTER(WHERE a.effective_cost_fen IS NULL) "
+        "FROM billing_operations o JOIN billing_effective_attempts a ON a.operation_id=o.id "
+        "JOIN script_from_audio_tasks t ON t.id=o.source_id WHERE o.service='asr' "
+        "AND t.request_json::jsonb->'viral_source'->>0=%s "
+        "AND t.request_json::jsonb->'viral_source'->>1=%s",
+        (platform, video_id),
+    ).fetchone()
+    resources = resource_summary(resource_records(conn, platform=platform, video_id=video_id))
+    resources["recordTotal"] = len(resources.pop("records"))
     return {
         "window": "全部已记录历史",
         "countingRule": (
@@ -119,12 +131,17 @@ def video_business_metrics(
         "knownRevenueFen": known_revenue,
         "unknownRevenueOperations": unknown_revenue,
         "collectionCostFen": None,
+        "resources": resources,
+        "transcriptionCalls": int(transcription[0]),
+        "knownTranscriptionCostFen": float(transcription[1]),
+        "unknownTranscriptionCostCalls": int(transcription[2]),
         "attributedDataCalls": int(costs[0]),
         "knownDataCostFen": float(costs[1]),
         "unknownDataCostCalls": int(costs[2]),
         "pendingDataCostCalls": int(costs[3]),
         "costNote": "仅统计上线后明确归属此视频的接口请求；共享搜索不按视频平摊。"
-        "历史请求、下载/转存、存储与流量缺完整计量，总成本未知。",
+        "新素材准备、下载/转存、应用观察存储保留与后端读取有独立事件。"
+        "历史与云端实际计价、直链流量仍缺证据，总成本未知。",
         "customers": list(customers.values())[offset : offset + limit],
         "customerTotal": len(customers),
         "offset": offset,

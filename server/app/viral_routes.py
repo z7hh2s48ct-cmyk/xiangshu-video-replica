@@ -41,6 +41,7 @@ from app.viral_media import (
 )
 from app.viral_media_preparation import ViralMediaBusy
 from app.viral_refresh import viral_refresh_status
+from app.viral_resource_metering import measured_object_chunks
 from app.viral_store import (
     InvalidViralCursorError,
     ViralAvailability,
@@ -899,7 +900,11 @@ def download_viral_media_file(
     if is_partial:
         headers["Content-Range"] = f"bytes {start}-{end}/{stored.size}"
     return StreamingResponse(
-        storage.iter_object(key, start=start, end=end),
+        measured_object_chunks(
+            storage.iter_object(key, start=start, end=end),
+            namespace=storage.cache_namespace,
+            key=stored.key,
+        ),
         status_code=206 if is_partial else 200,
         media_type=stored.content_type,
         headers=headers,

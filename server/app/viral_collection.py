@@ -292,7 +292,7 @@ def _run_single_archive(lease: ViralRefreshLease, storage: StorageAdapter, video
         pipeline.fetch(video, prefer="video")
         check()
         cover = CoverEnricher(
-            storage=storage, fetcher=UrlFetcher(max_bytes=10 * 1024 * 1024)
+            storage=storage, fetcher=UrlFetcher(max_bytes=10 * 1024 * 1024), metered=True
         ).enrich(video)
         check()
         with _connection() as conn:
@@ -511,7 +511,9 @@ def run_viral_collection(lease: ViralRefreshLease, storage: StorageAdapter) -> N
                 try:
                     with video_billing_context(entry.platform, video_id):
                         cover = CoverEnricher(
-                            storage=storage, fetcher=UrlFetcher(max_bytes=10 * 1024 * 1024)
+                            storage=storage,
+                            fetcher=UrlFetcher(max_bytes=10 * 1024 * 1024),
+                            metered=True,
                         ).enrich(video)
                         check()
                         if entry.platform == "wechat_channels" and video_id not in detailed:

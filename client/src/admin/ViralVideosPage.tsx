@@ -25,6 +25,7 @@ import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
 import { type BadgeTone, StatusBadge } from "./ui/StatusBadge";
+import { CONTENT_FUNNEL_LABELS, CONTENT_STATE_LABELS } from "./ui/vocabulary";
 import { ViralOperationCostSummary } from "./ViralOperationCostSummary";
 import { ViralRecycleBin } from "./ViralRecycleBin";
 import { ViralVideoBusinessDetails } from "./ViralVideoBusinessDetails";
@@ -82,7 +83,59 @@ type Filters = {
   hasUsage: "" | "used" | "unused";
   query: string;
   offset: number;
+  cohortStage: "" | "collected" | "prepared" | "homepage" | "detail" | "copy";
+  collectedFrom: string;
+  collectedTo: string;
+  attention: "" | "missing_cover";
+  libraryStatus: "" | "ready" | "pending" | "failed" | "featured";
 };
+
+function initialVideoFilters(query: string): Partial<Filters> {
+  const values = new URLSearchParams(query);
+  function choice<T extends string>(
+    key: string,
+    allowed: readonly T[],
+  ): T | "" {
+    const value = values.get(key);
+    return allowed.find((item) => item === value) ?? "";
+  }
+  return {
+    platform: choice("platform", ["douyin", "wechat_channels"] as const),
+    status: choice(
+      "status",
+      Object.keys(CONTENT_STATE_LABELS) as NonNullable<
+        CollectedViralVideo["content_state"]
+      >[],
+    ),
+    libraryStatus: choice("libraryStatus", [
+      "ready",
+      "pending",
+      "failed",
+      "featured",
+    ] as const),
+    category: values.get("category") ?? "",
+    sourceKeyword: values.get("sourceKeyword") ?? "",
+    cohortStage: choice("cohortStage", [
+      "collected",
+      "prepared",
+      "homepage",
+      "detail",
+      "copy",
+    ] as const),
+    collectedFrom: values.get("collectedFrom") ?? "",
+    collectedTo: values.get("collectedTo") ?? "",
+    publishedFrom: values.get("publishedFrom") ?? "",
+    publishedTo: values.get("publishedTo") ?? "",
+    attention: choice("attention", ["missing_cover"] as const),
+    customerVisible: choice("customerVisible", ["visible", "hidden"] as const),
+    hasUsage: choice("hasUsage", ["used", "unused"] as const),
+    sort:
+      choice("sort", ["created", "likes", "published", "usage"] as const) ||
+      "created",
+    query: values.get("query") ?? "",
+    offset: Math.max(0, Number(values.get("offset")) || 0),
+  };
+}
 
 /** 服务端 `curation:batch` 的 items 上限，前端先拦住，避免整批白跑一趟。 */
 const MAX_BATCH = 50;
@@ -110,20 +163,11 @@ export function mediaReady(video: CollectedViralVideo) {
 
 // 内容状态 6 态的界面文案（方案 P1）；词典本体在 ui/vocabulary，
 // 这里只做「底层状态 → 状态 id」的判定。
-const CONTENT_STATE_LABELS: Record<string, string> = {
-  pending_prepare: "待准备",
-  prepare_failed: "准备失败",
-  ready: "可上首页",
-  featured: "首页展示中",
-  removed: "已下架",
-  blocked: "已屏蔽",
-};
-
 /** 内容状态 6 态判定（方案 P1）：归档 × 首页 × 可见性收敛为一个运营状态。 */
 export function contentStateOf(video: CollectedViralVideo): string {
   if (video.content_state) return video.content_state;
-  if (video.availability === "UNAVAILABLE") return "blocked";
-  if (video.availability === "HIDDEN") return "removed";
+  if (video.availability === "UNAVAILABLE" || video.availability === "HIDDEN")
+    return "removed";
   if (
     video.homepage_featured &&
     mediaReady(video) &&
@@ -657,7 +701,8 @@ function pendingCopy(action: PendingAction, count: number) {
   if (action === "block")
     return {
       title: `屏蔽 ${count} 条视频`,
-      description: "屏蔽后客户不可见，后续采集不再重新展示。请填写操作原因。",
+      description:
+        "屏蔽后客户不可见，并保留标记防止再次采集。30天内可在回收站恢复，已导入项目的素材保留。请填写操作原因。",
     };
   if (action === "hide")
     return {
@@ -704,6 +749,8 @@ function batchNotice(action: BatchAction, count: number) {
 }
 
 function curationNotice(action: Action) {
+  if (action === "block")
+    return "视频已屏蔽，后续不再采集；30天内可在回收站恢复。";
   if (action === "delete") return "视频已删除，前台不再展示。";
   if (action === "pin") return "已置顶，客户端首页将优先展示该视频。";
   if (action === "unpin") return "已取消置顶，该视频恢复默认首页顺序。";
@@ -711,12 +758,16 @@ function curationNotice(action: Action) {
 }
 
 export function ViralVideosPage({
-  readOnly = false,
+  readOnly: actorReadOnly = false,
   initialSearch,
   initialVideo,
+  initialListQuery = "",
+  onScopeChange,
   onCustomer,
 }: {
   readOnly?: boolean;
+  initialListQuery?: string;
+  onScopeChange?: (scope: Record<string, string>) => void;
   onCustomer?: (userId: string) => void;
   initialVideo?: Pick<CollectedViralVideo, "platform" | "video_id"> | null;
   initialSearch?: {
@@ -738,8 +789,16 @@ export function ViralVideosPage({
     hasUsage: "",
     query: "",
     offset: 0,
+    cohortStage: "",
+    collectedFrom: "",
+    collectedTo: "",
+    attention: "",
+    libraryStatus: "",
+    ...initialVideoFilters(initialListQuery),
   });
-  const [search, setSearch] = useState("");
+  const readOnly = actorReadOnly || Boolean(filters.cohortStage);
+  const [categories, setCategories] = useState<string[]>([]);
+  const [search, setSearch] = useState(filters.query);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -848,7 +907,16 @@ export function ViralVideosPage({
       const result = await listCollectedViralVideos({
         platform: filters.platform || undefined,
         contentState: filters.status || undefined,
-        category: filters.category || undefined,
+        status: filters.libraryStatus || undefined,
+        category:
+          filters.category === "__uncategorized__"
+            ? undefined
+            : filters.category || undefined,
+        uncategorized: filters.category === "__uncategorized__",
+        cohortStage: filters.cohortStage || undefined,
+        collectedFrom: filters.collectedFrom || undefined,
+        collectedTo: filters.collectedTo || undefined,
+        attention: filters.attention || undefined,
         sourceKeyword: filters.sourceKeyword || undefined,
         publishedFrom: filters.publishedFrom || undefined,
         publishedTo: filters.publishedTo || undefined,
@@ -864,6 +932,7 @@ export function ViralVideosPage({
       });
       if (current !== generation.current) return;
       setItems(result.items);
+      setCategories(result.categories ?? []);
       setSelected((currentSelected) =>
         currentSelected.filter((key) =>
           result.items.some((video) => rowKey(video) === key),
@@ -893,6 +962,14 @@ export function ViralVideosPage({
       previewGeneration.current += 1;
     };
   }, [load]);
+
+  useEffect(() => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(filters)) {
+      if (value !== "" && value !== 0) query.set(key, String(value));
+    }
+    onScopeChange?.({ listQuery: query.toString() });
+  }, [filters, onScopeChange]);
 
   useEffect(() => {
     void loadOverview();
@@ -1037,33 +1114,22 @@ export function ViralVideosPage({
         patchUpstream(rows, { archive_status: "PENDING" });
       } else if (
         rows.length === 1 &&
-        (action === "hide" || action === "block" || action === "restore")
+        (action === "hide" || action === "restore")
       ) {
         await updateViralVideoAvailability(
           rows[0].platform,
           rows[0].video_id,
-          action === "hide"
-            ? "HIDDEN"
-            : action === "block"
-              ? "UNAVAILABLE"
-              : "AVAILABLE",
+          action === "hide" ? "HIDDEN" : "AVAILABLE",
           reason,
           key,
         );
         setNotice(
           action === "hide"
             ? "视频已隐藏，前台不再展示。"
-            : action === "block"
-              ? "视频已屏蔽，后续采集不会重新展示。"
-              : "视频已恢复可用，前台可正常浏览。",
+            : "视频已恢复到库中，客户可见性仍按发布时间、素材和首页排期判断。",
         );
         patchUpstream(rows, {
-          availability:
-            action === "hide"
-              ? "HIDDEN"
-              : action === "block"
-                ? "UNAVAILABLE"
-                : "AVAILABLE",
+          availability: action === "hide" ? "HIDDEN" : "AVAILABLE",
         });
       } else if (rows.length > 1 && isBatchAction(action)) {
         const result = await curateViralVideosBatch(
@@ -1086,7 +1152,7 @@ export function ViralVideosPage({
         for (const item of result.items) {
           patchUpstream(
             rows.filter((row) => rowKey(row) === rowKey(item)),
-            action === "delete"
+            action === "delete" || action === "block"
               ? null
               : item.queued_for_preparation
                 ? {
@@ -1097,19 +1163,16 @@ export function ViralVideosPage({
                   }
                 : {
                     homepage_featured: item.homepage_featured,
-                    ...(action === "hide" || action === "block"
+                    ...(action === "hide"
                       ? {
-                          availability:
-                            action === "hide"
-                              ? ("HIDDEN" as const)
-                              : ("UNAVAILABLE" as const),
+                          availability: "HIDDEN" as const,
                         }
                       : {}),
                   },
           );
         }
       } else {
-        if (action === "hide" || action === "block" || action === "restore")
+        if (action === "hide" || action === "restore")
           throw new Error("此操作请逐条执行。");
         const result = await curateViralVideo(
           rows[0],
@@ -1125,7 +1188,8 @@ export function ViralVideosPage({
               : "已排队准备素材，尚未上首页；准备成功后自动展示。"
             : curationNotice(action),
         );
-        if (action === "delete") patchUpstream(rows, null);
+        if (action === "delete" || action === "block")
+          patchUpstream(rows, null);
         else if (action === "feature")
           patchUpstream(rows, {
             homepage_featured: result.homepage_featured,
@@ -1141,7 +1205,7 @@ export function ViralVideosPage({
           patchUpstream(rows, { homepage_rank: null });
       }
       setPending(null);
-      if (action === "delete") {
+      if (action === "delete" || action === "block") {
         setDetail(null);
         setPreview(null);
         setSelected([]);
@@ -1349,6 +1413,8 @@ export function ViralVideosPage({
           onClick={() => {
             setUpstreamOpen(false);
             setRecycleOpen(false);
+            if (filters.status === "blocked")
+              changeFilters({ status: "", offset: 0 });
           }}
         >
           视频库
@@ -1601,6 +1667,30 @@ export function ViralVideosPage({
         role="tabpanel"
         aria-label="视频库列表"
       >
+        {filters.cohortStage || filters.libraryStatus || filters.attention ? (
+          <PageBanner tone="notice">
+            {filters.cohortStage
+              ? `采集批次 ${filters.collectedFrom} 至 ${filters.collectedTo} · ${CONTENT_FUNNEL_LABELS[filters.cohortStage]}（历史里程碑，包含已屏蔽内容）`
+              : filters.attention === "missing_cover"
+                ? "缺少归档封面"
+                : "概览库存分段"}
+            <button
+              type="button"
+              onClick={() =>
+                changeFilters({
+                  cohortStage: "",
+                  collectedFrom: "",
+                  collectedTo: "",
+                  libraryStatus: "",
+                  attention: "",
+                  offset: 0,
+                })
+              }
+            >
+              清除概览筛选
+            </button>
+          </PageBanner>
+        ) : null}
         <details className="admin-viral-advanced">
           <summary>高级筛选</summary>
           <div className="admin-toolbar admin-viral-toolbar">
@@ -1613,19 +1703,12 @@ export function ViralVideosPage({
                 }
               >
                 <option value="">全部分类</option>
-                {Array.from(
-                  new Set([
-                    ...(controls?.keywords ?? []).map((k) => k.category),
-                    ...items.map((v) => v.category),
-                  ]),
-                )
-                  .filter(Boolean)
-                  .sort()
-                  .map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
+                <option value="__uncategorized__">未分类</option>
+                {categories.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
               </select>
             </label>
             <label>
@@ -1678,7 +1761,7 @@ export function ViralVideosPage({
             </label>
           </div>
           <p className="admin-hint">
-            客户列表按实际采集周快照的发布窗口及素材、可用状态判断；来源未知的历史视频不会被猜测归入关键词。
+            未上首页的视频只在发布后七天内出现在客户列表；首页展示按排期判断。来源未知的历史视频不会被猜测归入关键词。
           </p>
         </details>
         <div className="admin-viral-filters">
@@ -1698,15 +1781,19 @@ export function ViralVideosPage({
             label="状态筛选"
             options={[
               { value: "", label: "全部状态" },
-              { value: "pending_prepare", label: "待准备" },
-              { value: "prepare_failed", label: "准备失败" },
-              { value: "ready", label: "可上首页" },
-              { value: "featured", label: "首页展示中" },
-              { value: "removed", label: "已下架" },
-              { value: "blocked", label: "已屏蔽" },
+              ...Object.entries(CONTENT_STATE_LABELS).map(([value, label]) => ({
+                value,
+                label,
+              })),
             ]}
             value={filters.status}
-            onChange={(value) => changeFilters({ status: value, offset: 0 })}
+            onChange={(value) => {
+              changeFilters({ status: value as Filters["status"], offset: 0 });
+              if (value === "blocked") {
+                setRecycleOpen(true);
+                setUpstreamOpen(false);
+              }
+            }}
           />
           <SegmentedGroup
             disabled={saving}
@@ -1980,6 +2067,7 @@ export function ViralVideosPage({
               <ViralVideoBusinessDetails
                 key={rowKey(detailVideo)}
                 video={detailVideo}
+                readOnly={readOnly}
                 onCustomer={onCustomer}
                 onRelated={(video) => setDetail({ key: rowKey(video), video })}
               />
