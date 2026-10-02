@@ -210,7 +210,7 @@ class ControlGenerationRecord(BaseModel):
     record_id: str
     short_ref: str | None = None
     root_task_id: str | None = None
-    retry_path: str | None = None
+    retry_path: Literal["ARCHIVE_ONLY", "PRE_PROVIDER"] | None = None
     handling_advice: str | None = None
     record_type: GenerationRecordType
     operation: str

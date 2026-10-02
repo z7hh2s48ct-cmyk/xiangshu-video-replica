@@ -9157,7 +9157,7 @@ export interface components {
       /** Root Task Id */
       root_task_id?: string | null;
       /** Retry Path */
-      retry_path?: string | null;
+      retry_path?: ("ARCHIVE_ONLY" | "PRE_PROVIDER") | null;
       /** Handling Advice */
       handling_advice?: string | null;
       /**
