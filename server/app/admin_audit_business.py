@@ -293,7 +293,9 @@ def business_detail(detail: object) -> dict[str, Any] | None:
             }
             if after:
                 result["new"] = after
-    return result or None
+    # Correlation metadata does not reconstruct missing historical business snapshots.
+    # Empty/null before-and-after values must retain the explicit unknown boundary.
+    return result if any(result.get(key) for key in ("old", "new", "changes")) else None
 
 
 def audit_business_fields(

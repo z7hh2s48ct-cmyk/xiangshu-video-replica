@@ -61,7 +61,7 @@ REGISTER_PATH = "/api/customer/register"
 # 及其后的 REFUND 调账、1800 部署垫片、20260924T0000 交易号唯一索引、
 # 20260924T0100 口播提交时刻列、20260924T0200 口播隐藏偏好表、20260926T0000
 # 爆款首页策展排行与 20260925T1400 计费触发器追加修复（api_metadata 的 PENDING 期写入）。
-HEAD_REVISION = "20261002T0430_payment_methods"
+HEAD_REVISION = "20261002T0800_alert_delivery_rules"
 PRIOR_REVISION = "20260912T1353_customer_discounts"
 
 # A policy-valid password (>= MIN_PASSWORD_LENGTH, not blank). Never a secret.
