@@ -28,7 +28,7 @@ from app.character_reference_matching import (
 )
 from app.characters import character_is_available, get_project_main_character, read_character
 from app.db_portable import BusinessConnection
-from app.external_calls import endpoint_from_url, recorded_urlopen
+from app.external_calls import CallTimer, endpoint_from_url, record_external_call, recorded_urlopen
 from app.net_safety import FAKE_IP_NETWORK
 from app.permissions import (
     require_asset_access,
@@ -558,6 +558,42 @@ class UrllibApilioTransport:
         return self._open(Request(url, headers=dict(headers), method="GET"), timeout_seconds=60)
 
     def get(self, url: str) -> tuple[bytes, Mapping[str, str]]:
+        timer = CallTimer()
+        observation: dict[str, Any] = {}
+        common = {
+            "provider": "apilio",
+            "endpoint": "images/output/download",
+            "method": "GET",
+            "url": url,
+        }
+        try:
+            body, headers = self._get_output(url, observation)
+        except (ImageProviderFailed, RetryableImageProviderFailed) as exc:
+            cause = exc.__cause__ or exc
+            record_external_call(
+                **common,
+                outcome="TIMEOUT"
+                if isinstance(cause, TimeoutError)
+                else "PROVIDER_ERROR"
+                if observation.get("http_status") is not None
+                else "NETWORK_ERROR",
+                latency_ms=timer.elapsed_ms(),
+                exception_type=type(cause).__name__,
+                error_message=str(exc),
+                **observation,
+            )
+            raise
+        record_external_call(
+            **common,
+            outcome="SUCCEEDED",
+            latency_ms=timer.elapsed_ms(),
+            response_body=body,
+            binary_response=True,
+            **observation,
+        )
+        return body, headers
+
+    def _get_output(self, url: str, observation: dict[str, Any]) -> tuple[bytes, Mapping[str, str]]:
         hostname, connect_ips = require_safe_provider_download_url(url)
         parsed = urlsplit(url)
         target = parsed.path or "/"
@@ -599,7 +635,12 @@ class UrllibApilioTransport:
                 },
             )
             response = connection.getresponse()
+            observation.update(
+                http_status=response.status, response_headers=dict(response.headers.items())
+            )
             if not 200 <= response.status < 300:
+                if response.status >= 400:
+                    observation["response_body"] = response.read(MAX_PROVIDER_IMAGE_BYTES + 1)
                 if response.status == 429 or response.status >= 500:
                     # 下载段是只读取回已生成的产出图——付费生成此时已完成并
                     # 计费，重发提交会产生第二笔费用，因此绝不打 rate_limited
@@ -635,6 +676,7 @@ class UrllibApilioTransport:
             # 记录每次调用的原始响应，图片失败原因可在管理端查到（方案 P0-9）。
             body, headers, _status = recorded_urlopen(
                 request,
+                expected_json=request.get_method() == "POST",
                 timeout=timeout_seconds or self.timeout_seconds,
                 provider="apilio",
                 endpoint=endpoint_from_url(request.full_url),

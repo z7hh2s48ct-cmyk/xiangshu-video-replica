@@ -10,8 +10,8 @@ import {
   reconcileFirstFrameTask,
   retryGenerationRecord,
 } from "../api.admin";
-import { AnalysisDiagnosticPanel } from "./AnalysisDiagnosticPanel";
-import { AnalysisRecentFailures } from "./AnalysisRecentFailures";
+import { CopyDiagnosticReference } from "./CopyDiagnosticReference";
+import { FailureDiagnostics } from "./FailureDiagnostics";
 import { RecordCallsPanel } from "./RecordCallsPanel";
 import { RecordThumbnail } from "./RecordThumbnail";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
@@ -29,6 +29,7 @@ import {
   GENERATION_RECORD_TYPE_LABELS,
   GENERATION_STATUS_FILTERS,
   GENERATION_STATUS_LABELS,
+  generationStatusGroupLabel,
   labelFrom,
   parseUtcTimestamp,
 } from "./ui/vocabulary";
@@ -54,10 +55,6 @@ const FAILURE_STATUSES = new Set([
   "CANCELED",
   "CANCELLED",
 ]);
-// 重试入口只给「可能被服务端放行」的两种终局：普通失败（PRE_PROVIDER 路径）
-// 与提交结果待核对（点击即得「先核对再重试」的中文指引）。用户主动取消无需
-// 重试，UNKNOWN 该先完成核对，都不给入口。
-const RETRY_ENTRY_STATUSES = new Set(["FAILED", SUBMISSION_UNCERTAIN]);
 // 有产物可预览的记录类型里，视频类用 <video> 播放成片，其余用 <img> 展示
 // 生成图（与服务端媒体端点的「有内容可读」类型一致）。
 const VIDEO_PREVIEW_TYPES = new Set([VIDEO_RECORD_TYPE, "ORAL_VIDEO"]);
@@ -66,12 +63,16 @@ export function GenerationRecordsPage({
   initialStatus = "",
   initialRecordType = "",
   initialUsername = "",
+  initialUserId = "",
+  initialTaskRef = "",
   readOnly = false,
 }: {
   initialStatus?: string;
   initialRecordType?: string;
   /** 客户详情「生成记录」页签带入的客户用户名（方案 P1 六页签）。 */
   initialUsername?: string;
+  initialUserId?: string;
+  initialTaskRef?: string;
   readOnly?: boolean;
 }) {
   const [items, setItems] = useState<AdminGenerationRecord[]>([]);
@@ -82,6 +83,7 @@ export function GenerationRecordsPage({
   const [summary, setSummary] =
     useState<AdminGenerationRecordSummaryCards | null>(null);
   const [username, setUsername] = useState(initialUsername);
+  const [projectName, setProjectName] = useState("");
   // 意图带来的单状态（如总览「失败任务」的 FAILED）归一到所属组：
   // 下拉只表达 5 组，单值会让 select 显示成空选项。
   const [status, setStatus] = useState(() =>
@@ -93,15 +95,16 @@ export function GenerationRecordsPage({
   );
   const [recordType, setRecordType] = useState(initialRecordType);
   const [failurePhase, setFailurePhase] = useState("");
-  const [taskRef, setTaskRef] = useState("");
+  const [taskRef, setTaskRef] = useState(initialTaskRef);
   const [createdFrom, setCreatedFrom] = useState("");
   const [createdTo, setCreatedTo] = useState("");
   const [filters, setFilters] = useState({
     username: initialUsername,
+    projectName: "",
     status,
     recordType: initialRecordType,
     failurePhase: "",
-    taskRef: "",
+    taskRef: initialTaskRef,
     createdFrom: "",
     createdTo: "",
   });
@@ -159,7 +162,9 @@ export function GenerationRecordsPage({
       setError("");
       setItems([]);
       const query = {
+        userId: initialUserId || undefined,
         username: filters.username || undefined,
+        projectName: filters.projectName || undefined,
         status: filters.status || undefined,
         recordType: filters.recordType || undefined,
         failurePhase: filters.failurePhase || undefined,
@@ -192,7 +197,7 @@ export function GenerationRecordsPage({
         setLoading(false);
       }
     }
-  }, [filters, offset]);
+  }, [filters, offset, initialUserId]);
 
   useEffect(() => {
     void loadRecords();
@@ -263,11 +268,11 @@ export function GenerationRecordsPage({
         retryKeyRef.current.key,
       );
       retryKeyRef.current = null;
-      // 两条重试路径的运营含义不同：重新入队（PENDING）会再次暂扣积分，
+      // 两条重试路径的运营含义不同：重新入队（PENDING）会再次生成冻结积分，
       // 恢复存档（SUCCEEDED）沿用原有计费——分开说清，避免误读成重复扣费。
       setNotice(
         result.status === "PENDING"
-          ? `已重新入队：任务 ${result.task_id} 将重新生成，并按规则再次暂扣积分。`
+          ? `已重新入队：任务 ${result.task_id} 将重新生成，并按规则再次生成冻结积分。`
           : `已恢复存档：任务 ${result.task_id} 将重试归档，沿用原有结果与计费。`,
       );
       setPendingRetry(null);
@@ -401,12 +406,10 @@ export function GenerationRecordsPage({
       {view === "diagnostics" ? (
         <>
           {/* 方案 P1：页签默认先给近 7 天失败清单；交接了具体任务编号时让位。 */}
-          {diagnosticTaskId ? null : (
-            <AnalysisRecentFailures onDiagnose={setDiagnosticTaskId} />
-          )}
-          <AnalysisDiagnosticPanel
+          <FailureDiagnostics
             initialTaskId={diagnosticTaskId}
-            key={`diagnostics:${diagnosticTaskId}`}
+            userId={initialUserId}
+            readOnly={readOnly}
           />
         </>
       ) : (
@@ -429,6 +432,7 @@ export function GenerationRecordsPage({
               setOffset(0);
               setFilters({
                 username,
+                projectName,
                 status,
                 recordType,
                 // 类型切走时草稿可能残留阶段值，不能让它泄漏进查询。
@@ -441,7 +445,7 @@ export function GenerationRecordsPage({
             }}
           >
             <label>
-              账号
+              公司名 / 账号
               <input
                 aria-label="生成账号"
                 value={username}
@@ -449,9 +453,18 @@ export function GenerationRecordsPage({
               />
             </label>
             <label>
+              项目
+              <input
+                aria-label="生成项目"
+                value={projectName}
+                onChange={(event) => setProjectName(event.target.value)}
+              />
+            </label>
+            <label>
               任务编号
               <input
                 aria-label="生成任务编号"
+                placeholder="任务编号、8 位错误编号或第三方任务号；重号用服务商:凭证"
                 value={taskRef}
                 onChange={(event) => setTaskRef(event.target.value)}
               />
@@ -577,79 +590,23 @@ export function GenerationRecordsPage({
                     {summary.failure_reasons.length === 0 ? "—" : ""}
                   </strong>
                   <small>
-                    {summary.failure_reasons
+                    {businessFailureCounts(summary)
                       .slice(0, 3)
-                      .map(
-                        (reason) =>
-                          `${reason.error_code ?? "未记录"} × ${reason.count}`,
-                      )
-                      .join(" · ")}
+                      .map(([label, count]) => `${label} · ${count}`)
+                      .join("；")}
                   </small>
                 </article>
               </div>
-              <h2>当前筛选聚合</h2>
               <p>
-                {summary.counts
-                  .map(
-                    (row) =>
-                      `${labelFrom(GENERATION_RECORD_TYPE_LABELS, row.record_type)} ${labelFrom(
-                        GENERATION_STATUS_LABELS,
-                        row.status,
-                      )} ${row.count}`,
-                  )
-                  .join("、")}
+                {businessStatusCounts(summary)
+                  .map(([label, count]) => `${label} ${count}`)
+                  .join(" · ")}
               </p>
-              {summary.failure_reasons.length > 0 ? (
+              {businessFailureCounts(summary).length > 0 ? (
                 <ul>
-                  {summary.failure_reasons.map((reason) => (
-                    <li
-                      key={`${reason.record_type}-${reason.error_code}-${reason.failure_phase}-${reason.reason}`}
-                    >
-                      <span>
-                        {/* 先说是哪类任务（聚合已覆盖全部类型），紧接着放分类与处理人：
-                            运营扫一眼就知道这条该归谁办，再往下才是环节与错误码这类
-                            排查细节。 */}
-                        {labelFrom(
-                          GENERATION_RECORD_TYPE_LABELS,
-                          reason.record_type,
-                        )}
-                        {" · "}
-                        {reason.failure_category && reason.failure_owner ? (
-                          <>
-                            {labelFrom(
-                              FAILURE_OWNER_LABELS,
-                              reason.failure_owner,
-                            )}
-                            {" · "}
-                            {labelFrom(
-                              FAILURE_CATEGORY_LABELS,
-                              reason.failure_category,
-                            )}
-                            {" · "}
-                          </>
-                        ) : null}
-                        {reason.failure_phase
-                          ? labelFrom(
-                              FAILURE_PHASE_LABELS,
-                              reason.failure_phase,
-                            )
-                          : "未知阶段"}
-                        {" · "}
-                        {reason.error_code ?? "未记录错误码"}
-                        {/* retryable 缺失（如取帧/评分族无此语义）时省掉这段，
-                            不能把「未判定」写成「不可重试」。 */}
-                        {reason.retryable != null
-                          ? ` · ${reason.retryable ? "可重试" : "不可重试"}`
-                          : ""}
-                        {" · "}
-                        {reason.count} 条
-                      </span>
-                      {reason.reason ? (
-                        <small>上游说明：{reason.reason}</small>
-                      ) : null}
-                      {reason.advice ? (
-                        <small>修复建议：{reason.advice}</small>
-                      ) : null}
+                  {businessFailureCounts(summary).map(([label, count]) => (
+                    <li key={label}>
+                      {label} · {count} 次
                     </li>
                   ))}
                 </ul>
@@ -667,30 +624,39 @@ export function GenerationRecordsPage({
               ariaLabel="用户生成记录列表"
               headers={
                 <>
+                  <th>缩略图</th>
                   <th>时间</th>
-                  <th>用户</th>
+                  <th>客户</th>
                   <th>项目</th>
                   <th>生成类型</th>
-                  <th>服务 / 模型</th>
                   <th>状态</th>
                   <th>耗时</th>
                   <th>扣减积分</th>
-                  <th>成本</th>
+                  {!readOnly ? <th>成本（¥）</th> : null}
                   {/* 预览列随审计员整体隐藏：媒体端点对 auditor 一律 403。 */}
-                  {!readOnly ? <th>结果预览</th> : null}
-                  <th>结果 / 错误</th>
+                  <th>操作</th>
                 </>
               }
             >
               {items.map((item) => (
                 <tr key={`${item.record_type}-${item.record_id}`}>
+                  <td>
+                    <RecordThumbnail
+                      active={!readOnly && item.has_preview}
+                      compact
+                      recordId={item.record_id}
+                      recordType={item.record_type}
+                    />
+                  </td>
                   <td>{formatDateTime(item.created_at)}</td>
-                  <td>{item.username}</td>
+                  <td>
+                    <strong>{item.display_name || item.username}</strong>
+                    <small>{item.username}</small>
+                  </td>
                   <td>{item.project_name ?? "—"}</td>
                   <td>
                     {labelFrom(GENERATION_RECORD_TYPE_LABELS, item.record_type)}
                   </td>
-                  <td>{formatProvider(item)}</td>
                   <td>
                     <StatusBadge
                       tone={
@@ -701,7 +667,7 @@ export function GenerationRecordsPage({
                             : "warn"
                       }
                     >
-                      {labelFrom(GENERATION_STATUS_LABELS, item.status)}
+                      {generationStatusGroupLabel(item.status)}
                     </StatusBadge>
                   </td>
                   <td>{formatDuration(item.created_at, item.completed_at)}</td>
@@ -710,61 +676,34 @@ export function GenerationRecordsPage({
                       ? `${item.charged_credits} 积分`
                       : "0 积分"}
                   </td>
-                  <td>{formatProviderCost(item)}</td>
-                  {!readOnly ? (
-                    <td className="admin-generation-records__preview-cell">
-                      {item.has_preview ? (
-                        <button
-                          aria-label={`${previewActionLabel(item)} ${item.record_id}`}
-                          className="admin-generation-records__preview"
-                          type="button"
-                          onClick={() => void openPreview(item)}
-                        >
-                          {previewActionLabel(item)}
-                        </button>
-                      ) : (
-                        <span className="admin-generation-records__preview-empty">
-                          无产物
-                        </span>
-                      )}
-                    </td>
-                  ) : null}
+                  {!readOnly ? <td>{formatProviderCost(item)}</td> : null}
                   <td>
+                    {!readOnly ? (
+                      <div className="admin-generation-records__preview-cell">
+                        {item.has_preview ? (
+                          <button
+                            aria-label={`${previewActionLabel(item)} ${item.record_id}`}
+                            className="admin-generation-records__preview"
+                            type="button"
+                            onClick={() => void openPreview(item)}
+                          >
+                            {previewActionLabel(item)}
+                          </button>
+                        ) : (
+                          <span className="admin-generation-records__preview-empty">
+                            无产物
+                          </span>
+                        )}
+                      </div>
+                    ) : null}
                     <details>
-                      {/* biome-ignore lint/a11y/noStaticElementInteractions: summary 是 details 的固有开关（原生可聚焦、可键盘切换），这里只借用它的点击做懒加载登记。 */}
-                      <summary
-                        onClick={(event) => {
-                          // 懒加载只在「即将打开」时触发：关闭动作不清空已加载内容。
-                          const container =
-                            event.currentTarget.closest("details");
-                          if (
-                            container instanceof HTMLDetailsElement &&
-                            container.open
-                          ) {
-                            return;
-                          }
-                          const key = recordKey(item);
-                          setOpenedDetails((prev) => {
-                            if (prev.has(key)) return prev;
-                            const next = new Set(prev);
-                            next.add(key);
-                            return next;
-                          });
-                        }}
-                      >
+                      <summary>
                         <span>查看详情</span>
-                        <small>{formatResult(item)}</small>
                       </summary>
                       {/* 方案 P1：详情分「概要 / 技术详情」——运营先看结论
                           （分类、谁来处理、积分是否退回），编号、凭证、状态码
                           这类排查字段收进折叠区。 */}
                       <dl>
-                        {item.error_message ? (
-                          <>
-                            <dt>错误说明</dt>
-                            <dd>{item.error_message}</dd>
-                          </>
-                        ) : null}
                         {item.failure_category && item.failure_owner ? (
                           <>
                             <dt>原因分类</dt>
@@ -800,24 +739,99 @@ export function GenerationRecordsPage({
                             <dd>{item.advice}</dd>
                           </>
                         ) : null}
-                        {item.credits_refunded != null ? (
+                        {FAILURE_STATUSES.has(item.status) ? (
                           <>
-                            <dt>积分退回</dt>
+                            <dt>本轮积分退回</dt>
                             <dd>
-                              {item.credits_refunded ? "已退回" : "未退回"}
+                              {item.credits_refunded == null
+                                ? "无法核验"
+                                : item.credits_refunded
+                                  ? "已退回"
+                                  : "未退回"}
                             </dd>
                           </>
                         ) : null}
                       </dl>
                       <details className="admin-generation-records__technical">
-                        <summary>技术详情</summary>
+                        {/* biome-ignore lint/a11y/noStaticElementInteractions: summary 是 details 的固有开关（原生可聚焦、可键盘切换），这里只借用它的点击做懒加载登记。 */}
+                        <summary
+                          onClick={(event) => {
+                            // 懒加载只在「即将打开」时触发：关闭动作不清空已加载内容。
+                            const container =
+                              event.currentTarget.closest("details");
+                            if (
+                              container instanceof HTMLDetailsElement &&
+                              container.open
+                            ) {
+                              return;
+                            }
+                            const key = recordKey(item);
+                            setOpenedDetails((prev) => {
+                              if (prev.has(key)) return prev;
+                              const next = new Set(prev);
+                              next.add(key);
+                              return next;
+                            });
+                          }}
+                        >
+                          技术详情
+                        </summary>
                         <dl>
+                          <dt>服务 / 模型</dt>
+                          <dd>{formatProvider(item)}</dd>
+                          <dt>原始状态</dt>
+                          <dd>
+                            {labelFrom(GENERATION_STATUS_LABELS, item.status)}（
+                            {item.status}）
+                          </dd>
+                          {!readOnly && item.error_message ? (
+                            <>
+                              <dt>错误说明</dt>
+                              <dd>{item.error_message}</dd>
+                            </>
+                          ) : null}
                           <dt>记录编号</dt>
-                          <dd>{item.record_id}</dd>
+                          <dd>
+                            <CopyDiagnosticReference
+                              value={item.record_id}
+                              label="任务编号"
+                            />
+                          </dd>
+                          {item.short_ref ? (
+                            <>
+                              <dt>错误编号</dt>
+                              <dd>
+                                <CopyDiagnosticReference
+                                  value={item.short_ref}
+                                  label="错误编号"
+                                />
+                              </dd>
+                            </>
+                          ) : null}
+                          {item.root_task_id ? (
+                            <>
+                              <dt>主记录</dt>
+                              <dd>
+                                <CopyDiagnosticReference
+                                  value={item.root_task_id}
+                                  label="主记录编号"
+                                />
+                              </dd>
+                            </>
+                          ) : null}
                           <dt>结果引用</dt>
                           <dd>{item.result_reference ?? "—"}</dd>
                           <dt>供应商任务凭证</dt>
-                          <dd>{item.provider_reference ?? "—"}</dd>
+                          <dd>
+                            {item.provider_reference ? (
+                              <CopyDiagnosticReference
+                                value={item.provider_reference}
+                                label="供应商任务凭证"
+                              />
+                            ) : (
+                              "—"
+                            )}
+                          </dd>
                           <dt>错误码</dt>
                           <dd>{item.error_code ?? "—"}</dd>
                           {item.provider_error_code ? (
@@ -826,7 +840,7 @@ export function GenerationRecordsPage({
                               <dd>{item.provider_error_code}</dd>
                             </>
                           ) : null}
-                          {item.provider_message ? (
+                          {!readOnly && item.provider_message ? (
                             <>
                               <dt>服务商原话</dt>
                               <dd>{item.provider_message}</dd>
@@ -845,7 +859,7 @@ export function GenerationRecordsPage({
                               <dd>{item.upstream_status}</dd>
                             </>
                           ) : null}
-                          {item.upstream_reason ? (
+                          {!readOnly && item.upstream_reason ? (
                             <>
                               <dt>上游说明</dt>
                               <dd>{item.upstream_reason}</dd>
@@ -858,19 +872,18 @@ export function GenerationRecordsPage({
                               : "正常"}
                           </dd>
                         </dl>
+                        <RecordCallsPanel
+                          active={openedDetails.has(recordKey(item))}
+                          readOnly={readOnly}
+                          recordId={item.record_id}
+                          recordType={item.record_type}
+                        />
                       </details>
-                      <RecordThumbnail
-                        active={openedDetails.has(recordKey(item))}
-                        recordId={item.record_id}
-                        recordType={item.record_type}
-                      />
-                      <RecordCallsPanel
-                        active={openedDetails.has(recordKey(item))}
-                        readOnly={readOnly}
-                        recordId={item.record_id}
-                        recordType={item.record_type}
-                      />
-                      {item.record_type === ANALYSIS_RECORD_TYPE ? (
+
+                      {item.status === "FAILED" ||
+                      item.status === "ARCHIVE_FAILED" ||
+                      item.status === "SUBMISSION_UNCERTAIN" ||
+                      item.status === "UNKNOWN" ? (
                         <button
                           className="admin-diagnostics__jump"
                           type="button"
@@ -897,21 +910,38 @@ export function GenerationRecordsPage({
                           重新对账
                         </button>
                       ) : null}
+                      {item.handling_advice ? (
+                        <p>{item.handling_advice}</p>
+                      ) : null}
+                      {!readOnly &&
+                      item.record_type === VIDEO_RECORD_TYPE &&
+                      item.retry_path ? (
+                        <button
+                          aria-label={`重试任务 ${item.record_id}`}
+                          type="button"
+                          onClick={() => {
+                            setPendingRetry(item);
+                            setRetryError("");
+                          }}
+                        >
+                          {item.retry_path === "ARCHIVE_ONLY"
+                            ? "恢复归档（不重新扣费）"
+                            : "重试任务"}
+                        </button>
+                      ) : null}
+                      {!readOnly &&
+                      item.retry_path === "ARCHIVE_ONLY" &&
+                      !FAILURE_STATUSES.has(item.status) ? (
+                        <button
+                          aria-label={`复制客户说明 ${item.record_id}`}
+                          type="button"
+                          onClick={() => void copyCustomerNote(item)}
+                        >
+                          复制客户说明
+                        </button>
+                      ) : null}
                       {!readOnly && FAILURE_STATUSES.has(item.status) ? (
                         <div className="admin-generation-records__actions">
-                          {item.record_type === VIDEO_RECORD_TYPE &&
-                          RETRY_ENTRY_STATUSES.has(item.status) ? (
-                            <button
-                              aria-label={`重试任务 ${item.record_id}`}
-                              type="button"
-                              onClick={() => {
-                                setPendingRetry(item);
-                                setRetryError("");
-                              }}
-                            >
-                              重试任务
-                            </button>
-                          ) : null}
                           <button
                             aria-label={`补偿积分 ${item.record_id}`}
                             type="button"
@@ -960,7 +990,7 @@ export function GenerationRecordsPage({
         confirmLabel="重新对账"
         description={
           pendingReconcile
-            ? `将向图像供应商核对任务 ${pendingReconcile.record_id} 的真实提交结果：已受理则回到生成队列继续处理；未成功则置为失败并退回暂扣积分。同一任务重复对账会被拒绝。`
+            ? `将向图像供应商核对任务 ${pendingReconcile.record_id} 的真实提交结果：已受理则回到生成队列继续处理；未成功则置为失败并退回生成冻结积分。同一任务重复对账会被拒绝。`
             : undefined
         }
         error={reconcileError}
@@ -980,7 +1010,9 @@ export function GenerationRecordsPage({
         confirmLabel="重新入队"
         description={
           pendingRetry
-            ? `将按现有规则尝试原地重试任务 ${pendingRetry.record_id}：未触达服务商的失败会重新生成并再次暂扣积分；已付款结果会改为重试归档、不重新计费。服务端不满足条件时会拒绝并说明原因。`
+            ? pendingRetry.retry_path === "ARCHIVE_ONLY"
+              ? `恢复任务 ${pendingRetry.record_id} 的已有成片归档，不重新生成或扣费；服务端再次核对条件。`
+              : `将按原规则重新入队任务 ${pendingRetry.record_id} 并预扣积分；服务端再次核对未触达服务商条件，不满足时拒绝。`
             : undefined
         }
         error={retryError}
@@ -1112,13 +1144,6 @@ function formatProviderCost(item: AdminGenerationRecord): string {
   return formatFen(fen);
 }
 
-function formatResult(item: AdminGenerationRecord): string {
-  if (item.record_data_status === "CORRUPTED") {
-    return "记录数据损坏";
-  }
-  return item.error_code ?? item.result_reference ?? "—";
-}
-
 /** 失败记录的客户说明文案（方案 P1-4「复制给客户的说明」）。
  *
  *  面向客户/客服的口吻：只说发生了什么、怎么处理、积分怎么算，不出现内部
@@ -1126,22 +1151,19 @@ function formatResult(item: AdminGenerationRecord): string {
 function customerNoteFor(item: AdminGenerationRecord): string {
   const lines = [
     "【生成任务处理说明】",
-    `任务编号：${item.record_id}`,
+    `任务编号：${item.short_ref ?? item.record_id}`,
     `业务类型：${labelFrom(GENERATION_RECORD_TYPE_LABELS, item.record_type)}`,
   ];
-  if (item.failure_category) {
-    lines.push(
-      `失败分类：${labelFrom(FAILURE_CATEGORY_LABELS, item.failure_category)}`,
-    );
-  }
-  if (item.advice) {
-    lines.push(`处理建议：${item.advice}`);
-  }
+  lines.push(
+    item.retry_path === "ARCHIVE_ONLY"
+      ? "任务情况：成片已生成，保存尚未完成，我们正在核对保存状态。"
+      : "任务情况：本次任务未完成，我们正在核对任务和结果。后续以确认结果为准。",
+  );
   lines.push(
     item.credits_refunded === true
-      ? "积分处理：本次消耗的积分已退回，请查收。"
+      ? "积分处理：已确认本轮任务积分退回，请核对账户记录。"
       : item.credits_refunded === false
-        ? "积分处理：本次消耗的积分将按流程退回或补偿，请留意后续通知。"
+        ? "积分处理：本轮积分尚未退回，需核对账户记录；后续处理以核对结果为准。"
         : "积分处理：请与客服核对本次消耗的积分。",
   );
   return lines.join("\n");
@@ -1171,4 +1193,28 @@ function previewActionLabel(item: AdminGenerationRecord): string {
 
 function previewTitle(item: AdminGenerationRecord): string {
   return VIDEO_PREVIEW_TYPES.has(item.record_type) ? "成片预览" : "生成图预览";
+}
+
+function businessStatusCounts(
+  summary: AdminGenerationRecordSummaryCards,
+): Array<[string, number]> {
+  const counts = new Map<string, number>();
+  for (const row of summary.counts) {
+    const label = generationStatusGroupLabel(row.status);
+    counts.set(label, (counts.get(label) ?? 0) + row.count);
+  }
+  return [...counts];
+}
+
+function businessFailureCounts(
+  summary: AdminGenerationRecordSummaryCards,
+): Array<[string, number]> {
+  const counts = new Map<string, number>();
+  for (const reason of summary.failure_reasons) {
+    const label =
+      FAILURE_CATEGORY_LABELS[reason.failure_category ?? "UNCLASSIFIED"] ??
+      "未归类";
+    counts.set(label, (counts.get(label) ?? 0) + reason.count);
+  }
+  return [...counts].sort((a, b) => b[1] - a[1]);
 }

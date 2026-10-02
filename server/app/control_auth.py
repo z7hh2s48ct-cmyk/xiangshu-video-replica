@@ -154,10 +154,30 @@ def control_auth_error() -> HTTPException:
     )
 
 
+def require_control_super_admin(conn: Database, actor: CurrentUser) -> CurrentUser:
+    # 技术权限须由数据库当前标记决定，不能仅依赖前端隐藏或旧代理身份。
+    row = conn.execute(
+        "SELECT is_super_admin, is_active FROM users WHERE id = %s", (actor.id,)
+    ).fetchone()
+    if actor.role != "admin" or row is None or not row["is_active"] or not row["is_super_admin"]:
+        raise HTTPException(
+            403,
+            detail={"code": "SUPER_ADMIN_REQUIRED", "message": "此功能仅超级管理员可用。"},
+        )
+    return actor
+
+
+def get_control_super_admin(
+    conn: Database, actor: Annotated[CurrentUser, Depends(get_control_route_user)]
+) -> CurrentUser:
+    return require_control_super_admin(conn, actor)
+
+
 def _valid_sha256_digest(value: str) -> bool:
     return len(value) == 64 and all(character in string.hexdigits for character in value)
 
 
 ControlUser = Annotated[CurrentUser, Depends(get_control_route_user)]
+ControlSuperUser = Annotated[CurrentUser, Depends(get_control_super_admin)]
 # Bulk exports (CSV dumps) — write-level authority on the read path.
 ControlWriter = Annotated[CurrentUser, Depends(get_control_writer)]

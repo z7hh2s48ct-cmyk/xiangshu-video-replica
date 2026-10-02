@@ -133,13 +133,13 @@ describe("AlertSettingsPanel（P2-4 告警口径设置）", () => {
     expect(screen.getByRole("button", { name: "保存告警设置" })).toBeEnabled();
   });
 
-  it("tells operators the recipient is not an external push channel", async () => {
+  it("explains configured email dispatch and unconfigured delivery", async () => {
     installFetch({});
     render(<AlertSettingsPanel />);
 
     // 服务端没有任何推送通道：文案不能让运营以为设了接收人就会收到短信 / 邮件。
     expect(
-      await screen.findByText(/暂不发送短信或邮件等外部提醒/),
+      await screen.findByText(/后台按已配置的邮件通道主动通知/),
     ).toBeInTheDocument();
   });
 

@@ -6,7 +6,9 @@ import {
   billingStates,
   billingUnit,
 } from "./billingTypes";
+import { CostQueues } from "./CostQueues";
 import { SourceActionPanorama } from "./SourceActionPanorama";
+import { TabBar } from "./ui/TabBar";
 import { formatDateTime, formatFen } from "./ui/vocabulary";
 import { ViralCollectionBilling } from "./ViralCollectionBilling";
 
@@ -148,11 +150,12 @@ const providerLabels: Record<string, string> = {
 const initialFilters = (
   attention: BillingAttention = "",
   start?: string,
+  end?: string,
 ): BillingFilters => ({
   // 带着总览「今日」待办进来时只看今天，条数才与待办计数一致；
   // 队列卡「历史待核对」用 initialStart 放宽起点。
   start: start ?? (attention ? today() : `${today().slice(0, 7)}-01`),
-  end: today(),
+  end: end ?? today(),
   grain: "day",
   user_id: "",
   username: "",
@@ -173,20 +176,27 @@ export function BillingEconomics({
   view = "profit",
   initialAttention = "",
   initialStart,
+  initialEnd,
+  initialQuery = "",
+  onQueryChange,
 }: {
   readOnly?: boolean;
   view?: "profit" | "cost";
   initialAttention?: BillingAttention;
   initialStart?: string;
+  initialEnd?: string;
+  initialQuery?: string;
+  onQueryChange?: (query: string) => void;
 }) {
   const costView = view === "cost";
   const detailRequest = useRef(0);
-  const [filters, setFilters] = useState(() =>
-    initialFilters(initialAttention, initialStart),
-  );
-  const [query, setQuery] = useState(() =>
-    params(initialFilters(initialAttention, initialStart)),
-  );
+  const seed = () =>
+    ({
+      ...initialFilters(initialAttention, initialStart, initialEnd),
+      ...Object.fromEntries(new URLSearchParams(initialQuery)),
+    }) as BillingFilters;
+  const [filters, setFilters] = useState(seed);
+  const [query, setQuery] = useState(() => params(seed()));
   const [revision, setRevision] = useState(0);
   const [offset, setOffset] = useState(0);
   const [catalog, setCatalog] = useState<BillingService[]>([]);
@@ -199,8 +209,7 @@ export function BillingEconomics({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
-  const [showCollections, setShowCollections] = useState(false);
-  const [showActions, setShowActions] = useState(false);
+  const [section, setSection] = useState("details");
   const name = (key: string) =>
     catalog.find((item) => item.service === key)?.name ?? key;
   useEffect(() => {
@@ -291,24 +300,40 @@ export function BillingEconomics({
       className="admin-panel billing-economics"
       aria-label={costView ? "成本明细" : "利润总览"}
     >
-      <button
-        type="button"
-        onClick={() => setShowCollections((value) => !value)}
-      >
-        {showCollections ? "收起采集账单" : "查看爆款采集账单"}
-      </button>
-      {showCollections && <ViralCollectionBilling key={query} query={query} />}
-      <button type="button" onClick={() => setShowActions((value) => !value)}>
-        {showActions ? "收起操作全景" : "查看操作全景"}
-      </button>
-      {showActions && (
-        <SourceActionPanorama key={query} query={query} name={name} />
+      <TabBar
+        ariaLabel="成本核对内容页签"
+        active={section}
+        onChange={setSection}
+        items={[
+          { id: "details", label: "账务明细" },
+          { id: "collections", label: "采集账单" },
+          { id: "actions", label: "业务全景" },
+        ]}
+      />
+      {costView && (
+        <CostQueues
+          query={query}
+          revision={revision}
+          onPick={(next) => {
+            const merged = {
+              ...filters,
+              ...Object.fromEntries(new URLSearchParams(next)),
+            } as BillingFilters;
+            setFilters(merged);
+            setQuery(next);
+            setOffset(0);
+            setSection("details");
+            onQueryChange?.(next);
+          }}
+        />
       )}
       <form
         className="billing-economics-filters"
         onSubmit={(event) => {
           event.preventDefault();
-          setQuery(params(filters));
+          const next = params(filters);
+          setQuery(next);
+          onQueryChange?.(next);
           setOffset(0);
           setRevision((value) => value + 1);
         }}
@@ -456,176 +481,190 @@ export function BillingEconomics({
       {error && <p role="alert">{error}</p>}
       {notice && <p role="status">{notice}</p>}
       {busy && <p role="status">正在计算…</p>}
-      {report && (
-        <>
-          <p>{report.basis} 时区：北京时间。</p>
-          <p>
-            供应商调用记录 {report.totals.provider_call_count ?? 0}{" "}
-            次；客户采集计费 {report.totals.shared_collection_charge_count ?? 0}{" "}
-            笔。 客户累计用量（含免费）：{usage(report.totals.seconds ?? 0)} 秒
-            / {usage(report.totals.images ?? 0)} 张 /{" "}
-            {usage(report.totals.calls ?? 0)} 次。平台承担的已确认成本：
-            {money(report.totals.platform_cost_fen ?? 0)}。
-          </p>
-          {(report.totals.legacy_cost_count ?? 0) +
-            (report.totals.legacy_settlement_count ?? 0) >
-            0 && (
-            <p role="status">
-              该日期及客户范围内有 {report.totals.legacy_cost_count ?? 0}{" "}
-              条历史成本、{report.totals.legacy_settlement_count ?? 0}{" "}
-              条历史结算待核对。
-            </p>
-          )}
-          <div className="economics-kpis economics-kpis--four">
-            {(costView
-              ? [
-                  ["已确认成本", money(report.totals.known_cost_fen ?? 0)],
-                  ["平台承担成本", money(report.totals.platform_cost_fen ?? 0)],
-                  ["待核对成本", `${report.totals.unknown_cost_count} 项`],
-                  ["生成次数", `${report.totals.operation_count} 次`],
-                ]
-              : [
-                  ["确认收入", money(report.totals.known_revenue_fen ?? 0)],
-                  ["已确认成本", money(report.totals.known_cost_fen ?? 0)],
-                  ["利润", money(report.totals.profit_fen)],
-                  ["净扣积分", String(report.totals.charged_credits ?? 0)],
-                ]
-            ).map(([label, value]) => (
-              <article key={label}>
-                <span>{label}</span>
-                <strong>{value}</strong>
-              </article>
-            ))}
-          </div>
-          <p className="admin-hint">
-            待核对成本 {report.totals.unknown_cost_count} 项 · 待核对收入{" "}
-            {report.totals.unknown_revenue_count} 项 · 未结算{" "}
-            {report.totals.pending_count} 项
-          </p>
-          <div className="admin-table-scroll">
-            <table
-              className="admin-data-table billing-economics-table"
-              aria-label="周期汇总"
-            >
-              <thead>
-                <tr>
-                  <th>周期起始</th>
-                  <th>账务记录数</th>
-                  <th>{costView ? "秒 / 张 / 次" : "净扣积分"}</th>
-                  {!costView && <th>确认收入</th>}
-                  <th>已确认成本</th>
-                  <th>{costView ? "平台承担成本" : "利润"}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {report.periods.map((row) => (
-                  <tr key={row.period}>
-                    <td>{row.period}</td>
-                    <td>{row.operation_count}</td>
-                    <td>
-                      {costView
-                        ? `${usage(row.seconds ?? 0)} / ${usage(row.images ?? 0)} / ${usage(row.calls ?? 0)}`
-                        : row.charged_credits}
-                    </td>
-                    {!costView && <td>{money(row.known_revenue_fen ?? 0)}</td>}
-                    <td>{money(row.known_cost_fen ?? 0)}</td>
-                    <td>
-                      {money(
-                        costView
-                          ? (row.platform_cost_fen ?? 0)
-                          : row.profit_fen,
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </>
+      {section === "collections" && (
+        <ViralCollectionBilling key={query} query={query} />
       )}
-      {operations && (
-        <>
-          <h3>生成账务明细（共 {operations.total} 条）</h3>
-          {!costView && (
-            <p className="admin-hint">
-              按售价折合以受理时的积分售价计算；确认收入按所消费积分对应的实际充值金额分摊，
-              赠送或免费加款不产生确认收入。利润按确认收入减成本计算。
+      {section === "actions" && (
+        <SourceActionPanorama key={query} query={query} name={name} />
+      )}
+      <div hidden={section !== "details"}>
+        {report && (
+          <>
+            <p>{report.basis} 时区：北京时间。</p>
+            <p>
+              供应商调用记录 {report.totals.provider_call_count ?? 0}{" "}
+              次；客户采集计费{" "}
+              {report.totals.shared_collection_charge_count ?? 0} 笔。
+              客户累计用量（含免费）：{usage(report.totals.seconds ?? 0)} 秒 /{" "}
+              {usage(report.totals.images ?? 0)} 张 /{" "}
+              {usage(report.totals.calls ?? 0)} 次。平台承担的已确认成本：
+              {money(report.totals.platform_cost_fen ?? 0)}。
             </p>
-          )}
-          <div className="admin-table-scroll">
-            <table
-              className="admin-data-table billing-economics-table"
-              aria-label="生成明细"
-            >
-              <thead>
-                <tr>
-                  <th>用户</th>
-                  <th>业务</th>
-                  <th>状态</th>
-                  <th>用量</th>
-                  {!costView && (
-                    <>
-                      <th>积分</th>
-                      <th>按售价折合</th>
-                      <th>确认收入</th>
-                    </>
-                  )}
-                  <th>成本</th>
-                  {!costView && <th>利润</th>}
-                  <th>详情</th>
-                </tr>
-              </thead>
-              <tbody>
-                {operations.items.map((row) => (
-                  <tr key={row.id}>
-                    <td>{row.username}</td>
-                    <td>{name(row.service)}</td>
-                    <td>{billingStates[row.state]}</td>
-                    <td>
-                      {usage(row.actual_units, "处理中")}{" "}
-                      {billingUnit[row.unit]}
-                    </td>
+            {(report.totals.legacy_cost_count ?? 0) +
+              (report.totals.legacy_settlement_count ?? 0) >
+              0 && (
+              <p role="status">
+                该日期及客户范围内有 {report.totals.legacy_cost_count ?? 0}{" "}
+                条历史成本、{report.totals.legacy_settlement_count ?? 0}{" "}
+                条历史结算待核对。
+              </p>
+            )}
+            <div className="economics-kpis economics-kpis--four">
+              {(costView
+                ? [
+                    ["已确认成本", money(report.totals.known_cost_fen ?? 0)],
+                    [
+                      "平台承担成本",
+                      money(report.totals.platform_cost_fen ?? 0),
+                    ],
+                    ["待核对成本", `${report.totals.unknown_cost_count} 项`],
+                    ["生成次数", `${report.totals.operation_count} 次`],
+                  ]
+                : [
+                    ["确认收入", money(report.totals.known_revenue_fen ?? 0)],
+                    ["已确认成本", money(report.totals.known_cost_fen ?? 0)],
+                    ["利润", money(report.totals.profit_fen)],
+                    ["净扣积分", String(report.totals.charged_credits ?? 0)],
+                  ]
+              ).map(([label, value]) => (
+                <article key={label}>
+                  <span>{label}</span>
+                  <strong>{value}</strong>
+                </article>
+              ))}
+            </div>
+            <p className="admin-hint">
+              待核对成本 {report.totals.unknown_cost_count} 项 · 待核对收入{" "}
+              {report.totals.unknown_revenue_count} 项 · 未结算{" "}
+              {report.totals.pending_count} 项
+            </p>
+            <div className="admin-table-scroll">
+              <table
+                className="admin-data-table billing-economics-table"
+                aria-label="周期汇总"
+              >
+                <thead>
+                  <tr>
+                    <th>周期起始</th>
+                    <th>账务记录数</th>
+                    <th>{costView ? "秒 / 张 / 次" : "净扣积分"}</th>
+                    {!costView && <th>确认收入</th>}
+                    <th>已确认成本</th>
+                    <th>{costView ? "平台承担成本" : "利润"}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {report.periods.map((row) => (
+                    <tr key={row.period}>
+                      <td>{row.period}</td>
+                      <td>{row.operation_count}</td>
+                      <td>
+                        {costView
+                          ? `${usage(row.seconds ?? 0)} / ${usage(row.images ?? 0)} / ${usage(row.calls ?? 0)}`
+                          : row.charged_credits}
+                      </td>
+                      {!costView && (
+                        <td>{money(row.known_revenue_fen ?? 0)}</td>
+                      )}
+                      <td>{money(row.known_cost_fen ?? 0)}</td>
+                      <td>
+                        {money(
+                          costView
+                            ? (row.platform_cost_fen ?? 0)
+                            : row.profit_fen,
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+        {operations && (
+          <>
+            <h3>生成账务明细（共 {operations.total} 条）</h3>
+            {!costView && (
+              <p className="admin-hint">
+                按售价折合以受理时的积分售价计算；确认收入按所消费积分对应的实际充值金额分摊，
+                赠送或免费加款不产生确认收入。利润按确认收入减成本计算。
+              </p>
+            )}
+            <div className="admin-table-scroll">
+              <table
+                className="admin-data-table billing-economics-table"
+                aria-label="生成明细"
+              >
+                <thead>
+                  <tr>
+                    <th>用户</th>
+                    <th>业务</th>
+                    <th>状态</th>
+                    <th>用量</th>
                     {!costView && (
                       <>
-                        <td>{row.charged_credits}</td>
-                        <td>{money(row.nominal_revenue_fen)}</td>
-                        <td>{money(row.revenue_fen)}</td>
+                        <th>积分</th>
+                        <th>按售价折合</th>
+                        <th>确认收入</th>
                       </>
                     )}
-                    <td>{money(row.cost_fen)}</td>
-                    {!costView && <td>{money(row.profit_fen)}</td>}
-                    <td>
-                      <button
-                        type="button"
-                        onClick={() => void inspect(row.id)}
-                      >
-                        查看详情
-                      </button>
-                    </td>
+                    <th>成本</th>
+                    {!costView && <th>利润</th>}
+                    <th>详情</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {operations.total === 0 && <p>这个时间范围没有生成记录。</p>}
-          <button
-            type="button"
-            disabled={busy || offset === 0}
-            onClick={() => setOffset((value) => Math.max(0, value - 100))}
-          >
-            上一页
-          </button>
-          <span>第 {Math.floor(offset / 100) + 1} 页</span>
-          <button
-            type="button"
-            disabled={busy || offset + 100 >= operations.total}
-            onClick={() => setOffset((value) => value + 100)}
-          >
-            下一页
-          </button>
-        </>
-      )}
-      {detail && snapshot && (
+                </thead>
+                <tbody>
+                  {operations.items.map((row) => (
+                    <tr key={row.id}>
+                      <td>{row.username}</td>
+                      <td>{name(row.service)}</td>
+                      <td>{billingStates[row.state]}</td>
+                      <td>
+                        {usage(row.actual_units, "处理中")}{" "}
+                        {billingUnit[row.unit]}
+                      </td>
+                      {!costView && (
+                        <>
+                          <td>{row.charged_credits}</td>
+                          <td>{money(row.nominal_revenue_fen)}</td>
+                          <td>{money(row.revenue_fen)}</td>
+                        </>
+                      )}
+                      <td>{money(row.cost_fen)}</td>
+                      {!costView && <td>{money(row.profit_fen)}</td>}
+                      <td>
+                        <button
+                          type="button"
+                          onClick={() => void inspect(row.id)}
+                        >
+                          查看详情
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {operations.total === 0 && <p>这个时间范围没有生成记录。</p>}
+            <button
+              type="button"
+              disabled={busy || offset === 0}
+              onClick={() => setOffset((value) => Math.max(0, value - 100))}
+            >
+              上一页
+            </button>
+            <span>第 {Math.floor(offset / 100) + 1} 页</span>
+            <button
+              type="button"
+              disabled={busy || offset + 100 >= operations.total}
+              onClick={() => setOffset((value) => value + 100)}
+            >
+              下一页
+            </button>
+          </>
+        )}
+      </div>
+      {detail && snapshot && section === "details" && (
         <aside aria-label="生成核算详情">
           <button
             type="button"
@@ -656,7 +695,7 @@ export function BillingEconomics({
           </p>
           <p>
             预算 {usage(detail.budget_units)} {billingUnit[detail.unit]}，实际{" "}
-            {usage(detail.actual_units)} {billingUnit[detail.unit]}；暂扣{" "}
+            {usage(detail.actual_units)} {billingUnit[detail.unit]}；生成冻结{" "}
             {detail.reserved_credits}，净扣 {detail.charged_credits} 积分。
           </p>
           <p>

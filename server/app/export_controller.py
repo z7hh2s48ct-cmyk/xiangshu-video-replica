@@ -13,6 +13,7 @@ import gzip
 import io
 import logging
 from datetime import UTC, date, datetime, timedelta
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
@@ -170,5 +171,131 @@ def export_statistics(request: ExportRequest, actor: AdminWriter) -> Response:
         headers={
             "Content-Disposition": f'attachment; filename="{filename}"',
             "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+class SummaryExportRequest(BaseModel):
+    kind: Literal["business", "funds"]
+    start_date: date
+    end_date: date
+
+
+@router.post("/reports/summary/export")
+def export_summary(request: SummaryExportRequest, actor: AdminWriter) -> Response:
+    """直接复用看板事实与日界；未知金额留中文标识，避免导出变成零。"""
+    from app.admin_dashboard_routes import business_overview, funds_summary
+
+    if request.end_date < request.start_date or (request.end_date - request.start_date).days > 366:
+        raise HTTPException(422, detail="报表区间应为有效日期且最多 366 天")
+    report = (
+        business_overview(request.start_date, request.end_date, actor)
+        if request.kind == "business"
+        else funds_summary(request.start_date, request.end_date, actor)
+    )
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(["区间开始", report["start"], "区间结束", report["end"], "时区", "北京时间"])
+    writer.writerow(["说明", "金额单位为分；预收余额与对账异常为导出时点数，非历史月末快照"])
+
+    def write(label: str, value: object) -> None:
+        writer.writerow(
+            [
+                spreadsheet_safe_cell(label),
+                "待核对" if value is None else spreadsheet_safe_cell(value),
+            ]
+        )
+
+    labels = {
+        "recharge_fen": "充值实收（分）",
+        "revenue_fen": "已知确认收入（分）",
+        "cost_fen": "已知成本（分）",
+        "gross_fen": "毛利（分）",
+        "margin_pct": "毛利率（%）",
+        "paying_customers": "付费客户数",
+        "new_paying_customers": "新增付费客户",
+        "unknown_cost_count": "成本待核对数",
+        "unknown_revenue_count": "收入待核对数",
+        "pending_count": "待结算数",
+        "legacy_cost_count": "历史未关联成本记录数",
+        "legacy_settlement_count": "历史未关联结算记录数",
+        "prepaid_credits": "当前预收积分余额",
+        "prepaid_fen": "当前预收折合金额（分）",
+        "orders": "实付订单数",
+        "unverified_manual_orders": "历史人工订单待核对数（未计实收）",
+        "unverified_manual_fen": "历史人工订单记录金额（待核对，分）",
+        "offline_fen": "线下收款（分）",
+        "grant_credits": "赠送积分",
+        "refund_credits": "退款扣减积分",
+        "refund_fen": "退款折合金额（分）",
+        "net_fen": "净收入（分）",
+        "reconciliation_problems": "当前对账异常数",
+    }
+    metrics = report["metrics"] if request.kind == "business" else report
+    for field, label in labels.items():
+        if field in metrics:
+            write(label, metrics[field])
+    if request.kind == "business":
+        write(
+            "客单价（分）",
+            (
+                metrics["recharge_fen"] / metrics["paying_customers"]
+                if metrics["paying_customers"]
+                else None
+            ),
+        )
+        writer.writerow(["按日趋势", "已知确认收入（分）", "已知成本（分）", "毛利率（%）"])
+        for item in report["daily"]:
+            writer.writerow(
+                [
+                    item["day"],
+                    item["known_revenue_fen"],
+                    item["known_cost_fen"],
+                    "待核对" if item["margin_pct"] is None else item["margin_pct"],
+                ]
+            )
+        writer.writerow(["业务构成", "已知确认收入（分）", "已知成本（分）", "待核对成本数"])
+        for item in report["modules"]:
+            writer.writerow(
+                [
+                    spreadsheet_safe_cell(item["label"]),
+                    item["revenue_fen"],
+                    item["cost_fen"],
+                    item["unknown_cost_count"],
+                ]
+            )
+        writer.writerow(["客户编号", "客户名称", "用户名", "确认收入（分）"])
+        for item in report["top_customers"]:
+            writer.writerow(
+                [
+                    spreadsheet_safe_cell(item[k])
+                    for k in ("user_id", "display_name", "username", "revenue_fen")
+                ]
+            )
+    else:
+        writer.writerow(["支付方式", "实付订单数", "金额（分）"])
+        names = {
+            "alipay": "支付宝",
+            "wxpay": "微信",
+            "offline": "线下转账",
+            "unknown": "支付方式未知",
+        }
+        for item in report["by_method"]:
+            writer.writerow([names[item["method"]], item["orders"], item["amount_fen"]])
+    logger.info(
+        "summary export: actor=%s kind=%s range=%s..%s",
+        actor.username,
+        request.kind,
+        request.start_date,
+        request.end_date,
+    )
+    filename = f"{request.kind}_{request.start_date}_{request.end_date}.csv"
+    return Response(
+        output.getvalue().encode("utf-8-sig"),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "no-store",
         },
     )

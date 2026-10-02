@@ -13,6 +13,9 @@ admin_adjustments.admin_user_id references users.id — there is no separate
 
 from __future__ import annotations
 
+import csv
+import io
+import json
 import os
 import secrets
 import uuid
@@ -157,6 +160,8 @@ def _insert_adjustment(
     source_type: str,
     reason: str,
     created_at: str | None = None,
+    balance_before: int | None = None,
+    balance_after: int | None = None,
 ) -> str:
     """Create one PAID adjustment-style order plus its audit row.
 
@@ -195,6 +200,9 @@ def _insert_adjustment(
     if created_at is not None:
         columns += ", created_at"
         values += (created_at,)
+    if balance_before is not None or balance_after is not None:
+        columns += ", balance_before, balance_after"
+        values += (balance_before, balance_after)
     placeholders = ", ".join(["%s"] * len(values))
     conn.execute(
         f"INSERT INTO admin_adjustments ({columns}) VALUES ({placeholders})",
@@ -202,6 +210,99 @@ def _insert_adjustment(
     )
     conn.commit()
     return adjustment_id
+
+
+@pytest.mark.pg
+def test_audit_business_summary_sensitive_direction_and_csv_share_evidence(client, route_state):
+    headers = _admin_session(client, "admin_u")
+    with psycopg.connect(route_state, autocommit=True) as conn:
+        conn.execute("UPDATE users SET display_name='审计客户公司' WHERE id='customer_u'")
+        adjustment = _insert_adjustment(
+            conn,
+            actor="admin_u",
+            target="customer_u",
+            source_type="LEDGER_CORRECTION",
+            reason="扣减核对",
+            balance_before=30,
+            balance_after=20,
+        )
+        metadata = {
+            "old": {
+                "points_per_yuan": 100,
+                "discount_basis_points": 10000,
+                "api_key": "synthetic-never-expose",
+            },
+            "new": {"points_per_yuan": 200, "discount_basis_points": 9000},
+            "reason": "报价核对",
+            "request_id": "audit-business-request",
+        }
+        conn.execute(
+            "INSERT INTO audit_logs(id,actor_user_id,action,entity_type,entity_id,metadata_json) "
+            "VALUES ('business-price','admin_u','customer_pricing.update',"
+            "'customer_pricing','1',%s)",
+            (json.dumps(metadata),),
+        )
+        conn.execute(
+            "INSERT INTO audit_logs(id,action,entity_type,entity_id,metadata_json) "
+            "VALUES ('system-only','worker.heartbeat','runtime_settings','1','{}')"
+        )
+    listed = client.get(AUDIT_PATH, headers=headers, params={"event_group": "funds,pricing"}).json()
+    byid = {row["event_id"]: row for row in listed["items"]}
+    debit = byid[adjustment]
+    assert debit["event_label"] == "退款扣减" and debit["sensitive"] is True
+    assert debit["target_label"] == "审计客户公司"
+    assert debit["change_summary"] == "可用积分：30 积分 → 20 积分"
+    price = byid["business-price"]
+    assert price["event_label"] == "修改全局报价" and price["sensitive"] is True
+    assert "10折 → 9折" in price["change_summary"]
+    assert "100 积分 → 200 积分" in price["change_summary"]
+    assert "synthetic-never-expose" not in json.dumps(listed)
+    exported = client.get(
+        AUDIT_PATH + ".csv", headers=headers, params={"event_group": "funds,pricing"}
+    )
+    assert exported.status_code == 200, exported.text
+    rows = {row["reason"]: row for row in csv.DictReader(io.StringIO(exported.text))}
+    for item in [debit, price]:
+        row = rows[item["reason"]]
+        assert row["event_label"] == item["event_label"]
+        assert row["target_label"] == item["target_label"]
+        assert row["change_summary"] == item["change_summary"]
+        assert row["sensitive"] == "True"
+    assert "synthetic-never-expose" not in exported.text
+    scoped = client.get(
+        AUDIT_PATH, headers=headers, params={"target_username": "审计客户公司"}
+    ).json()
+    assert scoped["total"] == 1 and scoped["items"][0]["event_id"] == adjustment
+    assert "system-only" not in {
+        row["event_id"] for row in client.get(AUDIT_PATH, headers=headers).json()["items"]
+    }
+
+
+def test_audit_business_snapshot_drops_nested_secret_fields_and_marks_missing_history():
+    from app.admin_audit_business import audit_business_fields, business_detail
+    from app.admin_audit_routes import EVENT_GROUPS
+
+    detail = business_detail(
+        {
+            "changes": {
+                "customer_unit_price": {
+                    "before": {
+                        "mode": "CUSTOM",
+                        "effective_unit_price_fen": 100,
+                        "api_key": "synthetic-private",
+                    },
+                    "after": {"mode": "DEFAULT", "effective_unit_price_fen": 90},
+                },
+                "api_key": {"before": "synthetic-private", "after": "synthetic-private"},
+            }
+        }
+    )
+    assert "synthetic-private" not in json.dumps(detail)
+    missing = audit_business_fields(
+        {"event_type": "provider_settings.update", "source_document_type": "provider_settings"},
+        EVENT_GROUPS,
+    )
+    assert "历史未记录" in missing["change_summary"]
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +596,7 @@ def test_list_audit_log_unions_all_audited_surfaces(client: TestClient, route_st
     data = response.json()
     types = {item["event_type"] for item in data["items"]}
     assert "ADMIN_ADJUSTMENT" in types
-    assert "ADMIN_DEVICE_DEVICE_ADMIN_UNBOUND" in types
+    assert "ADMIN_DEVICE_UNBIND" in types
     assert "ADMIN_SESSION_LOGOUT" in types
     assert "runtime_settings.update" in types
 

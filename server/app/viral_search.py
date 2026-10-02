@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -97,6 +98,7 @@ def run_viral_search_bounded(
     cursor: str | None = None,
     time_range: str = "week",
     deadline_seconds: float = SEARCH_DEADLINE_SECONDS,
+    billing_batch_id: str | None = None,
 ) -> ViralSearchPage:
     """把一次搜索外呼关进带总时限的工作线程（DNS 挂起也能按时返回）.
 
@@ -106,14 +108,20 @@ def run_viral_search_bounded(
     """
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="viral-search-bounded")
     try:
-        future = pool.submit(
-            run_viral_search,
-            client,
-            keyword=keyword,
-            platform=platform,
-            cursor=cursor,
-            time_range=time_range,
-        )
+
+        def search() -> ViralSearchPage:
+            from contextlib import nullcontext
+
+            from app.billing_meter import collection_billing_context
+
+            with (
+                collection_billing_context(billing_batch_id) if billing_batch_id else nullcontext()
+            ):
+                return run_viral_search(
+                    client, keyword=keyword, platform=platform, cursor=cursor, time_range=time_range
+                )
+
+        future = pool.submit(search)
         return future.result(timeout=deadline_seconds)
     finally:
         pool.shutdown(wait=False)
@@ -220,5 +228,27 @@ def persist_viral_search(
         video_ids=[video.video_id for video in videos],
         search_date=search_date,
         searched_at=searched_at,
+    )
+    # 计费轮次是一次真实交付的身份：重放不重复计数，重复搜索的新轮次单独计数。
+    operation = conn.execute(
+        "SELECT id FROM billing_operations WHERE user_id=%s AND service=%s "
+        "AND source_id=%s ORDER BY billing_round DESC LIMIT 1",
+        (user_id, SEARCH_SERVICE, source_id),
+    ).fetchone()
+    if operation is None:
+        raise RuntimeError("搜索交付缺少预留计费轮次")
+    conn.execute(
+        "INSERT INTO viral_search_events "
+        "(id,user_id,keyword,platform,search_date,searched_at,video_ids_json) "
+        "VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(id) DO NOTHING",
+        (
+            operation["id"],
+            user_id,
+            keyword,
+            platform,
+            search_date,
+            searched_at,
+            json.dumps(list(dict.fromkeys(video.video_id for video in videos))),
+        ),
     )
     finish_source(conn, source_id, units=1, succeeded=True, service=SEARCH_SERVICE)

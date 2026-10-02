@@ -8,6 +8,7 @@ import {
   getAlertsOverview,
   getFailureRateAlerts,
 } from "../api.admin";
+import { AlertDeliveryStatus } from "./AlertDeliveryStatus";
 import { AlertSettingsPanel } from "./AlertSettingsPanel";
 import { PageBanner } from "./ui/PageBanner";
 import { StatusBadge } from "./ui/StatusBadge";
@@ -110,14 +111,13 @@ export function AdminAlertsSection({
             {report.alerting ? (
               <PageBanner tone="error">
                 {`近 ${report.window_minutes} 分钟整体失败率 ${report.failure_rate_percent}%（${report.failed}/${report.total}），`}
-                已有类型越过 {report.threshold_percent}%
-                阈值，请技术负责人尽快处理下方标红项。
+                已有类型或错误码达到各自告警阈值，请技术负责人处理标记项。
                 {recipientName ? `指定负责人：${recipientName}。` : null}
               </PageBanner>
             ) : (
               <PageBanner tone="notice">
-                近 {report.window_minutes} 分钟没有类型越过{" "}
-                {report.threshold_percent}% 失败率阈值。
+                近 {report.window_minutes}{" "}
+                分钟没有类型或错误码达到各自告警阈值。
               </PageBanner>
             )}
 
@@ -152,7 +152,9 @@ export function AdminAlertsSection({
                         <td>
                           <GroupStatusBadge
                             group={group}
-                            minSample={report.min_sample_size}
+                            minSample={
+                              group.min_sample_size ?? report.min_sample_size
+                            }
                           />
                         </td>
                       </tr>
@@ -173,6 +175,7 @@ export function AdminAlertsSection({
           </>
         ) : null}
       </section>
+      <AlertDeliveryStatus />
       <AlertSettingsPanel readOnly={readOnly} onSaved={() => void load()} />
     </>
   );
@@ -191,6 +194,9 @@ function GroupStatusBadge({
 }) {
   if (group.exceeded) {
     return <StatusBadge tone="danger">超阈值</StatusBadge>;
+  }
+  if (group.top_errors.some((error) => error.exceeded)) {
+    return <StatusBadge tone="danger">错误码告警</StatusBadge>;
   }
   if (group.failed > 0 && group.total < minSample) {
     return <StatusBadge tone="warn">样本不足</StatusBadge>;
@@ -218,6 +224,9 @@ function ErrorGroup({ group }: { group: AdminFailureRateGroup }) {
               {error.error_code ?? "未记录错误码"}
               {" · "}
               {error.count} 条
+              {error.total !== undefined
+                ? ` / ${error.total}个本类型终局任务，失败率 ${error.failure_rate_percent}%（阈值${error.threshold_percent}%，最小样本${error.min_sample_size}）${error.exceeded ? " · 超阈值" : ""}`
+                : ""}
             </span>
             {error.category || error.owner ? (
               <small>

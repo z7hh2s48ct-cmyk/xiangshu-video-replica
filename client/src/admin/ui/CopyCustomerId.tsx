@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 
-export function CopyCustomerId({ value }: { value: string }) {
+export function CopyCustomerId({
+  value,
+  compact = false,
+}: {
+  value: string;
+  compact?: boolean;
+}) {
   const [notice, setNotice] = useState("");
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(timer.current), []);
@@ -16,15 +22,17 @@ export function CopyCustomerId({ value }: { value: string }) {
   }
   return (
     <span className="customer-id-copy">
-      <button
-        className="customer-id-copy__value"
-        type="button"
-        title={`${value} · 双击复制客户 ID`}
-        onClick={() => void copy()}
-        onDoubleClick={() => void copy()}
-      >
-        <code>{value}</code>
-      </button>
+      {!compact && (
+        <button
+          className="customer-id-copy__value"
+          type="button"
+          title={`${value} · 双击复制客户 ID`}
+          onClick={() => void copy()}
+          onDoubleClick={() => void copy()}
+        >
+          <code>{value}</code>
+        </button>
+      )}
       <button
         className="customer-id-copy__icon"
         type="button"

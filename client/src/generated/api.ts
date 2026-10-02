@@ -4,6 +4,23 @@
  */
 
 export interface paths {
+  "/api/task-references/{task_type}/{task_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Customer Task Reference */
+    get: operations["customer_task_reference_api_task_references__task_type___task_id__get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/projects/{project_id}/scripts": {
     parameters: {
       query?: never;
@@ -1689,6 +1706,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/control/recharge-orders/{order_no}/repair-ledger": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Repair Paid Order Ledger */
+    post: operations["repair_paid_order_ledger_api_control_recharge_orders__order_no__repair_ledger_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/payments/zpay/notify": {
     parameters: {
       query?: never;
@@ -1830,6 +1864,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/control/generation-records/{record_type}/{record_id}/history": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Generation Record History */
+    get: operations["read_generation_record_history_api_control_generation_records__record_type___record_id__history_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/control/generation-records": {
     parameters: {
       query?: never;
@@ -1845,6 +1896,23 @@ export interface paths {
      *     拆解记录。
      */
     get: operations["list_generation_records_api_control_generation_records_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/provider-errors/pending": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Pending Provider Errors */
+    get: operations["list_pending_provider_errors_api_control_provider_errors_pending_get"];
     put?: never;
     post?: never;
     delete?: never;
@@ -1887,6 +1955,23 @@ export interface paths {
      * @description 某条生成记录（或充值订单）的全部第三方接口调用，按时间顺序（方案 P0-9）。
      */
     get: operations["list_generation_record_calls_api_control_generation_records__record_type___record_id__calls_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/external-calls": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Global External Calls */
+    get: operations["list_global_external_calls_api_control_external_calls_get"];
     put?: never;
     post?: never;
     delete?: never;
@@ -2459,6 +2544,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/control/customers/{user_id}/overview": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Customer Overview
+     * @description Thirty Shanghai calendar days of ledger consumption and five mixed factual events.
+     */
+    get: operations["customer_overview_api_control_customers__user_id__overview_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/control/customers.csv": {
     parameters: {
       query?: never;
@@ -2815,9 +2920,8 @@ export interface paths {
      * Read Alerts Overview
      * @description 告警总览（方案 P2）：四类告警的首屏红黄条数据源。
      *
-     *     ``notify=1`` 时在有 danger 级告警且接收人配了邮箱的情况下，后台投递一封
-     *     摘要邮件（失败只记日志，不影响响应）；防打扰：同一小时只发一封，
-     *     以 ``alert_notify_dedup`` 里的最近投递时间为准。
+     *     notify=1时按类别配置投递；成功、失败、重试和去重写入alert_deliveries。
+     *     预算按月、其他类别按小时去重。
      */
     get: operations["read_alerts_overview_api_control_alerts_overview_get"];
     put?: never;
@@ -2864,6 +2968,26 @@ export interface paths {
      * @description 可作接收人的账号：启用中的 admin / auditor（读侧，普通管理员可见）。
      */
     get: operations["list_alert_recipient_candidates_api_control_settings_alerts_recipient_candidates_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/alerts/deliveries": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Read Alert Deliveries
+     * @description 通知元数据查询不发送邮件，也不返回邮箱/凭据。
+     */
+    get: operations["read_alert_deliveries_api_control_alerts_deliveries_get"];
     put?: never;
     post?: never;
     delete?: never;
@@ -3533,6 +3657,127 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/control/viral/keywords": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Keywords */
+    get: operations["read_keywords_api_control_viral_keywords_get"];
+    put?: never;
+    /** Add Viral Keyword */
+    post: operations["add_viral_keyword_api_control_viral_keywords_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Edit Keyword */
+    patch: operations["edit_keyword_api_control_viral_keywords_patch"];
+    trace?: never;
+  };
+  "/api/control/viral/keywords/batch": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Add Keywords */
+    post: operations["add_keywords_api_control_viral_keywords_batch_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/viral/operations/estimate": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Estimate Operation */
+    post: operations["estimate_operation_api_control_viral_operations_estimate_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/viral/collection/records": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Collection Records */
+    get: operations["read_collection_records_api_control_viral_collection_records_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/viral/collection/records/{batch_id}/tasks": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Collection Record Tasks */
+    get: operations["read_collection_record_tasks_api_control_viral_collection_records__batch_id__tasks_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/viral/platforms/probes": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Platform Probes */
+    get: operations["read_platform_probes_api_control_viral_platforms_probes_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/viral/platforms/{platform}/probe": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Probe Viral Platform */
+    post: operations["probe_viral_platform_api_control_viral_platforms__platform__probe_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/control/settings/viral": {
     parameters: {
       query?: never;
@@ -3549,23 +3794,6 @@ export interface paths {
     head?: never;
     /** Update Viral Runtime */
     patch: operations["update_viral_runtime_api_control_settings_viral_patch"];
-    trace?: never;
-  };
-  "/api/control/viral/keywords": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get?: never;
-    put?: never;
-    /** Add Viral Keyword */
-    post: operations["add_viral_keyword_api_control_viral_keywords_post"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
     trace?: never;
   };
   "/api/control/viral/keywords/delete": {
@@ -3602,6 +3830,23 @@ export interface paths {
     patch: operations["update_viral_video_availability_api_control_viral_videos__platform___video_id__availability_patch"];
     trace?: never;
   };
+  "/api/control/viral/collection/estimate": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Estimate Viral Collection */
+    get: operations["estimate_viral_collection_api_control_viral_collection_estimate_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/control/viral/collect": {
     parameters: {
       query?: never;
@@ -3613,11 +3858,12 @@ export interface paths {
     put?: never;
     /**
      * Collect Viral Now
-     * @description 立即采集：置 ``next_collection_at`` 为当前并直接入队一次关键词采集.
+     * @description 立即入队一次关键词采集，保留下一次定时执行计划.
      *
      *     与定时采集共用 ``enqueue_due_viral_collections``：关键词、平台、每词上限与
-     *     共享账单批次都在同一事务内建立；若已有在队/在制的采集任务则本次不重复入队
-     *     （与定时调度一致，避免并发采集互踩）。
+     *     共享账单批次都在同一事务内建立。手动触发不受月度预算门槛拦截（运营知情下的
+     *     动作）；若已有在队/在制的采集任务则如实回 409，而不是回「已入队」却什么都没排
+     *     ——事务随之回滚，不改下一次定时执行计划。
      */
     post: operations["collect_viral_now_api_control_viral_collect_post"];
     delete?: never;
@@ -3650,14 +3896,7 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /**
-     * Read Viral Search Discoveries
-     * @description 搜索发现每日汇总（运营视图）：按关键词×平台的热度分组.
-     *
-     *     一行 = 一个 (keyword, platform) 分组；`users`/`videos` 为去重覆盖数。
-     *     明细（谁在什么时候搜到什么）由客户侧 `GET /api/viral/search/discoveries`
-     *     与内容池 `GET /api/control/viral/videos` 交叉查看。
-     */
+    /** Read Viral Search Discoveries */
     get: operations["read_viral_search_discoveries_api_control_viral_discoveries_get"];
     put?: never;
     post?: never;
@@ -3685,6 +3924,23 @@ export interface paths {
      *     参数校验 422 抢在业务错误码之前返回）。
      */
     get: operations["read_viral_discovery_details_api_control_viral_discoveries_detail_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/viral/discoveries/customers": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Viral Discovery Customers */
+    get: operations["read_viral_discovery_customers_api_control_viral_discoveries_customers_get"];
     put?: never;
     post?: never;
     delete?: never;
@@ -3756,6 +4012,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/control/viral/videos/{platform}/{video_id}/details": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Viral Video Business Details */
+    get: operations["read_viral_video_business_details_api_control_viral_videos__platform___video_id__details_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/control/viral/videos/{platform}/{video_id}/preview": {
     parameters: {
       query?: never;
@@ -3807,6 +4080,57 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/control/viral/homepage": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Viral Homepage */
+    get: operations["read_viral_homepage_api_control_viral_homepage_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/viral/homepage/order": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    /** Reorder Viral Homepage */
+    put: operations["reorder_viral_homepage_api_control_viral_homepage_order_put"];
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/viral/homepage/{platform}/{video_id}/schedule": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Schedule Viral Homepage */
+    patch: operations["schedule_viral_homepage_api_control_viral_homepage__platform___video_id__schedule_patch"];
+    trace?: never;
+  };
   "/api/control/viral/overview": {
     parameters: {
       query?: never;
@@ -3822,6 +4146,23 @@ export interface paths {
      *     有 1200 条、列表翻不到」这类对不上的数。今日新增按上海日历归属。
      */
     get: operations["read_viral_library_overview_api_control_viral_overview_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/viral/content-overview": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Viral Content Overview */
+    get: operations["read_viral_content_overview_api_control_viral_content_overview_get"];
     put?: never;
     post?: never;
     delete?: never;
@@ -3862,6 +4203,57 @@ export interface paths {
     patch: operations["update_queue_mode_api_control_settings_queue_mode_patch"];
     trace?: never;
   };
+  "/api/control/viral/recycle": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Read Viral Recycle Bin */
+    get: operations["read_viral_recycle_bin_api_control_viral_recycle_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/viral/videos/{platform}/{video_id}/restore": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Restore Viral Video */
+    post: operations["restore_viral_video_api_control_viral_videos__platform___video_id__restore_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/viral/homepage/move": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Move Viral Homepage */
+    post: operations["move_viral_homepage_api_control_viral_homepage_move_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/control/audit-log.csv": {
     parameters: {
       query?: never;
@@ -3874,7 +4266,8 @@ export interface paths {
      * @description 审计导出（方案 P1）：与列表同筛选口径的整表 CSV，走 control.export 审计。
      *
      *     复用 customers.csv 的限流维度：导出是数据出境动作，读级角色不放行整表
-     *     转储，auditor 需要导出时由管理员执行或走行级查看。
+     *     转储，auditor 需要导出时由管理员执行或走行级查看——所以依赖写级门槛
+     *     （``AdminWriter``，与 customers.csv 及其它整表导出一致），而不只是能登录即可。
      */
     get: operations["export_audit_log_csv_api_control_audit_log_csv_get"];
     put?: never;
@@ -4802,7 +5195,7 @@ export interface paths {
     };
     /**
      * List Devices
-     * @description List devices with display metadata only — digests never leave the store.
+     * @description 完整历史设备与去重客户待办共享作用域，分页不改变卡片计数。
      */
     get: operations["list_devices_api_control_devices_get"];
     put?: never;
@@ -5268,6 +5661,30 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/control/settings/registration-bonus": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Read Registration Bonus Settings
+     * @description 注册赠送积分快照（「价格与套餐」页设置区块）。
+     */
+    get: operations["read_registration_bonus_settings_api_control_settings_registration_bonus_get"];
+    /**
+     * Update Registration Bonus Settings
+     * @description 全量更新注册赠送积分；只影响此后新注册的主账号，不补发存量。
+     */
+    put: operations["update_registration_bonus_settings_api_control_settings_registration_bonus_put"];
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/wallet": {
     parameters: {
       query?: never;
@@ -5318,6 +5735,26 @@ export interface paths {
      *     只读查询走 REPEATABLE READ 快照，导出行集与账务时点一致。
      */
     post: operations["export_statistics_api_control_reports_export_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/control/reports/summary/export": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Export Summary
+     * @description 直接复用看板事实与日界；未知金额留中文标识，避免导出变成零。
+     */
+    post: operations["export_summary_api_control_reports_summary_export_post"];
     delete?: never;
     options?: never;
     head?: never;
@@ -7397,6 +7834,8 @@ export interface components {
       detail: string;
       /** Count */
       count: number;
+      /** Dedup Period */
+      dedup_period?: string | null;
     };
     /**
      * AlertSettingsSnapshot
@@ -7417,6 +7856,10 @@ export interface components {
       updated_by_user_id: string | null;
       /** Updated At */
       updated_at: string | null;
+      /** Notification Policies */
+      notification_policies?: components["schemas"]["NotificationPolicy"][];
+      /** Failure Rules */
+      failure_rules?: components["schemas"]["FailureRule"][];
     };
     /**
      * AlertSettingsUpdate
@@ -7444,6 +7887,12 @@ export interface components {
       failure_rate_threshold_percent: number;
       /** Failure Rate Min Sample */
       failure_rate_min_sample: number;
+      /** Notification Policies */
+      notification_policies?:
+        | components["schemas"]["NotificationPolicy"][]
+        | null;
+      /** Failure Rules */
+      failure_rules?: components["schemas"]["FailureRule"][] | null;
     };
     /** AlertsOverview */
     AlertsOverview: {
@@ -8703,6 +9152,14 @@ export interface components {
     ControlGenerationRecord: {
       /** Record Id */
       record_id: string;
+      /** Short Ref */
+      short_ref?: string | null;
+      /** Root Task Id */
+      root_task_id?: string | null;
+      /** Retry Path */
+      retry_path?: ("ARCHIVE_ONLY" | "PRE_PROVIDER") | null;
+      /** Handling Advice */
+      handling_advice?: string | null;
       /**
        * Record Type
        * @enum {string}
@@ -8766,6 +9223,8 @@ export interface components {
       created_at: string;
       /** Completed At */
       completed_at: string | null;
+      /** Failed At */
+      failed_at?: string | null;
       /** Failure Phase */
       failure_phase?: string | null;
       /** Retryable */
@@ -8963,6 +9422,14 @@ export interface components {
       service?: string | null;
       /** Service Name */
       service_name?: string | null;
+      /** Order No */
+      order_no?: string | null;
+      /** Project Name */
+      project_name?: string | null;
+      /** Oral Title */
+      oral_title?: string | null;
+      /** Business Label */
+      business_label?: string | null;
     };
     /** ControlWalletTransactionPage */
     ControlWalletTransactionPage: {
@@ -9003,6 +9470,16 @@ export interface components {
       expected_version: number;
       /** Expected Balance */
       expected_balance: number;
+    };
+    /** CostTarget */
+    CostTarget: {
+      /**
+       * Platform
+       * @enum {string}
+       */
+      platform: "douyin" | "wechat_channels";
+      /** Video Id */
+      video_id: string;
     };
     /** CreateAnalysisRequest */
     CreateAnalysisRequest: {
@@ -9314,6 +9791,11 @@ export interface components {
       username: string;
       /** Display Name */
       display_name: string;
+    };
+    /** CustomerTaskReference */
+    CustomerTaskReference: {
+      /** Short Ref */
+      short_ref: string;
     };
     /** CustomerUnitPriceResponse */
     CustomerUnitPriceResponse: {
@@ -9673,6 +10155,21 @@ export interface components {
       /** Total */
       total: number;
     };
+    /** ExternalCallProviderMetric */
+    ExternalCallProviderMetric: {
+      /** Provider */
+      provider: string;
+      /** Total */
+      total: number;
+      /** Failed */
+      failed: number;
+      /** Failure Rate Pct */
+      failure_rate_pct: number | null;
+      /** Avg Latency Ms */
+      avg_latency_ms: number | null;
+      /** Latency Samples */
+      latency_samples: number;
+    };
     /** ExternalCallResponse */
     ExternalCallResponse: {
       /** Call Id */
@@ -9686,7 +10183,7 @@ export interface components {
       /** Response Body Bytes */
       response_body_bytes: number | null;
       /** Truncated */
-      truncated: boolean;
+      truncated: boolean | null;
     };
     /**
      * ExternalCallSummary
@@ -9695,6 +10192,8 @@ export interface components {
     ExternalCallSummary: {
       /** Call Id */
       call_id: string;
+      /** Task Id */
+      task_id?: string | null;
       /** Created At */
       created_at: string;
       /** Provider */
@@ -9731,6 +10230,27 @@ export interface components {
       response_body_bytes: number | null;
       /** Has Response Body */
       has_response_body: boolean;
+      /** Request Id */
+      request_id?: string | null;
+      /** Exception Type */
+      exception_type?: string | null;
+      /** Failure Category */
+      failure_category?: string | null;
+      /** Failure Owner */
+      failure_owner?: string | null;
+      /** Advice */
+      advice?: string | null;
+      /** Mapping Revision */
+      mapping_revision?: string | null;
+      /** Mapping Evidence */
+      mapping_evidence?: string | null;
+      /**
+       * Poll Count
+       * @default 1
+       */
+      poll_count: number;
+      /** Last Seen At */
+      last_seen_at?: string | null;
     };
     /** ExtractSourceFramesRequest */
     ExtractSourceFramesRequest: {
@@ -9750,6 +10270,31 @@ export interface components {
       error_code: string | null;
       /** Count */
       count: number;
+      /**
+       * Total
+       * @default 0
+       */
+      total: number;
+      /**
+       * Failure Rate Percent
+       * @default 0
+       */
+      failure_rate_percent: number;
+      /**
+       * Threshold Percent
+       * @default 30
+       */
+      threshold_percent: number;
+      /**
+       * Min Sample Size
+       * @default 5
+       */
+      min_sample_size: number;
+      /**
+       * Exceeded
+       * @default false
+       */
+      exceeded: boolean;
       /** Category */
       category: string | null;
       /** Owner */
@@ -9764,6 +10309,16 @@ export interface components {
     FailureRateGroup: {
       /** Record Type */
       record_type: string;
+      /**
+       * Threshold Percent
+       * @default 30
+       */
+      threshold_percent: number;
+      /**
+       * Min Sample Size
+       * @default 5
+       */
+      min_sample_size: number;
       /** Total */
       total: number;
       /** Failed */
@@ -9804,6 +10359,30 @@ export interface components {
       alerting: boolean;
       /** Groups */
       groups: components["schemas"]["FailureRateGroup"][];
+    };
+    /** FailureRule */
+    FailureRule: {
+      /**
+       * Record Type
+       * @enum {string}
+       */
+      record_type:
+        | "VIDEO"
+        | "ORAL_VIDEO"
+        | "ORAL_AVATAR"
+        | "ORAL_VOICE"
+        | "FIRST_FRAME_IMAGE"
+        | "CHARACTER_SHEET_IMAGE"
+        | "CHARACTER_VIEW_IMAGE"
+        | "SOURCE_FRAME_AI_SCORE"
+        | "SOURCE_FRAME_PROCESS"
+        | "ANALYSIS";
+      /** Error Code */
+      error_code?: string | null;
+      /** Threshold Percent */
+      threshold_percent: number;
+      /** Min Sample Size */
+      min_sample_size: number;
     };
     /** FirstFrameTaskResponse */
     FirstFrameTaskResponse: {
@@ -10173,6 +10752,35 @@ export interface components {
       /** Retry Reason */
       retry_reason: string;
     };
+    /** GlobalExternalCall */
+    GlobalExternalCall: {
+      call: components["schemas"]["ExternalCallSummary"];
+      /** Task Type */
+      task_type: string | null;
+      /** Task Id */
+      task_id: string | null;
+      /** Request Id */
+      request_id: string | null;
+    };
+    /** GlobalExternalCallPage */
+    GlobalExternalCallPage: {
+      /** Items */
+      items: components["schemas"]["GlobalExternalCall"][];
+      /** Total */
+      total: number;
+      /** Limit */
+      limit: number;
+      /** Offset */
+      offset: number;
+      /** Providers */
+      providers: string[];
+      /** Endpoints */
+      endpoints: string[];
+      /** Metrics */
+      metrics: components["schemas"]["ExternalCallProviderMetric"][];
+      /** Metrics Since */
+      metrics_since: string;
+    };
     /** H3AccountUpdate */
     H3AccountUpdate: {
       /**
@@ -10333,6 +10941,36 @@ export interface components {
        * @enum {string}
        */
       provider: "fake_h3" | "metaso";
+    };
+    /** KeywordBatch */
+    KeywordBatch: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /** Keywords */
+      keywords: components["schemas"]["ViralKeywordConfig"][];
+    };
+    /** KeywordEdit */
+    KeywordEdit: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      expected: components["schemas"]["ViralKeywordConfig"];
+      replacement: components["schemas"]["ViralKeywordConfig"];
     };
     /** LegacyPolicy */
     LegacyPolicy: {
@@ -10663,6 +11301,57 @@ export interface components {
       /** Items */
       items: components["schemas"]["MaterialUsage"][];
     };
+    /** NotificationPolicy */
+    NotificationPolicy: {
+      /**
+       * Key
+       * @enum {string}
+       */
+      key:
+        | "failure_rate"
+        | "unconfigured_rates"
+        | "reconciliation"
+        | "sensitive_events"
+        | "collection_budget";
+      /**
+       * Enabled
+       * @default true
+       */
+      enabled: boolean;
+      /**
+       * Threshold Count
+       * @default 1
+       */
+      threshold_count: number;
+      /**
+       * Window Minutes
+       * @default 1440
+       */
+      window_minutes: number;
+      /** Recipient User Id */
+      recipient_user_id?: string | null;
+      /**
+       * Channel
+       * @default email
+       */
+      channel: "email" | null;
+    };
+    /** OperationEstimateRequest */
+    OperationEstimateRequest: {
+      /**
+       * Action
+       * @enum {string}
+       */
+      action: "search" | "prepare" | "statistics" | "feature" | "archive";
+      /**
+       * Platform
+       * @default douyin
+       * @enum {string}
+       */
+      platform: "douyin" | "wechat_channels";
+      /** Items */
+      items?: components["schemas"]["CostTarget"][];
+    };
     /** OralBillingReconcileRequest */
     OralBillingReconcileRequest: {
       /** Reconciliation Operation Id */
@@ -10816,6 +11505,18 @@ export interface components {
       /** Source Document Ref */
       source_document_ref: string;
     };
+    /** PaidLedgerRepairResponse */
+    PaidLedgerRepairResponse: {
+      /** Order No */
+      order_no: string;
+      /**
+       * Outcome
+       * @enum {string}
+       */
+      outcome: "repaired" | "already_recorded";
+      /** Credits */
+      credits: number;
+    };
     /** PaidRegenerationRequest */
     PaidRegenerationRequest: {
       /** Idempotency Key */
@@ -10899,6 +11600,17 @@ export interface components {
       /** Created At */
       created_at: string;
     };
+    /** PendingProviderCode */
+    PendingProviderCode: {
+      /** Provider */
+      provider: string;
+      /** Error Code */
+      error_code: string | null;
+      /** Count */
+      count: number;
+      /** Last Seen At */
+      last_seen_at: string;
+    };
     /** PersonIdentity */
     PersonIdentity: {
       /** Id */
@@ -10968,6 +11680,21 @@ export interface components {
       authorization_status?: "REVOKED" | null;
       /** Status */
       status?: "ARCHIVED" | null;
+    };
+    /** PlatformProbeRequest */
+    PlatformProbeRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /** Expected Cost Snapshot */
+      expected_cost_snapshot?: string | null;
     };
     /** PolicyUpdate */
     PolicyUpdate: {
@@ -11699,6 +12426,38 @@ export interface components {
     RefreshRequest: {
       /** Videoids */
       videoIds: string[];
+    };
+    /**
+     * RegistrationBonusSettingsSnapshot
+     * @description 注册赠送积分当前值 + 最近修改（设置页展示）。
+     */
+    RegistrationBonusSettingsSnapshot: {
+      /** Bonus Credits */
+      bonus_credits: number;
+      /** Updated By User Id */
+      updated_by_user_id: string | null;
+      /** Updated By Display Name */
+      updated_by_display_name: string | null;
+      /** Updated At */
+      updated_at: string | null;
+    };
+    /**
+     * RegistrationBonusSettingsUpdate
+     * @description 全量更新注册赠送积分；范围与迁移 CHECK 同口径。
+     */
+    RegistrationBonusSettingsUpdate: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /** Bonus Credits */
+      bonus_credits: number;
     };
     /** RenameProjectRequest */
     RenameProjectRequest: {
@@ -12603,6 +13362,24 @@ export interface components {
       /** Total Completed */
       total_completed: number;
     };
+    /** SummaryExportRequest */
+    SummaryExportRequest: {
+      /**
+       * Kind
+       * @enum {string}
+       */
+      kind: "business" | "funds";
+      /**
+       * Start Date
+       * Format: date
+       */
+      start_date: string;
+      /**
+       * End Date
+       * Format: date
+       */
+      end_date: string;
+    };
     /** Tariff */
     Tariff: {
       /**
@@ -12997,6 +13774,8 @@ export interface components {
        * @default
        */
       reason: string;
+      /** Expected Cost Snapshot */
+      expected_cost_snapshot?: string | null;
       /** Keyword */
       keyword: string;
       /**
@@ -13070,7 +13849,9 @@ export interface components {
        * Action
        * @enum {string}
        */
-      action: "feature" | "unfeature" | "delete" | "prepare";
+      action: "feature" | "unfeature" | "delete" | "prepare" | "hide" | "block";
+      /** Expected Cost Snapshot */
+      expected_cost_snapshot?: string | null;
       /** Items */
       items: components["schemas"]["ViralBatchTarget"][];
     };
@@ -13097,6 +13878,21 @@ export interface components {
       platform: string;
       /** Reclaim */
       reclaim: string[];
+    };
+    /** ViralCollectRequest */
+    ViralCollectRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /** Expected Estimate Snapshot */
+      expected_estimate_snapshot?: string | null;
     };
     /**
      * ViralCopyBilling
@@ -13173,6 +13969,8 @@ export interface components {
        * @enum {string}
        */
       action: "feature" | "unfeature" | "delete" | "pin" | "unpin" | "prepare";
+      /** Expected Cost Snapshot */
+      expected_cost_snapshot?: string | null;
     };
     /**
      * ViralDetailBilling
@@ -13242,6 +14040,73 @@ export interface components {
       hasMore: boolean;
       /** Nextcursor */
       nextCursor: string | null;
+    };
+    /** ViralHomepageMoveRequest */
+    ViralHomepageMoveRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default 调整首页顺序
+       */
+      reason: string;
+      /**
+       * Platform
+       * @enum {string}
+       */
+      platform: "douyin" | "wechat_channels";
+      /** Video Id */
+      video_id: string;
+      /** Position */
+      position: number;
+      /** Expected Revision */
+      expected_revision: string;
+    };
+    /** ViralHomepageOrderRequest */
+    ViralHomepageOrderRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default 调整首页顺序
+       */
+      reason: string;
+      /**
+       * Platform
+       * @enum {string}
+       */
+      platform: "douyin" | "wechat_channels";
+      /** Video Ids */
+      video_ids: string[];
+      /** Expected Video Ids */
+      expected_video_ids: string[];
+    };
+    /** ViralHomepageScheduleRequest */
+    ViralHomepageScheduleRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default 设置首页排期
+       */
+      reason: string;
+      /** Starts At */
+      starts_at?: string | null;
+      /** Ends At */
+      ends_at?: string | null;
+      /** Expected Starts At */
+      expected_starts_at: string | null;
+      /** Expected Ends At */
+      expected_ends_at: string | null;
     };
     /** ViralImportRequest */
     ViralImportRequest: {
@@ -13326,6 +14191,13 @@ export interface components {
       category: string;
       /** Keyword */
       keyword: string;
+      /**
+       * Enabled
+       * @default true
+       */
+      enabled: boolean;
+      /** Limit */
+      limit?: number | null;
     };
     /** ViralKeywordDeleteRequest */
     ViralKeywordDeleteRequest: {
@@ -13401,6 +14273,10 @@ export interface components {
       hasMore: boolean;
       /** Nextcursor */
       nextCursor: string | null;
+      /** Servertime */
+      serverTime?: string | null;
+      /** Nextchangeat */
+      nextChangeAt?: string | null;
     };
     /** ViralMediaRequest */
     ViralMediaRequest: {
@@ -13422,6 +14298,21 @@ export interface components {
       /** Cachehit */
       cacheHit: boolean;
       video?: components["schemas"]["ViralVideoItem"] | null;
+    };
+    /** ViralOperationWriteRequest */
+    ViralOperationWriteRequest: {
+      /**
+       * Confirm
+       * @default false
+       */
+      confirm: boolean;
+      /**
+       * Reason
+       * @default
+       */
+      reason: string;
+      /** Expected Cost Snapshot */
+      expected_cost_snapshot?: string | null;
     };
     /** ViralPlatformStatus */
     ViralPlatformStatus: {
@@ -13491,6 +14382,35 @@ export interface components {
        * @default 0
        */
       month_spend_fen: number;
+      /**
+       * Month Unknown Cost Count
+       * @default 0
+       */
+      month_unknown_cost_count: number;
+      /**
+       * Month Pending Cost Count
+       * @default 0
+       */
+      month_pending_cost_count: number;
+      /** Month Total Cost Fen */
+      month_total_cost_fen?: number | null;
+      /**
+       * Budget Status
+       * @default unlimited
+       * @enum {string}
+       */
+      budget_status: "unlimited" | "normal" | "warning" | "exhausted";
+      /** Budget Usage Percent */
+      budget_usage_percent?: number | null;
+      /** Budget Period Start */
+      budget_period_start?: string | null;
+      /** Budget Period End */
+      budget_period_end?: string | null;
+      /**
+       * Budget Scope
+       * @default
+       */
+      budget_scope: string;
       /** Next Collection At */
       next_collection_at?: string | null;
       /**
@@ -13498,6 +14418,10 @@ export interface components {
        * @default 7
        */
       collection_interval_days: number;
+      /** Collection Time */
+      collection_time?: string | null;
+      /** Last Collection At */
+      last_collection_at?: string | null;
     };
     /** ViralRuntimeUpdateRequest */
     ViralRuntimeUpdateRequest: {
@@ -13517,10 +14441,14 @@ export interface components {
       import_enabled: boolean;
       /** Keywords */
       keywords?: components["schemas"]["ViralKeywordConfig"][] | null;
+      /** Expected Keywords */
+      expected_keywords?: components["schemas"]["ViralKeywordConfig"][] | null;
       /** Per Keyword Limit */
       per_keyword_limit?: number | null;
       /** Collection Interval Days */
       collection_interval_days?: (1 | 7) | null;
+      /** Collection Time */
+      collection_time?: string | null;
       /** Quality Min Likes */
       quality_min_likes?: number | null;
       /** Quality Duration Min Ms */
@@ -13642,6 +14570,10 @@ export interface components {
       homepageFeatured: boolean;
       /** Homepagerank */
       homepageRank?: number | null;
+      /** Homepagestartsat */
+      homepageStartsAt?: string | null;
+      /** Homepageendsat */
+      homepageEndsAt?: string | null;
       /** Platform */
       platform: string;
       /** Videoid */
@@ -13986,6 +14918,50 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+  customer_task_reference_api_task_references__task_type___task_id__get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Dev-User-Id"?: string | null;
+        Authorization?: string | null;
+      };
+      path: {
+        task_type:
+          | "VIDEO"
+          | "FIRST_FRAME_IMAGE"
+          | "CHARACTER_SHEET_IMAGE"
+          | "CHARACTER_VIEW_IMAGE"
+          | "ANALYSIS"
+          | "SOURCE_FRAME"
+          | "ORAL_VIDEO"
+          | "ORAL_AVATAR"
+          | "ORAL_VOICE";
+        task_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["CustomerTaskReference"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   create_project_script_api_projects__project_id__scripts_post: {
     parameters: {
       query?: never;
@@ -17875,6 +18851,41 @@ export interface operations {
       };
     };
   };
+  repair_paid_order_ledger_api_control_recharge_orders__order_no__repair_ledger_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        order_no: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AdminWriteContract"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["PaidLedgerRepairResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   zpay_notify_api_payments_zpay_notify_get: {
     parameters: {
       query?: never;
@@ -18012,6 +19023,7 @@ export interface operations {
         status?: ("PENDING" | "PAID" | "FAILED" | "CLOSED") | null;
         user_id?: string | null;
         username?: string | null;
+        order_no?: string | null;
         channel?: string | null;
         created_from?: string | null;
         created_to?: string | null;
@@ -18094,10 +19106,60 @@ export interface operations {
       };
     };
   };
+  read_generation_record_history_api_control_generation_records__record_type___record_id__history_get: {
+    parameters: {
+      query?: {
+        limit?: number;
+        offset?: number;
+      };
+      header?: {
+        "X-Control-Proxy-Token"?: string | null;
+      };
+      path: {
+        record_type:
+          | "VIDEO"
+          | "ORAL_VIDEO"
+          | "ORAL_AVATAR"
+          | "ORAL_VOICE"
+          | "FIRST_FRAME_IMAGE"
+          | "CHARACTER_SHEET_IMAGE"
+          | "CHARACTER_VIEW_IMAGE"
+          | "SOURCE_FRAME_AI_SCORE"
+          | "SOURCE_FRAME_PROCESS"
+          | "ANALYSIS";
+        record_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   list_generation_records_api_control_generation_records_get: {
     parameters: {
       query?: {
         username?: string | null;
+        user_id?: string | null;
         status?: string | null;
         status_group?:
           | ("queued" | "running" | "succeeded" | "failed" | "attention")
@@ -18117,6 +19179,18 @@ export interface operations {
             )
           | null;
         failure_phase?: string | null;
+        diagnostics?: boolean;
+        failure_category?:
+          | (
+              | "CUSTOMER_ASSET"
+              | "CONTENT_REVIEW"
+              | "PROVIDER_BUSY"
+              | "PROVIDER_FAULT"
+              | "CONFIG"
+              | "DEFECT"
+              | "UNCLASSIFIED"
+            )
+          | null;
         created_from?: string | null;
         created_to?: string | null;
         task_ref?: string | null;
@@ -18139,6 +19213,37 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["ControlGenerationRecordPage"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_pending_provider_errors_api_control_provider_errors_pending_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Control-Proxy-Token"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["PendingProviderCode"][];
         };
       };
       /** @description Validation Error */
@@ -18198,7 +19303,10 @@ export interface operations {
   };
   list_generation_record_calls_api_control_generation_records__record_type___record_id__calls_get: {
     parameters: {
-      query?: never;
+      query?: {
+        limit?: number;
+        offset?: number;
+      };
       header?: {
         "X-Control-Proxy-Token"?: string | null;
       };
@@ -18228,6 +19336,54 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["ExternalCallList"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_global_external_calls_api_control_external_calls_get: {
+    parameters: {
+      query?: {
+        provider?: string | null;
+        endpoint?: string | null;
+        outcome?:
+          | (
+              | "SUCCEEDED"
+              | "PROVIDER_ERROR"
+              | "TIMEOUT"
+              | "NETWORK_ERROR"
+              | "PARSE_ERROR"
+            )
+          | null;
+        task_ref?: string | null;
+        created_from?: string | null;
+        created_to?: string | null;
+        limit?: number;
+        offset?: number;
+      };
+      header?: {
+        "X-Control-Proxy-Token"?: string | null;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["GlobalExternalCallPage"];
         };
       };
       /** @description Validation Error */
@@ -18278,6 +19434,7 @@ export interface operations {
     parameters: {
       query?: {
         username?: string | null;
+        user_id?: string | null;
         status?: string | null;
         status_group?:
           | ("queued" | "running" | "succeeded" | "failed" | "attention")
@@ -19284,15 +20441,52 @@ export interface operations {
         limit?: number;
         offset?: number;
         username?: string;
+        user_id?: string;
         status?: string;
         created_from?: string;
         created_to?: string;
         balance_min?: number | null;
         balance_max?: number | null;
         sort?: "activated" | "recharge" | "month_consumed" | "last_active";
+        direction?: "asc" | "desc";
+        attention?: "" | "low_balance" | "recent_failure" | "inactive";
+        low_balance_threshold?: number | null;
       };
       header?: never;
       path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  customer_overview_api_control_customers__user_id__overview_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        user_id: string;
+      };
       cookie?: never;
     };
     requestBody?: never;
@@ -19328,6 +20522,10 @@ export interface operations {
         created_to?: string;
         balance_min?: number | null;
         balance_max?: number | null;
+        attention?: "" | "low_balance" | "recent_failure" | "inactive";
+        low_balance_threshold?: number | null;
+        sort?: "activated" | "recharge" | "month_consumed" | "last_active";
+        direction?: "asc" | "desc";
         limit?: number;
       };
       header?: never;
@@ -20067,6 +21265,28 @@ export interface operations {
       };
     };
   };
+  read_alert_deliveries_api_control_alerts_deliveries_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+    };
+  };
   customer_prices_api_customer_pricing_get: {
     parameters: {
       query?: never;
@@ -20582,10 +21802,12 @@ export interface operations {
         start: string;
         end: string;
         user_id?: string | null;
+        username?: string | null;
         service?: string | null;
         module?: string | null;
         provider?: string | null;
         platform?: boolean;
+        attention?: ("pending" | "unknown_cost") | null;
         limit?: number;
         offset?: number;
       };
@@ -20659,9 +21881,11 @@ export interface operations {
         start: string;
         end: string;
         user_id?: string | null;
+        username?: string | null;
         service?: string | null;
         module?: string | null;
         provider?: string | null;
+        attention?: ("pending" | "unknown_cost") | null;
       };
       header?: never;
       path?: never;
@@ -21354,6 +22578,299 @@ export interface operations {
       };
     };
   };
+  read_keywords_api_control_viral_keywords_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+    };
+  };
+  add_viral_keyword_api_control_viral_keywords_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ViralKeywordAddRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  edit_keyword_api_control_viral_keywords_patch: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["KeywordEdit"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  add_keywords_api_control_viral_keywords_batch_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["KeywordBatch"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  estimate_operation_api_control_viral_operations_estimate_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["OperationEstimateRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_collection_records_api_control_viral_collection_records_get: {
+    parameters: {
+      query: {
+        start: string;
+        end: string;
+        limit?: number;
+        offset?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_collection_record_tasks_api_control_viral_collection_records__batch_id__tasks_get: {
+    parameters: {
+      query?: {
+        video_limit?: number;
+        video_offset?: number;
+      };
+      header?: never;
+      path: {
+        batch_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_platform_probes_api_control_viral_platforms_probes_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+    };
+  };
+  probe_viral_platform_api_control_viral_platforms__platform__probe_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        platform: "douyin" | "wechat_channels";
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["PlatformProbeRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   read_viral_runtime_api_control_settings_viral_get: {
     parameters: {
       query?: never;
@@ -21394,41 +22911,6 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["ViralRuntimeResponse"];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["HTTPValidationError"];
-        };
-      };
-    };
-  };
-  add_viral_keyword_api_control_viral_keywords_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["ViralKeywordAddRequest"];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": {
-            [key: string]: unknown;
-          };
         };
       };
       /** @description Validation Error */
@@ -21513,6 +22995,28 @@ export interface operations {
       };
     };
   };
+  estimate_viral_collection_api_control_viral_collection_estimate_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+    };
+  };
   collect_viral_now_api_control_viral_collect_post: {
     parameters: {
       query?: never;
@@ -21522,7 +23026,7 @@ export interface operations {
     };
     requestBody: {
       content: {
-        "application/json": components["schemas"]["AdminWriteContract"];
+        "application/json": components["schemas"]["ViralCollectRequest"];
       };
     };
     responses: {
@@ -21553,7 +23057,21 @@ export interface operations {
       query?: {
         platform?: ("douyin" | "wechat_channels") | null;
         status?: ("ready" | "pending" | "failed" | "featured") | null;
+        content_state?:
+          | (
+              | "pending_prepare"
+              | "prepare_failed"
+              | "ready"
+              | "featured"
+              | "removed"
+              | "blocked"
+            )
+          | null;
         category?: string;
+        source_keyword?: string;
+        published_from?: string | null;
+        published_to?: string | null;
+        customer_visible?: boolean | null;
         has_usage?: boolean | null;
         sort?: "created" | "likes" | "published" | "usage";
         query?: string;
@@ -21647,6 +23165,42 @@ export interface operations {
       };
     };
   };
+  read_viral_discovery_customers_api_control_viral_discoveries_customers_get: {
+    parameters: {
+      query: {
+        keyword: string;
+        platform: "douyin" | "wechat_channels";
+        offset?: number;
+        limit?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   search_viral_videos_for_admin_api_control_viral_search_post: {
     parameters: {
       query?: never;
@@ -21694,7 +23248,7 @@ export interface operations {
     };
     requestBody: {
       content: {
-        "application/json": components["schemas"]["AdminWriteContract"];
+        "application/json": components["schemas"]["ViralOperationWriteRequest"];
       };
     };
     responses: {
@@ -21731,9 +23285,46 @@ export interface operations {
     };
     requestBody: {
       content: {
-        "application/json": components["schemas"]["AdminWriteContract"];
+        "application/json": components["schemas"]["ViralOperationWriteRequest"];
       };
     };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_viral_video_business_details_api_control_viral_videos__platform___video_id__details_get: {
+    parameters: {
+      query?: {
+        offset?: number;
+        limit?: number;
+      };
+      header?: never;
+      path: {
+        platform: "douyin" | "wechat_channels";
+        video_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
     responses: {
       /** @description Successful Response */
       200: {
@@ -21864,7 +23455,135 @@ export interface operations {
       };
     };
   };
+  read_viral_homepage_api_control_viral_homepage_get: {
+    parameters: {
+      query?: {
+        platform?: "douyin" | "wechat_channels";
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  reorder_viral_homepage_api_control_viral_homepage_order_put: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ViralHomepageOrderRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  schedule_viral_homepage_api_control_viral_homepage__platform___video_id__schedule_patch: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        platform: "douyin" | "wechat_channels";
+        video_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ViralHomepageScheduleRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   read_viral_library_overview_api_control_viral_overview_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+    };
+  };
+  read_viral_content_overview_api_control_viral_content_overview_get: {
     parameters: {
       query?: never;
       header?: never;
@@ -21926,6 +23645,113 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["QueueModeResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  read_viral_recycle_bin_api_control_viral_recycle_get: {
+    parameters: {
+      query?: {
+        offset?: number;
+        limit?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  restore_viral_video_api_control_viral_videos__platform___video_id__restore_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        platform: "douyin" | "wechat_channels";
+        video_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AdminWriteContract"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  move_viral_homepage_api_control_viral_homepage_move_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ViralHomepageMoveRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
         };
       };
       /** @description Validation Error */
@@ -23413,10 +25239,14 @@ export interface operations {
   list_devices_api_control_devices_get: {
     parameters: {
       query?: {
-        status?: string | null;
+        status?: ("BOUND" | "UNBOUND" | "REVOKED") | null;
         activation_code_id?: string | null;
         user_id?: string | null;
         platform?: string | null;
+        keyword?: string | null;
+        attention?:
+          | ("online" | "offline" | "at_slot_limit" | "frequent_swaps_24h")
+          | null;
         limit?: number;
         offset?: number;
       };
@@ -24302,6 +26132,59 @@ export interface operations {
       };
     };
   };
+  read_registration_bonus_settings_api_control_settings_registration_bonus_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["RegistrationBonusSettingsSnapshot"];
+        };
+      };
+    };
+  };
+  update_registration_bonus_settings_api_control_settings_registration_bonus_put: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["RegistrationBonusSettingsUpdate"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["RegistrationBonusSettingsSnapshot"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   read_wallet_api_wallet_get: {
     parameters: {
       query?: never;
@@ -24379,6 +26262,39 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["ExportRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": unknown;
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  export_summary_api_control_reports_summary_export_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["SummaryExportRequest"];
       };
     };
     responses: {

@@ -19,6 +19,8 @@ export type BillingService = {
   updated_at?: string | null;
   updated_by?: string | null;
   tariff: BillingTariff;
+  unit_price_fen?: string | null;
+  gross_margin_percent?: string | null;
 };
 
 export const billingUnit = { second: "秒", image: "张", call: "次" };

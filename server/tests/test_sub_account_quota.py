@@ -70,7 +70,7 @@ QUOTA_DB = "t_sub_account_quota"
 # 20260924T0100 口播提交时刻列、20260924T0200 口播隐藏偏好表、
 # 20260926T0000 爆款首页策展排行与 20260925T1400 计费触发器追加修复，
 # 故链尾为该值。
-_HEAD_REVISION = "20260930T1400_registration_bonus_settings"
+_HEAD_REVISION = "20261002T0800_alert_delivery_rules"
 # _PRIOR_REVISION 是本迁移自身的 down_revision，用于降级断言。
 # 合并 main 后 1200 重挂到 20260922T1200_recharge_packages（手册 §3）；Phase 3b
 # permissions 与其后的 analysis 三迁移（failure_diagnostic / request_id /

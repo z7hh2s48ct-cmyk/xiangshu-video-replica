@@ -62,11 +62,20 @@ from decimal import Decimal
 from typing import Literal, Never, cast
 
 import psycopg
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import Response as HttpResponse
 from pydantic import BaseModel, ConfigDict, StrictInt
 
 from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_cash_evidence import CASH_ORDER_ELIGIBLE
+from app.admin_customer_metrics import (
+    CUSTOMER_FACTS_CTE,
+    CUSTOMER_METRICS_JOINS,
+    INACTIVE_SQL,
+    CustomerAttention,
+    append_attention_filter,
+    utc_text_timestamp,
+)
 from app.admin_dates import append_admin_date_filters
 from app.admin_write_contract import (
     AdminWriteActor,
@@ -409,6 +418,8 @@ def update_customer_unit_price(
                 reason=body.reason.strip(),
                 request_id=request_id,
             )
+        # The user row exists even before an override does; serialize its audit snapshots.
+        conn.execute("SELECT id FROM users WHERE id=%s FOR UPDATE", (user_id,))
         current = _customer_unit_price_payload(conn, user_id=user_id)
         unit_price_fen = body.unit_price_fen
         if unit_price_fen is not None and not 1 <= unit_price_fen <= 2_147_483_647:
@@ -436,6 +447,16 @@ def update_customer_unit_price(
             )
             action = "customer_unit_price.update"
 
+        updated = _customer_unit_price_payload(conn, user_id=user_id, request_id=request_id)
+
+        def price_state(value: dict[str, object]) -> dict[str, object]:
+            custom = value["custom_unit_price_fen"]
+            return {
+                "mode": "DEFAULT" if custom is None else "CUSTOM",
+                "custom_unit_price_fen": custom,
+                "effective_unit_price_fen": value["unit_price_fen"],
+            }
+
         conn.execute(
             """
             INSERT INTO audit_logs
@@ -451,6 +472,10 @@ def update_customer_unit_price(
                     {
                         "old_unit_price_fen": current["custom_unit_price_fen"],
                         "new_unit_price_fen": unit_price_fen,
+                        "price_change": {
+                            "before": price_state(current),
+                            "after": price_state(updated),
+                        },
                         "reason": body.reason.strip(),
                         "request_id": request_id,
                     },
@@ -459,11 +484,7 @@ def update_customer_unit_price(
                 ),
             ),
         )
-        return _customer_unit_price_payload(
-            conn,
-            user_id=user_id,
-            request_id=request_id,
-        )
+        return updated
 
     return _write_with_idempotency(
         request,
@@ -711,8 +732,9 @@ def create_admin_adjustment(
             """
             INSERT INTO admin_adjustments
             (id, recharge_order_id, target_user_id, admin_user_id,
-             source_document_type, source_document_ref, reason, request_id, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+             source_document_type, source_document_ref, reason, request_id, created_at,
+             balance_before,balance_after)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 adjustment_id,
@@ -724,6 +746,8 @@ def create_admin_adjustment(
                 body.reason.strip(),
                 request_id,
                 now,
+                balance_after - credits,
+                balance_after,
             ),
         )
 
@@ -804,8 +828,10 @@ def list_admin_adjustments(
                        aa.source_document_type, aa.source_document_ref,
                        aa.reason, aa.request_id, aa.created_at,
                        COALESCE(ro.amount_fen, 0), COALESCE(ro.credits, tx.available_delta, 0),
-                       COALESCE(ro.pricing_scope, ''), COALESCE(ro.status, '')
+                       COALESCE(ro.pricing_scope, ''), COALESCE(ro.status, ''),
+                       admin_user.username, aa.balance_after, aa.balance_before
                 FROM admin_adjustments aa
+                JOIN users admin_user ON admin_user.id=aa.admin_user_id
                 {_ADJUSTMENT_ORDER_AND_LEDGER_JOINS}
                 WHERE aa.target_user_id = %s
                 ORDER BY {order_by}
@@ -840,6 +866,10 @@ def list_admin_adjustments(
             "credits": int(row[9]),
             "pricing_scope": str(row[10]),
             "status": str(row[11]),
+            "admin_username": str(row[12]),
+            "target_user_id": user_id,
+            "balance_after": int(row[13]) if row[13] is not None else None,
+            "balance_before": int(row[14]) if row[14] is not None else None,
         }
         for row in rows
     ]
@@ -868,7 +898,8 @@ def list_all_admin_adjustments(
         clauses.append("admin_user.username ILIKE %s")
         params.append(f"%{actor_username.strip()}%")
     if target_username.strip():
-        clauses.append("target_user.username ILIKE %s")
+        clauses.append("(target_user.username ILIKE %s OR target_user.display_name ILIKE %s)")
+        params.append(f"%{target_username.strip()}%")
         params.append(f"%{target_username.strip()}%")
     if source_document_type.strip():
         clauses.append("aa.source_document_type = %s")
@@ -893,20 +924,8 @@ def list_all_admin_adjustments(
                        aa.request_id, aa.created_at,
                        COALESCE(ro.amount_fen, 0), COALESCE(ro.credits, tx.available_delta, 0),
                        COALESCE(ro.pricing_scope, ''), COALESCE(ro.status, ''),
-                       CASE WHEN tx.ledger_sequence IS NULL THEN NULL
-                            ELSE ledger_balance.balance_after END AS balance_after,
-                       CASE WHEN tx.ledger_sequence IS NULL THEN NULL ELSE
-                         ledger_balance.balance_after - tx.available_delta
-                       END AS balance_before
+                        aa.balance_after, aa.balance_before, target_user.display_name
                 {joins}
-                LEFT JOIN LATERAL (
-                    SELECT COALESCE(SUM(prev.available_delta), 0) AS balance_after
-                    FROM wallet_transactions prev
-                    WHERE tx.ledger_sequence IS NOT NULL
-                      AND prev.user_id = aa.target_user_id
-                      AND (prev.ledger_sequence IS NULL OR
-                           prev.ledger_sequence <= tx.ledger_sequence)
-                ) ledger_balance ON TRUE
                 {where}
                 ORDER BY aa.created_at DESC, aa.id DESC {PAGE_CLAUSE}
                 """,  # noqa: S608
@@ -932,6 +951,7 @@ def list_all_admin_adjustments(
                 "admin_username": str(row[3]),
                 "target_user_id": str(row[4]),
                 "target_username": str(row[5]),
+                "target_display_name": str(row[17] or ""),
                 "source_document_type": str(row[6]),
                 "source_document_ref": str(row[7]),
                 "reason": str(row[8]),
@@ -1019,8 +1039,10 @@ def export_adjustments_csv(
                 clauses.append("admin_user.username ILIKE %s")
                 params.append(f"%{actor_username.strip()}%")
             if target_username.strip():
-                clauses.append("target_user.username ILIKE %s")
-                params.append(f"%{target_username.strip()}%")
+                clauses.append(
+                    "(target_user.username ILIKE %s OR target_user.display_name ILIKE %s)"
+                )
+                params.extend((f"%{target_username.strip()}%", f"%{target_username.strip()}%"))
             if source_document_type.strip():
                 clauses.append("aa.source_document_type = %s")
                 params.append(source_document_type.strip())
@@ -1126,7 +1148,7 @@ def suspend_customer(
         if not reason:
             raise _http(400, "REASON_REQUIRED", "请填写暂停原因。")
         current = conn.execute(
-            "SELECT u.is_active FROM users u WHERE u.id = %s", (user_id,)
+            "SELECT u.is_active FROM users u WHERE u.id = %s FOR UPDATE", (user_id,)
         ).fetchone()
         if current is None:
             raise _http(404, "USER_NOT_FOUND", "客户不存在。")
@@ -1147,6 +1169,20 @@ def suspend_customer(
             request_id=request_id,
             now_iso=_transaction_now_iso(conn),
         )
+        # Sub-account admission follows its master. Revoke these sessions too,
+        # so resuming the master cannot resurrect a previously paused login.
+        for child in conn.execute("SELECT id FROM users WHERE parent_user_id=%s", (user_id,)):
+            revoked = (
+                revoke_session(
+                    conn,
+                    user_id=str(child[0]),
+                    actor_user_id=actor.user_id,
+                    reason=reason,
+                    request_id=request_id,
+                    now_iso=_transaction_now_iso(conn),
+                )
+                or revoked
+            )
         conn.execute(
             """
             INSERT INTO audit_logs
@@ -1203,7 +1239,7 @@ def resume_customer(
         if not reason:
             raise _http(400, "REASON_REQUIRED", "请填写恢复原因。")
         current = conn.execute(
-            "SELECT u.is_active FROM users u WHERE u.id = %s", (user_id,)
+            "SELECT u.is_active FROM users u WHERE u.id = %s FOR UPDATE", (user_id,)
         ).fetchone()
         if current is None:
             raise _http(404, "USER_NOT_FOUND", "客户不存在。")
@@ -1243,9 +1279,15 @@ _CUSTOMER_SORTS = {
     "recharge": ("COALESCE(recharge.total_fen, 0) DESC, aca.activated_at DESC, aca.id DESC"),
     "month_consumed": ("COALESCE(month_spend.credits, 0) DESC, aca.activated_at DESC, aca.id DESC"),
     "last_active": (
-        "COALESCE(activity.last_at, aca.activated_at) DESC, aca.activated_at DESC, aca.id DESC"
+        f"COALESCE(activity.last_at, {utc_text_timestamp('aca.activated_at')}) "
+        "DESC, aca.activated_at DESC, aca.id DESC"
     ),
 }
+
+# The account admission flag takes precedence over its activation history.
+_CUSTOMER_STATUS_SQL = (
+    "CASE WHEN u.is_active=0 THEN 'SUSPENDED' ELSE COALESCE(ac.status,'ACTIVE') END"
+)
 
 
 @router.get("/customers")
@@ -1254,12 +1296,16 @@ def list_customers(
     limit: int = DEFAULT_CUSTOMER_PAGE_SIZE,
     offset: int = 0,
     username: str = "",
+    user_id: str = "",
     status: str = "",
     created_from: str = "",
     created_to: str = "",
     balance_min: int | None = None,
     balance_max: int | None = None,
     sort: Literal["activated", "recharge", "month_consumed", "last_active"] = "activated",
+    direction: Literal["asc", "desc"] = "desc",
+    attention: CustomerAttention = "",
+    low_balance_threshold: int | None = Query(default=None, ge=0, le=2147483647),
 ) -> dict[str, object]:
     """Registered and activated customer accounts for operators and auditors (ADM-02 read path).
 
@@ -1284,6 +1330,9 @@ def list_customers(
         "u.registration_source IN ('self_register', 'activation_code')))"
     ]
     params: list[object] = []
+    if user_id.strip():
+        clauses.append("u.id=%s")
+        params.append(user_id.strip())
     if username.strip():
         # 同一个输入同时匹配用户名与公司名称：运营的识别诉求是「这家公司是哪个
         # 账号」，而公司名存在 users.display_name（激活/注册默认写用户名，客户在
@@ -1295,9 +1344,7 @@ def list_customers(
         params.append(f"%{literal}%")
         params.append(f"%{literal}%")
     if status.strip():
-        clauses.append(
-            "COALESCE(ac.status, CASE WHEN u.is_active = 1 THEN 'ACTIVE' ELSE 'SUSPENDED' END) = %s"
-        )
+        clauses.append(f"{_CUSTOMER_STATUS_SQL} = %s")
         params.append(status.strip().upper())
     append_admin_date_filters(
         clauses, params, column="aca.activated_at", created_from=created_from, created_to=created_to
@@ -1309,14 +1356,21 @@ def list_customers(
         clauses.append("COALESCE(w.available_credits, 0) <= %s")
         params.append(max(0, balance_max))
 
+    summary_clauses = list(clauses)
+    summary_params = list(params)
+    append_attention_filter(clauses, params, attention, low_balance_threshold)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    order_sql = _CUSTOMER_SORTS[sort]
+    if direction == "asc":
+        order_sql = order_sql.replace(" DESC", " ASC")
     try:
         with pg_transaction() as conn:
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             rows = conn.execute(
-                "SELECT aca.user_id, u.username, u.display_name, aca.activated_at, "
+                CUSTOMER_FACTS_CTE
+                + "SELECT aca.user_id, u.username, u.display_name, aca.activated_at, "
                 "COALESCE(ac.id, ''), COALESCE(ac.masked_code, '账号注册'), "
-                "COALESCE(ac.status, CASE WHEN u.is_active = 1 "
-                "THEN 'ACTIVE' ELSE 'SUSPENDED' END), "
+                f"{_CUSTOMER_STATUS_SQL}, "
                 "COALESCE(w.available_credits, 0), COALESCE(w.reserved_credits, 0), "
                 "COALESCE(devices.slots_used, 0), "
                 "u.max_devices, "
@@ -1334,7 +1388,9 @@ def list_customers(
                 "COALESCE(recharge.total_fen, 0), "
                 "activity.last_at, "
                 "COALESCE(month_spend.credits, 0), "
-                "benefit.discount_rate "
+                "benefit.discount_rate, u.is_active, ac.status, "
+                "COALESCE(recent.total_30d,0), COALESCE(recent.succeeded_30d,0), "
+                "COALESCE(recent.failed_30d,0), COALESCE(recent.failed_7d,0) "
                 + CUSTOMER_ACCOUNT_FROM
                 + "LEFT JOIN (SELECT user_id, COUNT(*) AS slots_used FROM customer_devices "
                 "  WHERE status = 'BOUND' GROUP BY user_id) devices "
@@ -1384,15 +1440,12 @@ def list_customers(
                 # 累计充值：实付订单（线下开通同样落 PAID 订单）。
                 "LEFT JOIN ("
                 "  SELECT user_id, COALESCE(SUM(amount_fen), 0) AS total_fen "
-                "  FROM recharge_orders WHERE status = 'PAID' GROUP BY user_id"
+                f"  FROM recharge_orders ro WHERE status = 'PAID' AND {CASH_ORDER_ELIGIBLE} "
+                "GROUP BY user_id"
                 ") recharge ON recharge.user_id = aca.user_id "
-                # 最近活跃：最后一笔钱包流水的时间（充值/消耗/退回都算动作）。
-                "LEFT JOIN ("
-                "  SELECT user_id, MAX(created_at::timestamp AT TIME ZONE 'UTC') AS last_at "
-                "  FROM wallet_transactions GROUP BY user_id"
-                ") activity ON activity.user_id = aca.user_id "
+                + CUSTOMER_METRICS_JOINS
                 # 本月消耗：上海挂钟月首之后的净扣积分。
-                "LEFT JOIN ("
+                + "LEFT JOIN ("
                 "  SELECT user_id, COALESCE(SUM(-reserved_delta), 0) AS credits "
                 "  FROM wallet_transactions WHERE type = 'SETTLE' "
                 "    AND (created_at::timestamp AT TIME ZONE 'UTC') >= "
@@ -1407,13 +1460,28 @@ def list_customers(
                 "  FROM customer_discounts d WHERE d.is_active GROUP BY d.user_id"
                 ") benefit ON benefit.user_id = aca.user_id "
                 f"{where} "
-                f"ORDER BY {_CUSTOMER_SORTS[sort]} "
+                f"ORDER BY {order_sql} "
                 f"{PAGE_CLAUSE}",
                 (*params, bounded_limit, bounded_offset),
             ).fetchall()
             total_row = conn.execute(
-                "SELECT COUNT(*) " + CUSTOMER_ACCOUNT_FROM + f"{where}",
+                CUSTOMER_FACTS_CTE
+                + "SELECT COUNT(*) "
+                + CUSTOMER_ACCOUNT_FROM
+                + CUSTOMER_METRICS_JOINS
+                + f"{where}",
                 params,
+            ).fetchone()
+            summary = conn.execute(
+                CUSTOMER_FACTS_CTE + "SELECT "
+                "COUNT(*) FILTER (WHERE %s::integer IS NOT NULL "
+                "AND COALESCE(w.available_credits,0)<%s), "
+                "COUNT(*) FILTER (WHERE COALESCE(recent.failed_7d,0)>0), "
+                f"COUNT(*) FILTER (WHERE {INACTIVE_SQL}) "
+                + CUSTOMER_ACCOUNT_FROM
+                + CUSTOMER_METRICS_JOINS
+                + f"WHERE {' AND '.join(summary_clauses)}",
+                (low_balance_threshold, low_balance_threshold, *summary_params),
             ).fetchone()
     except (RuntimeError, MissingDatabaseConfigError) as exc:
         raise _http(
@@ -1431,6 +1499,8 @@ def list_customers(
             "activation_code_id": str(row[4]),
             "activation_code": str(row[5]),
             "status": str(row[6]),
+            "account_active": bool(row[25]),
+            "activation_status": str(row[26]) if row[26] is not None else None,
             "available_credits": int(row[7]),
             "reserved_credits": int(row[8]),
             "device_slots_used": int(row[9]),
@@ -1453,6 +1523,14 @@ def list_customers(
                 row[22].isoformat() if row[22] is not None and hasattr(row[22], "isoformat") else ""
             ),
             "month_consumed_credits": int(row[23]),
+            "generation_total_30d": int(row[27]),
+            "generation_succeeded_30d": int(row[28]),
+            "generation_failed_30d": int(row[29]),
+            "generation_failed_7d": int(row[30]),
+            "success_rate_30d": (100 * int(row[28]) / int(row[27]) if row[27] else None),
+            "low_balance": (
+                int(row[7]) < low_balance_threshold if low_balance_threshold is not None else None
+            ),
             "current_benefit": (
                 # 0.85 → 「专项 8.5 折」；无生效折扣显示空串，前端落「原价」。
                 f"专项 {Decimal(str(row[24])) * 10:g} 折" if row[24] is not None else ""
@@ -1461,11 +1539,99 @@ def list_customers(
         for row in rows
     ]
     total = int(total_row[0]) if total_row is not None else 0
+    summary = summary or (0, 0, 0)
     return {
         "items": customers,
         "total": total,
         "limit": bounded_limit,
         "offset": bounded_offset,
+        "attention_counts": {
+            "low_balance": int(summary[0]) if low_balance_threshold is not None else None,
+            "recent_failure": int(summary[1]),
+            "inactive": int(summary[2]),
+        },
+        "low_balance_threshold": low_balance_threshold,
+        "attention_basis": "当前名称/日期/状态/余额筛选的全量客户；不受分页和所选待办类别影响",
+    }
+
+
+@router.get("/customers/{user_id}/overview")
+def customer_overview(user_id: str, actor: AdminReader) -> dict[str, object]:
+    """Thirty Shanghai calendar days of ledger consumption and five mixed factual events."""
+    del actor
+    with pg_transaction(isolation="REPEATABLE READ") as conn:
+        found = conn.execute(
+            "SELECT 1 FROM users u WHERE u.id=%s AND (u.role='customer' "
+            "OR EXISTS (SELECT 1 FROM activation_code_activations a WHERE a.user_id=u.id))",
+            (user_id,),
+        ).fetchone()
+        if found is None:
+            raise _http(404, "USER_NOT_FOUND", "客户不存在。")
+        trend = conn.execute(
+            f"""
+            SELECT days.day::date,
+              COALESCE(SUM(-tx.reserved_delta) FILTER (WHERE tx.type='SETTLE'),0)
+            FROM generate_series(
+              (now() AT TIME ZONE 'Asia/Shanghai')::date - 29,
+              (now() AT TIME ZONE 'Asia/Shanghai')::date, interval '1 day') days(day)
+            LEFT JOIN wallet_transactions tx ON tx.user_id=%s
+              AND ({utc_text_timestamp("tx.created_at")} AT TIME ZONE 'Asia/Shanghai')::date
+                = days.day::date
+              AND {utc_text_timestamp("tx.created_at")} <= now()
+            GROUP BY days.day ORDER BY days.day
+            """,
+            (user_id,),
+        ).fetchall()
+        events = conn.execute(
+            CUSTOMER_FACTS_CTE
+            + f"""
+            SELECT kind, id, at, label, credits FROM (
+              SELECT 'recharge'::text AS kind, ro.id,
+                {utc_text_timestamp("ro.paid_at")} AS at,
+                '充值到账'::text AS label, ro.credits::bigint AS credits
+              FROM recharge_orders ro WHERE ro.user_id=%s AND ro.status='PAID'
+                AND ro.amount_fen>0 AND ro.paid_at IS NOT NULL
+                AND NOT EXISTS (SELECT 1 FROM admin_adjustments aa WHERE aa.recharge_order_id=ro.id)
+              UNION ALL
+              SELECT 'generation', id, created_at,
+                label || CASE WHEN succeeded THEN ' · 成功'
+                  WHEN failed THEN ' · 失败/待处理' ELSE ' · 处理中' END, NULL::bigint
+              FROM customer_task_facts WHERE user_id=%s
+              UNION ALL
+              SELECT 'adjustment', aa.id, {utc_text_timestamp("aa.created_at")}, '人工调整',
+                COALESCE(ro.credits, tx.available_delta)::bigint
+              FROM admin_adjustments aa
+              LEFT JOIN recharge_orders ro ON ro.id=aa.recharge_order_id
+              LEFT JOIN wallet_transactions tx ON tx.id=COALESCE(
+                'admin_adjustment:charge:' || aa.recharge_order_id,
+                'admin_adjustment:refund:' || aa.id)
+              WHERE aa.target_user_id=%s
+              UNION ALL
+              SELECT 'login', id, created_at::timestamptz, '客户登录', NULL::bigint
+              FROM customer_session_events WHERE user_id=%s AND event='LOGIN'
+            ) events WHERE at<=now()
+            ORDER BY at DESC, kind, id DESC LIMIT 5
+            """,
+            (user_id, user_id, user_id, user_id),
+        ).fetchall()
+    return {
+        "user_id": user_id,
+        "timezone": "Asia/Shanghai",
+        "daily_consumption": [{"day": row[0].isoformat(), "credits": int(row[1])} for row in trend],
+        "timeline": [
+            {
+                "kind": row[0],
+                "event_id": str(row[1]),
+                "created_at": row[2].isoformat(),
+                "label": row[3],
+                "credits": int(row[4]) if row[4] is not None else None,
+            }
+            for row in events
+        ],
+        "basis": (
+            "近30个北京时间自然日，按原账本SETTLE实扣积分；"
+            "最近5条按时间混排充值/生成/调整/登录，不含未发生事实。"
+        ),
     }
 
 
@@ -1478,6 +1644,10 @@ def export_customers_csv(
     created_to: str = "",
     balance_min: int | None = None,
     balance_max: int | None = None,
+    attention: CustomerAttention = "",
+    low_balance_threshold: int | None = Query(default=None, ge=0, le=2147483647),
+    sort: Literal["activated", "recharge", "month_consumed", "last_active"] = "activated",
+    direction: Literal["asc", "desc"] = "desc",
     limit: int = 5000,
 ) -> HttpResponse:
     """Export the customer list as CSV (C6) — audited + rate limited (A2).
@@ -1534,10 +1704,7 @@ def export_customers_csv(
             # of exporting a header-only CSV.
             normalized_status = status.strip().upper() if status else ""
             if normalized_status:
-                clauses.append(
-                    "COALESCE(ac.status, CASE WHEN u.is_active = 1 "
-                    "THEN 'ACTIVE' ELSE 'SUSPENDED' END) = %s"
-                )
+                clauses.append(f"{_CUSTOMER_STATUS_SQL} = %s")
                 params.append(normalized_status)
             append_admin_date_filters(
                 clauses,
@@ -1552,13 +1719,34 @@ def export_customers_csv(
             if balance_max is not None:
                 clauses.append("COALESCE(w.available_credits, 0) <= %s")
                 params.append(max(0, balance_max))
+            append_attention_filter(clauses, params, attention, low_balance_threshold)
             where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            # Same list sort/filter, including customer-level attention across all pages.
+            export_joins = (
+                CUSTOMER_METRICS_JOINS
+                + f"""
+              LEFT JOIN (SELECT user_id, SUM(amount_fen) AS total_fen
+                FROM recharge_orders ro WHERE status='PAID' AND {CASH_ORDER_ELIGIBLE}
+                GROUP BY user_id) recharge
+                ON recharge.user_id=u.id
+              LEFT JOIN (SELECT user_id, SUM(-reserved_delta) AS credits
+                FROM wallet_transactions WHERE type='SETTLE'
+                  AND created_at::timestamp AT TIME ZONE 'UTC' >=
+                    date_trunc('month', now() AT TIME ZONE 'Asia/Shanghai')
+                    AT TIME ZONE 'Asia/Shanghai' GROUP BY user_id) month_spend
+                ON month_spend.user_id=u.id
+            """
+            )
+            order_sql = _CUSTOMER_SORTS[sort]
+            if direction == "asc":
+                order_sql = order_sql.replace(" DESC", " ASC")
             rows = conn.execute(
-                "SELECT u.username, u.display_name, "
+                CUSTOMER_FACTS_CTE + "SELECT u.username, u.display_name, "
                 "COALESCE(ac.masked_code, '账号注册'), aca.activated_at, "
-                "COALESCE(ac.status, CASE WHEN u.is_active = 1 THEN 'ACTIVE' ELSE 'SUSPENDED' END) "
+                f"{_CUSTOMER_STATUS_SQL} "
                 + CUSTOMER_ACCOUNT_FROM
-                + f"{where} ORDER BY aca.activated_at DESC, aca.id DESC LIMIT %s",
+                + export_joins
+                + f"{where} ORDER BY {order_sql} LIMIT %s",
                 (*params, max(1, min(limit, 5000))),
             ).fetchall()
             write_audit(
@@ -1580,6 +1768,10 @@ def export_customers_csv(
                         "created_to": created_to,
                         "balance_min": balance_min,
                         "balance_max": balance_max,
+                        "attention": attention,
+                        "low_balance_threshold": low_balance_threshold,
+                        "sort": sort,
+                        "direction": direction,
                     },
                     "limit": limit,
                 },

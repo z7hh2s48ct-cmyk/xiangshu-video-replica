@@ -267,6 +267,100 @@ def test_content_supports_range_requests(api: TestClient, seeded: str, media_roo
     assert response.content == _VIDEO_PAYLOAD[:4]
 
 
+def _seed_direct_result(
+    dsn: str, *, url: str = "https://cdn.example.test/result.mp4?signature=private"
+) -> None:
+    _insert_video_task(dsn, "t-direct", status="SUCCEEDED", result_asset_id=None)
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE generation_tasks SET provider_result_url=%s WHERE id='t-direct'", (url,)
+        )
+
+
+def test_direct_success_no_asset_uses_safe_proxy_and_range(api, seeded, monkeypatch) -> None:
+    from app.admin_generation_routes import UrlFetcher
+
+    _seed_direct_result(seeded)
+    payload = b"\x00\x00\x00\x18ftypisomsynthetic-video"
+    urls = []
+    monkeypatch.setattr(UrlFetcher, "fetch", lambda self, url: urls.append(url) or payload)
+    page = api.get("/api/control/generation-records?record_type=VIDEO").json()
+    assert page["items"][0]["has_preview"] is True
+    assert "signature" not in str(page)
+    result = api.get(_content_url("VIDEO", "t-direct"), headers={"Range": "bytes=4-7"})
+    assert result.status_code == 206 and result.content == b"ftyp"
+    assert result.headers["cache-control"] == "private, no-store"
+    assert "signature" not in str(result.headers)
+    assert urls == ["https://cdn.example.test/result.mp4?signature=private"]
+    assert _audit_count(seeded, "t-direct") == 1
+    with psycopg.connect(seeded) as conn:
+        assert "signature" not in str(
+            conn.execute(
+                "SELECT metadata_json FROM audit_logs WHERE entity_id='t-direct'"
+            ).fetchall()
+        )
+        assert (
+            conn.execute(
+                "SELECT result_asset_id FROM generation_tasks WHERE id='t-direct'"
+            ).fetchone()[0]
+            is None
+        )
+
+
+def test_expired_direct_result_is_localized_and_audited(api, seeded, monkeypatch) -> None:
+    from app.admin_generation_routes import UrlFetcher, ViralMediaError
+
+    _seed_direct_result(seeded)
+
+    def expired(self, url):
+        raise ViralMediaError("private signed URL expired")
+
+    monkeypatch.setattr(UrlFetcher, "fetch", expired)
+    result = api.get(_content_url("VIDEO", "t-direct"))
+    assert result.status_code == 502
+    assert result.json()["detail"]["code"] == "MEDIA_DIRECT_RESULT_UNAVAILABLE"
+    assert "过期" in result.json()["detail"]["message"]
+    assert "private" not in result.text and "signature" not in result.text
+    assert _audit_count(seeded, "t-direct") == 1
+
+
+def test_direct_result_refuses_private_host_before_connection(api, seeded, monkeypatch) -> None:
+    import socket
+
+    from app.viral_media import UrlFetcher
+
+    _seed_direct_result(seeded, url="https://127.0.0.1/private")
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *args, **kw: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))],
+    )
+    called = []
+    monkeypatch.setattr(
+        UrlFetcher, "_connection_factory", lambda *a: called.append(a), raising=False
+    )
+    result = api.get(_content_url("VIDEO", "t-direct"))
+    assert result.status_code == 502 and called == []
+
+
+def test_auditor_cannot_read_direct_result_thumbnail_or_cost(
+    api_auditor, seeded, monkeypatch
+) -> None:
+    from app.admin_generation_routes import UrlFetcher
+
+    _seed_direct_result(seeded)
+    monkeypatch.setattr(UrlFetcher, "fetch", lambda *a: pytest.fail("auditor must not fetch media"))
+    assert api_auditor.get(_content_url("VIDEO", "t-direct")).status_code == 403
+    assert (
+        api_auditor.get("/api/control/generation-records/VIDEO/t-direct/thumbnail").status_code
+        == 403
+    )
+    item = api_auditor.get("/api/control/generation-records?record_type=VIDEO").json()["items"][0]
+    assert item["has_preview"] is False and item["provider_cost"] is None
+    assert item["provider_message"] is None and item["error_message"] is None
+    assert _audit_count(seeded, "t-direct") == 0
+
+
 def test_missing_record_and_missing_result_return_404(api: TestClient, seeded: str) -> None:
     missing = api.get(_content_url("VIDEO", "no-such-task"))
     assert missing.status_code == 404
@@ -344,3 +438,86 @@ def test_generation_records_list_exposes_has_preview(
     items = {item["record_id"]: item for item in response.json()["items"]}
     assert items["t-media"]["has_preview"] is True
     assert items["t-plain"]["has_preview"] is False
+
+
+@pytest.mark.parametrize(
+    "kind,status",
+    [
+        ("VIDEO", "FAILED"),
+        ("VIDEO", "SUBMISSION_UNCERTAIN"),
+        ("FIRST_FRAME_IMAGE", "FAILED"),
+        ("FIRST_FRAME_IMAGE", "SUBMISSION_UNCERTAIN"),
+        ("CHARACTER_SHEET_IMAGE", "FAILED"),
+        ("CHARACTER_SHEET_IMAGE", "SUBMISSION_UNCERTAIN"),
+        ("ORAL_VIDEO", "FAILED"),
+        ("ORAL_VIDEO", "SUBMISSION_UNCERTAIN"),
+        ("ORAL_VIDEO", "ARCHIVE_FAILED"),
+        ("ORAL_VIDEO", "CANCELLED"),
+    ],
+)
+def test_terminal_response_persistence_to_business_and_technical_display(api, seeded, kind, status):
+    import json
+
+    from app.external_calls import external_call_context, record_external_call
+
+    task_id = "matrix-task"
+    if kind == "VIDEO":
+        _insert_video_task(seeded, task_id, status=status, result_asset_id=None)
+        table = "generation_tasks"
+    elif kind == "FIRST_FRAME_IMAGE":
+        _insert_first_frame_task(seeded, task_id, version_id="matrix-version")
+        table = "first_frame_tasks"
+    elif kind == "CHARACTER_SHEET_IMAGE":
+        _insert_character_sheet_task(seeded, task_id, asset_id="matrix-asset")
+        table = "character_sheet_tasks"
+    else:
+        with psycopg.connect(seeded, autocommit=True) as conn:
+            conn.execute(
+                "INSERT INTO oral_avatars(id,identity_id,owner_user_id,title,status,"
+                "source_kind,source_asset_id) VALUES('matrix-avatar','ident-1','u-1',"
+                "'测试分身','READY','VIDEO','synthetic-source')"
+            )
+            conn.execute(
+                "INSERT INTO oral_tasks(id,owner_user_id,identity_id,avatar_id,mode,"
+                "title,estimated_cost_fen,idempotency_key,status) "
+                "VALUES(%s,'u-1','ident-1','matrix-avatar','TTS','测试口播',1,'matrix-ik',%s)",
+                (task_id, status),
+            )
+        table = "oral_tasks"
+    with psycopg.connect(seeded, autocommit=True) as conn:
+        conn.execute(f"UPDATE {table} SET status=%s WHERE id=%s", (status, task_id))
+        if kind != "ORAL_VIDEO":
+            code = "PROVIDER_TERMINAL" if kind == "VIDEO" else "IMAGE_TASK_PROVIDER_FAILED"
+            conn.execute(f"UPDATE {table} SET error_code=%s WHERE id=%s", (code, task_id))
+    with external_call_context(kind, task_id, attempt=1):
+        record_external_call(
+            provider="synthetic-provider",
+            endpoint="poll",
+            method="GET",
+            url="https://fixture.invalid/poll?token=secret-token",
+            outcome="PROVIDER_ERROR",
+            http_status=200,
+            response_body=json.dumps(
+                {
+                    "status": "FAILED",
+                    "error": {"code": "moderation", "message": "content policy violation"},
+                    "debug": "https://fixture.invalid/result?signature=secret-sign",
+                }
+            ),
+        )
+    with psycopg.connect(seeded) as conn:
+        persisted = conn.execute(
+            "SELECT outcome,provider_message,response_body,created_at IS NOT NULL "
+            "FROM external_call_logs WHERE task_id=%s",
+            (task_id,),
+        ).fetchone()
+        assert persisted[0] == "PROVIDER_ERROR" and persisted[1] == "content policy violation"
+        assert "secret-sign" not in persisted[2] and persisted[3] is True
+    page = api.get("/api/control/generation-records", params={"record_type": kind}).json()
+    item = next(row for row in page["items"] if row["record_id"] == task_id)
+    assert item["provider_message"] == "content policy violation"
+    assert item["failure_category"] and item["failure_owner"] and item["advice"]
+    assert "secret-sign" not in str(item) and "secret-token" not in str(item)
+    calls = api.get(f"/api/control/generation-records/{kind}/{task_id}/calls").json()
+    assert calls["items"][0]["provider_message"] == "content policy violation"
+    assert calls["items"][0]["has_response_body"] is True

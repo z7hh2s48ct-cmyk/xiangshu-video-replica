@@ -35,6 +35,15 @@ def _username_pattern(username: str | None) -> str | None:
     return f"%{username.strip()}%"
 
 
+def _attention_predicate(unknown_count: str, unmetered: str) -> str:
+    """明细、导出与动作聚合在聚合前使用同一个待办事实口径。"""
+    return f"""(%s::text IS NULL
+      OR (%s='pending' AND o.state='PENDING')
+      OR (%s='unknown_cost' AND o.state<>'PENDING'
+        AND (COALESCE({unknown_count},0)>0 OR {unmetered}))
+      OR (%s='unknown_revenue' AND o.state<>'PENDING' AND o.revenue_fen IS NULL))"""
+
+
 def date_bounds(start: date, end: date) -> tuple[datetime, datetime]:
     if end.year > 9998:
         raise HTTPException(422, detail="统计结束年份最多为 9998")
@@ -68,6 +77,7 @@ def operation_rows(
     lower, upper = date_bounds(start, end)
     # Aggregate provider attempts before joining the single revenue fact.
     unmetered = UNMETERED_DELIVERED_CHARGE.format(calls="c.attempt_count")
+    attention_predicate = _attention_predicate("c.unknown_cost_count", unmetered)
     rows = conn.execute(
         f"""
         SELECT o.*, COALESCE(u.username,'平台后台') AS username, COALESCE(c.attempt_count,0) AS
@@ -96,12 +106,7 @@ def operation_rows(
             WHERE (parent.id=o.id OR (o.collection_batch_id IS NOT NULL
               AND parent.id=o.source_id AND parent.collection_batch_id=o.collection_batch_id))
             AND a.provider=%s))
-          AND (%s::text IS NULL
-            OR (%s='pending' AND o.state='PENDING')
-            OR (%s='unknown_cost' AND o.state<>'PENDING'
-              AND (COALESCE(c.unknown_cost_count,0)>0 OR {unmetered}))
-            OR (%s='unknown_revenue' AND o.state<>'PENDING'
-              AND o.revenue_fen IS NULL))
+          AND {attention_predicate}
         ORDER BY COALESCE(o.completed_at,o.created_at) DESC,o.id DESC {PAGE_CLAUSE}
     """,
         (
@@ -150,11 +155,13 @@ def source_action_rows(
     start: date,
     end: date,
     user_id: str | None = None,
+    username: str | None = None,
     service: str | None = None,
     module: str | None = None,
     provider: str | None = None,
     source_id: str | None = None,
     platform: bool = False,
+    attention: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
@@ -169,8 +176,11 @@ def source_action_rows(
     成本列里 ``inspection_cost_fen`` 是质检（``quality_inspection``）调用成本的
     小计，已含在 ``known_cost_fen`` 内，便于核对质检花了多少钱。
     """
+    if attention not in (None, "pending", "unknown_cost", "unknown_revenue"):
+        raise ValueError(f"unsupported attention filter: {attention}")
     lower, upper = date_bounds(start, end)
     unmetered = UNMETERED_DELIVERED_CHARGE.format(calls="COALESCE(c.attempt_count,0)")
+    attention_predicate = _attention_predicate("c.unknown_attempt_count", unmetered)
     rows = conn.execute(
         f"""
         WITH scoped AS (
@@ -182,6 +192,8 @@ def source_action_rows(
             AND (%s::text IS NULL OR o.service=%s)
             AND (%s::text IS NULL OR o.module=%s)
             AND (%s::text IS NULL OR o.source_id=%s)
+            AND (%s::text IS NULL OR o.user_id IN (
+              SELECT id FROM users WHERE username ILIKE %s OR display_name ILIKE %s))
             AND (%s::text IS NULL OR EXISTS(SELECT 1 FROM billing_attempts a
               JOIN billing_operations parent ON parent.id=a.operation_id
               WHERE (parent.id=o.id OR (o.collection_batch_id IS NOT NULL
@@ -218,8 +230,10 @@ def source_action_rows(
           count(*) OVER() AS total_count
         FROM scoped o LEFT JOIN users u ON u.id=o.user_id
         LEFT JOIN calls c ON c.operation_id=o.id
+        WHERE {attention_predicate}
         GROUP BY o.user_id,o.source_id,u.username
-        ORDER BY max(COALESCE(o.completed_at,o.created_at)) DESC,o.source_id DESC
+        ORDER BY max(COALESCE(o.completed_at,o.created_at)) DESC,o.source_id DESC,
+          o.user_id DESC NULLS LAST
         {PAGE_CLAUSE}
     """,
         (
@@ -234,8 +248,15 @@ def source_action_rows(
             module,
             source_id,
             source_id,
+            _username_pattern(username),
+            _username_pattern(username),
+            _username_pattern(username),
             provider,
             provider,
+            attention,
+            attention,
+            attention,
+            attention,
             limit,
             offset,
         ),

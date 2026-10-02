@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import time
@@ -440,9 +441,9 @@ def test_update_display_name_records_audit(client: TestClient, route_state: str)
             "WHERE entity_id = 'staff_u' AND action = 'team.member.update'"
         ).fetchone()
     assert audit is not None
-    meta = str(audit[0])
-    assert '"old_display_name":"Staff Admin"' in meta
-    assert '"new_display_name":"Staff Renamed"' in meta
+    meta = json.loads(str(audit[0]))
+    assert meta["old_display_name"] == "Staff Admin"
+    assert meta["new_display_name"] == "Staff Renamed"
 
 
 def test_deactivate_member_revokes_their_sessions(client: TestClient, route_state: str) -> None:
@@ -467,7 +468,8 @@ def test_deactivate_member_revokes_their_sessions(client: TestClient, route_stat
             "WHERE entity_id = 'staff_u' AND action = 'team.member.update'"
         ).fetchone()
     assert revoked is not None and int(revoked[0]) >= 1
-    assert audit is not None and '"revoked_sessions":1' in str(audit[0])
+    assert audit is not None
+    assert json.loads(str(audit[0]))["revoked_sessions"] == 1
 
     # 被停用者的旧会话立刻失效：下一次请求 401。
     _restore_cookie(client, staff_cookie)

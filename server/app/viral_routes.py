@@ -92,6 +92,8 @@ logger = logging.getLogger(__name__)
 class ViralVideoItem(BaseModel):
     homepageFeatured: bool = False
     homepageRank: int | None = None
+    homepageStartsAt: str | None = None
+    homepageEndsAt: str | None = None
     platform: str
     videoId: str
     category: str
@@ -135,6 +137,8 @@ class ViralListResponse(BaseModel):
     total: int
     hasMore: bool
     nextCursor: str | None
+    serverTime: str | None = None
+    nextChangeAt: str | None = None
 
 
 class ViralFavoritesResponse(BaseModel):
@@ -318,6 +322,21 @@ def list_viral_videos(
                 detail={"code": "VIRAL_CURSOR_INVALID", "message": "分页游标无效，请刷新列表"},
             ) from exc
     fresh = fetch_state_is_fresh(conn, platform=platform, sort=sort, max_age=VIRAL_LIST_CACHE_TTL)
+    homepage_clock: tuple[str, str | None] = ("", None)
+    if featured_only:
+        from app.viral_content_state import ready_sql
+
+        clock = conn.execute(
+            "SELECT now(),(SELECT min(boundary) FROM viral_videos v "
+            "CROSS JOIN LATERAL (VALUES (v.homepage_starts_at),(v.homepage_ends_at)) "
+            "change(boundary) WHERE v.platform=%s AND v.homepage_featured=1 "
+            f"AND v.deleted_at IS NULL AND {ready_sql()} AND boundary>now() "
+            "AND NOT EXISTS (SELECT 1 FROM viral_video_visibility vis "
+            "WHERE vis.platform=v.platform AND vis.video_id=v.video_id "
+            "AND vis.status!='AVAILABLE'))",
+            (platform,),
+        ).fetchone()
+        homepage_clock = (clock[0].isoformat(), clock[1].isoformat() if clock[1] else None)
     refreshing, refresh_error = viral_refresh_status(conn, platform=platform, sort=SORT_HOT)
     try:
         page = list_viral_video_page(
@@ -375,6 +394,8 @@ def list_viral_videos(
         total=page.total,
         hasMore=page.has_more,
         nextCursor=page.next_cursor,
+        serverTime=homepage_clock[0] if featured_only else None,
+        nextChangeAt=homepage_clock[1] if featured_only else None,
     )
 
 
@@ -1173,6 +1194,15 @@ def open_viral_video_detail(
                 is not None,
                 detail_charged=deduped or charged > 0,
             )
+            from app.viral_content_observations import record_customer_read
+
+            record_customer_read(
+                conn,
+                platform=payload.platform,
+                video_id=payload.videoId,
+                user_id=actor.id,
+                kind="detail",
+            )
     return ViralDetailViewResponse(
         item=item,
         billing=ViralDetailBilling(
@@ -1221,6 +1251,15 @@ def claim_viral_video_copy(
                 platform=payload.platform,
                 video_id=payload.videoId,
                 billable=billable,
+            )
+            from app.viral_content_observations import record_customer_read
+
+            record_customer_read(
+                conn,
+                platform=payload.platform,
+                video_id=payload.videoId,
+                user_id=actor.id,
+                kind="copy",
             )
     return ViralCopyClaimResponse(
         text=hit.result.text,

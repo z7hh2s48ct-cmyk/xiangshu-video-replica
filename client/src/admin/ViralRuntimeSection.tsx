@@ -1,155 +1,117 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-
 import {
   adminActivationErrorMessage,
   collectViralNow,
+  estimateViralCollection,
   fetchViralRuntimeControls,
   updateViralRuntimeControls,
-  updateViralVideoAvailability,
+  type ViralCollectionEstimate,
   type ViralRuntimeControls,
 } from "../api.admin";
+import { yuanInputToFen } from "../rechargePackageDisplay";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { PageBanner } from "./ui/PageBanner";
 import { StatusBadge } from "./ui/StatusBadge";
-
-type PendingAction =
-  | "collection"
-  | "collect"
-  | "import"
-  | "availability"
-  | "keywords"
-  | null;
 
 export function ViralRuntimeSection({
   readOnly = false,
 }: {
   readOnly?: boolean;
 }) {
-  const [controls, setControls] = useState<ViralRuntimeControls>();
-  const [keywords, setKeywords] = useState<
-    Array<
-      NonNullable<ViralRuntimeControls["keywords"]>[number] & {
-        draftId: string;
-      }
-    >
-  >([]);
-  const [perKeywordLimit, setPerKeywordLimit] = useState(10);
-  const [intervalDays, setIntervalDays] = useState(7);
-  // 采集质量规则与月度预算（方案 P1 采集设置）。
-  const [qualityMinLikes, setQualityMinLikes] = useState("");
-  const [qualityDurationMin, setQualityDurationMin] = useState("");
-  const [qualityDurationMax, setQualityDurationMax] = useState("");
-  const [qualityExcludeWords, setQualityExcludeWords] = useState("");
-  const [monthlyBudget, setMonthlyBudget] = useState("");
+  const [controls, setControls] = useState<ViralRuntimeControls | null>(null);
+  const [interval, setInterval] = useState(7);
+  const [executionTime, setExecutionTime] = useState("");
+  const [estimate, setEstimate] = useState<ViralCollectionEstimate | null>(
+    null,
+  );
+  const [estimating, setEstimating] = useState(false);
+  const [limit, setLimit] = useState(10);
+  const [minLikes, setMinLikes] = useState("");
+  const [minDuration, setMinDuration] = useState("");
+  const [maxDuration, setMaxDuration] = useState("");
+  const [exclude, setExclude] = useState("");
+  const [budget, setBudget] = useState("");
+  const [budgetInvalid, setBudgetInvalid] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState(false);
-  const [pending, setPending] = useState<PendingAction>(null);
-  const [platform, setPlatform] = useState<"douyin" | "wechat_channels">(
-    "douyin",
-  );
-  const [videoId, setVideoId] = useState("");
-  const [availability, setAvailability] = useState<
-    "AVAILABLE" | "HIDDEN" | "UNAVAILABLE"
-  >("HIDDEN");
-  const statusRequest = useRef(0);
-
-  // 全量加载：把服务端值写进表单草稿，只在挂载时使用。轮询与操作后的刷新走
-  // loadStatus，避免采集进行中每 3 秒用服务端值回滚管理员未保存的编辑。
-  const load = useCallback(async () => {
-    setError("");
+  const [pending, setPending] = useState<
+    "settings" | "collection" | "import" | "collect" | null
+  >(null);
+  const generation = useRef(0);
+  const load = useCallback(async (drafts = false) => {
+    const current = ++generation.current;
     try {
-      const value = await fetchViralRuntimeControls();
-      setControls(value);
-      setKeywords(
-        (value.keywords ?? []).map((item) => ({
-          ...item,
-          draftId: crypto.randomUUID(),
-        })),
-      );
-      setPerKeywordLimit(value.per_keyword_limit ?? 10);
-      setIntervalDays(value.collection_interval_days ?? 7);
-      setQualityMinLikes(
-        value.quality_min_likes == null ? "" : String(value.quality_min_likes),
-      );
-      setQualityDurationMin(
-        value.quality_duration_min_ms == null
-          ? ""
-          : String(value.quality_duration_min_ms),
-      );
-      setQualityDurationMax(
-        value.quality_duration_max_ms == null
-          ? ""
-          : String(value.quality_duration_max_ms),
-      );
-      setQualityExcludeWords((value.quality_exclude_words ?? []).join("、"));
-      setMonthlyBudget(
-        value.monthly_budget_fen == null
-          ? ""
-          : String(value.monthly_budget_fen),
-      );
-    } catch (cause) {
-      setError(adminActivationErrorMessage(cause, "读取爆款视频运行状态失败"));
-    }
-  }, []);
-
-  // 仅刷新运行状态（开关、队列、采集进度），不触碰表单草稿与既有错误提示。
-  const loadStatus = useCallback(async () => {
-    const request = ++statusRequest.current;
-    try {
-      const value = await fetchViralRuntimeControls();
-      if (request === statusRequest.current) setControls(value);
-    } catch (cause) {
-      if (request === statusRequest.current)
-        setError(
-          adminActivationErrorMessage(cause, "读取爆款视频运行状态失败"),
+      const next = await fetchViralRuntimeControls();
+      if (current !== generation.current) return;
+      setControls(next);
+      if (drafts) {
+        setInterval(next.collection_interval_days ?? 7);
+        setExecutionTime(next.collection_time ?? "");
+        setLimit(next.per_keyword_limit ?? 10);
+        setMinLikes(
+          next.quality_min_likes == null ? "" : String(next.quality_min_likes),
         );
+        setMinDuration(
+          next.quality_duration_min_ms == null
+            ? ""
+            : String(next.quality_duration_min_ms / 1000),
+        );
+        setMaxDuration(
+          next.quality_duration_max_ms == null
+            ? ""
+            : String(next.quality_duration_max_ms / 1000),
+        );
+        setExclude((next.quality_exclude_words ?? []).join("、"));
+        setBudget(
+          next.monthly_budget_fen == null
+            ? ""
+            : String(next.monthly_budget_fen / 100),
+        );
+      }
+    } catch (cause) {
+      if (current === generation.current)
+        setError(adminActivationErrorMessage(cause, "读取采集设置失败"));
     }
   }, []);
-
   useEffect(() => {
-    void load();
+    void load(true);
+    return () => {
+      generation.current += 1;
+    };
   }, [load]);
-
-  // 采集进行中（有排队/执行中的刷新任务，或某平台处于「采集中」）时轮询刷新，
-  // 让「立即采集」与定时采集都有进度回显；采集结束后轮询自动停止。
-  const collectionActive =
-    controls !== undefined &&
-    (controls.pending_refreshes > 0 ||
-      controls.running_refreshes > 0 ||
-      controls.platforms.some((item) => item.refresh_status === "refreshing"));
-
   useEffect(() => {
-    if (!collectionActive || saving) return;
-    const timer = window.setInterval(() => {
-      void loadStatus();
-    }, 3000);
+    if (!controls?.pending_refreshes && !controls?.running_refreshes) return;
+    const timer = window.setInterval(() => void load(), 3000);
     return () => window.clearInterval(timer);
-  }, [collectionActive, loadStatus, saving]);
-
-  // 原因由操作人填写：此前写死成「更新爆款视频采集设置」之类的固定文字，
-  // 审计里查不出谁为什么改了采集（方案 P0-8）。
+  }, [controls?.pending_refreshes, controls?.running_refreshes, load]);
   async function confirm(reason: string) {
-    if (!controls || !pending) return;
-    statusRequest.current += 1;
+    if (!pending || !controls) return;
+    generation.current += 1;
     setSaving(true);
     setError("");
     setNotice("");
     try {
-      if (pending === "availability") {
-        if (!videoId.trim()) throw new Error("请输入源平台视频 ID");
-        await updateViralVideoAvailability(
-          platform,
-          videoId.trim(),
-          availability,
-          reason,
-        );
-        setNotice("视频可用状态已更新。");
-      } else if (pending === "collect") {
-        await collectViralNow(reason);
-        await loadStatus();
-        setNotice("已触发立即采集，下方状态会实时更新采集进度。");
+      if (pending === "collect") {
+        await collectViralNow(reason, undefined, estimate?.snapshot);
+        setNotice("采集已入队，可查看平台进度。");
+        await load();
       } else {
+        const budgetFen = budget.trim() === "" ? null : yuanInputToFen(budget);
+        if (
+          pending === "settings" &&
+          (budgetInvalid || (budget.trim() !== "" && budgetFen === null))
+        )
+          throw new Error(
+            "月度预算请输入大于零、最多两位小数的金额；清空才会解除限额。",
+          );
+        const duration = (value: string) => {
+          if (!value.trim()) return null;
+          const seconds = Number(value);
+          if (!Number.isFinite(seconds) || seconds < 0)
+            throw new Error("时长请输入非负秒数。");
+          return Math.round(seconds * 1000);
+        };
         const next = await updateViralRuntimeControls(
           {
             collection_enabled:
@@ -160,392 +122,415 @@ export function ViralRuntimeSection({
               pending === "import"
                 ? !controls.import_enabled
                 : controls.import_enabled,
-            ...(pending === "keywords"
+            ...(pending === "settings"
               ? {
-                  keywords: keywords.map(({ platform, category, keyword }) => ({
-                    platform,
-                    category,
-                    keyword,
-                  })),
-                  per_keyword_limit: perKeywordLimit,
-                  collection_interval_days: intervalDays,
-                  // 质量规则与预算（方案 P1）：空输入 = 清除该规则。
+                  per_keyword_limit: limit,
+                  collection_interval_days: interval,
+                  collection_time: executionTime || null,
                   quality_min_likes:
-                    qualityMinLikes.trim() === ""
-                      ? null
-                      : Number(qualityMinLikes),
-                  quality_duration_min_ms:
-                    qualityDurationMin.trim() === ""
-                      ? null
-                      : Number(qualityDurationMin),
-                  quality_duration_max_ms:
-                    qualityDurationMax.trim() === ""
-                      ? null
-                      : Number(qualityDurationMax),
-                  quality_exclude_words:
-                    qualityExcludeWords.trim() === ""
-                      ? []
-                      : qualityExcludeWords
-                          .split(/[,，、]/)
-                          .map((word) => word.trim())
-                          .filter(Boolean),
-                  monthly_budget_fen:
-                    monthlyBudget.trim() === "" ? null : Number(monthlyBudget),
+                    minLikes.trim() === "" ? null : Number(minLikes),
+                  quality_duration_min_ms: duration(minDuration),
+                  quality_duration_max_ms: duration(maxDuration),
+                  quality_exclude_words: exclude
+                    .split(/[,，、\n]/)
+                    .map((value) => value.trim())
+                    .filter(Boolean),
+                  monthly_budget_fen: budgetFen,
                 }
               : {}),
           },
           reason,
         );
-        statusRequest.current += 1;
+        generation.current += 1;
         setControls(next);
-        setNotice(
-          pending === "keywords"
-            ? "定时采集设置已更新。"
-            : "爆款视频运行开关已更新。",
-        );
+        setNotice("采集设置已保存。");
       }
       setPending(null);
     } catch (cause) {
-      setError(adminActivationErrorMessage(cause, "更新爆款视频配置失败"));
+      setError(adminActivationErrorMessage(cause, "操作失败，表单内容已保留"));
     } finally {
       setSaving(false);
     }
   }
-
+  const descriptions = {
+    settings: "保存计划、质量规则和预算；关键词在下方表格逐条维护。",
+    collection: controls?.collection_enabled
+      ? "暂停后不再安排新批次，运行中任务会在下一次状态检查时停止。"
+      : "开启后按已保存计划采集启用的关键词。",
+    import: controls?.import_enabled
+      ? "暂停客户粘贴视频链接创建新导入任务。"
+      : "允许客户粘贴视频链接并导入创作。",
+    collect: "立即安排当前启用关键词的采集批次。满预算时仍允许此次手动操作。",
+  };
+  async function prepareManual() {
+    setEstimating(true);
+    setError("");
+    setEstimate(null);
+    try {
+      setEstimate(await estimateViralCollection());
+      setPending("collect");
+    } catch (cause) {
+      setError(
+        adminActivationErrorMessage(cause, "无法读取采集预估，请稍后重试"),
+      );
+    } finally {
+      setEstimating(false);
+    }
+  }
   return (
-    <section aria-label="爆款视频运行控制" className="admin-panel">
-      <h2>爆款视频</h2>
-      {error ? <PageBanner tone="error">{error}</PageBanner> : null}
-      {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
-      {!controls ? (
-        <p className="admin-hint">读取中…</p>
-      ) : (
-        <>
-          <p className="admin-hint">
-            采集{" "}
-            <StatusBadge
-              tone={controls.collection_enabled ? "good" : "neutral"}
-            >
-              {controls.collection_enabled ? "已开启" : "已暂停"}
-            </StatusBadge>
-            　导入{" "}
-            <StatusBadge tone={controls.import_enabled ? "good" : "neutral"}>
-              {controls.import_enabled ? "已开启" : "已暂停"}
-            </StatusBadge>
-          </p>
-          <p className="admin-hint">
-            导入任务：排队 {controls.pending_imports} / 执行{" "}
-            {controls.running_imports} / 失败 {controls.failed_imports}
-          </p>
-          <p className="admin-hint">
-            数据源：
-            {controls.source_configured ? "已配置（未实时探测）" : "未配置"}
-            ；刷新任务： 排队 {controls.pending_refreshes} / 执行{" "}
-            {controls.running_refreshes} / 失败 {controls.failed_refreshes}
-          </p>
-          <p className="admin-hint">
-            {controls.collection_interval_days === 1 ? "每天" : "每周"}
-            采集一次。首次配置后由后台启动首轮采集，关键词修改在下一轮生效。
-            下一次：
-            {controls.next_collection_at
-              ? new Date(controls.next_collection_at).toLocaleString("zh-CN")
-              : "等待首次配置或后台调度"}
-            。 列表和播放读取已入库的云端素材；未配置关键词时不会采集。
-          </p>
-          <div className="admin-form-grid">
-            <label>
-              刷新周期
-              <select
-                disabled={readOnly || saving}
-                value={intervalDays}
-                onChange={(event) =>
-                  setIntervalDays(Number(event.target.value))
-                }
-              >
-                <option value={1}>每天</option>
-                <option value={7}>每周</option>
-              </select>
-            </label>
-            {keywords.map((item, index) => (
-              <fieldset key={item.draftId}>
-                <legend>采集关键词 {index + 1}</legend>
-                <label>
-                  平台 {index + 1}
-                  <select
-                    disabled={readOnly || saving}
-                    value={item.platform}
-                    onChange={(event) =>
-                      setKeywords(
-                        keywords.map((row, i) =>
-                          i === index
-                            ? {
-                                ...row,
-                                platform: event.target.value as
-                                  | "douyin"
-                                  | "wechat_channels",
-                              }
-                            : row,
-                        ),
-                      )
-                    }
-                  >
-                    <option value="douyin">抖音</option>
-                    <option value="wechat_channels">视频号</option>
-                  </select>
-                </label>
-                <label>
-                  分类 {index + 1}
-                  <input
-                    disabled={readOnly || saving}
-                    maxLength={32}
-                    value={item.category}
-                    onChange={(event) =>
-                      setKeywords(
-                        keywords.map((row, i) =>
-                          i === index
-                            ? { ...row, category: event.target.value }
-                            : row,
-                        ),
-                      )
-                    }
-                  />
-                </label>
-                <label>
-                  关键词 {index + 1}
-                  <input
-                    disabled={readOnly || saving}
-                    maxLength={80}
-                    value={item.keyword}
-                    onChange={(event) =>
-                      setKeywords(
-                        keywords.map((row, i) =>
-                          i === index
-                            ? { ...row, keyword: event.target.value }
-                            : row,
-                        ),
-                      )
-                    }
-                  />
-                </label>
-                {!readOnly && (
+    <>
+      <section className="admin-panel" aria-label="采集计划与质量">
+        <h2>采集计划与质量</h2>
+        {error ? <PageBanner tone="error">{error}</PageBanner> : null}
+        {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
+        {!controls ? (
+          <p role="status">正在读取采集设置…</p>
+        ) : (
+          <>
+            <div className="admin-form-grid admin-viral-plan-form">
+              <section>
+                <h3>定时采集</h3>
+                <StatusBadge
+                  tone={controls.collection_enabled ? "good" : "neutral"}
+                >
+                  {controls.collection_enabled ? "已开启" : "已暂停"}
+                </StatusBadge>
+                <p className="admin-hint">
+                  按计划采集启用的关键词；关键词启停和条数在下一轮生效。
+                </p>
+                {!readOnly ? (
                   <button
                     type="button"
                     disabled={saving}
-                    onClick={() =>
-                      setKeywords(keywords.filter((_, i) => i !== index))
-                    }
+                    onClick={() => setPending("collection")}
                   >
-                    删除关键词 {index + 1}
+                    {controls.collection_enabled ? "暂停采集" : "开启采集"}
                   </button>
-                )}
-              </fieldset>
-            ))}
-            <label>
-              每个关键词最多采集
-              <input
-                type="number"
-                min={1}
-                max={50}
-                disabled={readOnly || saving}
-                value={perKeywordLimit}
-                onChange={(event) =>
-                  setPerKeywordLimit(Number(event.target.value))
-                }
-              />
-            </label>
-            {/* 质量规则与月度预算（方案 P1 采集设置）：入池门槛 + 成本封顶。 */}
-            <label>
-              最低点赞数
-              <input
-                type="number"
-                min={0}
-                placeholder="不限"
-                disabled={readOnly || saving}
-                value={qualityMinLikes}
-                onChange={(event) => setQualityMinLikes(event.target.value)}
-              />
-            </label>
-            <label>
-              时长下限（毫秒）
-              <input
-                type="number"
-                min={0}
-                placeholder="不限"
-                disabled={readOnly || saving}
-                value={qualityDurationMin}
-                onChange={(event) => setQualityDurationMin(event.target.value)}
-              />
-            </label>
-            <label>
-              时长上限（毫秒）
-              <input
-                type="number"
-                min={0}
-                placeholder="不限"
-                disabled={readOnly || saving}
-                value={qualityDurationMax}
-                onChange={(event) => setQualityDurationMax(event.target.value)}
-              />
-            </label>
-            <label>
-              排除词（顿号或逗号分隔）
-              <input
-                placeholder="例：广告、抽奖"
-                disabled={readOnly || saving}
-                value={qualityExcludeWords}
-                onChange={(event) => setQualityExcludeWords(event.target.value)}
-              />
-            </label>
-            <label>
-              月度预算（元）
-              <input
-                type="number"
-                min={1}
-                placeholder="不限"
-                disabled={readOnly || saving}
-                value={monthlyBudget}
-                onChange={(event) => setMonthlyBudget(event.target.value)}
-              />
-            </label>
-            {controls.monthly_budget_fen != null ? (
-              <p className="admin-hint">
-                本月采集已用{" "}
-                {((controls.month_spend_fen ?? 0) / 100).toFixed(2)} 元 / 预算{" "}
-                {(controls.monthly_budget_fen / 100).toFixed(2)} 元
-                {(controls.month_spend_fen ?? 0) >= controls.monthly_budget_fen
-                  ? "（已达上限，定时采集暂停；手动「立即采集」仍可用）"
-                  : ""}
-              </p>
-            ) : null}
-            {!readOnly && (
-              <div className="admin-actions">
-                <button
-                  type="button"
-                  disabled={saving || keywords.length >= 20}
-                  onClick={() =>
-                    setKeywords([
-                      ...keywords,
-                      {
-                        platform: "douyin",
-                        category: "",
-                        keyword: "",
-                        draftId: crypto.randomUUID(),
-                      },
-                    ])
-                  }
+                ) : null}
+              </section>
+              <section>
+                <h3>客户链接导入</h3>
+                <StatusBadge
+                  tone={controls.import_enabled ? "good" : "neutral"}
                 >
-                  添加关键词
-                </button>
+                  {controls.import_enabled ? "已开启" : "已暂停"}
+                </StatusBadge>
+                <p className="admin-hint">客户粘贴视频链接并导入创作的功能。</p>
+                {!readOnly ? (
+                  <button
+                    type="button"
+                    disabled={saving}
+                    onClick={() => setPending("import")}
+                  >
+                    {controls.import_enabled ? "暂停链接导入" : "开启链接导入"}
+                  </button>
+                ) : null}
+              </section>
+              <label>
+                采集频率
+                <select
+                  disabled={readOnly || saving}
+                  value={interval}
+                  onChange={(event) => setInterval(Number(event.target.value))}
+                >
+                  <option value={1}>每天</option>
+                  <option value={7}>每周</option>
+                </select>
+              </label>
+              <label>
+                默认每词条数
+                <input
+                  type="number"
+                  min={1}
+                  max={50}
+                  disabled={readOnly || saving}
+                  value={limit}
+                  onChange={(event) => setLimit(Number(event.target.value))}
+                />
+              </label>
+              <label>
+                执行时间（上海时间）
+                <input
+                  type="time"
+                  disabled={readOnly || saving}
+                  value={executionTime}
+                  onChange={(event) => setExecutionTime(event.target.value)}
+                />
+              </label>
+              <label>
+                最低点赞数
+                <input
+                  type="number"
+                  min={0}
+                  disabled={readOnly || saving}
+                  value={minLikes}
+                  onChange={(event) => setMinLikes(event.target.value)}
+                />
+              </label>
+              <label>
+                最短时长（秒）
+                <input
+                  type="number"
+                  min={0}
+                  step={0.001}
+                  disabled={readOnly || saving}
+                  value={minDuration}
+                  onChange={(event) => setMinDuration(event.target.value)}
+                />
+              </label>
+              <label>
+                最长时长（秒）
+                <input
+                  type="number"
+                  min={0}
+                  step={0.001}
+                  disabled={readOnly || saving}
+                  value={maxDuration}
+                  onChange={(event) => setMaxDuration(event.target.value)}
+                />
+              </label>
+              <label>
+                排除词
+                <input
+                  disabled={readOnly || saving}
+                  value={exclude}
+                  onChange={(event) => setExclude(event.target.value)}
+                />
+              </label>
+              <label>
+                月度采集预算（元）
+                <input
+                  type="number"
+                  min={0.01}
+                  step={0.01}
+                  disabled={readOnly || saving}
+                  value={budget}
+                  onChange={(event) => {
+                    setBudget(event.target.value);
+                    setBudgetInvalid(event.target.validity.badInput);
+                  }}
+                />
+              </label>
+            </div>
+            <p className="admin-hint">
+              {executionTime
+                ? interval === 7
+                  ? "设置或更改每周时刻时，以当日为周起点；错过周期仅补采一次，随后保持原定星期。"
+                  : "每天在设定的上海时间执行。"
+                : "未设固定执行时间，沿用现有间隔计划。"}
+              上次采集：
+              {controls.last_collection_at
+                ? new Date(controls.last_collection_at).toLocaleString("zh-CN")
+                : "尚无执行记录"}
+              。 下一次采集：
+              {controls.next_collection_at
+                ? new Date(controls.next_collection_at).toLocaleString("zh-CN")
+                : "等待首次配置或调度"}
+              。本月已知成本
+              {controls.month_spend_fen == null
+                ? "待核对"
+                : ` ¥${(controls.month_spend_fen / 100).toFixed(4)}`}
+              。
+            </p>
+            {controls.budget_status === "warning" ||
+            controls.budget_status === "exhausted" ? (
+              <PageBanner tone="warning">
+                {controls.budget_status === "exhausted"
+                  ? "已知成本已达预算100%，新定时采集已暂停；手动采集仍可确认执行。"
+                  : "已知成本已达预算80%，请核对剩余预算。"}
+              </PageBanner>
+            ) : null}
+            {controls.month_unknown_cost_count ||
+            controls.month_pending_cost_count ? (
+              <PageBanner tone="warning">
+                费用尚未完整核对：未知 {controls.month_unknown_cost_count ?? 0}{" "}
+                次， 进行中 {controls.month_pending_cost_count ?? 0}{" "}
+                次；当前总费用未知， 已知成本占预算比例仅为下限。
+              </PageBanner>
+            ) : null}
+            <p className="admin-hint">{controls.budget_scope}</p>
+            {!readOnly ? (
+              <div className="admin-form-grid admin-viral-plan-actions">
                 <button
                   type="button"
                   disabled={saving}
-                  onClick={() => {
-                    if (
-                      keywords.some(
-                        (row) => !row.keyword.trim() || !row.category.trim(),
-                      ) ||
-                      !Number.isInteger(perKeywordLimit) ||
-                      perKeywordLimit < 1 ||
-                      perKeywordLimit > 50
-                    ) {
-                      setError(
-                        "请填写分类和关键词，采集数量须为 1 至 50 的整数。",
-                      );
-                      return;
-                    }
-                    setPending("keywords");
-                  }}
+                  onClick={() => setPending("settings")}
                 >
                   保存采集设置
                 </button>
+                <button
+                  type="button"
+                  disabled={
+                    saving || estimating || !controls.collection_enabled
+                  }
+                  onClick={() => void prepareManual()}
+                >
+                  立即采集
+                </button>
               </div>
-            )}
-          </div>
-          {controls.platforms.map((item) => (
-            <p className="admin-hint" key={item.platform}>
-              {item.platform === "douyin" ? "抖音" : "视频号"}：已缓存{" "}
-              {item.cached_videos}
-              条，最后采集 {item.last_fetched_at ?? "暂无"}，状态{" "}
-              {item.refresh_status === "ok"
-                ? "正常"
-                : item.refresh_status === "refreshing"
-                  ? "采集中"
-                  : item.refresh_status === "error"
-                    ? (item.last_refresh_error ?? "刷新失败")
-                    : item.refresh_status === "configured_only"
-                      ? "已配置，未验证"
-                      : "未配置"}
-            </p>
-          ))}
-          {!readOnly ? (
-            <div className="admin-actions">
-              <button type="button" onClick={() => setPending("collection")}>
-                {controls.collection_enabled ? "暂停采集" : "恢复采集"}
-              </button>
-              <button type="button" onClick={() => setPending("import")}>
-                {controls.import_enabled ? "暂停导入" : "恢复导入"}
-              </button>
-              <button
-                type="button"
-                disabled={!controls.collection_enabled}
-                onClick={() => setPending("collect")}
-              >
-                立即采集
-              </button>
-            </div>
-          ) : null}
-        </>
-      )}
-      {!readOnly ? (
-        <div className="admin-form-grid">
-          <label>
-            平台
-            <select
-              value={platform}
-              onChange={(event) =>
-                setPlatform(event.target.value as typeof platform)
-              }
-            >
-              <option value="douyin">抖音</option>
-              <option value="wechat_channels">视频号</option>
-            </select>
-          </label>
-          <label>
-            视频 ID
-            <input
-              value={videoId}
-              onChange={(event) => setVideoId(event.target.value)}
-            />
-          </label>
-          <label>
-            状态
-            <select
-              value={availability}
-              onChange={(event) =>
-                setAvailability(event.target.value as typeof availability)
-              }
-            >
-              <option value="AVAILABLE">可用</option>
-              <option value="HIDDEN">隐藏</option>
-              <option value="UNAVAILABLE">不可用</option>
-            </select>
-          </label>
-          <button type="button" onClick={() => setPending("availability")}>
-            更新视频状态
-          </button>
-        </div>
-      ) : null}
+            ) : null}
+            <section aria-label="采集平台状态">
+              <h3>平台状态</h3>
+              <div className="admin-viral-platform-table-scroll">
+                <table className="admin-data-table">
+                  <thead>
+                    <tr>
+                      <th>平台</th>
+                      <th>状态</th>
+                      <th>上次更新</th>
+                      <th>说明</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {controls.platforms.map((item) => (
+                      <tr key={item.platform}>
+                        <td>
+                          {item.platform === "douyin" ? "抖音" : "视频号"}
+                        </td>
+                        <td>
+                          {
+                            (
+                              {
+                                not_configured: "未配置",
+                                configured_only: "已配置，未探测",
+                                refreshing: "采集中",
+                                ok: "最近采集成功",
+                                error: "采集异常",
+                              } as const
+                            )[item.refresh_status]
+                          }
+                        </td>
+                        <td>
+                          {item.last_fetched_at
+                            ? new Date(item.last_fetched_at).toLocaleString(
+                                "zh-CN",
+                              )
+                            : "暂无"}
+                        </td>
+                        <td>
+                          {item.last_refresh_error ??
+                            (item.refresh_status === "error"
+                              ? "请查看采集记录并核对服务配置。"
+                              : "按已记录状态展示，未进行实时探测。")}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </>
+        )}
+      </section>
       <ConfirmDialog
-        busy={saving}
-        confirmLabel="确认更新"
-        description="确认后立即生效，原因会写入审计。"
-        error={error}
-        level="reason"
         open={pending !== null}
-        title="更新爆款视频运行状态"
-        onClose={() => setPending(null)}
+        title={
+          pending === "settings"
+            ? "保存采集设置"
+            : pending === "collect"
+              ? "立即采集"
+              : pending === "collection"
+                ? "修改定时采集开关"
+                : "修改客户链接导入开关"
+        }
+        description={pending ? descriptions[pending] : ""}
+        busy={saving}
+        error={error}
         onConfirm={(reason) => void confirm(reason)}
-      />
-    </section>
+        onClose={() => !saving && setPending(null)}
+      >
+        {pending === "settings" && controls ? (
+          <section aria-label="采集设置变更摘要">
+            <p>
+              最低点赞：{controls.quality_min_likes ?? "不限"} →{" "}
+              {minLikes.trim() || "不限"}
+            </p>
+            <p>
+              最短时长（秒）：
+              {controls.quality_duration_min_ms == null
+                ? "不限"
+                : controls.quality_duration_min_ms / 1000}{" "}
+              → {minDuration.trim() || "不限"}
+            </p>
+            <p>
+              最长时长（秒）：
+              {controls.quality_duration_max_ms == null
+                ? "不限"
+                : controls.quality_duration_max_ms / 1000}{" "}
+              → {maxDuration.trim() || "不限"}
+            </p>
+            <p>
+              排除词：{controls.quality_exclude_words?.join("、") || "不排除"} →{" "}
+              {exclude.trim() || "不排除"}
+            </p>
+            <p>
+              月度预算：
+              {controls.monthly_budget_fen == null
+                ? "不限"
+                : `¥${(controls.monthly_budget_fen / 100).toFixed(2)}`}{" "}
+              → {budget.trim() ? `¥${Number(budget).toFixed(2)}` : "不限"}
+            </p>
+          </section>
+        ) : null}
+        {pending === "collect" && estimate ? (
+          <div className="admin-viral-estimate">
+            <p>
+              启用关键词 {estimate.enabledKeywords} 个，预计搜索调用{" "}
+              {estimate.searchCallsMin}～{estimate.searchCallsMax} 次，最多接收{" "}
+              {estimate.videoLimit} 条视频（去重和过滤前）。
+            </p>
+            <p>
+              搜索费预估：
+              {estimate.searchCostMinFen == null ||
+              estimate.searchCostMaxFen == null
+                ? "价格未配置，费用未知"
+                : `¥${(estimate.searchCostMinFen / 100).toFixed(2)}～¥${(estimate.searchCostMaxFen / 100).toFixed(2)}`}
+              。
+            </p>
+            <p>
+              视频号详情预计 {estimate.detailCallsMin ?? "未知"}～
+              {estimate.detailCallsMax ?? "未知"} 次；含失败重试的数据接口总调用
+              {estimate.physicalDataCallsMin ?? "未知"}～
+              {estimate.physicalDataCallsMax ?? "未知"} 次。 数据接口成本区间：
+              {estimate.dataCostMinFen == null ||
+              estimate.dataCostMaxFen == null
+                ? "未知"
+                : `¥${(estimate.dataCostMinFen / 100).toFixed(4)}～¥${(estimate.dataCostMaxFen / 100).toFixed(4)}`}
+              。
+            </p>
+            <p>
+              常规失败重试估算至{" "}
+              {estimate.normalRetryPhysicalCallsMax ?? "未知"} 次数据请求，
+              对应接口成本{" "}
+              {estimate.normalRetryDataCostMaxFen == null
+                ? "未知"
+                : `¥${(estimate.normalRetryDataCostMaxFen / 100).toFixed(4)}`}
+              ； 断机恢复可能产生额外调用，最终上限未知。
+            </p>
+            <p>
+              常规重试视频下载 {estimate.mediaDownloadsMin ?? "未知"}～
+              {estimate.mediaDownloadsMax ?? "未知"} 次，封面下载
+              {estimate.coverDownloadsMin ?? "未知"}～
+              {estimate.coverDownloadsMax ?? "未知"}{" "}
+              次；缓存命中、下载流量费和存储费未知， 总费用待核对。
+            </p>
+            <PageBanner tone="warning">
+              此操作会影响客户积分：当前符合收费条件客户
+              {estimate.customerCount ?? "待核对"} 位，每位每次成功数据请求收费
+              {estimate.customerCreditsPerConfirmedCall ?? "待核对"} 积分，
+              常规重试估算每位至{" "}
+              {estimate.normalRetryCustomerCreditsMaxEach ?? "待核对"} 积分，
+              最终上限未知（实际按成功请求结算；断机恢复可能增加调用；客户停用或余额不足时不补扣）。
+            </PageBanner>
+            {estimate.budget?.budget_status === "exhausted" ? (
+              <PageBanner tone="warning">
+                月度预算已满，此次手动采集仍会产生费用。
+              </PageBanner>
+            ) : null}
+            <p className="admin-hint">{estimate.note}</p>
+          </div>
+        ) : null}
+      </ConfirmDialog>
+    </>
   );
 }

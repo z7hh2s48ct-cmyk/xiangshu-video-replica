@@ -194,6 +194,13 @@ def test_viral_task_hides_text_until_copy_claimed(gate_client, route_state) -> N
 
     with psycopg.connect(route_state) as raw:
         assert _wallet(raw, uid) == (50, 0)
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM viral_content_usage_events WHERE video_id=%s AND kind='copy'",
+                (video_id,),
+            ).fetchone()[0]
+            == 0
+        )
 
     claim = gate_client.post(
         "/api/viral/videos/copy/claim",
@@ -203,6 +210,14 @@ def test_viral_task_hides_text_until_copy_claimed(gate_client, route_state) -> N
     assert claim.status_code == 200, claim.text
     assert claim.json()["text"] == _COPY_TEXT
     assert claim.json()["billing"]["charged"] == 2
+    with psycopg.connect(route_state) as raw:
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM viral_content_usage_events WHERE video_id=%s AND kind='copy'",
+                (video_id,),
+            ).fetchone()[0]
+            == 1
+        )
 
     # 已购复看：任务接口依旧不下发正文（口径统一），claim 免费重放.
     replay = gate_client.post(
@@ -214,6 +229,53 @@ def test_viral_task_hides_text_until_copy_claimed(gate_client, route_state) -> N
     assert replay.json()["text"] == _COPY_TEXT
     again = gate_client.get(f"/api/script-from-audio-tasks/{task_id}", headers=headers).json()
     assert again["result"]["text"] is None
+    with psycopg.connect(route_state) as raw:
+        assert (
+            raw.execute(
+                "SELECT count(*) FROM viral_content_usage_events WHERE video_id=%s AND kind='copy'",
+                (video_id,),
+            ).fetchone()[0]
+            == 2
+        )
+
+
+def test_homepage_http_returns_server_clock_and_next_window_boundary(gate_client, route_state):
+    from datetime import datetime
+
+    headers, uid = account(gate_client, "gate_home_clock")
+    with psycopg.connect(route_state) as raw:
+        _seed_viral_copy_video(raw, uid, video_id="clock-video")
+        raw.execute(
+            "UPDATE viral_videos SET homepage_featured=1,"
+            "homepage_ends_at=date_trunc('second',now()+interval '1 day')"
+            "+interval '0.123450 seconds' "
+            "WHERE video_id='clock-video'"
+        )
+        raw.execute(
+            "INSERT INTO viral_media_preparations"
+            " (id,platform,video_id,media_kind,status,storage_uri) "
+            "VALUES('clock-media','douyin','clock-video','video','SUCCEEDED','fake://clock.mp4')"
+        )
+    reply = gate_client.get("/api/viral/videos?featured_only=true", headers=headers)
+    assert reply.status_code == 200, reply.text
+    result = reply.json()
+    assert len(result["items"]) == 1
+    # SQL JSON removes trailing fractional zeros; ISO timestamps permit either
+    # precision. Compare timezone-aware instants, including the persisted value.
+    item_end = datetime.fromisoformat(result["items"][0]["homepageEndsAt"])
+    server_time = datetime.fromisoformat(result["serverTime"])
+    boundary = datetime.fromisoformat(result["nextChangeAt"])
+    assert "T" in result["nextChangeAt"] and "T" in result["serverTime"]
+    assert item_end == boundary
+    assert server_time.utcoffset() is not None and boundary.utcoffset() is not None
+    with psycopg.connect(route_state) as raw:
+        persisted_end, database_now = raw.execute(
+            "SELECT homepage_ends_at,clock_timestamp() FROM viral_videos "
+            "WHERE video_id='clock-video'"
+        ).fetchone()
+    assert boundary == persisted_end
+    assert abs((server_time - database_now).total_seconds()) < 10
+    assert server_time < boundary
 
 
 def test_plain_task_still_returns_text(gate_client, route_state) -> None:

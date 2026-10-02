@@ -39,6 +39,8 @@ def test_h3_account_admin_contract_and_masking(operations_client, route_state):
     path = "/api/control/settings/h3-accounts"
     assert client.get(path).status_code == 401
     admin = admin_login(client, route_state)
+    with psycopg.connect(route_state) as raw:
+        raw.execute("UPDATE users SET is_super_admin=1 WHERE username='price_admin'")
     payload = {
         "name": "Synthetic account",
         "api_key": "synthetic-pool-secret",

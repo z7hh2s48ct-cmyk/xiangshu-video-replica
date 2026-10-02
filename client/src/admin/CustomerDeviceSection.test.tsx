@@ -44,7 +44,7 @@ describe("CustomerDeviceSection", () => {
     vi.unstubAllGlobals();
   });
 
-  it("loads only the customer's BOUND devices", async () => {
+  it("loads the customer's full device history", async () => {
     const fetchMock = vi.fn((_url: string, _init?: RequestInit) =>
       jsonResponse(deviceList()),
     );
@@ -53,16 +53,18 @@ describe("CustomerDeviceSection", () => {
     render(<CustomerDeviceSection readOnly={false} userId={CUSTOMER_ID} />);
 
     expect(await screen.findByText("办公室电脑")).toBeInTheDocument();
-    expect(screen.getByText("Windows")).toBeInTheDocument();
-    expect(screen.getByText("在线")).toBeInTheDocument();
-    expect(screen.getByText("已绑定 1 台")).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "Windows" })).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "在线" })).toBeInTheDocument();
+    expect(screen.getByText("共 1 台设备（含历史）")).toBeInTheDocument();
     // 时间列锁定北京时间口径（Asia/Shanghai）：10:00 UTC → 18:00。
-    expect(screen.getByText("2026/9/1 18:00:00")).toBeInTheDocument();
+    expect(
+      screen.getByRole("cell", { name: "2026/9/1 18:00:00" }),
+    ).toBeInTheDocument();
 
     const url = String(fetchMock.mock.calls[0]?.[0]);
     expect(url).toContain("/api/control/devices?");
     expect(url).toContain(`user_id=${CUSTOMER_ID}`);
-    expect(url).toContain("status=BOUND");
+    expect(url).not.toContain("status=BOUND");
   });
 
   it("shows an empty hint when the customer has no bound device", async () => {
@@ -74,7 +76,7 @@ describe("CustomerDeviceSection", () => {
     render(<CustomerDeviceSection readOnly={false} userId={CUSTOMER_ID} />);
 
     expect(
-      await screen.findByText("该客户当前没有已绑定设备。"),
+      await screen.findByText("该范围内没有设备记录。"),
     ).toBeInTheDocument();
     expect(screen.queryByRole("table")).toBeNull();
   });
@@ -116,10 +118,10 @@ describe("CustomerDeviceSection", () => {
     fireEvent.change(screen.getByLabelText("操作原因"), {
       target: { value: "客户换机" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "解绑并踢会话" }));
+    fireEvent.click(screen.getByRole("button", { name: "解绑并结束会话" }));
 
     expect(
-      await screen.findByText(/已解绑并踢出会话：device-1/),
+      await screen.findByText(/办公室电脑：解绑设备已完成/),
     ).toBeInTheDocument();
 
     const unbindCall = fetchMock.mock.calls.find(([url]) =>
@@ -171,7 +173,9 @@ describe("CustomerDeviceSection", () => {
     fireEvent.click(screen.getByLabelText("我已知晓该操作的影响"));
     fireEvent.click(screen.getByRole("button", { name: "永久禁用" }));
 
-    expect(await screen.findByText(/已永久禁用：device-1/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/办公室电脑：永久禁用该设备已完成/),
+    ).toBeInTheDocument();
     const revokeCall = fetchMock.mock.calls.find(([url]) =>
       String(url).includes("/revoke-credential"),
     );

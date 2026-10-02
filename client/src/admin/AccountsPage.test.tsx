@@ -68,6 +68,46 @@ function installFetch() {
 }
 
 describe("AccountsPage", () => {
+  it("完整客户流水按稳定账号分页，关联业务链接无需再次输入编号", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      const offset = Number(new URL(url).searchParams.get("offset") ?? 0);
+      const page = transactionPage(offset, 41);
+      return jsonResponse({
+        ...page,
+        items: [
+          {
+            ...page.items[0],
+            user_id: "stable-customer",
+            order_no: "MERCHANT-20261002",
+            business_label: "充值订单 · MERCHANT-20261002",
+          },
+        ],
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<AccountsPage userId="stable-customer" />);
+    await screen.findByText("充值订单 · MERCHANT-20261002");
+    expect(screen.getByRole("link", { name: "查看订单" })).toHaveAttribute(
+      "href",
+      "#admin/funds?intent=order&orderNo=MERCHANT-20261002&userId=stable-customer",
+    );
+    expect(
+      new URL(fetchMock.mock.calls[0][0]).searchParams.get("user_id"),
+    ).toBe("stable-customer");
+    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() =>
+      expect(
+        new URL(fetchMock.mock.calls.at(-1)?.[0] ?? "").searchParams.get(
+          "offset",
+        ),
+      ).toBe("20"),
+    );
+    expect(
+      new URL(fetchMock.mock.calls.at(-1)?.[0] ?? "").searchParams.get(
+        "user_id",
+      ),
+    ).toBe("stable-customer");
+  });
   it("shows point units and traces general business charges to their source", async () => {
     const page = transactionPage(0, 1);
     vi.stubGlobal(
@@ -88,10 +128,40 @@ describe("AccountsPage", () => {
       ),
     );
     render(<AccountsPage />);
+    fireEvent.click(await screen.findByText("查看关联编号"));
     expect(await screen.findByText("image-task-1")).toBeVisible();
     expect(screen.getByText("人物形象及任务图片")).toBeVisible();
     expect(screen.getByText("18 积分")).toBeVisible();
     expect(screen.queryByText("18 秒")).toBeNull();
+  });
+  it("展示可读订单号及项目业务，技术身份收进关联编号", async () => {
+    const page = transactionPage(0, 1);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        jsonResponse({
+          ...page,
+          items: [
+            {
+              ...page.items[0],
+              business_label: "视频生成 · 庭院项目",
+              recharge_order_id: null,
+              task_id: "full-task-identity",
+              billing_round: 2,
+            },
+          ],
+        }),
+      ),
+    );
+    render(<AccountsPage />);
+    expect(await screen.findByText("视频生成 · 庭院项目")).toBeVisible();
+    expect(screen.getByText("full-task-identity")).not.toBeVisible();
+    fireEvent.click(screen.getByText("查看关联编号"));
+    expect(screen.getByText("full-task-identity")).toBeVisible();
+    expect(screen.getByText("计费轮次 2")).toBeVisible();
+    expect(
+      screen.getByText(/生成冻结是在任务提交时保留预计积分/),
+    ).toBeVisible();
   });
   it("exports wallet filters from the wallet page", async () => {
     const fetchMock = installFetch();
@@ -149,9 +219,9 @@ describe("AccountsPage", () => {
     expect(within(table).getByText("充值到账")).toBeInTheDocument();
     expect(screen.getByText("+10 积分")).toBeInTheDocument();
     expect(screen.getByText(/18 积分/)).toBeInTheDocument();
-    expect(screen.getByText(/暂扣中 2 积分/)).toBeInTheDocument();
+    expect(screen.getByText(/生成冻结 2 积分/)).toBeInTheDocument();
     expect(
-      screen.getByRole("columnheader", { name: "暂扣中变动" }),
+      screen.getByRole("columnheader", { name: "生成冻结变动" }),
     ).toBeInTheDocument();
   });
 
@@ -168,18 +238,16 @@ describe("AccountsPage", () => {
         option.textContent,
       ]),
     );
-    // 下拉与词典逐项对应；客服对客户说的「暂扣 / 实扣 / 退回」就是筛选项文字。
+    // 下拉与词典逐项对应；客服对客户说的「生成冻结 / 生成扣费 / 退回」就是筛选项文字。
     expect(byValue).toMatchObject({
-      RESERVE: "暂扣",
-      SETTLE: "实扣",
-      RELEASE: "退回",
+      RESERVE: "生成冻结",
+      SETTLE: "生成扣费",
+      RELEASE: "失败退回",
       CHARGE: "充值到账",
       REFUND: "退款扣减",
       CONVERSION: "历史转换",
     });
-    expect(options.map((option) => option.textContent)).not.toContain(
-      "生成冻结",
-    );
+    expect(options.map((option) => option.textContent)).not.toContain("暂扣");
   });
 
   it("does not invent balances for unsequenced history", async () => {

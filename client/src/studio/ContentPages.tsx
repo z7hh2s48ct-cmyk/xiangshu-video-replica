@@ -1093,6 +1093,11 @@ export function ViralPage() {
   const [nextCursor, setNextCursor] = useState<string>();
   const [hasMore, setHasMore] = useState(false);
   const [listReloadRevision, setListReloadRevision] = useState(0);
+  const [homepageNow, setHomepageNow] = useState(Date.now);
+  const [homepageClockOffset, setHomepageClockOffset] = useState(0);
+  const [nextHomepageChange, setNextHomepageChange] = useState<string | null>(
+    null,
+  );
   const [favoriteKeys, setFavoriteKeys] = useState(new Set<string>());
   const [availabilityByKey, setAvailabilityByKey] = useState(
     new Map<string, ViralVideoItem["availability"]>(),
@@ -1134,9 +1139,61 @@ export function ViralPage() {
   // 平台计数与分类筛选同用这份策展集合，否则会出现「有分类没有卡片」的空点击。
   // 「我的收藏」不受此限：收藏是服务端状态，允许包含已下首页的视频。
   const curated = useMemo(
-    () => data.videos.filter((item) => item.homepageFeatured === true),
-    [data.videos],
+    () =>
+      data.videos.filter(
+        (item) =>
+          item.homepageFeatured === true &&
+          (!item.homepageStartsAt ||
+            Date.parse(item.homepageStartsAt) <= homepageNow) &&
+          (!item.homepageEndsAt ||
+            Date.parse(item.homepageEndsAt) > homepageNow),
+      ),
+    [data.videos, homepageNow],
   );
+  useEffect(() => {
+    if (review || scope !== "all") return;
+    const now = Math.max(homepageNow, Date.now() - homepageClockOffset);
+    const boundaries = [
+      nextHomepageChange,
+      ...data.videos.flatMap((item) =>
+        item.platformKey === platformKey && item.homepageFeatured
+          ? [item.homepageStartsAt, item.homepageEndsAt]
+          : [],
+      ),
+    ]
+      .filter((value): value is string => Boolean(value))
+      .map(Date.parse)
+      .filter((value) => Number.isFinite(value) && value > now);
+    const refresh = () => {
+      // 先移除过期条目；网络失败也不能把已到期内容留在打开中的首页。
+      setHomepageNow(Date.now() - homepageClockOffset);
+      setListReloadRevision((revision) => revision + 1);
+    };
+    const timer = boundaries.length
+      ? window.setTimeout(
+          refresh,
+          Math.min(Math.min(...boundaries) - now, 2_147_000_000),
+        )
+      : undefined;
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [
+    data.videos,
+    homepageClockOffset,
+    homepageNow,
+    nextHomepageChange,
+    platformKey,
+    review,
+    scope,
+  ]);
   const shown = useMemo(() => {
     const source = scope === "favorites" ? data.videos : curated;
     return source
@@ -1147,15 +1204,30 @@ export function ViralPage() {
           (category === "全部" || item.category === category),
       )
       .sort((left, right) => {
+        // API已按完整首页顺序分页；再次按点赞排序会把管理员移到首位的内容挤走。
+        if (scope === "all" && !review) return 0;
         if (sort === "热门优先") {
           return (
+            (scope === "all"
+              ? (left.homepageRank ?? 2147483647) -
+                (right.homepageRank ?? 2147483647)
+              : 0) ||
             right.likes - left.likes ||
             left.id.localeCompare(right.id, undefined, { numeric: true })
           );
         }
         return (right.publishedAt ?? 0) - (left.publishedAt ?? 0);
       });
-  }, [category, curated, data.videos, favoriteKeys, platform, scope, sort]);
+  }, [
+    category,
+    curated,
+    data.videos,
+    favoriteKeys,
+    platform,
+    scope,
+    sort,
+    review,
+  ]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: 平台/分类/排序变化时重置滚动加载计数。
   useEffect(() => {
@@ -1267,6 +1339,15 @@ export function ViralPage() {
         )
           return;
         const incoming = result.items.map(studioVideoFromViral);
+        const serverTime = result.serverTime
+          ? Date.parse(result.serverTime)
+          : NaN;
+        const offset = Number.isFinite(serverTime)
+          ? Date.now() - serverTime
+          : 0;
+        setHomepageClockOffset(offset);
+        setHomepageNow(Date.now() - offset);
+        setNextHomepageChange(result.nextChangeAt ?? null);
         const confirmedNextCursor = result.nextCursor ?? undefined;
         const confirmedHasMore = Boolean(result.hasMore && result.nextCursor);
         confirmedPaginationContextRef.current = requestContext;
@@ -1678,7 +1759,7 @@ export function ViralPage() {
               setSort(event.target.value as "热门优先" | "最新")
             }
           >
-            <option value="热门优先">热门优先</option>
+            <option value="热门优先">首页推荐</option>
             <option value="最新">最新</option>
           </select>
         </label>

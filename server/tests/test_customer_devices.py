@@ -84,7 +84,7 @@ DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 # 用的是这个常量——此前那两处把 head 字面量写在断言里，追加迁移时漏掉一处就会红
 # 而没有任何自动化提示。B1 追加 20260923T1200 时正是被这两个断言抓到的，
 # 因此顺手收敛成一个常量。
-_HEAD_REVISION = "20260930T1400_registration_bonus_settings"
+_HEAD_REVISION = "20261002T0800_alert_delivery_rules"
 
 T16_DB_NAME = "t16_customer_devices_test"
 
@@ -2256,6 +2256,90 @@ def test_admin_device_list_does_not_report_unbound_device_online(client: TestCli
     assert listed.status_code == 200, listed.text
     assert listed.json()["items"][0]["online"] is False
     assert listed.json()["summary"]["online"] == 0
+
+
+def test_admin_device_history_cards_share_customer_scope_and_stable_pagination(
+    client: TestClient,
+) -> None:
+    customer = _activated_customer(
+        client, code=FIRST_CODE, fingerprint="fp-history", suffix="history"
+    )
+    _second_device_row(
+        user_id=customer["user_id"],
+        activation_code_id="code-history",
+        device_id="history-current-second",
+        slot_no=2,
+    )
+    with psycopg.connect(_t16_dsn(), autocommit=True) as conn:
+        conn.execute(
+            "UPDATE users SET display_name='历史设备公司' WHERE id=%s", (customer["user_id"],)
+        )
+        for index in range(53):
+            conn.execute(
+                """
+                INSERT INTO customer_devices
+                (id,activation_code_id,user_id,slot_no,display_name,platform,status,
+                 fingerprint_hmac,fingerprint_key_version,token_digest,token_key_version,
+                 bound_at,unbound_at,created_at,last_active_at)
+                SELECT %s,activation_code_id,user_id,1,'历史电脑','windows','UNBOUND',
+                       %s,1,%s,1,(now()-interval '2 hours')::text,
+                       (now()-interval '1 hour')::text,(now()-interval '3 hours')::text,
+                       (now()-interval '90 minutes')::text
+                FROM customer_devices WHERE id=%s
+                """,
+                (
+                    f"history-{index:03d}",
+                    f"synthetic-fingerprint-{index}",
+                    f"synthetic-digest-{index}",
+                    customer["device_id"],
+                ),
+            )
+    headers = _admin_session(client)
+    params = {"keyword": "历史设备公司", "user_id": customer["user_id"], "limit": 50}
+    first = client.get(ADMIN_DEVICES_PATH, headers=headers, params=params).json()
+    second = client.get(ADMIN_DEVICES_PATH, headers=headers, params={**params, "offset": 50}).json()
+    assert first["total"] == second["total"] == 55
+    assert len(first["items"]) == 50 and len(second["items"]) == 5
+    assert {row["device_id"] for row in first["items"]}.isdisjoint(
+        {row["device_id"] for row in second["items"]}
+    )
+    assert first["summary"] == second["summary"]
+    assert first["summary"]["online_customers"] == 1
+    assert first["summary"]["at_slot_limit"] == 1
+    assert first["summary"]["frequent_swaps_24h"] == 1
+    history = next(row for row in first["items"] if row["status"] == "UNBOUND")
+    assert history["company_name"] == "历史设备公司"
+    assert datetime.fromisoformat(history["first_bound_at"]) < datetime.fromisoformat(
+        history["bound_at"]
+    )
+    assert history["last_active_at"] and not history["online"]
+    assert history["session_id"] is None and history["session_epoch"] is None
+    for attention, total in [
+        ("online", 1),
+        ("offline", 54),
+        ("at_slot_limit", 55),
+        ("frequent_swaps_24h", 55),
+    ]:
+        filtered = client.get(
+            ADMIN_DEVICES_PATH, headers=headers, params={**params, "attention": attention}
+        ).json()
+        assert filtered["total"] == total
+        assert filtered["summary"] == first["summary"]
+    platform = client.get(
+        ADMIN_DEVICES_PATH, headers=headers, params={**params, "platform": "macos"}
+    ).json()
+    assert platform["total"] == 1 and platform["summary"]["online_customers"] == 0
+    assert platform["summary"]["at_slot_limit"] == 1
+    empty = client.get(
+        ADMIN_DEVICES_PATH, headers=headers, params={**params, "keyword": "别的公司"}
+    ).json()
+    assert empty["total"] == 0 and all(value == 0 for value in empty["summary"].values())
+    assert (
+        client.get(
+            ADMIN_DEVICES_PATH, headers=headers, params={**params, "attention": "invalid"}
+        ).status_code
+        == 422
+    )
 
 
 def test_admin_approve_rejects_live_first_device(client: TestClient) -> None:

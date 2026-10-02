@@ -41,7 +41,7 @@
  * 产物扫描里（不放宽前三条：万一将来关掉 minify 或改动构建，它们立刻恢复
  * 检测力），但**真正有齿的层级是源码级合同测试** `client/src/entryContract.test.ts`
  * ——源码不压缩，标识符原样可见。真正在压缩产物里存活的是字符串字面量：
- * `/api/control/`、`总览仪表盘`、`审计中心`、`资金中心`、`运营管理后台`、`ASX1.`，
+ * `/api/control/`、`总览仪表盘`、`审计事件列表`、`资金中心`、`运营管理后台`、`ASX1.`，
  * 这六条构成阳性对照集合（POSITIVE_CONTROL_NEEDLES）。
  *
  * 与源码级合同测试（`client/src/entryContract.test.ts`）形成双层保护：
@@ -103,7 +103,9 @@ const TEXT_EXTENSIONS = new Set([
  *  `资金流水` 已随管理端「资金中心」改造（方案 P1）退出当前管理制品——页签改名后
  *  产物里只剩 `资金中心`，旧词在管理制品中命中 0 次，阳性对照因此失败。
  *  处理方式按本脚本的要求：旧词保留在禁止清单里（不放宽），阳性对照改用
- *  `资金中心`，并已实测它在管理制品里命中、在客户制品里 0 命中。 */
+ *  `资金中心`，并已实测它在管理制品里命中、在客户制品里 0 命中。
+ *  管理审计页同样已改为「审计事件列表」；旧「审计中心」仍保留排除，新文案
+ *  作为阳性对照，防止改名后把失效的特征误当成隔离证据。 */
 const FORBIDDEN_CONTENT_ADMIN = Object.freeze([
   "AdminApp",
   "api.admin",
@@ -115,6 +117,7 @@ const FORBIDDEN_CONTENT_ADMIN = Object.freeze([
   "激活码批次",
   "总览仪表盘",
   "审计中心",
+  "审计事件列表",
   "强制下线",
   "资金流水",
   "资金中心",
@@ -131,7 +134,7 @@ const FORBIDDEN_CONTENT_ADMIN = Object.freeze([
 const POSITIVE_CONTROL_NEEDLES = Object.freeze([
   "/api/control/",
   "总览仪表盘",
-  "审计中心",
+  "审计事件列表",
   "资金中心",
   "运营管理后台",
   "ASX1.",

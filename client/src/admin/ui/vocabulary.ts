@@ -5,14 +5,11 @@
 // 2. credits 统一按积分展示，任务计数仍用条。
 // 3. 金额一律 `¥xx.xx`（分位保留）——此前的 `Math.floor` 会把 100.50 元
 //    显示成 100 元，属数据失真，已修复。
-// 4. REVOKED 按域区分动词：激活码"已撤销"、设备"已强制退出"（沿用操作
-//    动词），客户沿用其激活码口径"已撤销"。
-// 5. 术语词典（方案 P2-1）：积分流水类型用"暂扣 / 实扣 / 退回 / 退款扣减"，
-//    其中前三个与客户端 customer/ledgerVocabulary.ts 的 LEDGER_TERMS 逐字一致，
-//    客服话术才能和客户看到的对上；账户里尚未结算的那部分额度统称"暂扣中"。
-//    金额不足 1 分显示 "< ¥0.01"，不得四舍五入成 ¥0.01 虚报。
-// 6. 列表里的"最近活动"用相对时间（formatRelativeTime），其余时间走
-//    formatDateTime（北京时间）。
+// 4. REVOKED 按域区分：激活码和客户为“已撤销”，设备为“永久禁用”。
+// 5. 管理端按原方案显示“生成冻结 / 生成扣费 / 失败退回 / 退款扣减”；
+//    只统一展示用语，存储类型、积分精度和客户端词典保持原有契约。
+//    金额不足 1 分显示“< ¥0.01”，不得四舍五入成 ¥0.01 虚报。
+// 6. 最近活动按分钟、小时、天显示相对时间，其余时间使用北京时间。
 
 type LabelMap = Record<string, string>;
 
@@ -30,7 +27,7 @@ export const DEVICE_STATUS_LABELS: LabelMap = {
   OFFLINE: "离线",
   BOUND: "已绑定",
   UNBOUND: "已解绑",
-  REVOKED: "已强制退出",
+  REVOKED: "永久禁用",
 };
 
 export const CUSTOMER_STATUS_LABELS: LabelMap = {
@@ -57,10 +54,10 @@ export const TRANSACTION_TYPE_LABELS: LabelMap = {
   CONVERSION: "历史转换",
   CHARGE: "充值到账",
   // P2-1：冻结/结算/释放太抽象，运营要能一眼看出这笔钱是哪一步产生的。
-  // 三个词与客户端一致：提交任务先「暂扣」，结束后按用量「实扣」，多暂扣的「退回」。
-  RESERVE: "暂扣",
-  SETTLE: "实扣",
-  RELEASE: "退回",
+  // 管理端依照改造方案展示生成冻结、生成扣费和失败退回。
+  RESERVE: "生成冻结",
+  SETTLE: "生成扣费",
+  RELEASE: "失败退回",
   // B1：审计调账的反向记账类型（20260923T1200），金额为负、不挂充值单。
   REFUND: "退款扣减",
 };
@@ -109,6 +106,7 @@ export const FAILURE_PHASE_LABELS: LabelMap = {
  * 回答的是「这条失败该往哪边归类」——比建议文本更适合先筛一遍再分工。
  */
 export const FAILURE_CATEGORY_LABELS: LabelMap = {
+  UNCLASSIFIED: "未归类",
   CUSTOMER_ASSET: "客户素材",
   CONTENT_REVIEW: "内容审核",
   PROVIDER_BUSY: "系统繁忙",
@@ -187,6 +185,15 @@ export const GENERATION_STATUS_FILTERS: Array<{
   },
   { value: "UNKNOWN,SUBMISSION_UNCERTAIN", label: "需人工核对" },
 ];
+
+/** Main generation view uses the same five groups as its filter. */
+export function generationStatusGroupLabel(status: string): string {
+  return (
+    GENERATION_STATUS_FILTERS.find(({ value }) =>
+      value.split(",").includes(status),
+    )?.label ?? "需人工核对"
+  );
+}
 
 /** 查词典并回退到原始值——未知状态原样展示，便于发现新枚举。 */
 export function labelFrom(labels: LabelMap, value: string): string {
@@ -283,8 +290,7 @@ export function formatRelativeTime(
   if (seconds < 60) return "刚刚";
   if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`;
   if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`;
-  if (seconds < 604800) return `${Math.floor(seconds / 86400)} 天前`;
-  return formatDateTime(value);
+  return `${Math.floor(seconds / 86400)} 天前`;
 }
 
 /** 服务端旧时间列按 UTC 解释，日期展示与耗时计算共用该契约。 */
@@ -298,7 +304,7 @@ export function parseUtcTimestamp(value: string): number {
 }
 
 /** 账户里正在暂扣、尚未结算的额度叫法，与客户端 HELD_CREDITS_LABEL 一致。 */
-export const HELD_CREDITS_LABEL = "暂扣中";
+export const HELD_CREDITS_LABEL = "生成冻结";
 
 /** 钱包额度展示统一后缀。 */
 export function formatCredits(count: number | null | undefined): string {

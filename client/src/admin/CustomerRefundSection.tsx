@@ -20,7 +20,7 @@ type PendingRefund = {
 };
 
 /**
- * 退款扣减（反向调账）：从客户可用积分里扣回，实际退款在线下办理。
+ * 退款扣减（退款扣减）：从客户可用积分里扣回，实际退款在线下办理。
  *
  * 原先只挂在「会话与设备」页、还要手输客户 ID，运营找不到入口；资金操作
  * 统一收进客户详情（方案 P0-2）。金额上限是当前可用余额——已消耗的积分
@@ -111,7 +111,7 @@ export function CustomerRefundSection({
       );
       retry.current = null;
       setNotice(
-        `已扣减 ${pending.credits} 积分，余额 ${result.wallet_balance_after} 积分（request id: ${result.request_id}）。实际退款请线下办理，并用审批单号 ${pending.sourceRef} 对齐。`,
+        `已扣减 ${pending.credits} 积分，余额 ${result.wallet_balance_after} 积分。实际退款请线下办理，并用审批单号 ${pending.sourceRef} 对齐。`,
       );
       setCredits("");
       setSourceRef("");

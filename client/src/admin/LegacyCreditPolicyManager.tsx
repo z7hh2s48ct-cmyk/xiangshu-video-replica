@@ -120,7 +120,7 @@ export function LegacyCreditPolicyManager({
     <section className="customer-detail-section" aria-label="历史积分转换">
       <h3>{userId ? "历史余额转换" : "历史余额处理策略"}</h3>
       <p>
-        仅用于旧激活账号，每个账号可执行一次。已有新积分交易、暂扣中积分或可补付订单时需要先核对账务。
+        仅用于旧激活账号，每个账号可执行一次。已有新积分交易、生成冻结中积分或可补付订单时需要先核对账务。
       </p>
       {error && <PageBanner tone="error">{error}</PageBanner>}
       {notice && <PageBanner tone="notice">{notice}</PageBanner>}

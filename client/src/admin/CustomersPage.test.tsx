@@ -28,6 +28,8 @@ vi.mock("../api.admin", () => ({
     .fn()
     .mockRejectedValue(new Error("已有新积分，不适用转换")),
   listCustomers: vi.fn(),
+  suspendCustomer: vi.fn().mockResolvedValue({}),
+  resumeCustomer: vi.fn().mockResolvedValue({}),
   fetchCustomerUnitPrice: vi.fn(),
   updateCustomerUnitPrice: vi.fn(),
   fetchCustomerAnnotation: vi.fn(),
@@ -143,6 +145,231 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     });
   });
 
+  it("restores server scope, shows global attention counts, and sorts both directions", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [
+        {
+          user_id: "stable-id",
+          username: "operator-user",
+          display_name: "合成客户公司",
+          created_at: "2026-09-01T00:00:00Z",
+          activation_code: "",
+          status: "active",
+          low_balance: true,
+        },
+      ],
+      total: 25,
+      limit: 20,
+      offset: 20,
+      attention_counts: { low_balance: 7, recent_failure: 6, inactive: 5 },
+    });
+    const navigate = vi.fn();
+    render(
+      <CustomersPage
+        readOnly
+        onCustomer={navigate}
+        initialListQuery="username=合成&threshold=50&offset=20&sort=recharge&direction=asc"
+      />,
+    );
+    await screen.findByText("合成客户公司");
+    expect(adminApi.listCustomers).toHaveBeenCalledWith(
+      expect.objectContaining({
+        username_filter: "合成",
+        lowBalanceThreshold: 50,
+        offset: 20,
+        sort: "recharge",
+        direction: "asc",
+      }),
+    );
+    expect(screen.queryByRole("button", { name: "导出列表 CSV" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /余额不足.*7/ }));
+    await waitFor(() =>
+      expect(adminApi.listCustomers).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          attention: "low_balance",
+          lowBalanceThreshold: 50,
+          offset: 0,
+        }),
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /累计充值/ }));
+    await waitFor(() =>
+      expect(adminApi.listCustomers).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          sort: "recharge",
+          direction: "desc",
+          attention: "low_balance",
+          offset: 0,
+        }),
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /累计充值/ }));
+    await waitFor(() =>
+      expect(adminApi.listCustomers).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sort: "recharge", direction: "asc" }),
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /合成客户公司/ }));
+    expect(navigate).toHaveBeenCalledWith("stable-id");
+  });
+
+  it("does not invent a low balance threshold and only applies its draft on submit", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 20,
+      offset: 0,
+      attention_counts: { low_balance: null, recent_failure: 0, inactive: 0 },
+    });
+    render(<CustomersPage />);
+    await screen.findByText(/暂无客户/);
+    expect(screen.getByRole("button", { name: /余额不足/ })).toBeDisabled();
+    const before = vi.mocked(adminApi.listCustomers).mock.calls.length;
+    fireEvent.change(screen.getByLabelText("低余额阈值"), {
+      target: { value: "50" },
+    });
+    expect(adminApi.listCustomers).toHaveBeenCalledTimes(before);
+    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+    await waitFor(() =>
+      expect(adminApi.listCustomers).toHaveBeenLastCalledWith(
+        expect.objectContaining({ lowBalanceThreshold: 50 }),
+      ),
+    );
+  });
+
+  it.each([false, true])(
+    "账号暂停状态优先于激活码并在写入后刷新，初始暂停=%s",
+    async (paused) => {
+      const customer = {
+        user_id: "user-1",
+        username: "pause-customer",
+        display_name: "暂停测试公司",
+        created_at: "2026-10-01T00:00:00Z",
+        activation_code: "XS04-****",
+        status: "ACTIVE",
+        account_active: !paused,
+        activation_status: "ACTIVE",
+        available_credits: 50,
+        reserved_credits: 3,
+      };
+      vi.mocked(adminApi.listCustomers)
+        .mockResolvedValueOnce({
+          items: [customer],
+          total: 1,
+          limit: 20,
+          offset: 0,
+        })
+        .mockResolvedValue({
+          items: [
+            {
+              ...customer,
+              account_active: paused,
+              status: paused ? "ACTIVE" : "SUSPENDED",
+            },
+          ],
+          total: 1,
+          limit: 20,
+          offset: 0,
+        });
+      render(<CustomersPage />);
+      fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+      fireEvent.click(
+        await screen.findByRole("button", {
+          name: paused ? "恢复账号" : "暂停账号",
+        }),
+      );
+      const dialog = screen.getByRole("dialog");
+      expect(
+        within(dialog).getByText(/钱包余额|余额保持不变/),
+      ).toBeInTheDocument();
+      fireEvent.change(within(dialog).getByLabelText("操作原因"), {
+        target: { value: "客户确认账户状态" },
+      });
+      fireEvent.click(
+        within(dialog).getByRole("button", {
+          name: paused ? "确认恢复账号" : "确认暂停账号",
+        }),
+      );
+      await waitFor(() =>
+        expect(
+          paused ? adminApi.resumeCustomer : adminApi.suspendCustomer,
+        ).toHaveBeenCalledWith(
+          "user-1",
+          "客户确认账户状态",
+          expect.any(String),
+        ),
+      );
+      expect(
+        await screen.findByRole("button", {
+          name: paused ? "暂停账号" : "恢复账号",
+        }),
+      ).toBeInTheDocument();
+      expect(adminApi.listCustomers).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("客户详情可分页查看25条人工调整，稳定客户编号随翻页保留", async () => {
+    vi.mocked(adminApi.listCustomers).mockResolvedValue({
+      items: [
+        {
+          user_id: "user-1",
+          username: "分页调整客户",
+          display_name: "调整公司",
+          created_at: "2026-10-01T00:00:00Z",
+          activation_code: "synthetic",
+          status: "ACTIVE",
+          available_credits: 50,
+          reserved_credits: 0,
+        },
+      ],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+    vi.mocked(adminApi.listAdminAdjustments).mockResolvedValue({
+      items: [
+        {
+          adjustment_id: "refund100",
+          source_document_type: "REFUND_APPROVAL",
+          source_document_ref: "refund100",
+          reason: "已审批扣减100积分",
+          credits: -100,
+          amount_fen: 0,
+          admin_username: "operator",
+          balance_before: 150,
+          balance_after: 50,
+          created_at: "2026-10-01T00:00:00Z",
+        },
+      ],
+      total: 25,
+      limit: 20,
+      offset: 0,
+    } as never);
+    render(<CustomersPage readOnly />);
+    fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
+    fireEvent.click(screen.getByRole("tab", { name: "充值与积分" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "查看全部人工调整" }),
+    );
+    expect(await screen.findByText("150 → 50 积分")).toBeInTheDocument();
+    expect(screen.getByText("operator")).toBeInTheDocument();
+    const history = screen.getByRole("table", { name: "调账历史列表" })
+      .parentElement?.parentElement;
+    expect(history).not.toBeNull();
+    fireEvent.click(
+      within(history as HTMLElement).getByRole("button", { name: "下一页" }),
+    );
+    await waitFor(() =>
+      expect(adminApi.listAdminAdjustments).toHaveBeenLastCalledWith("user-1", {
+        limit: 20,
+        offset: 20,
+      }),
+    );
+    expect(
+      screen.queryByRole("button", { name: "导出 CSV" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("renders customer list with pagination", async () => {
     const mockCustomers = [
       {
@@ -154,6 +381,10 @@ describe("CustomersPage (ADM-02 / T33)", () => {
         status: "active",
         generation_total: 8,
         generation_succeeded: 5,
+        generation_total_30d: 8,
+        generation_succeeded_30d: 5,
+        generation_failed_30d: 1,
+        success_rate_30d: 62.5,
         generation_failed: 1,
         generation_in_progress: 1,
         generation_attention: 1,
@@ -184,24 +415,19 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     });
 
     expect(screen.getByText("第 1 / 1 页（共 2 位）")).toBeInTheDocument();
-    expect(screen.getByText("成功 5 / 8")).toBeInTheDocument();
+    expect(screen.getByText("5 / 8 次")).toBeInTheDocument();
     const headers = within(screen.getByRole("table", { name: "客户列表" }))
       .getAllByRole("columnheader")
       .map((cell) => cell.textContent);
     expect(headers).toEqual([
-      "用户名",
-      "公司名称",
-      "标签",
+      "客户",
       "负责人",
-      "客户 ID",
-      "注册时间",
-      "状态",
-      "当前权益",
+      "状态与权益",
       "可用积分",
-      "累计充值",
-      "本月消耗",
-      "生成情况",
-      "最近活跃",
+      "累计充值 ↕",
+      "本月消耗 ↕",
+      "近30天生成",
+      "最近活跃 ↕",
       "操作",
     ]);
     expect(screen.getByLabelText("customer-1 累计充值")).toHaveTextContent(
@@ -211,33 +437,16 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       .getAllByRole("row")
       .find((row) => row.textContent?.includes("customer-1"));
     expect(firstDataRow).toBeDefined();
+    const cells = within(firstDataRow as HTMLElement).getAllByRole("cell");
+    expect(cells).toHaveLength(9);
+    expect(within(cells[0]).getByText("乡墅装饰有限公司")).toBeInTheDocument();
+    expect(within(cells[0]).getByText("customer-1")).toBeInTheDocument();
     expect(
-      within(firstDataRow as HTMLElement)
-        .getAllByRole("cell")
-        .map((cell) => cell.textContent?.replace(/\s+/g, " ").trim()),
-    ).toEqual([
-      "customer-1",
-      "乡墅装饰有限公司",
-      // 未标注 / 未指定负责人走显式占位，不是空白（P2-3）。
-      "—",
-      "未指定",
-      "user-1",
-      // 与 formatDateTime 的展示契约一致：固定 Asia/Shanghai，
-      // 否则期望值随 runner 时区漂移（CI 为 UTC，本地为 +8）。
-      new Date(mockCustomers[0].created_at).toLocaleString("zh-CN", {
-        hour12: false,
-        timeZone: "Asia/Shanghai",
-      }),
-      "活跃",
-      // 无生效专项折扣显示「原价」（方案 P1 经营字段）。
-      "原价",
-      "0 积分",
-      "¥0.00",
-      "0 积分",
-      "成功 5 / 8 失败 1 · 进行中 1",
-      "—",
-      "展开详情",
-    ]);
+      within(cells[0]).getByRole("button", { name: "复制客户 ID" }),
+    ).toBeInTheDocument();
+    expect(cells[2]).toHaveTextContent("活跃原价");
+    expect(cells[6]).toHaveTextContent("62.5%5 / 8 次失败 1");
+    expect(cells[7]).toHaveTextContent("暂无活动");
   });
 
   it("公司名称未填写时显式占位，不拿用户名顶替", async () => {
@@ -266,8 +475,8 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       .getAllByRole("cell")
       .map((cell) => cell.textContent?.replace(/\s+/g, " ").trim());
     // 「用户名」列有值、与「公司名称」列内容不同，才说明没有静默顶替。
-    expect(cells[0]).toBe("customer-1");
-    expect(cells[1]).toBe("未填写");
+    expect(cells[0]).toContain("未填写customer-1");
+    expect(within(row).getByText("未填写").tagName).toBe("STRONG");
 
     // 详情页与列表同口径（原先详情页在这里回退成用户名，两处显示不同值）。
     fireEvent.click(screen.getByRole("button", { name: "展开详情" }));
@@ -342,7 +551,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
 
     const section = await screen.findByRole("region", { name: "客户标注" });
-    expect(within(section).getByText("VIP")).toBeInTheDocument();
+    expect(await within(section).findByText("VIP")).toBeInTheDocument();
     expect(within(section).getByText("ops-chen")).toBeInTheDocument();
     expect(
       within(section).getByText("老客户，续费前先电话回访。"),
@@ -535,7 +744,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     fireEvent.click(await screen.findByRole("button", { name: "展开详情" }));
 
     const section = await screen.findByRole("region", { name: "客户标注" });
-    expect(within(section).getByText("VIP")).toBeInTheDocument();
+    expect(await within(section).findByText("VIP")).toBeInTheDocument();
     expect(within(section).getByText("ops-chen")).toBeInTheDocument();
     expect(
       within(section).getByText("老客户，续费前先电话回访。"),
@@ -768,10 +977,12 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     const nextPageButton = screen.getByRole("button", { name: "下一页" });
     fireEvent.click(nextPageButton);
 
-    expect(adminApi.listCustomers).toHaveBeenCalledWith({
-      limit: 20,
-      offset: 20,
-    });
+    expect(adminApi.listCustomers).toHaveBeenCalledWith(
+      expect.objectContaining({
+        limit: 20,
+        offset: 20,
+      }),
+    );
   });
 
   it("supports filtering by username", async () => {
@@ -788,11 +999,13 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     fireEvent.change(filterInput, { target: { value: "customer-1" } });
     fireEvent.click(screen.getByRole("button", { name: "筛选" }));
 
-    expect(adminApi.listCustomers).toHaveBeenCalledWith({
-      limit: 20,
-      offset: 0,
-      username_filter: "customer-1",
-    });
+    expect(adminApi.listCustomers).toHaveBeenCalledWith(
+      expect.objectContaining({
+        limit: 20,
+        offset: 0,
+        username_filter: "customer-1",
+      }),
+    );
   });
 
   it("applies filter drafts together and ignores an older response arriving last", async () => {
@@ -872,6 +1085,10 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       createdTo: "2026-09-05",
       balanceMin: 10,
       balanceMax: 500,
+      attention: "",
+      sort: "activated",
+      direction: "desc",
+      lowBalanceThreshold: undefined,
     });
   });
 
@@ -953,11 +1170,11 @@ describe("CustomersPage (ADM-02 / T33)", () => {
 
     expect(screen.queryByRole("table", { name: "客户列表" })).toBeNull();
     const detailPanel = screen
-      .getByRole("heading", { name: "customer-1" })
+      .getByRole("heading", { name: "乡墅装饰有限公司" })
       .closest("div");
     expect(detailPanel).not.toBeNull();
     // 详情页带出公司名（display_name），让管理员确认账号与公司的一一对应
-    expect(screen.getByText(/公司名称/)).toBeInTheDocument();
+    expect(screen.getByText(/用户名 customer-1/)).toBeInTheDocument();
     expect(screen.getByText("乡墅装饰有限公司")).toBeInTheDocument();
     expect(
       screen.getByRole("region", { name: "客户核心指标" }),
@@ -987,22 +1204,20 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       // 本条此前断言 listDevices 不被调用，是 PR #102 删除设备页后的固化状态，
       // 随任务书 C 反转；会话与调账仍未在详情内直连，两条否定断言保持。
       expect(adminApi.listDevices).toHaveBeenCalledWith({
-        status: "BOUND",
         userId: "user-1",
+        offset: 0,
         limit: 50,
       });
       // 方案 P1「登录与设备」页签：设备 + 该客户的在线会话一并挂载；
       // 调账历史仍不在详情内直连（资金中心入口）。
-      expect(adminApi.listCustomerSessions).toHaveBeenCalledWith(
-        "user-1",
-        expect.anything(),
-      );
+      expect(adminApi.listCustomerSessions).not.toHaveBeenCalled();
+      expect(adminApi.listDevices).toHaveBeenCalledTimes(1);
       expect(adminApi.listAdminAdjustments).not.toHaveBeenCalled();
     });
     expect(
       screen.getByRole("region", { name: "客户设备" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("该客户当前没有已绑定设备。")).toBeInTheDocument();
+    expect(screen.getByText("该范围内没有设备记录。")).toBeInTheDocument();
     expect(screen.queryByText("绑定设备")).not.toBeInTheDocument();
     expect(screen.queryByText("登录设备")).not.toBeInTheDocument();
     expect(
@@ -1011,8 +1226,8 @@ describe("CustomersPage (ADM-02 / T33)", () => {
     expect(
       screen.queryByRole("button", { name: "查看会话" }),
     ).not.toBeInTheDocument();
-    // 详情不单列暂扣额度：旧叫法「冻结额度」与统一后的「暂扣中额度」都不应出现。
-    expect(screen.queryByText(/冻结额度|暂扣中额度/)).not.toBeInTheDocument();
+    // 详情不单列生成冻结额度：旧叫法「冻结额度」与统一后的「生成冻结额度」都不应出现。
+    expect(screen.queryByText(/冻结额度|生成冻结额度/)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "← 返回客户列表" }));
 
@@ -1085,6 +1300,7 @@ describe("CustomersPage (ADM-02 / T33)", () => {
       expect(adminApi.getAdminGenerationRecordCalls).toHaveBeenCalledWith(
         "RECHARGE_ORDER",
         "CZ20260928001",
+        { limit: 50, offset: 0 },
       ),
     );
     expect(

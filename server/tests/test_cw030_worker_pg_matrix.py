@@ -110,6 +110,9 @@ CW030_DB_NAME = "cw030_worker_matrix_test"
 DEFAULT_DSN = "postgresql://testuser:testpass@localhost:5433/customer_v3_test"
 
 _MATRIX_CLEANUP_ORDER = (
+    "viral_keyword_runs",
+    "viral_content_usage_events",
+    "viral_content_sources",
     "viral_script_cache",
     # Reset only this isolated fixture, including new immutable billing descendants.
     "wallet_transactions",
@@ -1654,6 +1657,45 @@ def test_viral_copy_cache_reuses_result_but_bills_each_request(
         )
     ) == [24, 24, 36]
     assert _one(pg_state, "SELECT sum(reserved_credits) FROM wallets") == 0
+
+
+def test_first_asr_completion_records_usage_only_on_actual_claim(pg_state, monkeypatch):
+    from contextlib import contextmanager
+
+    from app.auth import CurrentUser
+    from app.viral_routes import ViralCopyClaimRequest, claim_viral_video_copy
+
+    storage, calls = _copy_fixture(pg_state, monkeypatch)
+    _seed_viral_copy(pg_state, "u1")
+    _exec(
+        pg_state, "INSERT INTO viral_videos(platform,video_id,title) VALUES('douyin','123','copy')"
+    )
+    _enqueue_copy(pg_state, "u1", "first-asr-then-claim")
+    _run_copy(pg_state, storage)
+    assert len(calls) == 1
+    assert _one(pg_state, "SELECT count(*) FROM viral_content_usage_events WHERE kind='copy'") == 0
+    _exec(pg_state, "UPDATE users SET role='customer' WHERE id='u1'")
+    _exec(pg_state, "DELETE FROM billing_tariffs WHERE service='viral_copy'")
+    _exec(
+        pg_state,
+        "INSERT INTO billing_tariffs(service,enabled,unit_credits) VALUES('viral_copy',true,2)",
+    )
+
+    class ClaimDatabase:
+        @contextmanager
+        def write(self):
+            with psycopg.connect(pg_state) as raw:
+                yield BusinessConnection.postgres(raw), CurrentUser("u1", "u1", "u1", "customer")
+
+    request = ViralCopyClaimRequest(platform="douyin", videoId="123")
+    first = claim_viral_video_copy(request, cast(Any, ClaimDatabase()))
+    assert first.text == "服务器共享的原视频文案"
+    assert first.billing.charged == 2
+    assert _one(pg_state, "SELECT count(*) FROM viral_content_usage_events WHERE kind='copy'") == 1
+    replay = claim_viral_video_copy(request, cast(Any, ClaimDatabase()))
+    assert replay.billing.deduped and replay.billing.charged == 0
+    assert _one(pg_state, "SELECT count(*) FROM viral_content_usage_events WHERE kind='copy'") == 2
+    assert len(calls) == 1
 
 
 def test_viral_copy_cache_waiters_do_not_submit_twice(
@@ -4093,6 +4135,13 @@ async def test_viral_copy_handler_serves_shared_cache_and_bills_the_delivery(
     assert payload.billing is not None
     assert payload.billing.charged == 5
     assert payload.billing.deduped is False
+    assert (
+        _one(
+            pg_state,
+            "SELECT count(*) FROM viral_content_usage_events WHERE video_id='123' AND kind='copy'",
+        )
+        == 1
+    )
     assert _one(pg_state, "SELECT count(*) FROM script_from_audio_tasks") == 0
     assert _one(pg_state, "SELECT count(*) FROM viral_import_tasks") == 0
     assert _rows(pg_state, "SELECT service, state, charged_credits FROM billing_operations") == [

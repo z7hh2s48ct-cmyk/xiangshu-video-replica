@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 from typing import Literal
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import ConfigDict
@@ -32,10 +33,11 @@ from app.auth import CurrentUser
 from app.db_pg import pg_transaction
 from app.db_portable import BusinessConnection
 from app.generation import GenerationTaskRetryRequest, retry_generation_task
-from app.media import storage_key_from_uri
-from app.media_routes import read_stored_object, storage_for_asset
+from app.media import MAX_UPLOAD_BYTES, storage_key_from_uri
+from app.media_routes import _object_range, read_stored_object, storage_for_asset
 from app.permissions import write_audit
 from app.storage import StorageAdapter
+from app.viral_media import UrlFetcher, ViralMediaError
 
 router = APIRouter(prefix="/api/control", tags=["admin-generation"])
 
@@ -280,20 +282,74 @@ def get_generation_record_content(
     播放视频/展示图片，Range 支持拖动进度条。
     """
     _require_media_viewer(actor)
+    direct_url: str | None = None
+    storage: StorageAdapter | None = None
+    object_key = ""
     with pg_transaction() as raw:
         conn = BusinessConnection.postgres(raw)
-        storage, object_key = _resolve_record_object(
-            conn, record_type=record_type, record_id=record_id
-        )
+        if record_type == "VIDEO":
+            # Only a persisted successful result may use this proxy. There is no
+            # caller-supplied URL and no generation, archive or billing write.
+            task = conn.execute(
+                "SELECT status,archive_status,provider,result_asset_id,provider_result_url "
+                "FROM generation_tasks WHERE id=%s",
+                (record_id,),
+            ).fetchone()
+            if task is not None and task["result_asset_id"] is None:
+                candidate = str(task["provider_result_url"] or "").strip()
+                if (
+                    task["status"] == "SUCCEEDED"
+                    and task["archive_status"] in {"DIRECT", "ARCHIVING", "ARCHIVE_FAILED"}
+                    and task["provider"] == "metaso"
+                    and urlsplit(candidate).scheme == "https"
+                ):
+                    direct_url = candidate
+        if direct_url is None:
+            storage, object_key = _resolve_record_object(
+                conn, record_type=record_type, record_id=record_id
+            )
         write_audit(
             conn,
             actor=_admin_to_current_user(actor),
             action="generation_record.content_view",
             entity_type="generation_record",
             entity_id=record_id,
-            metadata={"record_type": record_type},
+            metadata={
+                "record_type": record_type,
+                "result_source": "DIRECT" if direct_url else "ASSET",
+            },
             commit=False,
         )
+    if direct_url is not None:
+        try:
+            # Existing media fetcher pins a public IP, verifies each redirect,
+            # forbids HTTPS downgrade, and limits bytes. It sends no credentials.
+            content = UrlFetcher(timeout_seconds=30, max_bytes=MAX_UPLOAD_BYTES).fetch(direct_url)
+            if len(content) < 12 or content[4:8] != b"ftyp":
+                raise ViralMediaError("invalid video result")
+        except (ViralMediaError, OSError, ValueError) as exc:
+            raise HTTPException(
+                502,
+                detail={
+                    "code": "MEDIA_DIRECT_RESULT_UNAVAILABLE",
+                    "message": "成片直链已过期或暂时无法读取，请核对结果或稍后重试。",
+                },
+            ) from exc
+        start, end, partial = _object_range(request.headers.get("range"), len(content))
+        headers = {
+            "Cache-Control": "private, no-store",
+            "Accept-Ranges": "bytes",
+            "Content-Disposition": 'inline; filename="result.mp4"',
+        }
+        if partial:
+            headers["Content-Range"] = f"bytes {start}-{end}/{len(content)}"
+        return Response(
+            content[start : end + 1],
+            status_code=206 if partial else 200,
+            media_type="video/mp4",
+            headers=headers,
+        )
+    assert storage is not None
     return read_stored_object(
         storage,
         object_key=object_key,

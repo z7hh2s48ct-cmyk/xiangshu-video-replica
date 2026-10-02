@@ -148,6 +148,7 @@ def _default_transport(
         # 语音转写（口播稿识别）的原始响应落调用日志（方案 P0-9）。
         response_body, _headers, status = recorded_urlopen(
             request,
+            expected_json=True,
             timeout=timeout_seconds,
             provider="asr",
             endpoint=endpoint_from_url(url),

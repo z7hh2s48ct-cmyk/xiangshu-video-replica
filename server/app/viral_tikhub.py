@@ -169,6 +169,7 @@ class UrllibViralHttpTransport(ViralHttpTransport):
             )
             response_body, _headers, _status = recorded_urlopen(
                 request,
+                expected_json=True,
                 timeout=self.timeout_seconds,
                 provider="tikhub",
                 endpoint=endpoint_from_url(url),
@@ -221,6 +222,8 @@ class ViralVideo:
     homepage_featured: bool = False
     # 策展置顶序（T4）：NULL 表示未置顶，featured 列表按 ASC NULLS LAST 排序。
     homepage_rank: int | None = None
+    homepage_starts_at: str | None = None
+    homepage_ends_at: str | None = None
 
     def to_client_dict(self) -> dict[str, Any]:
         return {
@@ -228,6 +231,8 @@ class ViralVideo:
             "videoId": self.video_id,
             "homepageFeatured": self.homepage_featured,
             "homepageRank": self.homepage_rank,
+            "homepageStartsAt": self.homepage_starts_at,
+            "homepageEndsAt": self.homepage_ends_at,
             "category": self.category,
             "title": self.title,
             "sourceDescription": str(self.native.get("source_description") or "") or None,

@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from typing import Annotated
+from typing import Annotated, Literal
+from uuid import uuid4
 
 import psycopg
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 # Import to trigger provider registration
 import app.zpay_provider  # noqa: F401
-from app.admin_write_contract import AdminWriteContract
+from app.admin_auth_routes import AdminWriter
+from app.admin_write_contract import AdminWriteContract, write_with_idempotency
 from app.admin_write_contract import require_write_contract as _require_write_contract
-from app.auth import Database
+from app.auth import CurrentUser, Database
 from app.control_auth import ControlUser
 from app.db_portable import BusinessConnection
 from app.ops_metrics import get_or_create_request_id
@@ -40,6 +43,148 @@ from app.zpay_payments import (
 
 router = APIRouter(prefix="/api", tags=["payments"])
 logger = logging.getLogger(__name__)
+
+
+class PaidLedgerRepairResponse(BaseModel):
+    order_no: str
+    outcome: Literal["repaired", "already_recorded"]
+    credits: int
+
+
+def _repair_paid_order_ledger(conn: BusinessConnection, order_no: str) -> PaidLedgerRepairResponse:
+    if not conn.is_postgres:
+        raise HTTPException(503, detail={"code": "LEDGER_REPAIR_UNAVAILABLE"})
+    with conn.raw.transaction():
+        # 与支付结算同样先锁订单，再锁钱包；并发补记/结算只允许一个入账事实。
+        order = conn.execute(
+            "SELECT id, user_id, status, credits FROM recharge_orders "
+            "WHERE merchant_order_no = %s FOR UPDATE",
+            (order_no,),
+        ).fetchone()
+        if order is None:
+            raise HTTPException(
+                404, detail={"code": "RECHARGE_ORDER_NOT_FOUND", "message": "订单不存在。"}
+            )
+        if order["status"] != "PAID":
+            raise HTTPException(
+                409,
+                detail={"code": "LEDGER_REPAIR_ORDER_NOT_PAID", "message": "仅可补记已支付订单。"},
+            )
+        credits = int(order["credits"])
+        existing = conn.execute(
+            "SELECT user_id, available_delta, reserved_delta FROM wallet_transactions "
+            "WHERE recharge_order_id = %s AND type = 'CHARGE'",
+            (str(order["id"]),),
+        ).fetchall()
+        if existing:
+            if (
+                len(existing) != 1
+                or existing[0]["user_id"] != order["user_id"]
+                or int(existing[0]["available_delta"]) != credits
+                or int(existing[0]["reserved_delta"]) != 0
+            ):
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "LEDGER_REPAIR_CHARGE_CONFLICT",
+                        "message": "已有入账流水与订单不符，请人工核对。",
+                    },
+                )
+            return PaidLedgerRepairResponse(
+                order_no=order_no, outcome="already_recorded", credits=credits
+            )
+        wallet = conn.execute(
+            "SELECT available_credits, reserved_credits FROM wallets WHERE user_id = %s FOR UPDATE",
+            (str(order["user_id"]),),
+        ).fetchone()
+        if wallet is None or credits <= 0:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "LEDGER_REPAIR_WALLET_INVALID",
+                    "message": "钱包或订单积分快照不完整，请人工核对。",
+                },
+            )
+        ledger = conn.execute(
+            "SELECT COALESCE(SUM(available_delta), 0) AS available, "
+            "COALESCE(SUM(reserved_delta), 0) AS reserved "
+            "FROM wallet_transactions WHERE user_id = %s",
+            (str(order["user_id"]),),
+        ).fetchone()
+        if int(wallet["available_credits"]) != int(ledger["available"]) or int(
+            wallet["reserved_credits"]
+        ) != int(ledger["reserved"]):
+            # 缺流水但钱包已加分时不能再加一次；先进入钱包异常核对，不能猜测旧入账。
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "LEDGER_REPAIR_WALLET_MISMATCH",
+                    "message": "钱包与已有流水不符，请先核对，暂不自动补记。",
+                },
+            )
+        updated = conn.execute(
+            "UPDATE wallets SET available_credits = available_credits + %s, "
+            "updated_at = CURRENT_TIMESTAMP "
+            "WHERE user_id = %s AND available_credits <= 2147483647 - %s",
+            (credits, str(order["user_id"]), credits),
+        )
+        if updated.rowcount != 1:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "WALLET_CREDIT_OVERFLOW",
+                    "message": "积分超出钱包范围，请人工核对。",
+                },
+            )
+        conn.execute(
+            "INSERT INTO wallet_transactions (id, user_id, type, available_delta, reserved_delta, "
+            "recharge_order_id, idempotency_key, auth_source) "
+            "VALUES (%s, %s, 'CHARGE', %s, 0, %s, %s, 'internal')",
+            (
+                str(uuid4()),
+                str(order["user_id"]),
+                credits,
+                str(order["id"]),
+                f"paid-ledger-repair:{order['id']}",
+            ),
+        )
+        return PaidLedgerRepairResponse(order_no=order_no, outcome="repaired", credits=credits)
+
+
+@router.post(
+    "/control/recharge-orders/{order_no}/repair-ledger", response_model=PaidLedgerRepairResponse
+)
+def repair_paid_order_ledger(
+    order_no: str,
+    body: AdminWriteContract,
+    request: Request,
+    response: Response,
+    actor: AdminWriter,
+) -> dict[str, object]:
+    _key, reason = _require_write_contract(request, body)
+    current_user = CurrentUser(
+        id=actor.user_id, username=actor.username, display_name=actor.display_name, role="admin"
+    )
+
+    def business(raw: psycopg.Connection, request_id: str) -> dict[str, object]:
+        conn = BusinessConnection.postgres(raw)
+        result = _repair_paid_order_ledger(conn, order_no)
+        write_audit(
+            conn,
+            actor=current_user,
+            action="payment.ledger_repair",
+            entity_type="recharge_order",
+            entity_id=order_no,
+            metadata={
+                "reason": reason,
+                "outcome": result.outcome,
+                "credits": result.credits,
+                "request_id": request_id,
+            },
+        )
+        return result.model_dump()
+
+    return write_with_idempotency(request, response, actor, body, business, success_status=200)
 
 
 def get_zpay_provider() -> PaymentProvider:

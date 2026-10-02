@@ -31,11 +31,13 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from typing import Literal
 
 import psycopg
 from fastapi import APIRouter, Request, Response
 
 from app.admin_auth_routes import AdminReader, AdminWriter
+from app.admin_customer_metrics import utc_text_timestamp
 from app.admin_write_contract import (
     AdminWriteContract,
     DeferredHTTPWriteError,
@@ -90,93 +92,107 @@ def _transaction_now(conn: psycopg.Connection) -> datetime:
 @router.get("/devices")
 def list_devices(
     actor: AdminReader,
-    status: str | None = None,
+    status: Literal["BOUND", "UNBOUND", "REVOKED"] | None = None,
     activation_code_id: str | None = None,
     user_id: str | None = None,
     platform: str | None = None,
+    keyword: str | None = None,
+    attention: Literal["online", "offline", "at_slot_limit", "frequent_swaps_24h"] | None = None,
     limit: int = DEFAULT_LIST_LIMIT,
     offset: int = 0,
 ) -> dict[str, object]:
-    """List devices with display metadata only — digests never leave the store."""
+    """完整历史设备与去重客户待办共享作用域，分页不改变卡片计数。"""
     bounded_limit, bounded_offset = page_bounds(limit, offset, max_limit=MAX_LIST_LIMIT)
     clauses: list[str] = []
     params: list[object] = []
-    if status:
-        clauses.append("cd.status = %s")
-        params.append(status)
-    if activation_code_id:
-        clauses.append("cd.activation_code_id = %s")
-        params.append(activation_code_id)
-    if user_id:
-        clauses.append("cd.user_id = %s")
-        params.append(user_id)
-    if platform:
-        clauses.append("cd.platform = %s")
-        params.append(platform)
+    for field, value in [
+        ("cd.activation_code_id", activation_code_id),
+        ("cd.user_id", user_id),
+        ("cd.platform", platform),
+    ]:
+        if value:
+            clauses.append(f"{field} = %s")
+            params.append(value)
+    if keyword and keyword.strip():
+        clauses.append("(u.username ILIKE %s OR u.display_name ILIKE %s)")
+        params.extend([f"%{keyword.strip()}%"] * 2)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    # 客户上限是全平台限制，先按客户计算真实占用，再作用于当前检索范围。
+    bound_time = utc_text_timestamp("cd.bound_at")
+    created_time = utc_text_timestamp("cd.created_at")
+    lease_time = utc_text_timestamp("css.lease_until")
+    heartbeat_time = utc_text_timestamp("css.last_heartbeat_at")
+    active_time = utc_text_timestamp("cd.last_active_at")
+    unbound_time = utc_text_timestamp("cd.unbound_at")
+    revoked_time = utc_text_timestamp("cd.revoked_at")
+    cte = f"""
+      WITH customer_flags AS (
+        SELECT cd.user_id,
+          count(*) FILTER (WHERE cd.status='BOUND') >= u.max_devices AS at_slot_limit,
+          count(*) FILTER (WHERE {bound_time} >= now()-interval '24 hours'
+            AND ({unbound_time} >= now()-interval '24 hours'
+                 OR {revoked_time} >= now()-interval '24 hours')) >= 2 AS frequent_swaps_24h
+        FROM customer_devices cd JOIN users u ON u.id=cd.user_id
+        GROUP BY cd.user_id,u.max_devices
+      ), scoped AS (
+        SELECT cd.id,cd.activation_code_id,cd.user_id,cd.slot_no,cd.display_name,
+          cd.platform,cd.status,cd.bound_at,cd.unbound_at,cd.revoked_at,
+          u.username,ac.masked_code,css.last_heartbeat_at,
+          COALESCE(cd.status='BOUND' AND {lease_time}>now(),false) AS online,
+          u.display_name AS company_name,css.session_id,css.session_epoch,
+          LEAST({bound_time},{created_time}) AS first_bound_at,
+          GREATEST({heartbeat_time},{active_time},history.last_active_at) AS last_active_at,
+          flags.at_slot_limit,flags.frequent_swaps_24h,
+          {bound_time} AS bound_time,{revoked_time} AS revoked_time
+        FROM customer_devices cd JOIN users u ON u.id=cd.user_id
+        LEFT JOIN activation_codes ac ON ac.id=cd.activation_code_id
+        LEFT JOIN customer_session_state css ON css.device_id=cd.id AND css.user_id=cd.user_id
+        JOIN customer_flags flags ON flags.user_id=cd.user_id
+        LEFT JOIN LATERAL (
+          SELECT max({utc_text_timestamp("se.created_at")}) AS last_active_at
+          FROM customer_session_events se WHERE se.device_id=cd.id
+            AND se.event IN ('ACTIVATED','LOGIN','SWITCH','HEARTBEAT')
+        ) history ON true
+        {where}
+      )
+    """
+    list_clauses: list[str] = []
+    list_params = list(params)
+    if status:
+        list_clauses.append("status=%s")
+        list_params.append(status)
+    if attention == "online":
+        list_clauses.append("online")
+    elif attention == "offline":
+        list_clauses.append("NOT online")
+    elif attention:
+        list_clauses.append(attention)
+    list_where = f"WHERE {' AND '.join(list_clauses)}" if list_clauses else ""
     try:
-        with pg_transaction() as conn:
+        with pg_transaction(isolation="REPEATABLE READ") as conn:
             total_row = conn.execute(
-                "SELECT COUNT(*) FROM customer_devices cd "
-                "JOIN users u ON u.id = cd.user_id "
-                "LEFT JOIN activation_codes ac ON ac.id = cd.activation_code_id "
-                f"{where}",
-                params,
+                cte + f"SELECT count(*) FROM scoped {list_where}", list_params
             ).fetchone()
-            total = int(total_row[0]) if total_row is not None else 0
             rows = conn.execute(
-                "SELECT cd.id, cd.activation_code_id, cd.user_id, cd.slot_no, "
-                "cd.display_name, cd.platform, cd.status, cd.bound_at, cd.unbound_at, "
-                "cd.revoked_at, u.username, ac.masked_code, css.last_heartbeat_at, "
-                "(cd.status = 'BOUND' AND "
-                " css.lease_until::timestamptz > clock_timestamp()) AS online "
-                "FROM customer_devices cd "
-                "JOIN users u ON u.id = cd.user_id "
-                "LEFT JOIN activation_codes ac ON ac.id = cd.activation_code_id "
-                "LEFT JOIN customer_session_state css ON css.device_id = cd.id "
-                f"{where} ORDER BY cd.bound_at DESC {PAGE_CLAUSE}",
-                (*params, bounded_limit, bounded_offset),
+                cte + "SELECT id,activation_code_id,user_id,slot_no,display_name,platform,"
+                "status,bound_at,unbound_at,revoked_at,username,masked_code,last_heartbeat_at,"
+                "online,company_name,session_id,session_epoch,first_bound_at,last_active_at "
+                f"FROM scoped {list_where} ORDER BY bound_time DESC,id DESC {PAGE_CLAUSE}",
+                (*list_params, bounded_limit, bounded_offset),
             ).fetchall()
             summary_row = conn.execute(
-                """
-                SELECT
-                  COUNT(*) FILTER (WHERE cd.status = 'BOUND'),
-                  COUNT(*) FILTER (
-                    WHERE cd.status = 'BOUND'
-                      AND css.lease_until::timestamptz > clock_timestamp()
-                  ),
-                  COUNT(*) FILTER (
-                    WHERE cd.revoked_at::timestamptz >= date_trunc('day', clock_timestamp())
-                  ),
-                  COUNT(*) FILTER (WHERE cd.status = 'UNBOUND')
-                FROM customer_devices cd
-                LEFT JOIN customer_session_state css ON css.device_id = cd.id
-                """
-            ).fetchone()
-            # 方案 P1「登录与设备」顶部三张卡的后两项：
-            # 达上限 = 在绑设备数 ≥ users.max_devices 的客户；频繁更换 = 近 24h
-            # 解绑+再绑定动作 ≥ 2 的客户（只有解绑或只有绑定不算「换」）。
-            attention_row = conn.execute(
-                """
-                SELECT
-                  (SELECT COUNT(*) FROM (
-                     SELECT cd.user_id FROM customer_devices cd
-                     JOIN users u ON u.id = cd.user_id
-                     WHERE cd.status = 'BOUND'
-                     GROUP BY cd.user_id, u.max_devices
-                     HAVING COUNT(*) >= u.max_devices
-                  ) full_users),
-                  (SELECT COUNT(*) FROM (
-                     SELECT cd.user_id FROM customer_devices cd
-                     WHERE (cd.unbound_at::timestamptz >= clock_timestamp() - interval '24 hours'
-                            OR cd.revoked_at::timestamptz
-                                >= clock_timestamp() - interval '24 hours')
-                       AND cd.bound_at::timestamptz
-                            >= clock_timestamp() - interval '24 hours'
-                     GROUP BY cd.user_id
-                     HAVING COUNT(*) >= 2
-                  ) churny_users)
-                """
+                cte
+                + """
+                SELECT count(*) FILTER (WHERE status='BOUND'),count(*) FILTER (WHERE online),
+                  count(*) FILTER (WHERE revoked_time >= date_trunc('day',now() AT TIME ZONE
+                    'Asia/Shanghai') AT TIME ZONE 'Asia/Shanghai'),
+                  count(*) FILTER (WHERE status='UNBOUND'),
+                  count(DISTINCT user_id) FILTER (WHERE online),
+                  count(DISTINCT user_id) FILTER (WHERE at_slot_limit),
+                  count(DISTINCT user_id) FILTER (WHERE frequent_swaps_24h)
+                FROM scoped
+                """,
+                params,
             ).fetchone()
     except RuntimeError as exc:
         raise _http(503, DEVICE_SERVICE_UNAVAILABLE, DEVICE_SERVICE_UNAVAILABLE_MESSAGE) from exc
@@ -196,23 +212,30 @@ def list_devices(
             "activation_code": str(row[11]) if row[11] is not None else "",
             "last_heartbeat_at": row[12],
             "online": bool(row[13]),
+            "company_name": row[14] or "",
+            # 会话编号仅用于受原权限和写契约保护的下线请求，不包含会话凭据。
+            "session_id": row[15] if row[13] else None,
+            "session_epoch": int(row[16]) if row[13] and row[16] is not None else None,
+            "first_bound_at": row[17],
+            "last_active_at": row[18],
         }
         for row in rows
     ]
-    # A5：返回 total，前端不再用"取满一页"启发式翻页。
+    keys = [
+        "bound",
+        "online",
+        "revoked_today",
+        "unbound",
+        "online_customers",
+        "at_slot_limit",
+        "frequent_swaps_24h",
+    ]
     return {
         "items": items,
-        "total": total,
+        "total": int(total_row[0]) if total_row else 0,
         "limit": bounded_limit,
         "offset": bounded_offset,
-        "summary": {
-            "bound": int(summary_row[0]) if summary_row else 0,
-            "online": int(summary_row[1]) if summary_row else 0,
-            "revoked_today": int(summary_row[2]) if summary_row else 0,
-            "unbound": int(summary_row[3]) if summary_row else 0,
-            "at_slot_limit": int(attention_row[0]) if attention_row else 0,
-            "frequent_swaps_24h": int(attention_row[1]) if attention_row else 0,
-        },
+        "summary": {key: int(summary_row[i]) if summary_row else 0 for i, key in enumerate(keys)},
     }
 
 

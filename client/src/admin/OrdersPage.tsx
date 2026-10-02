@@ -11,9 +11,11 @@ import {
   downloadControlRechargeOrdersCsv,
   getControlReconciliation,
   type RechargeOrderStatus,
+  type ReconciliationAnomaly,
   syncControlRechargeOrder,
 } from "../api";
 import { type AdminRechargeOrder, listAdminRechargeOrders } from "../api.admin";
+import { CustomerLink } from "./CustomerLink";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { DataTable } from "./ui/DataTable";
 import { PageBanner } from "./ui/PageBanner";
@@ -40,7 +42,19 @@ const STATUS_FILTERS = [
  * 充值订单页（从 AdminApp 内联表格抽出）：补上状态筛选与分页（服务端
  * 均已支持）；手动查单改为说明性确认——它会向 ZPay 查单并可能入账。
  */
-export function OrdersPage({ readOnly = false }: { readOnly?: boolean }) {
+export function OrdersPage({
+  readOnly = false,
+  userId = "",
+  orderNo = "",
+  onOpenReconciliation,
+  onCustomer,
+}: {
+  readOnly?: boolean;
+  userId?: string;
+  orderNo?: string;
+  onOpenReconciliation?: (anomaly: ReconciliationAnomaly) => void;
+  onCustomer?: (id: string) => void;
+}) {
   const [orders, setOrders] = useState<AdminRechargeOrder[]>([]);
   const [orderTotal, setOrderTotal] = useState(0);
   const [orderOffset, setOrderOffset] = useState(0);
@@ -70,11 +84,13 @@ export function OrdersPage({ readOnly = false }: { readOnly?: boolean }) {
     try {
       const [orderPage, nextReconciliation] = await Promise.all([
         listAdminRechargeOrders({
+          orderNo: orderNo || undefined,
           status: (statusFilter || undefined) as
             | RechargeOrderStatus
             | undefined,
           limit: PAGE_SIZE,
           offset: orderOffset,
+          userId: userId || undefined,
           username: usernameFilter || undefined,
           channel: channelFilter || undefined,
           createdFrom: createdFrom || undefined,
@@ -95,6 +111,8 @@ export function OrdersPage({ readOnly = false }: { readOnly?: boolean }) {
       setLoading(false);
     }
   }, [
+    userId,
+    orderNo,
     channelFilter,
     createdFrom,
     createdTo,
@@ -140,13 +158,14 @@ export function OrdersPage({ readOnly = false }: { readOnly?: boolean }) {
   }
 
   async function exportRechargeOrders() {
-    if (exporting) return;
+    if (exporting || orderNo) return;
     setExporting(true);
     setError("");
     setNotice("");
     try {
       const summary = await downloadControlRechargeOrdersCsv({
         status: (statusFilter || undefined) as RechargeOrderStatus | undefined,
+        userId: userId || undefined,
         username: usernameFilter || undefined,
         channel: channelFilter || undefined,
         createdFrom: createdFrom || undefined,
@@ -179,7 +198,7 @@ export function OrdersPage({ readOnly = false }: { readOnly?: boolean }) {
         {readOnly ? null : (
           <button
             type="button"
-            disabled={exporting || loading}
+            disabled={exporting || loading || Boolean(orderNo)}
             onClick={() => void exportRechargeOrders()}
           >
             导出充值订单 CSV
@@ -190,22 +209,54 @@ export function OrdersPage({ readOnly = false }: { readOnly?: boolean }) {
       {error ? <PageBanner tone="error">{error}</PageBanner> : null}
       {notice ? <PageBanner tone="notice">{notice}</PageBanner> : null}
 
-      {reconciliation ? (
+      {reconciliation && !userId && !orderNo ? (
         <div className="admin-metrics">
-          {[
-            ["钱包数", reconciliation.wallet_count],
-            ["待支付订单", reconciliation.pending_order_count],
-            ["钱包不一致", reconciliation.wallet_mismatch_count],
-            ["已支付未入账", reconciliation.paid_order_without_charge_count],
+          <button
+            type="button"
+            onClick={() => {
+              setStatusDraft("PENDING");
+              setStatusFilter("PENDING");
+              setOrderOffset(0);
+              setUsernameFilter("");
+              setChannelFilter("");
+              setCreatedFrom("");
+              setCreatedTo("");
+            }}
+          >
+            <small>待支付订单 </small>
+            <strong>{reconciliation.pending_order_count}</strong>
+          </button>
+          {(
             [
-              "入账但订单未支付",
-              reconciliation.charge_without_paid_order_count,
-            ],
-          ].map(([label, value]) => (
-            <span key={label}>
+              [
+                "钱包不一致",
+                reconciliation.wallet_mismatch_count,
+                "wallet_mismatch",
+              ],
+              [
+                "已支付未入账",
+                reconciliation.paid_order_without_charge_count,
+                "paid_without_charge",
+              ],
+              [
+                "入账但订单未支付",
+                reconciliation.charge_without_paid_order_count,
+                "charge_without_paid_order",
+              ],
+            ] as const
+          ).map(([label, value, anomaly]) => (
+            <button
+              key={anomaly}
+              type="button"
+              onClick={() => {
+                if (onOpenReconciliation) onOpenReconciliation(anomaly);
+                else
+                  window.location.hash = `admin/funds?intent=recon&anomaly=${anomaly}`;
+              }}
+            >
               <small>{label} </small>
               <strong>{value}</strong>
-            </span>
+            </button>
           ))}
         </div>
       ) : null}
@@ -295,7 +346,14 @@ export function OrdersPage({ readOnly = false }: { readOnly?: boolean }) {
               <td>
                 <code>{order.order_no}</code>
               </td>
-              <td>{order.username}</td>
+              <td>
+                <CustomerLink
+                  userId={order.user_id}
+                  company={order.display_name}
+                  username={order.username}
+                  onCustomer={onCustomer}
+                />
+              </td>
               <td>{formatFen(order.amount_fen)}</td>
               <td>+{order.credits} 积分</td>
               <td>

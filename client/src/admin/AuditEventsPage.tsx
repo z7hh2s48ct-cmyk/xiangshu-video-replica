@@ -1,10 +1,23 @@
-import { type FormEvent, useCallback, useEffect, useState } from "react";
+import {
+  type FormEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 import {
   type AuditLogItem,
   downloadAuditLogCsv,
   listAuditLog,
 } from "../api.admin";
+import {
+  AUDIT_EVENT_LABELS,
+  AUDIT_GROUP_MEMBERS,
+  auditEventLabel,
+  auditGroupLabel,
+  BILLING_SERVICE_NAMES,
+} from "./auditVocabulary";
 import { DataTable } from "./ui/DataTable";
 import { PageBanner } from "./ui/PageBanner";
 import { Pagination } from "./ui/Pagination";
@@ -18,56 +31,17 @@ const EVENT_GROUP_OPTIONS = [
   ["pricing", "价格与套餐"],
   ["account", "账号与设备"],
   ["system", "系统配置"],
+  ["content", "内容与采集"],
   ["secret_export", "密钥与导出"],
   ["login", "登录"],
 ] as const;
 
 /** 分组包含的事件类型；与服务端 EVENT_GROUPS 同口径，用于过滤事件下拉。 */
-const EVENT_GROUP_MEMBERS: Record<string, ReadonlySet<string>> = {
-  funds: new Set(["ADMIN_ADJUSTMENT", "payment.sync"]),
-  pricing: new Set([
-    "operation_rate.update",
-    "billing.tariff.update",
-    "customer_pricing.update",
-    "customer_unit_price.update",
-    "customer_unit_price.reset",
-    "recharge_package.create",
-    "recharge_package.update",
-    "customer_discount.create",
-    "customer_discount.deactivate",
-    "customer_package.grant",
-    "registration_bonus.settings.update",
-  ]),
-  account: new Set([
-    "ADMIN_DEVICE_DISABLE",
-    "ADMIN_DEVICE_UNBIND",
-    "ADMIN_SESSION_LOGOUT",
-    "h3.account.update",
-    "admin.activation_code_batch.created",
-    "ACTIVATION_CODE_ISSUED",
-    "ACTIVATION_CODE_ARCHIVED",
-    "ACTIVATION_CODE_DELIVERED",
-  ]),
-  system: new Set([
-    "provider_settings.update",
-    "provider_settings.paid_test",
-    "runtime_settings.update",
-    "payment.provider.update",
-    "payment.wechat.update",
-    "control.reconciliation.read",
-  ]),
-  secret_export: new Set([
-    "provider_settings.secret_reveal",
-    "admin.activation_code.revealed",
-    "admin.activation_code.revealed_replay",
-    "external_call.response_view",
-    "control.export",
-  ]),
-  login: new Set(["admin_session.password_login", "admin_session.exchange"]),
-};
+const EVENT_GROUP_MEMBERS = AUDIT_GROUP_MEMBERS;
 
 /** 计费科目 key → 业务名（方案 P1：科目不再直出英文 key）。 */
 const SUBJECT_LABELS: Record<string, string> = {
+  ...BILLING_SERVICE_NAMES,
   video_generation_768p: "视频生成 · 768P",
   video_generation_2k: "视频生成 · 2K",
   video_analysis_768p: "视频分析 · 768P",
@@ -85,52 +59,10 @@ const SUBJECT_LABELS: Record<string, string> = {
 
 function subjectLabel(subject: string | null | undefined): string {
   if (!subject) return "";
-  return SUBJECT_LABELS[subject] ?? subject;
+  return SUBJECT_LABELS[subject] ?? "业务配置项";
 }
 
-const EVENT_OPTIONS = [
-  ["", "全部事件"],
-  ["ADMIN_ADJUSTMENT", "管理员调账"],
-  ["operation_rate.update", "费率调整"],
-  ["billing.tariff.update", "API 成本与售价调整"],
-  ["customer_pricing.update", "客户报价调整"],
-  ["h3.account.update", "视频账号配置"],
-  ["payment.provider.update", "默认支付方式调整"],
-  ["payment.wechat.update", "微信商户配置"],
-  ["customer_unit_price.update", "客户单价调整"],
-  ["customer_unit_price.reset", "客户单价恢复默认"],
-  ["runtime_settings.update", "运行参数调整"],
-  // 激活码类是 audit_logs 里的 admin.activation_code.* 动作（archive/reveal
-  // 走 audit_logs，suspend/resume/revoke 走 activation_code_events）。
-  // 此前这里只有标签映射里的一个 CODE_REVEAL 分支，而后端从不产生该值，
-  // 运营既选不到、reveal 行也只能显示成"系统操作"。
-  ["admin.activation_code.revealed", "查看激活码明文"],
-  ["admin.activation_code.revealed_replay", "查看激活码明文（幂等重放）"],
-  ["admin.activation_code.archived", "归档激活码"],
-  ["admin.activation_code_batch.created", "创建激活码批次"],
-  // 管理员下线：customer_session_events 中 actor 非会话属主的行。
-  ["ADMIN_SESSION_LOGOUT", "管理员下线"],
-  // 方案 P0-4：服务端早已写这些 audit_logs 动作，但下拉里没有，运营筛不出来——
-  // 其中查看密钥、数据导出、线下开通套餐都是高敏操作。
-  ["admin_session.password_login", "管理员密码登录"],
-  ["admin_session.exchange", "恢复凭据登录"],
-  ["provider_settings.secret_reveal", "查看密钥明文"],
-  ["provider_settings.update", "服务配置修改"],
-  ["provider_settings.paid_test", "付费连接测试"],
-  ["customer_package.grant", "开通套餐（线下收款）"],
-  ["customer_discount.create", "设置专项折扣"],
-  ["customer_discount.deactivate", "停用专项折扣"],
-  ["recharge_package.create", "新建充值套餐"],
-  ["recharge_package.update", "修改充值套餐"],
-  ["registration_bonus.settings.update", "注册赠送设置调整"],
-  ["payment.sync", "查单同步"],
-  ["control.export", "数据导出"],
-  // P0-9：记录详情里「查看原始响应」的高敏动作，每次读取都写审计；
-  // 之前只能靠族回退标签显示成“系统操作”，运营筛不出来。
-  ["external_call.response_view", "查看接口原始响应"],
-] as const;
-
-const EVENT_LABELS = new Map<string, string>(EVENT_OPTIONS);
+const EVENT_OPTIONS = [["", "全部事件"], ...Object.entries(AUDIT_EVENT_LABELS)];
 
 // 方案 P0-3：同一张表里既有管理员动作也有客户工作台动作，默认只看管理员——
 // 否则客户建项目、读素材淹没处置记录。客户维度的完整动作在客户详情的
@@ -153,17 +85,6 @@ const SENSITIVE_EVENTS = new Set([
   "external_call.response_view",
 ]);
 
-function eventLabel(eventType: string) {
-  if (EVENT_LABELS.has(eventType))
-    return EVENT_LABELS.get(eventType) ?? "系统操作";
-  if (eventType.startsWith("ADMIN_DEVICE_")) return "设备管理";
-  if (eventType.startsWith("ADMIN_SESSION_")) return "管理员会话操作";
-  if (eventType.startsWith("ACTIVATION_CODE_")) return "激活码操作";
-  if (eventType.startsWith("admin.activation_code")) return "激活码操作";
-  if (eventType.includes("reconciliation")) return "对账查询";
-  return "系统操作";
-}
-
 function eventTone(eventType: string) {
   if (SENSITIVE_EVENTS.has(eventType)) return "danger";
   if (/REVOK|DENIED|FAILED|FORCE/.test(eventType)) return "danger";
@@ -172,12 +93,6 @@ function eventTone(eventType: string) {
   if (eventType.includes("DEVICE") || eventType.includes("SESSION"))
     return "info";
   return "success";
-}
-
-function compactText(value: string, maxLength = 20) {
-  if (!value) return "—";
-  if (value.length <= maxLength) return value;
-  return `${value.slice(0, 10)}…${value.slice(-6)}`;
 }
 
 function priceUnit(item: AuditLogItem) {
@@ -248,6 +163,45 @@ function tariffChange(item: AuditLogItem) {
 }
 
 function priceChange(item: AuditLogItem) {
+  if (item.change_summary) return item.change_summary;
+  if (item.event_type === "viral_runtime.update") {
+    const changes = item.change_detail?.changes;
+    if (!changes) return "历史记录未保存变更值";
+    const labels: Record<string, string> = {
+      collection_enabled: "定时采集",
+      import_enabled: "客户链接导入",
+      keywords: "关键词",
+      per_keyword_limit: "默认每词条数",
+      collection_interval_days: "采集间隔（天）",
+      collection_time: "上海执行时刻",
+      quality_min_likes: "最低点赞",
+      quality_duration_min_ms: "最短时长",
+      quality_duration_max_ms: "最长时长",
+      quality_exclude_words: "排除词",
+      monthly_budget_fen: "月度预算",
+    };
+    const valueLabel = (field: string, value: unknown): string => {
+      if (value == null) return field === "collection_time" ? "未指定" : "不限";
+      if (field === "monthly_budget_fen" && typeof value === "number")
+        return fenAmount(value);
+      if (field.endsWith("_ms") && typeof value === "number")
+        return `${value / 1000} 秒`;
+      if (field.endsWith("_enabled")) return value ? "开启" : "暂停";
+      if (field === "keywords" && Array.isArray(value))
+        return `${value.length} 个`;
+      if (Array.isArray(value)) return value.map(String).join("、") || "不排除";
+      return String(value);
+    };
+    return (
+      Object.entries(changes)
+        .filter(([field]) => field in labels)
+        .map(
+          ([field, change]) =>
+            `${labels[field]}：${valueLabel(field, change.before)} → ${valueLabel(field, change.after)}`,
+        )
+        .join(" · ") || "未变更"
+    );
+  }
   if (item.event_type === "billing.tariff.update") {
     const change = tariffChange(item);
     if (change) return change;
@@ -316,7 +270,9 @@ export function AuditEventsPage({ readOnly = false }: { readOnly?: boolean }) {
     to: "",
   });
 
+  const request = useRef(0);
   const loadLog = useCallback(async () => {
+    const id = ++request.current;
     try {
       setLoading(true);
       setError("");
@@ -331,21 +287,27 @@ export function AuditEventsPage({ readOnly = false }: { readOnly?: boolean }) {
         limit: PAGE_SIZE,
         offset,
       });
+      if (id !== request.current) return;
       setItems(response.items);
       setTotal(response.total);
     } catch (cause) {
+      if (id !== request.current) return;
       setError(
         cause instanceof Error && cause.message
           ? `加载失败：${cause.message}`
           : "加载失败：未知错误",
       );
     } finally {
-      setLoading(false);
+      if (id === request.current) setLoading(false);
     }
   }, [filters, offset]);
 
   useEffect(() => {
+    setDetail(null);
     void loadLog();
+    return () => {
+      request.current += 1;
+    };
   }, [loadLog]);
 
   function handleFilter(event: FormEvent) {
@@ -530,13 +492,12 @@ export function AuditEventsPage({ readOnly = false }: { readOnly?: boolean }) {
           headers={
             <>
               <th>时间</th>
-              <th>类型</th>
               <th>操作人</th>
-              <th>目标客户</th>
-              <th>变更明细</th>
-              <th>来源单</th>
+              <th>分组与事件</th>
+              <th>操作对象</th>
+              <th>变更摘要</th>
               <th>原因</th>
-              <th>request id</th>
+              <th>详情</th>
             </>
           }
         >
@@ -547,36 +508,35 @@ export function AuditEventsPage({ readOnly = false }: { readOnly?: boolean }) {
               onClick={() => setDetail(item)}
             >
               <td>{formatDateTime(item.created_at)}</td>
+              <td>{item.actor_username || "系统"}</td>
               <td>
+                <small>{auditGroupLabel(item)}</small>
                 <span
-                  className={`audit-event-badge is-${eventTone(item.event_type)}`}
-                  title={item.event_type}
+                  className={`audit-event-badge is-${item.sensitive ? "danger" : eventTone(item.event_type)}`}
                 >
-                  {eventLabel(item.event_type)}
+                  {auditEventLabel(item)}
                   {item.sensitive ? " ·高敏" : ""}
                 </span>
               </td>
-              <td>{item.actor_username || item.actor_user_id}</td>
               <td>
-                {item.target_username || "—"}
-                <br />
-                <small>{item.target_user_id}</small>
+                {item.target_label ||
+                  item.target_company_name ||
+                  item.target_username ||
+                  subjectLabel(item.change_subject) ||
+                  "业务配置项"}
               </td>
               <td className="audit-change-detail">{priceChange(item)}</td>
+              <td>{item.reason || "—"}</td>
               <td>
-                <span
-                  title={`${item.source_document_type} / ${item.source_document_ref}`}
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setDetail(item);
+                  }}
                 >
-                  {compactText(
-                    `${item.source_document_type} / ${item.source_document_ref}`,
-                  )}
-                </span>
-              </td>
-              <td>{item.reason}</td>
-              <td>
-                <span title={item.request_id}>
-                  {compactText(item.request_id)}
-                </span>
+                  查看详情
+                </button>
               </td>
             </tr>
           ))}
@@ -601,7 +561,7 @@ export function AuditEventsPage({ readOnly = false }: { readOnly?: boolean }) {
             关闭详情
           </button>
           <h3>
-            {eventLabel(detail.event_type)}
+            {auditEventLabel(detail)}
             {detail.sensitive ? "（高敏）" : ""}
           </h3>
           <dl>
@@ -611,7 +571,7 @@ export function AuditEventsPage({ readOnly = false }: { readOnly?: boolean }) {
             <dd>{detail.actor_username || detail.actor_user_id || "系统"}</dd>
             <dt>目标客户</dt>
             <dd>
-              {detail.target_username || "—"}
+              {detail.target_label || detail.target_username || "业务配置项"}
               <small>
                 {detail.target_user_id ? `（${detail.target_user_id}）` : ""}
               </small>
@@ -625,6 +585,16 @@ export function AuditEventsPage({ readOnly = false }: { readOnly?: boolean }) {
             <dd>{priceChange(detail)}</dd>
             <dt>原因</dt>
             <dd>{detail.reason || "—"}</dd>
+            {detail.event_type === "viral_runtime.update" ? (
+              <>
+                <dt>变更内容</dt>
+                <dd>{priceChange(detail)}</dd>
+              </>
+            ) : null}
+            <dt>技术事件名</dt>
+            <dd>
+              <code>{detail.event_type}</code>
+            </dd>
             <dt>请求编号</dt>
             <dd>
               <code>{detail.request_id || "—"}</code>

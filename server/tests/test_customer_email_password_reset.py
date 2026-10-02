@@ -536,6 +536,45 @@ def test_template_sender_skips_notice_without_template() -> None:
     assert calls == []
 
 
+def test_alert_template_missing_is_explicit_and_never_calls_transport() -> None:
+    calls: list[Any] = []
+    config = {key: value for key, value in _CONFIG.items() if key != "notice_template_id"}
+    sender = TemplateEmailSender(config, post=lambda url, **kw: calls.append(kw))
+    assert sender.alert_digest_configured is False
+    with pytest.raises(EmailDeliveryError):
+        sender.send_alert_digest(
+            to="synthetic@example.com",
+            total=1,
+            danger_count=0,
+            items="高敏操作需要核对",
+            generated_at="2026-10-02T08:00:00Z",
+        )
+    assert calls == []
+
+
+def test_alert_template_contains_warn_headline_using_existing_template_keys() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def post(url: str, **kwargs: Any) -> _FakeResponse:
+        calls.append(kwargs)
+        return _FakeResponse({"Response": {"MessageId": "synthetic", "RequestId": "fake"}})
+
+    sender = TemplateEmailSender(_CONFIG, post=post)
+    assert sender.alert_digest_configured is True
+    sender.send_alert_digest(
+        to="synthetic@example.com",
+        total=1,
+        danger_count=0,
+        items="高敏操作需要核对",
+        generated_at="2026-10-02T08:00:00Z",
+    )
+    body = json.loads(calls[0]["data"].decode("utf-8"))
+    data = json.loads(body["Template"]["TemplateData"])
+    assert set(data) == {"username", "time"}
+    assert data["username"] == "高敏操作需要核对"
+    assert "0 条紧急 / 共 1 条" in body["Subject"]
+
+
 def test_template_sender_maps_errors_without_leaking_transport_details() -> None:
     def api_error(url: str, **kwargs: Any) -> _FakeResponse:
         return _FakeResponse(

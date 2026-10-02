@@ -136,6 +136,11 @@ def _write_package_audit(
     }
     if old is not None:
         metadata["old"] = old
+    metadata["new"] = {
+        key: value
+        for key, value in metadata.items()
+        if key not in {"old", "reason", "request_id", "package_id"}
+    }
     conn.execute(
         "INSERT INTO audit_logs (id, actor_user_id, action, entity_type, entity_id, "
         "metadata_json) VALUES (%s, %s, %s, 'recharge_package', %s, %s)",

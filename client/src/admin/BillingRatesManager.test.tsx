@@ -582,3 +582,73 @@ test("holds the tariff write behind an explicit confirmation", async () => {
   fireEvent.click(screen.getByRole("button", { name: "保存" }));
   expect(await screen.findByRole("dialog")).toBeInTheDocument();
 });
+
+test("shows server yuan pricing with exact auxiliary credits and unknown-safe margin", async () => {
+  const base = catalog.services[0];
+  vi.mocked(adminRead).mockResolvedValue({
+    ...catalog,
+    services: [
+      {
+        ...base,
+        service: "known",
+        name: "已知成本业务",
+        unit_price_fen: "0.123456",
+        gross_margin_percent: "75",
+        tariff: {
+          ...base.tariff,
+          enabled: true,
+          unit_credits: "0.123456",
+          unit_price_fen: "0.123456",
+          unit_cost_fen: "0.030864",
+          gross_margin_percent: "75",
+        },
+      },
+      {
+        ...base,
+        service: "unknown",
+        name: "未知成本业务",
+        unit_price_fen: "1",
+        gross_margin_percent: null,
+        tariff: {
+          ...base.tariff,
+          enabled: true,
+          unit_credits: "1",
+          unit_price_fen: "1",
+          unit_cost_fen: null,
+          gross_margin_percent: null,
+        },
+      },
+      {
+        ...base,
+        service: "zero",
+        name: "零售价业务",
+        unit_price_fen: "0",
+        gross_margin_percent: null,
+        tariff: {
+          ...base.tariff,
+          enabled: true,
+          unit_credits: "0",
+          unit_price_fen: "0",
+          unit_cost_fen: "0",
+          gross_margin_percent: null,
+        },
+      },
+    ],
+  });
+  render(<BillingRatesManager readOnly />);
+  const known = (await screen.findByText("已知成本业务")).closest(
+    "tr",
+  ) as HTMLTableRowElement;
+  expect(within(known).getByText(/0.123456 积分/)).toBeInTheDocument();
+  expect(within(known).getByText(/75/)).toHaveTextContent("75");
+  expect(within(known).getAllByText(/< ¥0.01/)[0]).toBeInTheDocument();
+  const unknown = screen
+    .getByText("未知成本业务")
+    .closest("tr") as HTMLTableRowElement;
+  expect(within(unknown).getAllByText("成本待核对").length).toBeGreaterThan(0);
+  expect(within(unknown).queryByText(/100%/)).toBeNull();
+  const zero = screen
+    .getByText("零售价业务")
+    .closest("tr") as HTMLTableRowElement;
+  expect(within(zero).getByText("不适用")).toBeInTheDocument();
+});

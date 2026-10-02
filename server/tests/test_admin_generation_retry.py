@@ -307,3 +307,54 @@ def test_retry_route_requeues_archive_recovery(api: TestClient, retry_dsn: str) 
     assert body["status"] == "SUCCEEDED"
     assert body["archive_status"] == "ARCHIVE_FAILED"
     assert _wallet(retry_dsn) == (100, 0)
+
+
+def test_archive_guidance_drives_existing_retry_without_new_charge(
+    api: TestClient, retry_dsn: str
+) -> None:
+    from app.control_routes import ControlGenerationRecord, _attach_retry_guidance
+    from app.db_portable import BusinessConnection
+
+    _insert_task(
+        retry_dsn,
+        "t-guidance",
+        status="SUCCEEDED",
+        archive_status="ARCHIVE_FAILED",
+        provider_result_url="https://synthetic.invalid/already-paid.mp4",
+    )
+    record = ControlGenerationRecord.model_construct(
+        record_id="t-guidance", record_type="VIDEO", status="SUCCEEDED"
+    )
+    with psycopg.connect(retry_dsn) as conn:
+        _attach_retry_guidance(BusinessConnection.postgres(conn), [record])
+    assert record.retry_path == "ARCHIVE_ONLY"
+    assert "不重新生成或扣费" in str(record.handling_advice)
+    body = {"confirm": True, "reason": "恢复已付款归档"}
+    for _ in range(2):
+        response = _post(api, "t-guidance", key="k-guidance", body=body)
+        assert response.status_code == 200
+    assert _wallet(retry_dsn) == (100, 0)
+    assert _operation_count(retry_dsn, "t-guidance") == 1
+
+
+def test_paid_terminal_failure_has_no_retry_guidance(api: TestClient, retry_dsn: str) -> None:
+    from app.control_routes import ControlGenerationRecord, _attach_retry_guidance
+    from app.db_portable import BusinessConnection
+
+    _insert_task(retry_dsn, "t-paid-terminal", status="FAILED", error_code="PROVIDER_FAILED")
+    with psycopg.connect(retry_dsn) as conn:
+        conn.execute(
+            "UPDATE generation_tasks SET provider_task_id='synthetic-paid-task' WHERE id=%s",
+            ("t-paid-terminal",),
+        )
+        record = ControlGenerationRecord.model_construct(
+            record_id="t-paid-terminal", record_type="VIDEO", status="FAILED"
+        )
+        _attach_retry_guidance(BusinessConnection.postgres(conn), [record])
+    assert record.retry_path is None
+    assert "确认费用" in str(record.handling_advice)
+    response = _post(
+        api, "t-paid-terminal", key="k-paid", body={"confirm": True, "reason": "核对后处理"}
+    )
+    assert response.status_code == 409
+    assert _wallet(retry_dsn) == (100, 0)
