@@ -54,6 +54,8 @@ def test_redact_url_masks_signature_parameters_and_credentials() -> None:
         ("asr", "/api/v1/services/audio/asr/transcription"),
         ("asr", "/api/v1/services/aigc/multimodal-generation/generation"),
         ("asr", "/api/v1/tasks/synthetic-task"),
+        ("metaso", "/api/minimax/v2/video_generation"),
+        ("metaso", "/api/minimax/v2/query/video_generation/424010985738629"),
     ],
 )
 def test_documented_body_receipt_is_distinct_from_task_and_our_request(
@@ -97,6 +99,8 @@ def test_invalid_body_receipts_are_not_truncated_or_invented(value: object) -> N
         ("other", "/api/v2/hifly/video/task", {"request_id": "unproven"}),
         ("hifly", "/unverified", {"request_id": "unproven"}),
         ("asr", "/api/v1/tasks/a/extra", {"request_id": "unproven"}),
+        ("metaso", "/api/minimax/v2/other", {"request_id": "unproven"}),
+        ("metaso", "/api/minimax/v2/query/video_generation/a/extra", {"request_id": "unproven"}),
         ("hifly", "/api/v2/hifly/video/task", {"data": {"request_id": "unproven"}}),
         ("hifly", "/api/v2/hifly/video/task", {"id": "completion-id", "task_id": "task-id"}),
     ],

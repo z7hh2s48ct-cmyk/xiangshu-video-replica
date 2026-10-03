@@ -3884,6 +3884,131 @@ def test_generation_worker_completes_oral_task_and_settles_once(
     assert sum(1 for _, url in transport.calls if url.endswith("video/create_by_tts")) == 1
 
 
+def test_oral_task_submit_embeds_short_ref_in_vendor_title(
+    scene: str, fake_source_storage: FakeSourceStorage
+) -> None:
+    """G19：飞影没有透传编号字段，视频任务用 title 携带我方 8 位短号。
+
+    外发 title = 业务名前 11 字 + '#' + task_diagnostic_refs.short_ref，飞影的
+    创作任务回调会原样回传 title，凭短号即可在供应商侧反查；我方库的任务标题
+    仍保留完整业务名，客户端展示不受影响。
+    """
+    avatar_id, voice_id = _seed_ready_assets()
+    vendor, transport = make_vendor()
+    long_title = "乡墅宣传口播任务标题超过十一字用于验证截断"
+    captured: dict[str, Any] = {}
+
+    def record_create_body(body: bytes | None) -> bytes:
+        captured.update(json.loads(body or b"{}"))
+        return envelope({"task_id": "oral-vt-title-ref"})
+
+    transport.on("POST", "/api/v2/hifly/video/create_by_tts", record_create_body)
+    transport.on(
+        "GET",
+        "/api/v2/hifly/video/task",
+        envelope({"status": 1, "video_url": ""}),
+    )
+    created = _create_task(
+        actor=actor(),
+        identity_id="ident-1",
+        avatar_id=avatar_id,
+        voice_id=voice_id,
+        mode="TTS",
+        title=long_title,
+        script_text="这是短号透传验证口播。",
+        audio_asset_id=None,
+        subtitle=None,
+        idempotency_key="oral-title-ref-key",
+    )
+    assert (
+        _run_pg_worker(
+            worker_id="generation-worker",
+            storage=fake_source_storage,
+            vendor=vendor,
+            max_tasks=1,
+        )
+        == 1
+    )
+
+    ref = _fetch(
+        "SELECT short_ref FROM task_diagnostic_refs"
+        " WHERE task_type = 'ORAL_VIDEO' AND task_id = %s",
+        (created.task_id,),
+    )
+    assert ref is not None
+    assert captured["title"] == f"{long_title[:11]}#{ref['short_ref']}"
+    assert len(str(captured["title"])) <= 20
+    stored = _fetch("SELECT title FROM oral_tasks WHERE id = %s", (created.task_id,))
+    assert stored["title"] == long_title
+
+
+def test_oral_audio_task_submit_embeds_short_ref_in_vendor_title(
+    scene: str, fake_source_storage: FakeSourceStorage
+) -> None:
+    """G19 音频模式：create_by_audio 的 title 与 TTS 模式同样携带 8 位短号。"""
+    avatar_id, _voice_id = _seed_ready_assets()
+    vendor, transport = make_vendor()
+    long_title = "乡墅配音口播任务标题超过十一字验证截断"
+    captured: dict[str, Any] = {}
+
+    def record_create_body(body: bytes | None) -> bytes:
+        captured.update(json.loads(body or b"{}"))
+        return envelope({"task_id": "oral-va-title-ref"})
+
+    transport.on(
+        "POST",
+        "/api/v2/hifly/tool/create_upload_url",
+        envelope(
+            {
+                "upload_url": "https://up.example/audio",
+                "content_type": "audio/mpeg",
+                "file_id": "file-audio",
+            }
+        ),
+    )
+    transport.on("POST", "/api/v2/hifly/video/create_by_audio", record_create_body)
+    transport.on(
+        "GET",
+        "/api/v2/hifly/video/task",
+        envelope({"status": 1, "video_url": ""}),
+    )
+    _exec(
+        "UPDATE assets SET metadata_json = %s WHERE id = 'asset-audio'",
+        ('{"audio_purpose":"oral_audio","duration_seconds":42,"audio_duration_verified":true}',),
+    )
+    created = _create_task(
+        actor=actor(),
+        identity_id="ident-1",
+        avatar_id=avatar_id,
+        voice_id=None,
+        mode="AUDIO",
+        title=long_title,
+        script_text=None,
+        audio_asset_id="asset-audio",
+        subtitle=None,
+        idempotency_key="oral-audio-title-ref-key",
+    )
+    assert (
+        _run_pg_worker(
+            worker_id="generation-worker",
+            storage=fake_source_storage,
+            vendor=vendor,
+            max_tasks=1,
+        )
+        == 1
+    )
+
+    ref = _fetch(
+        "SELECT short_ref FROM task_diagnostic_refs"
+        " WHERE task_type = 'ORAL_VIDEO' AND task_id = %s",
+        (created.task_id,),
+    )
+    assert ref is not None
+    assert captured["title"] == f"{long_title[:11]}#{ref['short_ref']}"
+    stored = _fetch("SELECT title FROM oral_tasks WHERE id = %s", (created.task_id,))
+    assert stored["title"] == long_title
+
+
 def test_oral_worker_rejects_invalid_provider_video_without_settlement(
     scene: str, fake_source_storage: FakeSourceStorage
 ) -> None:

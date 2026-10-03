@@ -923,6 +923,28 @@ def create_oral_task(
     )
 
 
+def oral_vendor_title(title: str, short_ref: str | None) -> str:
+    """提交给飞影的视频任务标题：业务名截到 11 字 + '#' + 我方 8 位短号。
+
+    飞影接口没有独立的透传编号字段，title 是官方文档中唯一受支持、且创作任务
+    回调会原样回传的载体；总长控制在 20 字以内，短号缺失时退回纯业务名。
+    """
+    base = title.strip()
+    if not short_ref:
+        return base[:20]
+    return f"{base[:11]}#{short_ref}"
+
+
+def _oral_short_ref(conn: BusinessConnection, task_id: str) -> str | None:
+    # 短号由任务插行触发器写入 task_diagnostic_refs；无行时（异常路径）退回业务名。
+    row = conn.execute(
+        "SELECT short_ref FROM task_diagnostic_refs"
+        " WHERE task_type = 'ORAL_VIDEO' AND task_id = %s",
+        (task_id,),
+    ).fetchone()
+    return str(row[0]) if row is not None else None
+
+
 def _submit_oral_task(
     conn: BusinessConnection,
     *,
@@ -930,6 +952,7 @@ def _submit_oral_task(
     vendor: HiflyClient,
 ) -> None:
     row = _oral_task_row(conn, task_id)
+    short_ref = _oral_short_ref(conn, task_id)
     try:
         audio_target = None
         if row["mode"] == "AUDIO":
@@ -945,14 +968,14 @@ def _submit_oral_task(
                 voice=_vendor_voice_id(conn, str(row["voice_id"])),
                 text=str(row["script_text"]),
                 avatar=_vendor_avatar_id(conn, str(row["avatar_id"])),
-                title=str(row["title"])[:20],
+                title=oral_vendor_title(str(row["title"]), short_ref),
                 aigc_flag=True,
                 subtitle=subtitle,
             )
         else:
             vendor_task_id = vendor.create_video_by_audio(
                 avatar=_vendor_avatar_id(conn, str(row["avatar_id"])),
-                title=str(row["title"])[:20],
+                title=oral_vendor_title(str(row["title"]), short_ref),
                 file_id=audio_target.file_id if audio_target else None,
                 aigc_flag=True,
             )
