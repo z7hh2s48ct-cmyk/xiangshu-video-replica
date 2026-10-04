@@ -457,15 +457,26 @@ def _body_request_id(provider: str, url: str | None, body: bytes | str | None) -
         "/api/v2/hifly/tool/create_upload_url",
         "/api/v2/hifly/account/credit",
     }
-    supported = (provider == "hifly" and path in hifly_paths) or (
-        provider == "asr"
-        and (
-            path
-            in {
-                "/api/v1/services/audio/asr/transcription",
-                "/api/v1/services/aigc/multimodal-generation/generation",
-            }
-            or re.fullmatch(r"/api/v1/tasks/[^/]+", path)
+    supported = (
+        (provider == "hifly" and path in hifly_paths)
+        or (
+            provider == "asr"
+            and (
+                path
+                in {
+                    "/api/v1/services/audio/asr/transcription",
+                    "/api/v1/services/aigc/multimodal-generation/generation",
+                }
+                or re.fullmatch(r"/api/v1/tasks/[^/]+", path)
+            )
+        )
+        or (
+            # metaso 创建/查询响应顶层带 request_id（官方文档错误响应示例均已核实）。
+            provider == "metaso"
+            and (
+                path == "/api/minimax/v2/video_generation"
+                or re.fullmatch(r"/api/minimax/v2/query/video_generation/[^/]+", path) is not None
+            )
         )
     )
     if not supported:

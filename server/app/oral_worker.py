@@ -36,7 +36,7 @@ from app.media_tools import (
     normalize_audio_to_mp3,
     normalize_generated_video,
 )
-from app.oral import DEFAULT_VOICE_LANGUAGE
+from app.oral import DEFAULT_VOICE_LANGUAGE, oral_vendor_title
 from app.storage import StorageAdapter, StoredObject
 
 logger = logging.getLogger(__name__)
@@ -598,7 +598,7 @@ def _perform_submission(
             voice=str(row["vendor_voice_id"]),
             text=str(row["script_text"]),
             avatar=str(row["vendor_avatar_id"]),
-            title=str(row["title"])[:20],
+            title=oral_vendor_title(str(row["title"]), row.get("vendor_short_ref")),
             aigc_flag=True,
             subtitle=(json.loads(str(row["subtitle_json"])) if row["subtitle_json"] else None),
         )
@@ -609,7 +609,7 @@ def _perform_submission(
         vendor.upload_file(target, content)
         task_id = vendor.create_video_by_audio(
             avatar=str(row["vendor_avatar_id"]),
-            title=str(row["title"])[:20],
+            title=oral_vendor_title(str(row["title"]), row.get("vendor_short_ref")),
             file_id=target.file_id,
             aigc_flag=True,
         )
@@ -648,11 +648,14 @@ def prepare_oral_work(conn: BusinessConnection, lease: OralWorkLease) -> OralWor
                 """,
             "task_submit": """
                     SELECT task.*, avatar.vendor_avatar_id, voice.vendor_voice_id,
-                           asset.storage_uri AS audio_storage_uri
+                           asset.storage_uri AS audio_storage_uri,
+                           ref.short_ref AS vendor_short_ref
                     FROM oral_tasks AS task
                     JOIN oral_avatars AS avatar ON avatar.id = task.avatar_id
                     LEFT JOIN oral_voices AS voice ON voice.id = task.voice_id
                     LEFT JOIN assets AS asset ON asset.id = task.audio_asset_id
+                    LEFT JOIN task_diagnostic_refs AS ref
+                      ON ref.task_type = 'ORAL_VIDEO' AND ref.task_id = task.id
                     WHERE task.id = %s AND task.lease_owner = %s
                       AND task.attempt_count = %s
                 """,
